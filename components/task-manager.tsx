@@ -64,6 +64,8 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [boardOpen, setBoardOpen] = useState(false);
+  const [newBoardOpen, setNewBoardOpen] = useState(false);
+  const [newBoardName, setNewBoardName] = useState("");
   const [detailId, setDetailId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [comment, setComment] = useState("");
@@ -141,6 +143,10 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
     const next = emptyDraft(target); if (stageId) next.stageId = stageId;
     setDetailId("new"); setDraft(next);
   };
+  const createBoard = async () => {
+    const created = await request<TaskBoard>("/v1/boards", { method: "POST", body: JSON.stringify({ name: newBoardName }) });
+    if (created) { setSelectedBoard(created.id); setNewBoardName(""); setNewBoardOpen(false); }
+  };
   const closeDetail = () => { setDetailId(null); setDraft(null); setComment(""); setFeedback(""); };
   const current = detailId && detailId !== "new" ? snapshot.tasks.find(task => task.id === detailId) : null;
 
@@ -192,9 +198,9 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
   return <section className="tasks-page">
     <div className="tasks-heading">
       <div><div className="eyebrow">AGENT WORK QUEUE</div><h1>Tasks</h1><p>Plan the work, assign your agents, and follow every task through review.</p></div>
-      <div className="task-heading-actions"><button disabled={stale || busy} onClick={async () => { const name = window.prompt("Project board name"); if (name?.trim()) { const created = await request<TaskBoard>("/v1/boards", { method: "POST", body: JSON.stringify({ name }) }); if (created) setSelectedBoard(created.id); } }}><Plus size={15} /> New board</button><button className="task-primary" disabled={stale || busy || !snapshot.boards.length} onClick={() => createTask()}><Plus size={16} /> New task</button></div>
+      <div className="task-heading-actions"><button disabled={stale || busy} onClick={() => setNewBoardOpen(true)}><Plus size={15} /> New board</button><button className="task-primary" disabled={stale || busy || !snapshot.boards.length} onClick={() => createTask()}><Plus size={16} /> New task</button></div>
     </div>
-    {stale && <div className="task-alert"><CircleAlert size={16} /> Showing the last task data received. Editing is paused until the local service reconnects.<button onClick={() => void refresh()}>Retry</button></div>}
+    {stale && <div className="task-alert"><CircleAlert size={16} /> Showing the last task data received. Editing is paused until task storage reconnects.<button onClick={() => void refresh()}>Retry</button></div>}
     {error && <div className="task-alert error"><CircleAlert size={16} /> {error}<button aria-label="Dismiss" onClick={() => setError("")}><X size={15} /></button></div>}
     <div className="task-toolbar">
       <label className="task-select"><span>Project</span><select value={selectedBoard} onChange={event => setSelectedBoard(event.target.value)}><option value="all">All tasks</option>{snapshot.boards.map(item => <option value={item.id} key={item.id}>{item.name}{item.archived ? " (archived)" : ""}</option>)}</select><ChevronDown size={14} /></label>
@@ -271,6 +277,7 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
       </div>
     </aside></div>}
 
+    {newBoardOpen && <div className="modal-backdrop" onClick={() => setNewBoardOpen(false)}><section className="modal board-create" role="dialog" aria-modal="true" aria-labelledby="new-board-title" onClick={event => event.stopPropagation()} onKeyDown={event => { if (event.key === "Enter" && newBoardName.trim() && !busy) void createBoard(); }}><div className="modal-heading"><h2 id="new-board-title">New project board</h2><button aria-label="Close new board" onClick={() => setNewBoardOpen(false)}><X size={18} /></button></div><label>Board name<input autoFocus value={newBoardName} onChange={event => setNewBoardName(event.target.value)} placeholder="Website launch" /></label><div className="modal-footer"><button onClick={() => setNewBoardOpen(false)}>Cancel</button><button className="light-button" disabled={!newBoardName.trim() || busy} onClick={() => void createBoard()}>{busy ? <LoaderCircle className="spin" size={14} /> : <Plus size={14} />} Create board</button></div></section></div>}
     {boardOpen && board && <BoardSettings board={board} tasks={snapshot.tasks.filter(task => task.boardId === board.id)} busy={busy} request={request} onClose={() => setBoardOpen(false)} />}
   </section>;
 }

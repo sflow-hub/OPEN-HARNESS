@@ -20,6 +20,7 @@ function base() {
   if (typeof window !== "undefined") {
     const testPort = new URLSearchParams(window.location.search).get("controlPort");
     if (testPort && /^\d{2,5}$/.test(testPort)) return `http://127.0.0.1:${testPort}`;
+    if (!["localhost", "127.0.0.1", "::1"].includes(window.location.hostname)) return `${window.location.origin}/api/control`;
   }
   return "http://127.0.0.1:4317";
 }

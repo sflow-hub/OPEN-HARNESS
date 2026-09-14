@@ -139,9 +139,18 @@ test('a stale save keeps the draft and can load the winning revision', async ({ 
 });
 
 test('creates, filters, and moves an agent task across desktop and phone layouts', async ({ page }, testInfo) => {
+  const boardName = `Release board ${testInfo.project.name}`;
   const title = `Prepare release notes ${testInfo.project.name}`;
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'New board', exact: true }).click();
+  const boardDialog = page.getByRole('dialog', { name: 'New project board' });
+  await boardDialog.getByLabel('Board name').fill(boardName);
+  await boardDialog.getByRole('button', { name: 'Create board' }).click();
+  await expect(boardDialog).toBeHidden();
+  const projectSelect = page.locator('.task-select select');
+  await expect(projectSelect).toHaveValue(/.+/);
+  await expect(projectSelect.locator('option', { hasText: boardName })).toHaveCount(1);
   await page.getByRole('button', { name: 'New task', exact: true }).click();
   const drawer = page.locator('.task-drawer');
   await drawer.getByPlaceholder('What needs to be done?').fill(title);

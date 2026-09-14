@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 
 const children = [
-  spawn(process.execPath, ["--import", "tsx", "runtime/service.ts"], { stdio: "inherit" }),
+  spawn(process.execPath, ["--watch", "--watch-preserve-output", "--import", "tsx", "runtime/service.ts"], { stdio: "inherit" }),
   spawn("npx", ["vinext", "dev"], { stdio: "inherit" }),
 ];
 let stopping = false;
