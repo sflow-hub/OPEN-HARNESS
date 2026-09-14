@@ -39,3 +39,8 @@ next-env.d.ts
 
 !.env.example
 *.tsbuildinfo
+/.open-harness/
+
+/test-results/
+/playwright-report/
+__pycache__/

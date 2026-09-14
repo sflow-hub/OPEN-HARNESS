@@ -1,4 +1,6 @@
+import type { AgentProfile } from "./agent-profile";
 export type Agent = {
+  profile?: AgentProfile;
   id: string;
   name: string;
   role: string;
@@ -13,6 +15,8 @@ export type Artifact = {
   content: string;
   agentId: string;
   updatedAt: string;
+  encoding?: "utf8" | "base64";
+  mimeType?: string;
 };
 export type Activity = {
   id: string;
@@ -22,6 +26,8 @@ export type Activity = {
 };
 export type Message = {
   id: string;
+  runId?: string;
+  eventCursor?: number;
   role: "user" | "assistant";
   content: string;
   activities?: Activity[];
@@ -70,7 +76,7 @@ export const initialWorkspace: Workspace = {
       description:
         "Find the signal in your source material. Compare, analyze, and make sense of it.",
       instructions:
-        "You are Scout, a careful research analyst. Analyze the files and material the user provides. Separate evidence from inference. Cite supplied sources and identify gaps. You do not have live web access; never invent searches or sources.",
+        "You are Scout, a careful research analyst. Use web, browser, terminal, and file tools when they improve the result. Separate evidence from inference, cite sources, identify gaps, and save useful research artifacts in the shared workspace.",
       tone: 1,
       memory: [],
     },

@@ -1,17 +1,26 @@
 {
   "name": "open-harness",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev",
+    "dev": "node runtime/dev.mjs",
+    "dev:app": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "test": "node --import tsx --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "harness": "node --import tsx runtime/cli.ts",
+    "harness:serve": "node --import tsx runtime/service.ts",
+    "harness:setup": "npm run harness -- setup",
+    "harness:start": "npm run harness -- start",
+    "harness:stop": "npm run harness -- stop",
+    "harness:doctor": "npm run harness -- doctor",
+    "harness:install-service": "npm run harness -- install-service",
+    "test:browser": "npm run build && playwright test"
   },
   "dependencies": {
     "lucide-react": "^1.45.0",
@@ -25,6 +34,7 @@
     "@cloudflare/vite-plugin": "1.54.8",
     "@cloudflare/workers-types": "5.20260911.1",
     "@openai/sites-vite-plugin": "^0.1.0 || ^0.2.0",
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",

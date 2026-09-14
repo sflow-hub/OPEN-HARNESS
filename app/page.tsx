@@ -26,6 +26,8 @@ import {
   Paperclip,
   Play,
   Cable,
+  CalendarClock,
+  ShieldCheck,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -38,20 +40,29 @@ import {
   type RunEvent,
 } from "../lib/types";
 import { PROVIDERS, type Provider } from "../lib/provider";
+import {
+  ControlClient,
+  type PersistentRun,
+  type RuntimeStatus,
+} from "../lib/control-client";
+
+import AgentSettings from "../components/agent-settings";
+import TaskManager from "../components/task-manager";
+import { profileAgent, type ModelChoice } from "../lib/agent-profile";
 
 const STORAGE_KEY = "open-harness.workspace.v1";
 const SETTINGS_KEY = "open-harness.settings.v1";
-type View = "home" | "chat" | "files";
-type ModelSettings = { provider: Provider; model: string; maxSteps: number };
+type View = "home" | "chat" | "files" | "routines" | "tasks";
+type ModelSettings = { provider: Provider; model: string; maxSteps?: number; baseUrl?: string };
 const defaultSettings: ModelSettings = {
   provider: "xai",
   model: PROVIDERS.xai.model,
-  maxSteps: 8,
 };
 const uid = () => crypto.randomUUID();
 const now = () => new Date().toISOString();
-function download(name: string, content: string, type = "text/plain") {
-  const url = URL.createObjectURL(new Blob([content], { type }));
+function download(name: string, content: string, type = "text/plain", encoding: "utf8" | "base64" = "utf8") {
+  const data = encoding === "base64" ? Uint8Array.from(atob(content), char => char.charCodeAt(0)) : content;
+  const url = URL.createObjectURL(new Blob([data], { type }));
   const link = document.createElement("a");
   link.href = url;
   link.download = name;
@@ -60,7 +71,7 @@ function download(name: string, content: string, type = "text/plain") {
 }
 function Avatar({ agent, large = false }: { agent: Agent; large?: boolean }) {
   return (
-    <div className={`avatar tone-${agent.tone % 3} ${large ? "large" : ""}`}>
+    <div className={`avatar tone-${agent.tone % 6} ${large ? "large" : ""}`}>
       {agent.name[0]}
     </div>
   );
@@ -92,10 +103,12 @@ export default function Home() {
   const [workspace, setWorkspace] = useState<Workspace>(initialWorkspace);
   const [ready, setReady] = useState(false);
   const [view, setView] = useState<View>("home");
+  const lastWorkspaceView = useRef<View>("home");
   const [selectedAgent, setSelectedAgent] = useState("atlas");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [settings, setSettings] = useState<ModelSettings>(defaultSettings);
   const [apiKey, setApiKey] = useState("");
+  const [workspaceModelRevision, setWorkspaceModelRevision] = useState(0);
   const [server, setServer] = useState({
     xai: false,
     openrouter: false,
@@ -108,10 +121,23 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
   const [running, setRunning] = useState(false);
+  const [persistentRun, setPersistentRun] = useState<PersistentRun | null>(null);
+  const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
+  const [approval, setApproval] = useState<{ approvalId: string; detail: string } | null>(null);
+  const [inputMode, setInputMode] = useState<"steer" | "followup">("steer");
+  const [routines, setRoutines] = useState<Array<Record<string, unknown>>>([]);
+  const [agentContext, setAgentContext] = useState<{
+    memory: string;
+    user: string;
+    skills: string[];
+    capabilities: Record<string, boolean>;
+  } | null>(null);
+
   const [notice, setNotice] = useState("");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [inspector, setInspector] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
+  const controlRef = useRef(new ControlClient());
   const runLock = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
@@ -123,7 +149,7 @@ export default function Home() {
     (c) => c.id === conversationId,
   );
   const file = workspace.files.find((f) => f.id === selectedFile);
-  const connected = !!apiKey || server[settings.provider];
+  const connected = Boolean(runtime?.runtime.available);
 
   useEffect(() => {
     try {
@@ -175,6 +201,147 @@ export default function Home() {
         ),
       );
   }, []);
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    const connect = async () => {
+      try {
+        const client = controlRef.current;
+        const status = await client.bootstrap();
+        if (cancelled) return;
+        setRuntime(status);
+        const synced = await client.request<{ agents: Agent[] }>("/v1/agents/sync", {
+          method: "POST",
+          body: JSON.stringify({ agents: workspace.agents }),
+        });
+        await client.request("/v1/migrate", {
+          method: "POST",
+          body: JSON.stringify(workspace),
+        });
+        if (!cancelled) {
+          setWorkspace(current => ({ ...current, agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })) }));
+          const defaults = await client.request<{ model: ModelChoice; revision: number }>("/v1/workspace/model/import", {
+            method: "POST",
+            body: JSON.stringify({ model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: ({ xai: "XAI_API_KEY", openrouter: "OPENROUTER_API_KEY" } as Record<string, string>)[settings.provider] || "" } }),
+          });
+          setSettings({ provider: defaults.model.provider as Provider, model: defaults.model.model, baseUrl: defaults.model.baseUrl });
+          setWorkspaceModelRevision(defaults.revision);
+        }
+        const [{ routines: savedRoutines }, { runs }] = await Promise.all([
+          client.request<{ routines: Array<Record<string, unknown>> }>(
+            "/v1/routines",
+          ),
+          client.request<{ runs: PersistentRun[] }>("/v1/runs"),
+        ]);
+        if (!cancelled) {
+          setRoutines(savedRoutines);
+          const live = runs.find((run) =>
+            ["queued", "running", "waiting_approval", "waiting_input"].includes(
+              run.state,
+            ),
+          );
+          if (live) {
+            const existing = workspace.conversations.find(
+              (item) => item.id === live.conversation_id,
+            );
+            const existingMessage = existing?.messages.find(
+              (message) => message.runId === live.id,
+            );
+            const messageId = existingMessage?.id || uid();
+            if (!existing) {
+              setWorkspace((current) => ({
+                ...current,
+                conversations: [
+                  {
+                    id: live.conversation_id,
+                    agentId: live.agent_id,
+                    title: live.prompt.slice(0, 52),
+                    updatedAt: now(),
+                    messages: [
+                      { id: uid(), role: "user", content: live.prompt },
+                      {
+                        id: messageId,
+                        runId: live.id,
+                        role: "assistant",
+                        content: "",
+                        activities: [],
+                      },
+                    ],
+                  },
+                  ...current.conversations,
+                ],
+              }));
+            } else if (!existingMessage) {
+              updateConversation(existing.id, (current) => ({
+                ...current,
+                messages: [
+                  ...current.messages,
+                  {
+                    id: messageId,
+                    runId: live.id,
+                    role: "assistant",
+                    content: "",
+                    activities: [],
+                  },
+                ],
+              }));
+            }
+            setSelectedAgent(live.agent_id);
+            setConversationId(live.conversation_id);
+            setView("chat");
+            setPersistentRun(live);
+            setRunning(true);
+            runLock.current = true;
+            void followRun(
+              live,
+              live.conversation_id,
+              messageId,
+              live.agent_id,
+              existingMessage?.eventCursor || 0,
+              Boolean(existingMessage?.content),
+            ).finally(() => {
+              runLock.current = false;
+              setRunning(false);
+              setPersistentRun(null);
+            });
+          }
+        }
+      } catch (error) {
+        if (!cancelled)
+          setNotice(
+            error instanceof Error
+              ? `${error.message} Run npm run harness:doctor, then npm run dev.`
+              : "The local agent runtime is unavailable.",
+          );
+      }
+    };
+    void connect();
+    return () => {
+      cancelled = true;
+    };
+    // The one-time migration intentionally snapshots the hydrated browser workspace.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+  useEffect(() => {
+    if (!runtime || !selectedAgent) return;
+    let cancelled = false;
+    controlRef.current
+      .request<{
+        memory: string;
+        user: string;
+        skills: string[];
+        capabilities: Record<string, boolean>;
+      }>(`/v1/agents/${encodeURIComponent(selectedAgent)}/context`)
+      .then((value) => {
+        if (!cancelled) setAgentContext(value);
+      })
+      .catch(() => {
+        if (!cancelled) setAgentContext(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runtime, selectedAgent]);
   // Surface storage failures from the external persistence operation.
   useEffect(() => {
     if (ready) {
@@ -201,7 +368,6 @@ export default function Home() {
       }
       if (event.key === "Escape") {
         setSettingsOpen(false);
-        setEditingAgent(null);
         setSelectedFile(null);
         setMobileOpen(false);
       }
@@ -270,6 +436,39 @@ export default function Home() {
         ? null
         : workspace.conversations.find((c) => c.agentId === id)?.id || null,
     );
+  }
+  function openTaskRun(run: PersistentRun, title: string) {
+    const existing = workspace.conversations.find(item => item.id === run.conversation_id);
+    const existingReply = existing?.messages.find(message => message.runId === run.id);
+    const messageId = existingReply?.id || uid();
+    if (!existing) {
+      setWorkspace(current => ({
+        ...current,
+        conversations: [{
+          id: run.conversation_id,
+          agentId: run.agent_id,
+          title,
+          updatedAt: now(),
+          messages: [
+            { id: uid(), role: "user", content: run.prompt },
+            { id: messageId, runId: run.id, role: "assistant", content: run.result || run.error || "", error: Boolean(run.error), activities: [] },
+          ],
+        }, ...current.conversations],
+      }));
+    }
+    setSelectedAgent(run.agent_id);
+    setConversationId(run.conversation_id);
+    setView("chat");
+    if (!runLock.current && ["queued", "running", "waiting_approval", "waiting_input"].includes(run.state)) {
+      runLock.current = true;
+      setRunning(true);
+      setPersistentRun(run);
+      void followRun(run, run.conversation_id, messageId, run.agent_id, existingReply?.eventCursor || 0, Boolean(existingReply?.content)).finally(() => {
+        runLock.current = false;
+        setRunning(false);
+        setPersistentRun(null);
+      });
+    }
   }
   function newAgent() {
     setEditingAgent({
@@ -342,15 +541,160 @@ export default function Home() {
         ),
       }));
   }
+  async function refreshRuntimeFiles() {
+    if (!runtime) return;
+    const result = await controlRef.current.request<{
+      files: Array<{ name: string; size: number; updatedAt: string; encoding: "utf8" | "base64"; mimeType: string }>;
+    }>("/v1/files?scope=shared");
+    const loaded: Artifact[] = [];
+    for (const meta of result.files.slice(0, 40)) {
+      if (meta.size > 1_000_000) continue;
+      const record = await controlRef.current.request<{
+        name: string;
+        content: string;
+        encoding: "utf8" | "base64";
+        mimeType: string;
+      }>(`/v1/files?scope=shared&name=${encodeURIComponent(meta.name)}`);
+      const existing = workspace.files.find((item) => item.name === meta.name);
+      loaded.push({
+        id: existing?.id || uid(),
+        name: meta.name,
+        content: record.encoding === "base64" ? record.content : record.content.slice(0, 100_000),
+        agentId: existing?.agentId || "runtime",
+        updatedAt: meta.updatedAt,
+        encoding: record.encoding,
+        mimeType: record.mimeType,
+      });
+    }
+    setWorkspace((current) => ({ ...current, files: loaded }));
+  }
+  async function followRun(
+    run: PersistentRun,
+    cid: string,
+    mid: string,
+    agentId: string,
+    startCursor = 0,
+    hasExistingText = false,
+  ) {
+    let cursor = startCursor;
+    let receivedStreamText = hasExistingText;
+    while (true) {
+      const snapshot = await controlRef.current.events(run.id, cursor);
+      setPersistentRun(snapshot.run);
+      for (const item of snapshot.events) {
+        cursor = Math.max(cursor, item.seq);
+        const payload = item.payload || {};
+        if (item.type === "message.delta") {
+          const text = String(payload.text || payload.delta || payload.content || "");
+          if (text) { receivedStreamText = true; handleEvent({ type: "text", text }, cid, mid, agentId); }
+        } else if (item.type === "message.complete") {
+          const text = String(payload.text || payload.content || "");
+          if (text && !receivedStreamText) {
+            receivedStreamText = true;
+            handleEvent({ type: "text", text }, cid, mid, agentId);
+          }
+        } else if (
+          item.type === "tool.start" ||
+          item.type === "tool.generating" ||
+          item.type === "tool.progress"
+        ) {
+          handleEvent(
+            {
+              type: "activity",
+              activity: {
+                id: String(payload.tool_call_id || payload.id || item.id),
+                name: String(payload.name || payload.tool || "Hermes tool"),
+                detail: String(payload.preview || payload.detail || "Running…"),
+                status: "running",
+              },
+            },
+            cid,
+            mid,
+            agentId,
+          );
+        } else if (item.type === "tool.complete") {
+          handleEvent(
+            {
+              type: "activity",
+              activity: {
+                id: String(payload.tool_call_id || payload.id || item.id),
+                name: String(payload.name || payload.tool || "Hermes tool"),
+                detail: String(payload.result || payload.preview || "Complete"),
+                status: payload.error ? "error" : "done",
+              },
+            },
+            cid,
+            mid,
+            agentId,
+          );
+        } else if (item.type === "approval.request") {
+          setApproval({
+            approvalId: String(payload.approvalId),
+            detail: String(
+              payload.command || payload.description || "Hermes requests approval.",
+            ),
+          });
+        } else if (item.type === "run.failed" || item.type === "run.interrupted") {
+          handleEvent(
+            { type: "error", message: String(payload.error || "Run interrupted.") },
+            cid,
+            mid,
+            agentId,
+          );
+        } else if (item.type === "run.completed" && payload.result && !receivedStreamText) {
+          receivedStreamText = true;
+          handleEvent(
+            { type: "text", text: String(payload.result) },
+            cid,
+            mid,
+            agentId,
+          );
+        }
+      }
+      if (snapshot.events.length) {
+        updateConversation(cid, current => ({
+          ...current,
+          messages: current.messages.map(message =>
+            message.id === mid ? { ...message, eventCursor: cursor } : message),
+        }));
+      }
+      if (["completed", "failed", "interrupted", "cancelled"].includes(snapshot.run.state)) {
+        await refreshRuntimeFiles().catch(() => {});
+        return snapshot.run;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
   async function send(text = input, guided = false) {
-    if (!text.trim() || runLock.current || !ready) return;
-    if (!guided && !connected) {
-      setSettingsOpen(true);
-      setNotice("Connect your model, then send your task.");
+    if (!text.trim() || !ready) return;
+    if (running && !guided && persistentRun) {
+      try {
+        if (inputMode === "steer") {
+          await controlRef.current.request(`/v1/runs/${persistentRun.id}/steer`, {
+            method: "POST",
+            body: JSON.stringify({ text: text.trim() }),
+          });
+          setNotice("Guidance queued for the next tool boundary.");
+        } else {
+          await controlRef.current.createRun({
+            agentId: agent.id,
+            conversationId: conversationId || undefined,
+            prompt: text.trim(),
+          });
+          setNotice("Follow-up queued behind the current task.");
+        }
+        setInput("");
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : "Could not send guidance.");
+      }
       return;
     }
-    if (!guided && !settings.model.trim()) {
-      setSettingsOpen(true);
+    if (runLock.current) return;
+    if (!guided && !connected) {
+      setNotice(
+        runtime?.runtime.message ||
+          "Start the local Hermes runtime before sending a task.",
+      );
       return;
     }
     runLock.current = true;
@@ -427,7 +771,7 @@ export default function Home() {
             agentId,
             updatedAt: now(),
             content:
-              "# Your first handoff\n\n## A useful first task\nGive your agent a clear outcome and the relevant source material.\n\nExample: “Read my notes and turn them into a one-page project brief. Save the result as project-brief.md.”\n\n## Make the agent yours\n1. Edit its name, role, and instructions.\n2. Connect an xAI, OpenRouter, or local model in Settings.\n3. Attach a text or Markdown file for context.\n4. Send a task and watch the tool activity.\n5. Download the result from Files.\n\n## What persists\nConversations, agent instructions, memories, and files stay in this browser. Export your workspace for a portable backup. API keys entered in Settings stay only in memory for this page session.\n\nThis file was created by the guided example. No AI model was called.\n",
+              "# Your first handoff\n\n## A useful first task\nGive your agent a clear outcome and the relevant source material.\n\nExample: “Read my notes and turn them into a one-page project brief. Save the result as project-brief.md.”\n\n## Make the agent yours\n1. Edit its name, role, and instructions.\n2. Connect an xAI, OpenRouter, or local model in Settings.\n3. Attach a text or Markdown file for context.\n4. Send a task and watch the tool activity.\n5. Download the result from Files.\n\n## What persists\nAgent profiles, runs, memories, skills, and shared files persist in the local control service. Closing this page does not stop a task. Credentials are stored only on the server with restricted permissions and are excluded from normal exports. Use Agent settings to choose each agent’s model, instructions, and tools.\n\nThis file was created by the guided example. No AI model was called.\n",
           },
         });
         emit({
@@ -445,53 +789,19 @@ export default function Home() {
           text: "**Your first file is ready.** Open `first-handoff.md` in the workspace panel, or find it in **Files**.\n\nTo run your own task, connect a model in **Settings**. You can also edit my instructions with the settings button above.",
         });
       } else {
-        const response = await fetch("/api/run", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            agent,
-            files: workspace.files,
-            messages: messages.filter((m) => !("error" in m && m.error)),
-            ...settings,
-            apiKey,
-          }),
-          signal: controller.signal,
+        const run = await controlRef.current.createRun({
+          agentId,
+          conversationId: cid,
+          prompt: text.trim(),
         });
-        if (!response.ok) {
-          const data = (await response.json()) as { error?: string };
-          throw new Error(data.error || "Could not start the run.");
-        }
-        if (!response.body)
-          throw new Error("The server returned no response stream.");
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let finished = false;
-        while (true) {
-          const { value, done } = await reader.read();
-          buffer += done
-            ? decoder.decode()
-            : decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          for (const line of lines)
-            if (line.trim()) {
-              const event = JSON.parse(line) as RunEvent;
-              emit(event);
-              if (event.type === "done" || event.type === "error")
-                finished = true;
-            }
-          if (done) break;
-        }
-        if (buffer.trim()) {
-          const event = JSON.parse(buffer) as RunEvent;
-          emit(event);
-          if (event.type === "done" || event.type === "error") finished = true;
-        }
-        if (!finished)
-          throw new Error(
-            "The connection ended before the run finished. Completed work is preserved; send a follow-up to continue.",
-          );
+        setPersistentRun(run);
+        updateConversation(cid, (c) => ({
+          ...c,
+          messages: c.messages.map((message) =>
+            message.id === mid ? { ...message, runId: run.id } : message,
+          ),
+        }));
+        await followRun(run, cid, mid, agentId);
       }
     } catch (error) {
       emit({
@@ -505,6 +815,7 @@ export default function Home() {
     } finally {
       runLock.current = false;
       setRunning(false);
+      setPersistentRun(null);
       abortRef.current = null;
     }
   }
@@ -557,26 +868,17 @@ export default function Home() {
       }
       return { ...w, files: merged };
     });
+    if (runtime)
+      for (const file of additions)
+        void controlRef.current
+          .request("/v1/files?scope=shared", {
+            method: "POST",
+            body: JSON.stringify({ name: file.name, content: file.content }),
+          })
+          .catch((error) =>
+            setNotice(error instanceof Error ? error.message : "Upload failed."),
+          );
     if (uploadRef.current) uploadRef.current.value = "";
-  }
-  function saveAgent(form: HTMLFormElement) {
-    if (!editingAgent) return;
-    const data = new FormData(form);
-    const updated = {
-      ...editingAgent,
-      name: String(data.get("name")).trim(),
-      role: String(data.get("role")).trim(),
-      description: String(data.get("description")).trim(),
-      instructions: String(data.get("instructions")).trim(),
-    };
-    if (!updated.name || !updated.instructions) return;
-    setWorkspace((w) => ({
-      ...w,
-      agents: w.agents.some((a) => a.id === updated.id)
-        ? w.agents.map((a) => (a.id === updated.id ? updated : a))
-        : [...w.agents, updated],
-    }));
-    setEditingAgent(null);
   }
   async function importWorkspace(upload: File | undefined) {
     if (!upload) return;
@@ -683,6 +985,15 @@ export default function Home() {
           <FolderOpen size={16} /> Files{" "}
           <span>{workspace.files.length || ""}</span>
         </button>
+        <button
+          className={`nav-item ${view === "routines" ? "active" : ""}`}
+          onClick={() => {
+            setView("routines");
+            setMobileOpen(false);
+          }}
+        >
+          <CalendarClock size={16} /> Routines <span>{routines.length || ""}</span>
+        </button>
         <div className="nav-label">YOUR AGENTS</div>
         <div className="sidebar-scroll">
           {workspace.agents
@@ -761,11 +1072,20 @@ export default function Home() {
                 ? "Agents"
                 : view === "files"
                   ? "Files"
-                  : agent.name}
+                  : view === "routines"
+                    ? "Routines"
+                    : view === "tasks"
+                      ? "Tasks"
+                      : agent.name}
             </span>
           </span>
+          <nav className="top-tabs" aria-label="Main workspace">
+            <button className={view !== "tasks" ? "active" : ""} onClick={() => { if (view === "tasks") setView(lastWorkspaceView.current); }}>Workspace</button>
+            <button className={view === "tasks" ? "active" : ""} onClick={() => { if (view !== "tasks") lastWorkspaceView.current = view; setView("tasks"); }}>Tasks</button>
+          </nav>
           <span className="badge">Open source · Yours to shape</span>
         </header>
+        {view === "tasks" && <TaskManager agents={workspace.agents} client={controlRef.current} onOpenRun={openTaskRun} />}
         {view === "home" && (
           <section className="home-content">
             <div className="eyebrow">YOUR PERSONAL AGENT WORKSPACE</div>
@@ -790,9 +1110,9 @@ export default function Home() {
             </div>
             <div className="agent-grid">
               {workspace.agents.map((a) => (
+                <div className="agent-card-shell" key={a.id}>
                 <button
                   className="agent-card"
-                  key={a.id}
                   onClick={() => openAgent(a.id)}
                   disabled={running && a.id !== selectedAgent}
                 >
@@ -812,6 +1132,8 @@ export default function Home() {
                     <span>→</span>
                   </div>
                 </button>
+                <button className="agent-card-settings" onClick={() => setEditingAgent({ ...a })} aria-label={`Edit ${a.name} profile`} title="Agent settings"><SlidersHorizontal size={16} /></button>
+                </div>
               ))}
             </div>
             <div className="start-panel">
@@ -857,9 +1179,8 @@ export default function Home() {
                     <Plus size={18} />
                   </button>
                   <button
-                    title="Edit agent"
-                    aria-label="Edit agent"
-                    disabled={running}
+                    title="Agent settings"
+                    aria-label="Agent settings"
                     onClick={() => setEditingAgent({ ...agent })}
                   >
                     <SlidersHorizontal size={17} />
@@ -1007,7 +1328,6 @@ export default function Home() {
                     aria-label={`Message ${agent.name}`}
                     maxLength={30000}
                     rows={3}
-                    disabled={running}
                     onKeyDown={(e) => {
                       if (
                         e.key === "Enter" &&
@@ -1033,23 +1353,64 @@ export default function Home() {
                       type="button"
                       className="model-choice"
                       onClick={() => setSettingsOpen(true)}
-                      disabled={running}
                     >
                       <span className="status-dot" />
                       {connected
-                        ? settings.model || "Choose model"
-                        : "Connect model"}
+                        ? `Hermes ${runtime?.hermes.release}`
+                        : "Start local runtime"}
                       <ChevronRight size={12} />
                     </button>
                     {running ? (
-                      <button
-                        className="send-button stop"
-                        type="button"
-                        aria-label="Stop run"
-                        onClick={() => abortRef.current?.abort()}
-                      >
-                        <Square size={14} fill="currentColor" />
-                      </button>
+                      <>
+                        <button
+                          className={`run-mode ${inputMode === "steer" ? "active" : ""}`}
+                          type="button"
+                          onClick={() => setInputMode("steer")}
+                        >
+                          Steer
+                        </button>
+                        <button
+                          className={`run-mode ${inputMode === "followup" ? "active" : ""}`}
+                          type="button"
+                          onClick={() => setInputMode("followup")}
+                        >
+                          Follow-up
+                        </button>
+                        <button
+                          className="send-button"
+                          type="submit"
+                          disabled={!input.trim()}
+                          aria-label={`Send ${inputMode}`}
+                        >
+                          <ArrowUp size={18} />
+                        </button>
+                        <button
+                          className="send-button stop"
+                          type="button"
+                          aria-label="Stop run"
+                          onClick={() => {
+                            if (persistentRun)
+                              void controlRef.current.request(
+                                `/v1/runs/${persistentRun.id}/stop`,
+                                { method: "POST" },
+                              );
+                          }}
+                        >
+                          <Square size={14} fill="currentColor" />
+                        </button>
+                        <button
+                          className="run-mode"
+                          type="button"
+                          aria-label="Stop all runs"
+                          onClick={() =>
+                            void controlRef.current.request("/v1/runs/stop-all", {
+                              method: "POST",
+                            })
+                          }
+                        >
+                          Stop all
+                        </button>
+                      </>
                     ) : (
                       <button
                         className="send-button"
@@ -1064,9 +1425,54 @@ export default function Home() {
                 </form>
                 <div className="composer-note">
                   {running
-                    ? "Keep this tab open while your agent works."
+                    ? "This task continues if you close the browser. Send guidance or queue a follow-up."
                     : "Enter to send · Shift + Enter for a new line · Files are shared with all your agents"}
                 </div>
+                {approval && persistentRun && (
+                  <div className="approval-banner" role="alert">
+                    <ShieldCheck size={18} />
+                    <div>
+                      <strong>Approval required</strong>
+                      <p>{approval.detail}</p>
+                    </div>
+                    <button
+                      className="subtle-button"
+                      onClick={async () => {
+                        await controlRef.current.request(
+                          `/v1/runs/${persistentRun.id}/approval`,
+                          {
+                            method: "POST",
+                            body: JSON.stringify({
+                              approvalId: approval.approvalId,
+                              decision: "deny",
+                            }),
+                          },
+                        );
+                        setApproval(null);
+                      }}
+                    >
+                      Deny
+                    </button>
+                    <button
+                      className="light-button"
+                      onClick={async () => {
+                        await controlRef.current.request(
+                          `/v1/runs/${persistentRun.id}/approval`,
+                          {
+                            method: "POST",
+                            body: JSON.stringify({
+                              approvalId: approval.approvalId,
+                              decision: "approve",
+                            }),
+                          },
+                        );
+                        setApproval(null);
+                      }}
+                    >
+                      Approve once
+                    </button>
+                  </div>
+                )}
               </div>
             </section>
             {inspector && (
@@ -1120,9 +1526,31 @@ export default function Home() {
                   <Plus size={12} /> Add a file
                 </button>
                 <div className="inspector-label">
-                  <Brain size={13} /> MEMORY <span>{agent.memory.length}</span>
+                  <Brain size={13} /> MEMORY{" "}
+                  <span>{agentContext?.memory ? "HERMES" : agent.memory.length}</span>
                 </div>
-                {agent.memory.length ? (
+                {agentContext?.memory ? (
+                  <>
+                    <div className="memory-item">{agentContext.memory}</div>
+                    <button
+                      className="subtle-button"
+                      onClick={async () => {
+                        const memory = window.prompt(
+                          `Edit ${agent.name}’s durable memory`,
+                          agentContext.memory,
+                        );
+                        if (memory === null) return;
+                        await controlRef.current.request(
+                          `/v1/agents/${encodeURIComponent(agent.id)}/context`,
+                          { method: "PUT", body: JSON.stringify({ memory }) },
+                        );
+                        setAgentContext({ ...agentContext, memory });
+                      }}
+                    >
+                      Edit memory
+                    </button>
+                  </>
+                ) : agent.memory.length ? (
                   agent.memory.map((m, i) => (
                     <div className="memory-item" key={i}>
                       {m}
@@ -1135,16 +1563,47 @@ export default function Home() {
                   </p>
                 )}
                 <div className="inspector-label">
-                  <Cable size={13} /> AVAILABLE TOOLS
+                  <Sparkles size={13} /> SKILLS{" "}
+                  <span>{agentContext?.skills.length || 0}</span>
                 </div>
-                <div className="tool-chips">
-                  <span>Read files</span>
-                  <span>Write files</span>
-                  <span>Save memory</span>
-                </div>
+                {agentContext?.skills.length ? (
+                  <div className="tool-chips">
+                    {agentContext.skills.map((skill) => (
+                      <span className="skill-control" key={skill}>
+                        <button onClick={() => setInput(`/${skill} `)} title={`Invoke ${skill}`}>/{skill}</button>
+                        <button
+                          onClick={async () => {
+                            const path = `/v1/agents/${encodeURIComponent(agent.id)}/context/skills/${encodeURIComponent(skill)}`;
+                            const current = await controlRef.current.request<{ content: string }>(path);
+                            const content = window.prompt(`Edit ${skill}/SKILL.md`, current.content);
+                            if (content !== null) await controlRef.current.request(path, { method: "PUT", body: JSON.stringify({ content }) });
+                          }}
+                          title={`Inspect or edit ${skill}`}
+                        >Edit</button>
+                        <button
+                          onClick={async () => {
+                            if (!window.confirm(`Remove the ${skill} skill?`)) return;
+                            await controlRef.current.request(`/v1/agents/${encodeURIComponent(agent.id)}/context/skills/${encodeURIComponent(skill)}`, { method: "DELETE" });
+                            setAgentContext({ ...agentContext, skills: agentContext.skills.filter(item => item !== skill) });
+                          }}
+                          title={`Remove ${skill}`}
+                        >×</button>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="panel-help">
+                    Hermes can create and improve reusable skills as it works.
+                  </p>
+                )}
+                <div className="inspector-label"><Cable size={13} /> PROFILE TOOLS <span>{agent.profile?.allowedTools.length || 0}</span></div>
+                <p className="panel-help">{agent.profile?.allowedTools.length ? `${agent.profile.allowedTools.length} tools selected. Open Agent settings to check availability or change access.` : "No tools selected. Choose the capabilities this agent needs."}</p>
+                <button className="subtle-button" onClick={() => setEditingAgent({ ...agent })}><SlidersHorizontal size={13} /> Agent settings</button>
                 <div className="scope-note">
-                  This first version works with text files. Browser, terminal,
-                  and background routines are future extensions.
+                  {runtime?.runtime.available
+                    ? "Hermes is ready in this agent’s isolated workspace. External actions still follow the approval policy."
+                    : runtime?.runtime.message ||
+                      "Run npm run harness:doctor to connect the local Hermes runtime."}
                 </div>
               </aside>
             )}
@@ -1206,7 +1665,7 @@ export default function Home() {
                     </span>
                     <button
                       aria-label={`Download ${f.name}`}
-                      onClick={() => download(f.name, f.content)}
+                      onClick={() => download(f.name, f.content, f.mimeType, f.encoding)}
                     >
                       <Download size={16} />
                     </button>
@@ -1214,14 +1673,121 @@ export default function Home() {
                       aria-label={`Delete ${f.name}`}
                       disabled={running}
                       onClick={() => {
-                        if (confirm(`Delete ${f.name}?`))
-                          setWorkspace((w) => ({
-                            ...w,
-                            files: w.files.filter((x) => x.id !== f.id),
-                          }));
+                        if (!confirm(`Delete ${f.name}?`)) return;
+                        if (runtime)
+                          void controlRef.current.request(
+                            `/v1/files?scope=shared&name=${encodeURIComponent(f.name)}`,
+                            { method: "DELETE" },
+                          );
+                        setWorkspace((w) => ({
+                          ...w,
+                          files: w.files.filter((x) => x.id !== f.id),
+                        }));
                       }}
                     >
                       <Trash2 size={15} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+        {view === "routines" && (
+          <section className="files-page">
+            <div className="eyebrow">BACKGROUND WORK</div>
+            <div className="files-title">
+              <div>
+                <h1>Routines</h1>
+                <p className="intro">
+                  Durable tasks that run through Hermes while the browser is closed.
+                </p>
+              </div>
+              <button
+                className="light-button"
+                disabled={!runtime}
+                onClick={async () => {
+                  const name = window.prompt("Routine name");
+                  if (!name) return;
+                  const task = window.prompt("What should the agent do?");
+                  if (!task) return;
+                  const minutes = Number(
+                    window.prompt("Repeat every how many minutes?", "1440"),
+                  );
+                  try {
+                    await controlRef.current.request("/v1/routines", {
+                      method: "POST",
+                      body: JSON.stringify({
+                        name,
+                        prompt: task,
+                        agentId: agent.id,
+                        intervalMinutes: Number.isFinite(minutes) ? minutes : 1440,
+                        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                      }),
+                    });
+                    const result = await controlRef.current.request<{
+                      routines: Array<Record<string, unknown>>;
+                    }>("/v1/routines");
+                    setRoutines(result.routines);
+                  } catch (error) {
+                    setNotice(error instanceof Error ? error.message : "Could not create routine.");
+                  }
+                }}
+              >
+                <Plus size={14} /> New routine
+              </button>
+            </div>
+            {!routines.length ? (
+              <div className="files-empty">
+                <CalendarClock size={40} />
+                <h2>No routines yet.</h2>
+                <p>Create a recurring handoff for any of your agents.</p>
+              </div>
+            ) : (
+              <div className="file-table">
+                {routines.map((routine) => (
+                  <div className="file-table-row" key={String(routine.id)}>
+                    <div className="file-name">
+                      <CalendarClock size={20} />
+                      <span>
+                        {String(routine.name)}
+                        <small>
+                          {workspace.agents.find(
+                            (item) => item.id === routine.agent_id,
+                          )?.name || "Agent"}{" "}
+                          · every {String(routine.interval_minutes)} minutes · next{" "}
+                          {new Date(String(routine.next_run_at)).toLocaleString()}
+                        </small>
+                      </span>
+                    </div>
+                    <span className="muted small">
+                      {routine.enabled ? "Enabled" : "Paused"}
+                    </span>
+                    <button
+                      className="subtle-button"
+                      onClick={async () => {
+                        await controlRef.current.request(
+                          `/v1/routines/${String(routine.id)}/run`,
+                          { method: "POST" },
+                        );
+                        setNotice("Routine queued now.");
+                      }}
+                    >
+                      Run now
+                    </button>
+                    <button
+                      onClick={async () => {
+                        await controlRef.current.request(
+                          `/v1/routines/${String(routine.id)}/toggle`,
+                          { method: "POST" },
+                        );
+                        const result = await controlRef.current.request<{
+                          routines: Array<Record<string, unknown>>;
+                        }>("/v1/routines");
+                        setRoutines(result.routines);
+                      }}
+                    >
+                      {routine.enabled ? "Pause" : "Enable"}
                     </button>
                   </div>
                 ))}
@@ -1282,7 +1848,7 @@ export default function Home() {
               Connect a model that supports tool calling. Your agents bring the
               instructions and tools.
             </p>
-            <fieldset disabled={running}>
+            <fieldset>
               <label>
                 Provider
                 <select
@@ -1334,47 +1900,20 @@ export default function Home() {
                     maxLength={1000}
                   />
                   <small>
-                    Kept in memory for this page session only. Never included in
-                    backups.
+                    Stored by the local service with restricted permissions. Secret values are never included in exports.
                   </small>
                 </label>
               )}
-              {settings.provider === "local" && (
-                <div className="info-box">
-                  Set <code>MODEL_BASE_URL</code> and <code>MODEL_NAME</code> in
-                  your server’s environment. For Ollama, use{" "}
-                  <code>http://localhost:11434/v1</code> and a model with tool
-                  support. Restart the server after changes.
-                </div>
-              )}
-              <label>
-                Maximum model steps per task
-                <select
-                  value={settings.maxSteps}
-                  onChange={(e) =>
-                    setSettings((s) => ({
-                      ...s,
-                      maxSteps: Number(e.target.value),
-                    }))
-                  }
-                >
-                  {[4, 8, 12].map((n) => (
-                    <option key={n} value={n}>
-                      {n} steps
-                    </option>
-                  ))}
-                </select>
-                <small>
-                  Each step can call the model once and use its requested tools.
-                </small>
-              </label>
+              {settings.provider === "local" && <label>Model API base URL<input value={settings.baseUrl || ""} onChange={e => setSettings(current => ({ ...current, baseUrl: e.target.value }))} placeholder="http://host.docker.internal:11434/v1" /><small>Use an address reachable from the agent container.</small></label>}
+              <p className="muted small">Only agents using “Use workspace default” follow these changes. Agents with their own model keep it.</p>
             </fieldset>
             <div className="settings-divider" />
             <h3>Your data stays with you</h3>
             <p className="muted small">
-              Agents, conversations, memory, and files are saved in this
-              browser. Export a backup before moving devices or clearing browser
-              data. Tasks run while this tab stays open.
+              Hermes state, skills, schedules, run events, and working files are
+              saved by the local control service. Browser history remains
+              exportable for portability. Active tasks continue after this tab
+              closes.
             </p>
             <div className="button-row">
               <button
@@ -1399,13 +1938,38 @@ export default function Home() {
             </div>
             <div className="modal-footer">
               <span className="muted small">
-                MIT licensed · Open Harness v0.1
+                MIT licensed · Open Harness v0.2 · Hermes {runtime?.hermes.release}
               </span>
               <button
                 className="light-button"
-                onClick={() => {
-                  setSettingsOpen(false);
-                  setNotice("Settings saved.");
+                onClick={async () => {
+                  try {
+                    if (apiKey && runtime) {
+                      const name =
+                        settings.provider === "xai"
+                          ? "XAI_API_KEY"
+                          : settings.provider === "openrouter"
+                            ? "OPENROUTER_API_KEY"
+                            : "MODEL_API_KEY";
+                      await controlRef.current.request("/v1/secrets", {
+                        method: "POST",
+                        body: JSON.stringify({ name, value: apiKey }),
+                      });
+                      setApiKey("");
+                    }
+                    const saved = await controlRef.current.request<{ revision: number }>("/v1/workspace/model", {
+                      method: "PUT", body: JSON.stringify({ revision: workspaceModelRevision, model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: settings.provider === "xai" ? "XAI_API_KEY" : settings.provider === "openrouter" ? "OPENROUTER_API_KEY" : "" } }),
+                    });
+                    setWorkspaceModelRevision(saved.revision);
+                    setSettingsOpen(false);
+                    setNotice("Hermes settings saved.");
+                  } catch (error) {
+                    setNotice(
+                      error instanceof Error
+                        ? error.message
+                        : "Could not save settings.",
+                    );
+                  }
                 }}
               >
                 Done <Check size={14} />
@@ -1414,137 +1978,11 @@ export default function Home() {
           </section>
         </div>
       )}
-      {editingAgent && (
-        <div className="modal-backdrop" onClick={() => setEditingAgent(null)}>
-          <form
-            className="modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="agent-title"
-            onClick={(e) => e.stopPropagation()}
-            onSubmit={(e) => {
-              e.preventDefault();
-              saveAgent(e.currentTarget);
-            }}
-          >
-            <div className="modal-heading">
-              <h2 id="agent-title">
-                {workspace.agents.some((a) => a.id === editingAgent.id)
-                  ? "Shape your agent"
-                  : "Meet your next agent"}
-              </h2>
-              <button
-                type="button"
-                aria-label="Close agent editor"
-                onClick={() => setEditingAgent(null)}
-              >
-                <X size={19} />
-              </button>
-            </div>
-            <label>
-              Name
-              <input
-                autoFocus
-                name="name"
-                defaultValue={editingAgent.name}
-                required
-                maxLength={30}
-                placeholder="e.g. Nova"
-              />
-            </label>
-            <label>
-              Role
-              <input
-                name="role"
-                defaultValue={editingAgent.role}
-                required
-                maxLength={60}
-                placeholder="e.g. Project planner"
-              />
-            </label>
-            <label>
-              Short description
-              <input
-                name="description"
-                defaultValue={editingAgent.description}
-                maxLength={180}
-                placeholder="What should this agent help you with?"
-              />
-            </label>
-            <label>
-              Instructions
-              <textarea
-                name="instructions"
-                defaultValue={editingAgent.instructions}
-                required
-                rows={6}
-                maxLength={12000}
-                placeholder="Describe its job, style, and what a good result looks like."
-              />
-            </label>
-            {editingAgent.memory.length > 0 && (
-              <>
-                <label>Saved memory</label>
-                {editingAgent.memory.map((m, i) => (
-                  <div className="memory-edit" key={i}>
-                    <span>{m}</span>
-                    <button
-                      type="button"
-                      aria-label="Remove memory"
-                      onClick={() =>
-                        setEditingAgent((a) =>
-                          a
-                            ? {
-                                ...a,
-                                memory: a.memory.filter((_, n) => n !== i),
-                              }
-                            : a,
-                        )
-                      }
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                ))}
-              </>
-            )}
-            <div className="modal-footer">
-              {workspace.agents.length > 1 &&
-                workspace.agents.some((a) => a.id === editingAgent.id) && (
-                  <button
-                    className="danger-button"
-                    type="button"
-                    onClick={() => {
-                      if (
-                        confirm(
-                          `Delete ${editingAgent.name} and its conversations? Shared files will be kept.`,
-                        )
-                      ) {
-                        setWorkspace((w) => ({
-                          ...w,
-                          agents: w.agents.filter(
-                            (a) => a.id !== editingAgent.id,
-                          ),
-                          conversations: w.conversations.filter(
-                            (c) => c.agentId !== editingAgent.id,
-                          ),
-                        }));
-                        setEditingAgent(null);
-                        setView("home");
-                        setConversationId(null);
-                      }
-                    }}
-                  >
-                    <Trash2 size={14} /> Delete agent
-                  </button>
-                )}
-              <button className="light-button" disabled={running} type="submit">
-                Save agent <Check size={14} />
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
+      {editingAgent && <AgentSettings key={editingAgent.id} agent={editingAgent} client={controlRef.current} onClose={() => setEditingAgent(null)} onSaved={profile => {
+        setWorkspace(current => ({ ...current, agents: current.agents.some(a => a.id === profile.id)
+          ? current.agents.map(a => a.id === profile.id ? profileAgent(profile, a.memory) : a)
+          : [...current.agents, profileAgent(profile)] }));
+      }} />}
       {file && (
         <div className="modal-backdrop" onClick={() => setSelectedFile(null)}>
           <section
@@ -1561,7 +1999,7 @@ export default function Home() {
               <div className="button-row">
                 <button
                   aria-label="Download file"
-                  onClick={() => download(file.name, file.content)}
+                  onClick={() => download(file.name, file.content, file.mimeType, file.encoding)}
                 >
                   <Download size={17} />
                 </button>
@@ -1574,7 +2012,11 @@ export default function Home() {
                 </button>
               </div>
             </div>
-            {file.name.endsWith(".md") ? (
+            {file.encoding === "base64" && file.mimeType?.startsWith("image/") ? (
+              // Runtime screenshots are local data URLs and cannot use the image optimizer.
+              // eslint-disable-next-line @next/next/no-img-element
+              <img className="file-image" src={`data:${file.mimeType};base64,${file.content}`} alt={file.name} />
+            ) : file.name.endsWith(".md") ? (
               <Markdown>{file.content}</Markdown>
             ) : (
               <pre className="file-content">{file.content}</pre>

@@ -1,0 +1,164 @@
+import { test, expect, type APIRequestContext } from '@playwright/test';
+import { initialWorkspace } from '../../lib/types';
+import { draftProfile } from '../../lib/agent-profile';
+const control = `http://127.0.0.1:${process.env.OPEN_HARNESS_TEST_PORT || 4317}`;
+async function seed(request: APIRequestContext) {
+  const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  const headers = { Authorization: `Bearer ${token}` };
+  await request.post(control + '/v1/agents/sync', { headers, data: { agents: initialWorkspace.agents } });
+  for (const agent of initialWorkspace.agents) {
+    const { profile } = await (await request.get(control + `/v1/agents/${agent.id}/profile`, { headers })).json();
+    await request.put(control + `/v1/agents/${agent.id}/profile`, { headers, data: { ...draftProfile(agent), revision: profile.revision } });
+  }
+}
+test.beforeEach(async ({ request, page }) => { await seed(request); await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`); await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible(); });
+
+test('edits identity, model, prompt and tools, then persists on reload', async ({ page }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByLabel('Name', { exact: true }).fill('Atlas Custom');
+  await panel.getByLabel('Violet', { exact: true }).check();
+  await panel.getByRole('tab', { name: 'Model', exact: true }).click();
+  await panel.getByRole('switch', { name: 'Use workspace default' }).uncheck();
+  await panel.getByLabel('Provider', { exact: true }).selectOption('openrouter');
+  await panel.getByRole('combobox', { name: 'Model', exact: true }).fill('custom-research-model');
+  await panel.getByRole('tab', { name: 'System prompt', exact: true }).click();
+  await panel.getByLabel('System prompt / agent instructions').fill('Research thoroughly. Save source citations.');
+  await panel.getByRole('switch', { name: 'Use custom instructions' }).uncheck();
+  await expect(panel.getByLabel('System prompt / agent instructions')).toBeDisabled();
+  await panel.getByRole('switch', { name: 'Use custom instructions' }).check();
+  await panel.getByRole('tab', { name: 'Tools & connections' }).click();
+  await expect(panel.getByText('Deterministic test runtime — tool availability is simulated.')).toBeVisible();
+  await panel.getByRole('checkbox', { name: 'Enable Browser', exact: true }).check();
+  await panel.getByText('Browser', { exact: true }).click();
+  await panel.getByRole('switch', { name: 'browser screenshot', exact: true }).uncheck();
+  await panel.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
+  await panel.getByRole('button', { name: 'Close agent settings' }).click();
+  await page.reload(); await page.getByRole('button', { name: 'Edit Atlas Custom profile' }).click();
+  await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Atlas Custom');
+  await page.getByRole('tab', { name: 'Model', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toHaveValue('custom-research-model');
+});
+
+test('cancel preserves saved values and validates missing identity', async ({ page }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByLabel('Name', { exact: true }).fill('');
+  await panel.getByRole('button', { name: 'Save changes' }).click();
+  await expect(panel.getByRole('alert')).toHaveText('Give this agent a name and a role.');
+  await panel.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await panel.getByRole('button', { name: 'Keep editing' }).click();
+  await expect(panel.getByLabel('Name', { exact: true })).toHaveValue('');
+  await panel.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await panel.getByRole('button', { name: 'Discard changes', exact: true }).click();
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Atlas');
+});
+
+test('failed save retains the draft and remains retryable', async ({ page }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByLabel('Role', { exact: true }).fill('A persistent draft');
+  await page.route('**/v1/agents/atlas/profile', route => route.request().method() === 'PUT' ? route.fulfill({ status: 503, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Service offline. Your draft is still here.' }) }) : route.continue());
+  await panel.getByRole('button', { name: 'Save changes' }).click();
+  await expect(panel.getByRole('alert')).toContainText('Service offline');
+  await expect(panel.getByLabel('Role', { exact: true })).toHaveValue('A persistent draft');
+  await page.unroute('**/v1/agents/atlas/profile');
+  await panel.getByRole('button', { name: 'Save changes' }).click();
+  await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
+});
+
+test('connection form discovers individual MCP tools without browser prompts', async ({ page }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByRole('tab', { name: 'Tools & connections' }).click();
+  await panel.getByRole('button', { name: 'Add MCP connection', exact: true }).click();
+  await panel.getByLabel('Connection name').fill('research');
+  await panel.getByLabel('Executable', { exact: true }).fill('npx');
+  await panel.getByLabel('Arguments — one per line').fill('-y\nexample-mcp');
+  await panel.getByRole('button', { name: 'Test connection', exact: true }).click();
+  await expect(panel.getByText('connected · 1 tools discovered')).toBeVisible();
+  await panel.getByRole('checkbox', { name: 'Enable MCP connections' }).check();
+  await panel.getByRole('button', { name: 'Save changes' }).click();
+  await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
+});
+
+test('keyboard tab navigation and phone layout keep save controls visible', async ({ page }, testInfo) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await panel.getByRole('tab', { name: 'Profile', exact: true }).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(panel.getByRole('tab', { name: 'Model', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('End');
+  await expect(panel.getByRole('tab', { name: 'Tools & connections' })).toHaveAttribute('aria-selected', 'true');
+  const button = await panel.getByRole('button', { name: 'Save changes' }).boundingBox();
+  expect(button).not.toBeNull(); expect(button!.y + button!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+  if (testInfo.project.name === 'mobile') {
+    const bounds = await panel.boundingBox(); expect(bounds!.width).toBe(page.viewportSize()!.width);
+  }
+  await page.screenshot({ path: `test-results/profile-${testInfo.project.name}.png`, fullPage: true });
+});
+
+test('group switches and Disable all tools preserve an explicit empty selection', async ({ page, request }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByRole('tab', { name: 'Tools & connections' }).click();
+  await panel.getByRole('checkbox', { name: 'Enable Browser', exact: true }).check();
+  await panel.getByRole('checkbox', { name: 'Enable Browser', exact: true }).uncheck();
+  await panel.getByRole('checkbox', { name: 'Enable Files', exact: true }).check();
+  await panel.getByRole('button', { name: 'Save changes' }).click();
+  await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
+  await panel.getByRole('button', { name: 'Disable all tools' }).click();
+  await panel.getByRole('button', { name: 'Save changes' }).click();
+  await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
+  const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  const { profile } = await (await request.get(control + '/v1/agents/atlas/profile', { headers: { Authorization: `Bearer ${token}` } })).json();
+  expect(profile.allowedTools).toEqual([]);
+});
+
+test('a stale save keeps the draft and can load the winning revision', async ({ page, request }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByLabel('Role', { exact: true }).fill('My unsaved role');
+  const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  const headers = { Authorization: `Bearer ${token}` };
+  const { profile } = await (await request.get(control + '/v1/agents/atlas/profile', { headers })).json();
+  await request.put(control + '/v1/agents/atlas/profile', { headers, data: { ...profile, role: 'Saved elsewhere' } });
+  await panel.getByRole('button', { name: 'Save changes' }).click();
+  await expect(panel.getByRole('alert')).toContainText('changed elsewhere');
+  await expect(panel.getByLabel('Role', { exact: true })).toHaveValue('My unsaved role');
+  await panel.getByRole('button', { name: 'Replace draft with saved version' }).click();
+  await expect(panel.getByLabel('Role', { exact: true })).toHaveValue('Saved elsewhere');
+});
+
+test('creates, filters, and moves an agent task across desktop and phone layouts', async ({ page }, testInfo) => {
+  const title = `Prepare release notes ${testInfo.project.name}`;
+  await page.getByRole('button', { name: 'Tasks', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  const drawer = page.locator('.task-drawer');
+  await drawer.getByPlaceholder('What needs to be done?').fill(title);
+  await drawer.getByLabel('Owner').selectOption('atlas');
+  await drawer.getByRole('button', { name: /Scout/ }).click();
+  await drawer.getByRole('button', { name: 'Add item' }).click();
+  await drawer.getByPlaceholder('Checklist item').fill('Summarize shipped changes');
+  await drawer.getByRole('button', { name: 'Save', exact: true }).click();
+  await drawer.getByRole('button', { name: 'Close task' }).click();
+  const card = page.locator('.task-card').filter({ hasText: title });
+  await expect(card).toBeVisible();
+  await card.getByRole('button', { name: 'Move right' }).click();
+  await page.getByRole('button', { name: 'List', exact: true }).click();
+  await expect(page.getByRole('cell', { name: title })).toBeVisible();
+  await page.getByRole('button', { name: /Filter/ }).click();
+  await page.getByRole('group', { name: 'Owner' }).getByLabel('Atlas').check();
+  await expect(page.getByText('atlas', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'By agent', exact: true }).click();
+  await expect(page.locator('.agent-task-card').filter({ hasText: 'Atlas' })).toContainText('Owned');
+});
