@@ -30,6 +30,9 @@ export const hostedRuntimeSchema = [
   `CREATE INDEX IF NOT EXISTS idx_hosted_runner_commands_machine_state ON runner_commands(machine_id,state,created_at)`,
   `CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, conversation_id TEXT NOT NULL, prompt TEXT NOT NULL, state TEXT NOT NULL, machine_id TEXT NOT NULL, command_id TEXT, result TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_hosted_runs_agent_state ON runs(agent_id,state)`,
+  `CREATE TABLE IF NOT EXISTS run_snapshots (run_id TEXT PRIMARY KEY, json TEXT NOT NULL, created_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS run_credentials (run_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, token_hash TEXT NOT NULL, created_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS run_relations (run_id TEXT PRIMARY KEY, parent_run_id TEXT, depth INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS run_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, run_id TEXT NOT NULL, type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_hosted_run_events_run_seq ON run_events(run_id,seq)`,
   `CREATE TABLE IF NOT EXISTS runner_event_receipts (command_id TEXT NOT NULL, event_id TEXT NOT NULL, received_at TEXT NOT NULL, PRIMARY KEY(command_id,event_id))`,
@@ -37,4 +40,6 @@ export const hostedRuntimeSchema = [
   `CREATE TABLE IF NOT EXISTS agent_transfers (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, source_machine_id TEXT NOT NULL, destination_machine_id TEXT NOT NULL, state TEXT NOT NULL, detail TEXT NOT NULL, export_command_id TEXT, import_command_id TEXT, checksum TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_hosted_agent_transfers_agent_state ON agent_transfers(agent_id,state,created_at)`,
   `CREATE TABLE IF NOT EXISTS transfer_chunks (transfer_id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(transfer_id,position))`,
+  `CREATE TABLE IF NOT EXISTS hosted_routines (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL, interval_minutes INTEGER NOT NULL, timezone TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_hosted_routines_due ON hosted_routines(enabled,next_run_at)`,
 ];
