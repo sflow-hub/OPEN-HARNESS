@@ -1,0 +1,106 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, unlinkSync } from 'node:fs';
+import { homedir, hostname, platform, arch } from 'node:os';
+import { join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { HermesGateway, dockerStatus, ensureContainer } from './hermes';
+import { COORDINATION_TOOLS, discoverModels, groupTool, prepareProfile, runtimeProbe } from './profile-runtime';
+import type { AgentProfile } from '../lib/agent-profile';
+import { exportAgentFiles, importAgentFiles } from './transfer-files';
+
+type Credentials = { coordinator: string; machineId: string; token: string };
+type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models'; payload: any };
+const args = new Map<string,string>();
+for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith('--')) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith('--') ? '' : process.argv[++i] || '');
+const stateRoot = resolve(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join(homedir(), '.open-harness-runner'));
+const credentialPath = join(stateRoot, 'connection.json');
+const spool = join(stateRoot, 'spool'); mkdirSync(spool, { recursive: true });
+
+function capabilities() {
+  const container = dockerStatus(false).available;
+  const python = spawnSync(process.env.HERMES_PYTHON || 'python3', ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore' }).status === 0;
+  return { container, direct: python, desktop: Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === 'darwin' || process.platform === 'win32'), virtualDesktop: process.platform === 'linux' && container, detail: python ? 'Hermes host runtime is installed.' : 'Install the Hermes host runtime to enable direct access.' };
+}
+async function pair(): Promise<Credentials> {
+  const coordinator = String(args.get('coordinator') || '').replace(/\/$/, ''), code = String(args.get('pairing-code') || '');
+  if (!coordinator || !code) throw new Error('Use --coordinator URL and --pairing-code CODE, or keep an existing runner connection.');
+  const response = await fetch(`${coordinator}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, name: hostname(), platform: platform(), arch: arch(), capabilities: capabilities() }) });
+  const value = await response.json() as any; if (!response.ok) throw new Error(value.error || 'Pairing failed.');
+  const saved = { coordinator, machineId: value.machineId, token: value.token };
+  writeFileSync(credentialPath, JSON.stringify(saved, null, 2), { mode: 0o600 }); chmodSync(credentialPath, 0o600); return saved;
+}
+const credentials = args.has('pairing-code') ? await pair() : existsSync(credentialPath) ? JSON.parse(readFileSync(credentialPath, 'utf8')) as Credentials : await pair();
+if (args.has('once')) { console.log(`Paired ${credentials.machineId}.`); process.exit(0); }
+const headers = { Authorization: `Bearer ${credentials.token}`, 'X-Open-Harness-Machine': credentials.machineId, 'Content-Type': 'application/json' };
+async function request(path: string, init: RequestInit = {}, retry = false): Promise<any> {
+  for (;;) {
+    try { const response = await fetch(credentials.coordinator + path, { ...init, headers: { ...headers, ...init.headers } }); const value = await response.json() as any; if (!response.ok) throw new Error(value.error || `Coordinator returned HTTP ${response.status}.`); return value; }
+    catch (error) { if (!retry) throw error; await new Promise(resolve => setTimeout(resolve, 2000)); }
+  }
+}
+
+const active = new Map<string, { gateway: HermesGateway; sessionId: string; commandId: string }>();
+const admittedCommands = new Set<string>();
+type SpoolRecord = { id: string; path: string; body: unknown };
+async function deliver(record: SpoolRecord) { const file = join(spool, `${record.id}.json`); if (!existsSync(file)) writeFileSync(file, JSON.stringify(record), { mode: 0o600 }); await request(record.path, { method: 'POST', body: JSON.stringify(record.body) }, true); if (existsSync(file)) unlinkSync(file); }
+async function flushSpool() { for (const name of readdirSync(spool).filter(name => name.endsWith('.json'))) { try { await deliver(JSON.parse(readFileSync(join(spool, name), 'utf8'))); } catch {} } }
+async function emit(command: RunnerCommand, event: any) { const eventId = crypto.randomUUID(); await deliver({ id: eventId, path: `/v1/runner/commands/${command.id}/events`, body: { eventId, runId: command.payload.runId, event } }); }
+async function finish(command: RunnerCommand, result?: unknown, error?: unknown) { await deliver({ id: `complete-${command.id}`, path: `/v1/runner/commands/${command.id}/complete`, body: error ? { error: error instanceof Error ? error.message : String(error) } : { result } }); }
+
+async function run(command: RunnerCommand) {
+  const payload = command.payload as { runId: string; prompt: string; snapshot: AgentProfile & { effectiveModel: any }; secrets: Record<string,string>; coordinationToken: string };
+  const profile = payload.snapshot, direct = profile.computer.access === 'direct';
+  try {
+    const agentRoot = join(stateRoot, 'agents', profile.id), shared = join(stateRoot, 'shared'); mkdirSync(shared, { recursive: true });
+    const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean);
+    const localSecrets = Object.fromEntries(needed.filter(name => process.env[name]).map(name => [name, process.env[name] as string]));
+    const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...payload.secrets }) };
+    const coordinatorForContainer = credentials.coordinator.replace('://localhost', '://host.docker.internal').replace('://127.0.0.1', '://host.docker.internal');
+    prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator } : { controlUrl: coordinatorForContainer });
+    const gateway = direct
+      ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } })
+      : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
+    gateway.on('event', event => void emit(command, event)); await gateway.start();
+    const session = await gateway.request('session.create', { cwd: direct ? shared : '/workspace/shared', profile: 'default' });
+    const sessionId = String(session?.session_id || session?.id || ''); if (!sessionId) throw new Error('Hermes did not return a session ID.');
+    active.set(payload.runId, { gateway, sessionId, commandId: command.id });
+    const result = await gateway.submitPrompt(sessionId, payload.prompt); active.delete(payload.runId); await finish(command, result);
+  } catch (error) { active.delete(payload.runId); await finish(command, undefined, error); }
+}
+async function control(command: RunnerCommand) {
+  try {
+    if (command.kind === 'export-agent') { await finish(command, exportAgentFiles(stateRoot, command.agentId)); return; }
+    if (command.kind === 'import-agent') { const bundle = command.payload.bundle || (await request(`/v1/runner/transfers/${encodeURIComponent(command.payload.transferId)}`)).bundle; await finish(command, importAgentFiles(stateRoot, command.agentId, bundle)); return; }
+    if (command.kind.startsWith('probe-')) {
+      const profile = command.payload.profile as AgentProfile & { effectiveModel: any }, direct = profile.computer.access === 'direct', shared = join(stateRoot, 'shared'), agentRoot = join(stateRoot, 'agents', profile.id); mkdirSync(shared, { recursive: true });
+      const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter(name => process.env[name]).map(name => [name, process.env[name] as string])), secretSource = { environment: () => ({ ...localSecrets, ...(command.payload.secrets || {}) }) };
+      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command.payload.coordinationToken || '', `probe-${command.id}`, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator } : {});
+      if (command.kind === 'probe-runtime') {
+        if (direct) { const result = spawnSync(process.env.HERMES_PYTHON || 'python3', [join(import.meta.dirname, 'hermes', 'inspect_runtime.py')], { input: JSON.stringify(command.payload.input) + '\n', encoding: 'utf8', env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile') }, maxBuffer: 5_000_000 }); if (result.status || !result.stdout) throw new Error(result.stderr || 'Native runtime probe failed.'); await finish(command, JSON.parse(result.stdout)); }
+        else await finish(command, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), command.payload.input));
+        return;
+      }
+      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
+      if (command.kind === 'probe-tools') { const input = direct ? (() => { const result = spawnSync(process.env.HERMES_PYTHON || 'python3', [join(import.meta.dirname, 'hermes', 'inspect_runtime.py')], { input: '{"action":"catalog"}\n', encoding: 'utf8', env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile') }, maxBuffer: 5_000_000 }); if (result.status || !result.stdout) throw new Error(result.stderr || 'Tool discovery failed.'); return JSON.parse(result.stdout); })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), { action: 'catalog' }); await finish(command, { source: 'runtime', tools: [...(input.tools || []).filter((tool: any) => tool.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }); return; }
+      await gateway.start(); try { await finish(command, await discoverModels(gateway)); } finally { await gateway.stop(); } return;
+    }
+    const live = active.get(String(command.payload.runId));
+    if (!live) throw new Error('The requested run is no longer active on this runner.');
+    if (command.kind === 'stop') { await live.gateway.request('session.interrupt', { session_id: live.sessionId }, 5000).catch(() => {}); await live.gateway.stop(); }
+    if (command.kind === 'steer') await live.gateway.request('session.steer', { session_id: live.sessionId, text: String(command.payload.text || '') });
+    if (command.kind === 'approval') await live.gateway.request('approval.respond', { request_id: command.payload.requestId, decision: command.payload.decision });
+    await finish(command, { ok: true });
+  } catch (error) { await finish(command, undefined, error); }
+}
+
+console.log(`Open Harness runner ${credentials.machineId} connected to ${credentials.coordinator}`);
+await flushSpool();
+let lastHeartbeat = 0;
+for (;;) {
+  try {
+    if (Date.now() - lastHeartbeat > 15_000) { await request('/v1/runner/heartbeat', { method: 'POST', body: JSON.stringify({ capabilities: capabilities(), activeCommandIds: [...new Set([...admittedCommands, ...[...active.values()].map(item => item.commandId)])] }) }); lastHeartbeat = Date.now(); }
+    const result = await request('/v1/runner/commands');
+    for (const command of result.commands as RunnerCommand[]) { admittedCommands.add(command.id); void (command.kind === 'run' ? run(command) : control(command)).finally(() => admittedCommands.delete(command.id)); }
+  } catch (error) { console.error(error instanceof Error ? error.message : error); }
+  await new Promise(resolve => setTimeout(resolve, 1000));
+}

@@ -93,6 +93,8 @@ test('keyboard tab navigation and phone layout keep save controls visible', asyn
   const panel = page.getByRole('dialog', { name: 'Agent settings' });
   await panel.getByRole('tab', { name: 'Profile', exact: true }).focus();
   await page.keyboard.press('ArrowRight');
+  await expect(panel.getByRole('tab', { name: 'Computer', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('ArrowRight');
   await expect(panel.getByRole('tab', { name: 'Model', exact: true })).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('End');
   await expect(panel.getByRole('tab', { name: 'Tools & connections' })).toHaveAttribute('aria-selected', 'true');
@@ -102,6 +104,29 @@ test('keyboard tab navigation and phone layout keep save controls visible', asyn
     const bounds = await panel.boundingBox(); expect(bounds!.width).toBe(page.viewportSize()!.width);
   }
   await page.screenshot({ path: `test-results/profile-${testInfo.project.name}.png`, fullPage: true });
+});
+
+test('configures computer access and creates an OS-specific pairing command', async ({ page }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
+  await expect(panel.getByLabel('Connected computer')).toContainText(/online/);
+  await panel.getByText('Selected folders', { exact: true }).click();
+  await panel.getByText('Advanced resources and shared folders').click();
+  await panel.getByRole('button', { name: 'Add folder' }).click();
+  await panel.getByLabel('Shared folder 1 path').fill('/tmp/open-harness-project');
+  await panel.getByLabel('Shared folder 1 access').selectOption('write');
+  await panel.getByLabel('Desktop access').selectOption('virtual');
+  await panel.getByRole('button', { name: 'Add computer' }).click();
+  await panel.getByLabel('Computer name').fill('Design workstation');
+  await panel.getByLabel('Computer operating system').selectOption('win32');
+  await panel.getByRole('button', { name: 'Create pairing command' }).click();
+  await expect(panel.getByLabel('Run on the computer')).toContainText('runner-install');
+  await expect(panel.getByLabel('Run on the computer')).toContainText('--pairing-code');
+  await panel.getByRole('button', { name: 'Close add computer' }).click();
+  await panel.getByRole('button', { name: 'Save changes' }).click();
+  await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
 });
 
 test('group switches and Disable all tools preserve an explicit empty selection', async ({ page, request }) => {

@@ -8,7 +8,8 @@ This is independent software and is not affiliated with xAI or Nous Research.
 
 - Node.js 22.13+ control service with SQLite state and replayable events
 - Hermes `v2026.9.11`, pinned to commit `939e45c91d751fadd94dcd1b873ac3cb44846213`
-- One managed Docker container per named agent, with Python 3.12, a separate `HERMES_HOME`, Chromium, terminal tools, and private storage
+- One managed Docker container per isolated agent, or direct execution under a paired runner's OS account
+- Outbound-only runners for Linux, macOS, and Windows computers, VPSs, and user-owned servers
 - A shared project directory mounted into every agent container
 - Two concurrent top-level runs and four total executions, including delegated subagents
 - Durable routines, approvals, memories, skills, sessions, handoffs, and crash recovery
@@ -18,7 +19,7 @@ The host home directory, Docker socket, and other agents' private directories ar
 
 ## Set up and run
 
-Docker must be installed. Open Harness starts Docker Desktop or the Docker service when you launch the local app, then waits for the daemon before starting its control service.
+Docker must be installed for the default isolated workspace. Open Harness starts Docker Desktop or the Docker service when you launch the local app, then waits for the daemon before starting its coordinator.
 
 ```bash
 npm ci
@@ -48,7 +49,33 @@ The **Try a guided run** action remains an explicitly scripted demonstration. No
 
 ## Agent settings
 
-Use the settings icon on any agent card, or **Agent settings** in a conversation header. The four tabs cover identity and avatar color, model selection, custom instructions, and expandable tool/connection switches. The panel fills the screen on phones and supports keyboard navigation.
+Use the settings icon on any agent card, or **Agent settings** in a conversation header. The tabs cover identity, computer assignment, model selection, custom instructions, and expandable tool/connection switches. The panel fills the screen on phones and supports keyboard navigation.
+
+### Connect another computer
+
+Open **Agent settings → Computer → Add computer**, choose Linux, macOS, or Windows, and run the generated one-time command from an Open Harness checkout on that machine. The command checks its runtime, pairs the runner, and installs automatic startup through systemd, launchd, or Windows Task Scheduler. Pairing codes expire after ten minutes and can be used only once. The runner initiates every connection over HTTP(S); it never opens an inbound port and does not need SSH credentials.
+
+For a coordinator reachable beyond localhost, put it behind HTTPS and set:
+
+```bash
+OPEN_HARNESS_BIND=0.0.0.0
+OPEN_HARNESS_PUBLIC_URL=https://agents.example.com
+npm run harness:serve
+```
+
+The dashboard token remains available only from the coordinator machine. Public runner endpoints accept scoped runner credentials or one-time pairing codes. A hosted Open Harness Site stores profiles, machines, runs, commands, and replayable events in D1; model credentials for hosted coordination belong in the selected runner's environment.
+
+Each agent starts with a private container. **Selected folders** mounts only the named host folders and preserves their read-only or read-write setting. **Direct computer access** runs Hermes under the runner's OS account; install the pinned host runtime and policy extension before selecting it:
+
+```bash
+python3 -m pip install "hermes-agent[all] @ git+https://github.com/NousResearch/hermes-agent.git@939e45c91d751fadd94dcd1b873ac3cb44846213"
+python3 -m pip install runtime/hermes/extension
+hermes computer-use install
+```
+
+Existing desktop control also needs the interactive OS session and its platform permissions. macOS requires Accessibility and Screen Recording. Windows remote hosts require a logged-in desktop session. Linux requires X11 or Wayland with AT-SPI. Linux runners can instead give each isolated agent a private Xvfb/Openbox desktop.
+
+Independent agents may share a runner up to its configured capacity. Existing-desktop sessions are serialized. A disconnected runner finishes work already admitted and buffers results until the coordinator returns; new work remains queued. Moving an agent exports managed private files, memory, and skills, verifies every checksum at the destination, and preserves the source if transfer fails.
 
 Profiles are authoritative in SQLite. Each save creates a revision; active work keeps its original revision, and queued work snapshots the latest profile when it starts. Workspace model changes affect inheriting agents only. Disabling instructions preserves their text. Failed saves keep your draft, and conflicting saves ask you to reload the winning revision.
 
@@ -78,7 +105,9 @@ Stopping a parent run also stops descendants and their associated Hermes session
 
 | Path | Responsibility |
 | --- | --- |
-| `runtime/service.ts` | Loopback control API, queue, schedules, approvals, migration, handoffs |
+| `runtime/service.ts` | Coordinator API, queue, schedules, approvals, runner dispatch, migration, handoffs |
+| `runtime/runner.ts` | Outbound runner polling, execution, durable result delivery, and remote controls |
+| `runtime/machines.ts` | Pairing, scoped credentials, machine health, commands, reservations, and transfers |
 | `runtime/db.ts` | SQLite schema, runs, events, approvals, and recovery state |
 | `runtime/hermes.ts` | Hermes TUI gateway JSON-RPC adapter and container lifecycle |
 | `runtime/hermes/Dockerfile` | Reproducible pinned Hermes/Python 3.12 runtime |

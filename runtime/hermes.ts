@@ -2,15 +2,20 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
+import type { ComputerConfig } from '../lib/agent-profile';
 
 type Pending = { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout };
+export type NativeGatewayOptions = { cwd: string; env: NodeJS.ProcessEnv; entry: string; python?: string };
 
 export class HermesGateway extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null;
   private requestId = 0;
   private pending = new Map<string, Pending>();
   private mockApproval: ((decision: string) => void) | null = null;
-  constructor(readonly container: string, readonly allowedTools: string[] | null = null) { super(); }
+  constructor(readonly container: string, readonly allowedTools: string[] | null = null, readonly native: NativeGatewayOptions | null = null) { super(); }
 
   async start() {
     if (process.env.OPEN_HARNESS_MOCK === "1") {
@@ -18,7 +23,9 @@ export class HermesGateway extends EventEmitter {
       return;
     }
     if (this.child && !this.child.killed) return;
-    this.child = spawn("docker", ["exec", "-i", this.container, "python", "/opt/open-harness/managed_entry.py"], { stdio: ["pipe", "pipe", "pipe"] });
+    this.child = this.native
+      ? spawn(this.native.python || process.env.HERMES_PYTHON || 'python3', [this.native.entry], { cwd: this.native.cwd, env: this.native.env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== 'win32' })
+      : spawn("docker", ["exec", "-i", this.container, "python", "/opt/open-harness/managed_entry.py"], { stdio: ["pipe", "pipe", "pipe"] });
     createInterface({ input: this.child.stdout }).on("line", line => {
       try {
         const value = JSON.parse(line);
@@ -33,7 +40,7 @@ export class HermesGateway extends EventEmitter {
     });
     createInterface({ input: this.child.stderr }).on("line", line => this.emit("log", { level: "debug", message: line.slice(0, 1000) }));
     this.child.once("exit", code => {
-      const error = Object.assign(new Error(`Hermes gateway exited with code ${code ?? "unknown"}. Inspect its saved work before retrying.`), { interrupted: true });
+      const error = Object.assign(new Error(`Hermes ${this.native ? 'host' : 'container'} gateway exited with code ${code ?? "unknown"}. Inspect its saved work before retrying.`), { interrupted: true });
       for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
       this.pending.clear(); this.child = null; this.emit("exit", error);
     });
@@ -102,11 +109,15 @@ export class HermesGateway extends EventEmitter {
     // Killing the docker CLI alone leaves the Python process inside the container.
     // Stopping this agent's container also reaps detached tools and subagents;
     // mounted profile/workspace data persists for its next task.
-    if (process.env.OPEN_HARNESS_MOCK !== "1") await new Promise<void>((resolve, reject) => {
+    if (process.env.OPEN_HARNESS_MOCK !== "1" && !this.native) await new Promise<void>((resolve, reject) => {
       const child = spawn("docker", ["stop", "--time", "2", this.container], { stdio: "ignore" });
       child.once("error", () => reject(new Error("Could not stop the agent container. Check Docker.")));
       child.once("exit", code => code === 0 ? resolve() : reject(new Error("Docker could not confirm the agent container stopped.")));
     });
+    if (process.env.OPEN_HARNESS_MOCK !== '1' && this.native && this.child?.pid) {
+      if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(this.child.pid), '/T', '/F'], { stdio: 'ignore' });
+      else { try { process.kill(-this.child.pid, 'SIGTERM'); } catch { this.child.kill('SIGTERM'); } }
+    }
     this.mockApproval?.("deny"); this.mockApproval = null;
     this.child?.kill("SIGTERM"); this.child = null;
     this.emit("exit", Object.assign(new Error("Agent runtime stopped."), { interrupted: true }));
@@ -127,24 +138,39 @@ export function dockerStatus(requireImage = true) {
     : "Docker is required to run isolated Hermes agents." };
 }
 
-export function ensureContainer(agentId: string, stateRoot: string) {
+export function ensureContainer(agentId: string, stateRoot: string, computer?: ComputerConfig) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
-  const inspect = spawnSync("docker", ["inspect", "-f", "{{.State.Running}}", name], { encoding: "utf8" });
+  const selected = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
+  const signature = createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources })).digest('hex').slice(0, 24);
+  const inspect = spawnSync("docker", ["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"open-harness.config\"}}", name], { encoding: "utf8" });
   if (inspect.status === 0) {
-    if (inspect.stdout.trim() !== "true") {
+    const [running, currentSignature] = inspect.stdout.trim().split(/\s+/);
+    if (currentSignature !== signature) {
+      spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
+    } else if (running !== "true") {
       const started = spawnSync("docker", ["start", name], { encoding: "utf8" });
       if (started.status !== 0) throw new Error(started.stderr.trim() || "Could not start the agent container.");
+      return name;
+    } else {
+      return name;
     }
-    return name;
   }
   const profile = `${stateRoot}/agents/${safe}/profile`, privateDir = `${stateRoot}/agents/${safe}/private`, shared = `${stateRoot}/shared`;
-  const run = spawnSync("docker", ["run", "-d", "--name", name, "--restart", "unless-stopped", "--security-opt", "no-new-privileges",
-    "--cap-drop", "ALL", "--pids-limit", "512", "--memory", "4g", "--cpus", "2", "--add-host", "host.docker.internal:host-gateway",
+  const mounts: string[] = [];
+  if (selected.access === 'folders') selected.folders.forEach((folder, index) => {
+    const source = isAbsolute(folder.path) ? folder.path : resolve(folder.path);
+    if (!existsSync(source)) throw new Error(`Shared folder does not exist on this computer: ${folder.path}`);
+    mounts.push('-v', `${source}:/workspace/mounts/folder-${index + 1}${folder.mode === 'read' ? ':ro' : ''}`);
+  });
+  const run = spawnSync("docker", ["run", "-d", "--name", name, "--restart", "unless-stopped", '--label', `open-harness.config=${signature}`, "--security-opt", "no-new-privileges",
+    "--cap-drop", "ALL", "--pids-limit", "512", "--memory", `${Math.round(selected.resources.memoryMb)}m`, "--cpus", String(selected.resources.cpu), "--add-host", "host.docker.internal:host-gateway",
     "--user", `${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "-e", "HOME=/workspace/private",
+    ...(selected.desktop === 'virtual' ? ['-e', 'DISPLAY=:99', '-e', 'OPEN_HARNESS_VIRTUAL_DESKTOP=1'] : []),
     "-v", `${stateRoot}/agents/${safe}/managed:/run/open-harness:ro`,
     "-v", `${profile}:/home/hermes/.hermes`, "-v", `${privateDir}:/workspace/private`, "-v", `${shared}:/workspace/shared`,
+    ...mounts,
     "open-harness-hermes:2026.9.11"], { encoding: "utf8" });
   if (run.status !== 0) throw new Error(run.stderr.trim() || "Could not create the agent container. Run npm run harness:setup first.");
   return name;

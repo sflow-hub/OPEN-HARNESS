@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { DEFAULT_MODEL, draftProfile, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
+import { DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
 import type { Agent } from '../lib/types';
 
 export class ProfileError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
@@ -28,7 +28,18 @@ export function validateProfile(value: AgentProfile): AgentProfile {
     if (c.secretRef && !/^[A-Z][A-Z0-9_]{1,79}$/.test(c.secretRef)) throw new ProfileError('Invalid connector secret reference.');
     return { id: short(c.id, 'Connection ID', 100, true), name: c.name, command: short(c.command, 'Executable', 300, true), args: c.args, secretRef: c.secretRef || '', enabled: c.enabled };
   });
-  return { id: validId(value.id), revision: value.revision, name: short(value.name, 'Name', 30, true).trim(), role: short(value.role, 'Role', 60, true).trim(), description: short(value.description, 'Description', 180), tone: value.tone, prompt: { enabled: value.prompt.enabled, text: short(value.prompt.text, 'System prompt', 12000) }, model: { ...validateModel(value.model.inherit ? { ...DEFAULT_MODEL, ...value.model, model: value.model.model || DEFAULT_MODEL.model } : value.model), inherit: value.model.inherit }, allowedTools: [...new Set(value.allowedTools)], connectors };
+  const computerInput = (value.computer || DEFAULT_COMPUTER) as ComputerConfig;
+  if (!['private', 'folders', 'direct'].includes(computerInput.access) || !['none', 'virtual', 'existing'].includes(computerInput.desktop)) throw new ProfileError('Choose a valid computer access and desktop mode.');
+  if (computerInput.desktop === 'existing' && computerInput.access !== 'direct') throw new ProfileError('Existing desktop control requires direct computer access.');
+  if (computerInput.desktop === 'virtual' && computerInput.access === 'direct') throw new ProfileError('A private virtual desktop requires an isolated workspace.');
+  const resources = computerInput.resources || DEFAULT_COMPUTER.resources;
+  if (![resources.cpu, resources.memoryMb, resources.concurrency].every(Number.isFinite) || resources.cpu < .25 || resources.cpu > 64 || resources.memoryMb < 256 || resources.memoryMb > 262144 || !Number.isInteger(resources.concurrency) || resources.concurrency < 1 || resources.concurrency > 32) throw new ProfileError('Computer resource limits are outside the supported range.');
+  const folders = (computerInput.folders || []).slice(0, 50).map(folder => {
+    if (!folder || typeof folder.path !== 'string' || !folder.path.trim() || folder.path.length > 4000 || !['read', 'write'].includes(folder.mode)) throw new ProfileError('Shared folders need a path and read or write access.');
+    return { id: short(folder.id || crypto.randomUUID(), 'Folder ID', 100, true), path: folder.path.trim(), mode: folder.mode };
+  });
+  const computer: ComputerConfig = { machineId: short(computerInput.machineId || 'local', 'Machine', 100, true), access: computerInput.access, desktop: computerInput.desktop, reserveMachine: Boolean(computerInput.reserveMachine), folders: computerInput.access === 'folders' ? folders : [], resources: { cpu: Math.round(resources.cpu * 100) / 100, memoryMb: Math.round(resources.memoryMb), concurrency: resources.concurrency } };
+  return { id: validId(value.id), revision: value.revision, name: short(value.name, 'Name', 30, true).trim(), role: short(value.role, 'Role', 60, true).trim(), description: short(value.description, 'Description', 180), tone: value.tone, prompt: { enabled: value.prompt.enabled, text: short(value.prompt.text, 'System prompt', 12000) }, model: { ...validateModel(value.model.inherit ? { ...DEFAULT_MODEL, ...value.model, model: value.model.model || DEFAULT_MODEL.model } : value.model), inherit: value.model.inherit }, allowedTools: [...new Set(value.allowedTools)], connectors, computer };
 }
 export class Profiles {
   constructor(readonly db: DatabaseSync) {
@@ -38,7 +49,7 @@ export class Profiles {
       CREATE TABLE IF NOT EXISTS run_profiles(run_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, revision INTEGER NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tool_catalogs(agent_id TEXT PRIMARY KEY, json TEXT NOT NULL);`);
   }
-  get(id: string): AgentProfile | null { const row = this.db.prepare('SELECT json FROM agent_profiles WHERE id=?').get(id) as { json: string } | undefined; return row ? JSON.parse(row.json) : null; }
+  get(id: string): AgentProfile | null { const row = this.db.prepare('SELECT json FROM agent_profiles WHERE id=?').get(id) as { json: string } | undefined; if (!row) return null; const profile = JSON.parse(row.json); return { ...profile, computer: profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } }; }
   list(): AgentProfile[] { return (this.db.prepare('SELECT json FROM agent_profiles ORDER BY rowid').all() as Array<{ json: string }>).map(row => JSON.parse(row.json)); }
   defaults(): { model: ModelChoice; revision: number } { const row = this.db.prepare('SELECT revision,json FROM workspace_settings WHERE id=1').get() as { revision: number; json: string } | undefined; return row ? { model: JSON.parse(row.json), revision: row.revision } : { model: DEFAULT_MODEL, revision: 0 }; }
   setDefaults(model: ModelChoice, revision: number) { const current = this.defaults(); if (revision !== current.revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409); this.db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(revision + 1, JSON.stringify(validateModel(model))); return this.defaults(); }

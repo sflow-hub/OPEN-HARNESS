@@ -3,7 +3,6 @@ import { mkdirSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentProfile, ModelChoice, ToolCatalog, ToolInfo } from '../lib/agent-profile';
 import { dockerStatus, ensureContainer, HermesGateway } from './hermes';
-import type { SecretStore } from './secrets';
 
 export const COORDINATION_TOOLS: ToolInfo[] = [
   { id: 'mcp_open_harness_delegate_named_agent', name: 'Hand off to another agent', group: 'delegation', description: 'Assign explicit task context to another named agent.', available: true },
@@ -27,18 +26,19 @@ export function runtimeProbe(container: string, input: object): Promise<Record<s
     child.stdin.end(JSON.stringify(input) + '\n');
   });
 }
-export async function discoverTools(agentId: string, root: string): Promise<ToolCatalog> {
+export async function discoverTools(agentId: string, root: string, profile?: AgentProfile): Promise<ToolCatalog> {
   if (process.env.OPEN_HARNESS_MOCK === '1') return { source: 'mock', tools: [...mockTools, ...COORDINATION_TOOLS] };
   const status = dockerStatus(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
-  try { const result = await runtimeProbe(ensureContainer(agentId, root), { action: 'catalog' }); return { source: 'runtime', tools: [...(result.tools as ToolInfo[]).filter(t => t.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }; }
+  try { const result = await runtimeProbe(ensureContainer(agentId, root, profile?.computer), { action: 'catalog' }); return { source: 'runtime', tools: [...(result.tools as ToolInfo[]).filter(t => t.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }; }
   catch (error) { return { source: 'unavailable', tools: [], error: error instanceof Error ? error.message : 'Tool inventory is unavailable.' }; }
 }
 function atomic(path: string, data: string) { writeFileSync(`${path}.tmp`, data, { mode: 0o600 }); renameSync(`${path}.tmp`, path); chmodSync(path, 0o600); }
-export function prepareProfile(root: string, profile: AgentProfile, effective: ModelChoice, secrets: SecretStore, token: string, runId: string) {
+export type PrepareProfileOptions = { cwd?: string; coordinationCommand?: string; controlUrl?: string; controlSocket?: string };
+export function prepareProfile(root: string, profile: AgentProfile, effective: ModelChoice, secrets: { environment(): Record<string,string> }, token: string, runId: string, options: PrepareProfileOptions = {}) {
   const dir = join(root, 'agents', profile.id), home = join(dir, 'profile'), managed = join(dir, 'managed');
   for (const path of [home, managed, join(dir, 'private')]) mkdirSync(path, { recursive: true });
   const mcp: Record<string, unknown> = {};
-  if (profile.allowedTools.some(id => COORDINATION_TOOLS.some(t => t.id === id))) mcp.open_harness = { command: 'node', args: ['/opt/open-harness/coordination.mjs'], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId } };
+  if (profile.allowedTools.some(id => COORDINATION_TOOLS.some(t => t.id === id))) mcp.open_harness = { command: 'node', args: [options.coordinationCommand || '/opt/open-harness/coordination.mjs'], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...(options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}), ...(options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {}) } };
   const env: Record<string, string> = {};
   const secretValues = secrets.environment();
   if (effective.credentialRef && secretValues[effective.credentialRef]) {
@@ -51,7 +51,7 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
     Object.assign(env, connectorEnv);
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: '${' + c.secretRef + '}' } : {} };
   }
-  const config = { model: { default: effective.model, provider: effective.provider === 'local' ? 'custom' : effective.provider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { entries: { open_harness_policy: { enabled: true } } }, mcp_servers: mcp };
+  const config = { model: { default: effective.model, provider: effective.provider === 'local' ? 'custom' : effective.provider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { entries: { open_harness_policy: { enabled: true } } }, mcp_servers: mcp };
   // JSON is a YAML subset; serialization prevents YAML injection from prompts, names, and endpoints.
   atomic(join(home, 'config.yaml'), JSON.stringify(config, null, 2));
   atomic(join(home, 'SOUL.md'), profile.prompt.enabled ? profile.prompt.text : '');

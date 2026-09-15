@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { resolve } from "node:path";
 import { dockerStatus } from "./hermes";
 
@@ -24,4 +24,26 @@ if (command === "doctor" || command === "status") {
   run("systemctl", ["--user", "start", "open-harness.service"]);
 } else if (command === "stop") {
   run("systemctl", ["--user", "stop", "open-harness.service"]);
-} else { console.error("Usage: npm run harness -- setup|start|stop|doctor|status|install-service"); process.exitCode = 2; }
+} else if (command === 'runner') {
+  run(process.execPath, ['--import', 'tsx', 'runtime/runner.ts', ...process.argv.slice(3)]);
+} else if (command === 'runner-install') {
+  const docker = dockerStatus(false);
+  if (docker.available && spawnSync('docker', ['image', 'inspect', 'open-harness-hermes:2026.9.11'], { stdio: 'ignore' }).status !== 0) {
+    const built = spawnSync('docker', ['build', '-f', 'runtime/hermes/Dockerfile', '-t', 'open-harness-hermes:2026.9.11', '.'], { cwd: project, stdio: 'inherit' }); if (built.status !== 0) process.exit(built.status || 1);
+  }
+  const nativeReady = spawnSync(process.env.HERMES_PYTHON || 'python3', ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore' }).status === 0;
+  if (!docker.available && !nativeReady) { console.error('This machine needs Docker for isolated agents or a local Hermes installation for direct access.'); process.exit(1); }
+  const forwarded = process.argv.slice(3), paired = spawnSync(process.execPath, ['--import', 'tsx', 'runtime/runner.ts', ...forwarded, '--once', '1'], { cwd: project, stdio: 'inherit' });
+  if (paired.status !== 0) process.exitCode = paired.status || 1;
+  else if (process.platform === 'linux') {
+    const unitDir = resolve(process.env.XDG_CONFIG_HOME || `${process.env.HOME}/.config`, 'systemd/user'); mkdirSync(unitDir, { recursive: true });
+    writeFileSync(resolve(unitDir, 'open-harness-runner.service'), `[Unit]\nDescription=Open Harness machine runner\nAfter=network-online.target docker.service\n\n[Service]\nType=simple\nWorkingDirectory=${project}\nExecStart=${process.execPath} --import tsx runtime/runner.ts\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n`);
+    run('systemctl', ['--user', 'daemon-reload']); if (!process.exitCode) run('systemctl', ['--user', 'enable', '--now', 'open-harness-runner.service']);
+  } else if (process.platform === 'darwin') {
+    const dir = resolve(`${process.env.HOME}/Library/LaunchAgents`); mkdirSync(dir, { recursive: true }); const path = resolve(dir, 'app.open-harness.runner.plist');
+    writeFileSync(path, `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>app.open-harness.runner</string><key>ProgramArguments</key><array><string>${process.execPath}</string><string>--import</string><string>tsx</string><string>${resolve(project, 'runtime/runner.ts')}</string></array><key>WorkingDirectory</key><string>${project}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>`); chmodSync(path, 0o600); run('launchctl', ['bootstrap', `gui/${process.getuid?.() || 501}`, path]);
+  } else if (process.platform === 'win32') {
+    const taskCommand = `\"${process.execPath}\" --import tsx \"${resolve(project, 'runtime/runner.ts')}\"`;
+    run('schtasks', ['/Create', '/F', '/SC', 'ONLOGON', '/TN', 'Open Harness Runner', '/TR', taskCommand]); run('schtasks', ['/Run', '/TN', 'Open Harness Runner']);
+  } else { console.error('Automatic runner startup is supported on Linux, macOS, and Windows.'); process.exitCode = 2; }
+} else { console.error("Usage: npm run harness -- setup|start|stop|doctor|status|install-service|runner|runner-install"); process.exitCode = 2; }

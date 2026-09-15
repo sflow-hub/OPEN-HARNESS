@@ -14,6 +14,8 @@ export type PersistentRun = {
   state: "queued" | "running" | "waiting_approval" | "waiting_input" | "completed" | "failed" | "interrupted" | "cancelled";
   result?: string | null;
   error?: string | null;
+  machine_id?: string | null;
+  machine_connection?: "online" | "offline" | "revoked" | null;
 };
 
 function base() {

@@ -1,6 +1,6 @@
 {
   "name": "open-harness",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -20,6 +20,7 @@
     "harness:start": "npm run harness -- start",
     "harness:stop": "npm run harness -- stop",
     "harness:doctor": "npm run harness -- doctor",
+    "runner": "node --import tsx runtime/runner.ts",
     "harness:install-service": "npm run harness -- install-service",
     "test:browser": "npm run build && playwright test"
   },

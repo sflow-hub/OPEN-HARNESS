@@ -94,3 +94,31 @@ test('MCP inventory survives refresh without claiming a stale handshake is conne
   const tool = catalog.tools.find(t => t.id === 'mcp_catalog_test_lookup');
   assert.ok(tool); assert.equal(tool.available, false); assert.match(tool.reason || '', /Test this connection again/);
 });
+
+test('pairs and authenticates a remote runner, dispatches work once, and revokes it', async () => {
+  const pairing = await request<{ code: string }>('/v1/machines', 'POST', { name: 'Test VPS', platform: 'linux' });
+  const pairedResponse = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, name: 'Test VPS', platform: 'linux', arch: 'x64', capabilities: { container: true, direct: true, desktop: false, virtualDesktop: true } }) });
+  assert.equal(pairedResponse.status, 201); const paired = await pairedResponse.json() as { machineId: string; token: string };
+  const reused = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code }) }); assert.equal(reused.status, 410);
+  const runnerHeaders = { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId, 'Content-Type': 'application/json' };
+  assert.equal((await fetch(base + '/v1/runner/heartbeat', { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ capabilities: { container: true, direct: true, desktop: false, virtualDesktop: true } }) })).status, 200);
+  const current = await profile(); await save({ ...current, computer: { ...current.computer, machineId: paired.machineId, access: 'private', desktop: 'virtual', reserveMachine: true } });
+  const created = await run('remote test');
+  let command: { id: string; payload: { runId: string } } | undefined;
+  for (let i = 0; i < 80 && !command; i++) { const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { runId: string; bundle?: { checksum: string } } }> }; for (const item of value.commands) { if (item.kind === 'import-agent') await fetch(`${base}/v1/runner/commands/${item.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { checksum: item.payload.bundle?.checksum } }) }); if (item.kind === 'run' && item.payload.runId === created.id) command = item; } if (!command) await new Promise(resolve => setTimeout(resolve, 20)); }
+  assert.ok(command); const duplicate = crypto.randomUUID();
+  for (let i = 0; i < 2; i++) assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: duplicate, runId: created.id, event: { type: 'message.delta', payload: { text: 'once' } } }) })).status, 200);
+  assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { final_response: 'remote complete' } }) })).status, 200);
+  assert.equal((await waitRun(created.id)).result, 'remote complete');
+  const events = await request<{ events: Array<{ type: string }> }>(`/v1/runs/${created.id}/events`); assert.equal(events.events.filter(item => item.type === 'message.delta').length, 1);
+  const scout = await profile('scout'); await assert.rejects(save({ ...scout, computer: { ...scout.computer, machineId: paired.machineId } }), { status: 409 });
+  await request(`/v1/machines/${paired.machineId}/revoke`, 'POST'); assert.equal((await fetch(base + '/v1/runner/heartbeat', { method: 'POST', headers: runnerHeaders, body: '{}' })).status, 401);
+  const latest = await profile(); await save({ ...latest, computer: { ...latest.computer, machineId: 'local', desktop: 'none', reserveMachine: false } });
+});
+
+test('computer settings reject unsafe mode combinations and invalid resource limits', async () => {
+  const current = await profile();
+  await assert.rejects(save({ ...current, computer: { ...current.computer, access: 'private', desktop: 'existing' } }), { status: 400 });
+  await assert.rejects(save({ ...current, computer: { ...current.computer, resources: { ...current.computer.resources, memoryMb: 128 } } }), { status: 400 });
+  await assert.rejects(save({ ...current, computer: { ...current.computer, access: 'folders', folders: [{ id: 'bad', path: '', mode: 'write' }] } }), { status: 400 });
+});

@@ -1,6 +1,8 @@
 import { env } from "cloudflare:workers";
-import { hostedTaskSchema } from "../../../../db/schema";
+import { hostedRuntimeSchema, hostedTaskSchema } from "../../../../db/schema";
 import type { AgentTask, TaskBoard, TaskStage, WorkflowCategory } from "../../../../lib/task-types";
+import { DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, type AgentProfile } from '../../../../lib/agent-profile';
+import type { Agent } from '../../../../lib/types';
 
 export const runtime = "edge";
 
@@ -40,7 +42,7 @@ async function input(request: Request): Promise<Row> {
   if (request.method === "GET" || request.method === "DELETE") return {};
   try {
     const text = await request.text();
-    if (text.length > 250_000) throw new HttpError(413, "Request is too large.");
+    if (text.length > 30_000_000) throw new HttpError(413, "Request is too large.");
     const value = text ? JSON.parse(text) : {};
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
     return value as Row;
@@ -51,12 +53,65 @@ async function input(request: Request): Promise<Row> {
 }
 
 async function prepare(db: D1Database) {
-  await db.batch(hostedTaskSchema.map(sql => db.prepare(sql)));
+  await db.batch([...hostedTaskSchema, ...hostedRuntimeSchema].map(sql => db.prepare(sql)));
   const now = stamp();
   await db.batch([
     db.prepare("INSERT OR IGNORE INTO task_boards(id,name,archived,revision,created_at,updated_at) VALUES(?,?,?,?,?,?)").bind("default-board", "Open Harness", 0, 1, now, now),
     ...categories.map((category, position) => db.prepare("INSERT OR IGNORE INTO task_stages(id,board_id,name,category,position) VALUES(?,?,?,?,?)").bind(`default-${category}`, "default-board", category === "in_progress" ? "In Progress" : category[0].toUpperCase() + category.slice(1), category, position)),
   ]);
+}
+
+async function digest(value: string) { const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)); return [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, '0')).join(''); }
+function normalizeProfile(input: AgentProfile): AgentProfile { return { ...input, computer: input.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } }; }
+function mapMachine(row: Row, assignedAgents = 0) {
+  const fresh = row.last_seen_at && Date.now() - Date.parse(String(row.last_seen_at)) < 45_000;
+  return { id: String(row.id), name: String(row.name), platform: String(row.platform), arch: String(row.arch), status: row.revoked_at ? 'revoked' : fresh ? 'online' : 'offline', lastSeenAt: row.last_seen_at ? String(row.last_seen_at) : null, local: false, reservedAgentId: row.reserved_agent_id ? String(row.reserved_agent_id) : null, assignedAgents, capabilities: JSON.parse(String(row.capabilities_json || '{}')) };
+}
+async function machineList(db: D1Database) {
+  const profiles = (await db.prepare('SELECT json FROM agent_profiles').all<Row>()).results.map(row => normalizeProfile(JSON.parse(String(row.json))));
+  return (await db.prepare('SELECT * FROM machines WHERE revoked_at IS NULL ORDER BY name').all<Row>()).results.map(row => mapMachine(row, profiles.filter(profile => profile.computer.machineId === row.id).length));
+}
+async function runnerMachine(db: D1Database, request: Request) {
+  const machineId = request.headers.get('x-open-harness-machine') || '', token = (request.headers.get('authorization') || '').replace(/^Bearer /, '');
+  if (!machineId || !token) return null; const row = await db.prepare('SELECT * FROM machines WHERE id=? AND revoked_at IS NULL').bind(machineId).first<Row>();
+  return row && String(row.credential_hash) === await digest(token) ? row : null;
+}
+async function appendRunEvent(db: D1Database, runId: string, type: string, payload: unknown, eventId = id()) { await db.prepare('INSERT OR IGNORE INTO run_events(id,run_id,type,payload_json,created_at) VALUES(?,?,?,?,?)').bind(eventId, runId, type, JSON.stringify(payload), stamp()).run(); }
+async function publicRun(db: D1Database, row: Row) { const machine = await db.prepare('SELECT * FROM machines WHERE id=?').bind(row.machine_id).first<Row>(); return { id: String(row.id), agent_id: String(row.agent_id), conversation_id: String(row.conversation_id), prompt: String(row.prompt), state: String(row.state), machine_id: String(row.machine_id), machine_connection: machine ? mapMachine(machine).status : 'offline', result: row.result ? String(row.result) : null, error: row.error ? String(row.error) : null }; }
+async function enqueueRunnerCommand(db: D1Database, machineId: string, agentId: string | null, kind: string, payload: unknown) {
+  const commandId = id(); await db.prepare('INSERT INTO runner_commands(id,machine_id,agent_id,kind,payload_json,state,created_at) VALUES(?,?,?,?,?,?,?)').bind(commandId, machineId, agentId, kind, JSON.stringify(payload), 'queued', stamp()).run(); return commandId;
+}
+async function activeTransfer(db: D1Database, agentId: string) { return db.prepare("SELECT * FROM agent_transfers WHERE agent_id=? AND state IN ('queued','exporting','importing','verifying') ORDER BY created_at DESC LIMIT 1").bind(agentId).first<Row>(); }
+async function beginHostedTransfer(db: D1Database, agentId: string, source: string, destination: string) {
+  if (source === destination || await activeTransfer(db, agentId)) return;
+  const sourceMachine = await db.prepare('SELECT id FROM machines WHERE id=? AND revoked_at IS NULL').bind(source).first<Row>();
+  if (!sourceMachine) return;
+  const now = stamp(); await db.prepare('INSERT INTO agent_transfers(id,agent_id,source_machine_id,destination_machine_id,state,detail,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').bind(id(), agentId, source, destination, 'queued', 'Waiting for active work to finish.', now, now).run();
+}
+async function startReadyTransfers(db: D1Database, sourceMachineId: string) {
+  const transfers = (await db.prepare("SELECT * FROM agent_transfers WHERE source_machine_id=? AND state='queued' ORDER BY created_at LIMIT 10").bind(sourceMachineId).all<Row>()).results;
+  for (const transfer of transfers) {
+    const busy = await db.prepare("SELECT 1 FROM runs WHERE agent_id=? AND state IN ('running','waiting_approval') LIMIT 1").bind(transfer.agent_id).first(); if (busy) continue;
+    const commandId = await enqueueRunnerCommand(db, sourceMachineId, String(transfer.agent_id), 'export-agent', { transferId: transfer.id });
+    await db.prepare("UPDATE agent_transfers SET state='exporting',detail='Exporting managed files, memory, and skills.',export_command_id=?,updated_at=? WHERE id=? AND state='queued'").bind(commandId, stamp(), transfer.id).run();
+  }
+}
+async function dispatchHostedRun(db: D1Database, run: Row, profile: AgentProfile) {
+  const machine = await db.prepare('SELECT * FROM machines WHERE id=? AND revoked_at IS NULL').bind(profile.computer.machineId).first<Row>();
+  if (!machine || !machine.last_seen_at || Date.now() - Date.parse(String(machine.last_seen_at)) >= 45_000) return;
+  if (await activeTransfer(db, profile.id)) return;
+  if (await db.prepare("SELECT 1 FROM runs WHERE agent_id=? AND id<>? AND state IN ('running','waiting_approval') LIMIT 1").bind(profile.id, run.id).first()) return;
+  const activeCount = await db.prepare("SELECT COUNT(*) AS count FROM runs WHERE state IN ('running','waiting_approval')").first<Row>(); if (Number(activeCount?.count || 0) >= 2) return;
+  const occupants = (await db.prepare("SELECT agent_id FROM runs WHERE machine_id=? AND state IN ('running','waiting_approval')").bind(profile.computer.machineId).all<Row>()).results;
+  if (occupants.length >= profile.computer.resources.concurrency) return;
+  if (profile.computer.desktop === 'existing') for (const occupant of occupants) { const row = await db.prepare('SELECT json FROM agent_profiles WHERE id=?').bind(occupant.agent_id).first<Row>(); if (row && normalizeProfile(JSON.parse(String(row.json))).computer.desktop === 'existing') return; }
+  const commandId = id(), created = stamp(), effectiveModel = profile.model.inherit ? DEFAULT_MODEL : profile.model;
+  const snapshot = { ...profile, effectiveModel, workspaceRevision: 0 };
+  await db.batch([
+    db.prepare('INSERT INTO runner_commands(id,machine_id,agent_id,kind,payload_json,state,created_at) VALUES(?,?,?,?,?,?,?)').bind(commandId, profile.computer.machineId, profile.id, 'run', JSON.stringify({ runId: run.id, prompt: run.prompt, snapshot, secrets: {}, coordinationToken: '' }), 'queued', created),
+    db.prepare("UPDATE runs SET state='running',command_id=?,updated_at=? WHERE id=? AND state='queued'").bind(commandId, created, run.id),
+  ]);
+  await appendRunEvent(db, String(run.id), 'runner.dispatched', { commandId, machineId: profile.computer.machineId });
 }
 
 function mapStage(row: Row): TaskStage {
@@ -232,12 +287,103 @@ async function handler(request: Request, context: RouteContext) {
     const { path } = await context.params;
     const pathname = `/${path.join("/")}`, url = new URL(request.url), body = await input(request);
 
-    if (pathname === "/v1/bootstrap" && request.method === "GET") return json({ token: "hosted-site", runtime: { available: false, version: null, message: "Agent execution requires the local Open Harness runtime." }, version: "0.3.0", hermes: { release: "hosted", commit: "sites" } });
-    if (pathname === "/v1/agents/sync" && request.method === "POST") return json({ agents: Array.isArray(body.agents) ? body.agents : [] });
+    if (pathname === "/v1/bootstrap" && request.method === "GET") return json({ token: "hosted-site", runtime: { available: true, version: 'runner', message: "Connect a computer to run agents from this hosted dashboard." }, version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } });
+    if (pathname === '/v1/runner/pair' && request.method === 'POST') {
+      const code = String(body.code || ''), pairing = await db.prepare('SELECT * FROM machine_pairings WHERE code_hash=?').bind(await digest(code)).first<Row>();
+      if (!pairing || pairing.used_at || Date.parse(String(pairing.expires_at)) <= Date.now()) throw new HttpError(410, 'This pairing code is invalid, expired, or already used.');
+      const machineId = `machine-${id()}`, token = crypto.randomUUID() + crypto.randomUUID(), now = stamp();
+      const used = await db.prepare('UPDATE machine_pairings SET used_at=? WHERE id=? AND used_at IS NULL').bind(now, pairing.id).run(); if (!used.meta.changes) throw new HttpError(409, 'This pairing code was already used.');
+      await db.prepare('INSERT INTO machines VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').bind(machineId, String(body.name || pairing.name).slice(0,80), String(body.platform || pairing.platform), String(body.arch || 'unknown'), 'online', now, null, JSON.stringify(body.capabilities || {}), await digest(token), null, now, now).run();
+      return json({ machineId, token, machine: mapMachine({ id: machineId, name: body.name || pairing.name, platform: body.platform || pairing.platform, arch: body.arch || 'unknown', last_seen_at: now, capabilities_json: JSON.stringify(body.capabilities || {}) }) }, 201);
+    }
+    if (pathname.startsWith('/v1/runner/')) {
+      const runner = await runnerMachine(db, request); if (!runner) throw new HttpError(401, 'Invalid or revoked runner credential.'); const machineId = String(runner.id);
+      if (pathname === '/v1/runner/heartbeat' && request.method === 'POST') {
+        const now = stamp(); await db.prepare("UPDATE machines SET status='online',last_seen_at=?,capabilities_json=?,updated_at=? WHERE id=?").bind(now, JSON.stringify(body.capabilities || {}), now, machineId).run();
+        const activeIds = new Set(Array.isArray(body.activeCommandIds) ? body.activeCommandIds.map(String) : []), cutoff = new Date(Date.now() - 45_000).toISOString(), leased = (await db.prepare("SELECT * FROM runner_commands WHERE machine_id=? AND state='leased' AND leased_at<?").bind(machineId, cutoff).all<Row>()).results.filter(command => !activeIds.has(String(command.id)));
+        for (const command of leased) { const error = 'Runner restarted after accepting this work. Completed events were preserved and the task was not replayed.'; await db.batch([db.prepare("UPDATE runner_commands SET state='failed',finished_at=?,result_json=? WHERE id=? AND state='leased'").bind(now, JSON.stringify({ error, interrupted: true }), command.id), db.prepare("UPDATE runs SET state='interrupted',error=?,updated_at=? WHERE command_id=? AND state NOT IN ('completed','failed','cancelled','interrupted')").bind(error, now, command.id)]); const run = await db.prepare('SELECT id FROM runs WHERE command_id=?').bind(command.id).first<Row>(); if (run) await appendRunEvent(db, String(run.id), 'run.interrupted', { error }); }
+        const queued = (await db.prepare("SELECT * FROM runs WHERE machine_id=? AND state='queued' ORDER BY created_at LIMIT 10").bind(machineId).all<Row>()).results;
+        for (const run of queued) { const row = await db.prepare('SELECT json FROM agent_profiles WHERE id=?').bind(run.agent_id).first<Row>(); if (row) await dispatchHostedRun(db, run, normalizeProfile(JSON.parse(String(row.json)))); }
+        await startReadyTransfers(db, machineId);
+        return json(mapMachine({ ...runner, last_seen_at: now, capabilities_json: JSON.stringify(body.capabilities || {}) }));
+      }
+      if (pathname === '/v1/runner/commands' && request.method === 'GET') {
+        const rows = (await db.prepare("SELECT * FROM runner_commands WHERE machine_id=? AND state='queued' ORDER BY created_at LIMIT 10").bind(machineId).all<Row>()).results, now = stamp();
+        await db.batch(rows.map(row => db.prepare("UPDATE runner_commands SET state='leased',leased_at=? WHERE id=? AND state='queued'").bind(now, row.id)));
+        return json({ commands: rows.map(row => ({ id: row.id, agentId: row.agent_id, kind: row.kind, payload: JSON.parse(String(row.payload_json)), createdAt: row.created_at })) });
+      }
+      const runnerTransfer = pathname.match(/^\/v1\/runner\/transfers\/([^/]+)$/);
+      if (runnerTransfer && request.method === 'GET') {
+        const transfer = await db.prepare("SELECT * FROM agent_transfers WHERE id=? AND destination_machine_id=? AND state IN ('importing','verifying')").bind(runnerTransfer[1], machineId).first<Row>(); if (!transfer) throw new HttpError(404, 'Transfer bundle not found.');
+        const chunks = (await db.prepare('SELECT data FROM transfer_chunks WHERE transfer_id=? ORDER BY position').bind(transfer.id).all<Row>()).results; return json({ bundle: JSON.parse(chunks.map(chunk => String(chunk.data)).join('')) });
+      }
+      const runnerCommand = pathname.match(/^\/v1\/runner\/commands\/([^/]+)\/(events|complete)$/);
+      if (runnerCommand && request.method === 'POST') {
+        const command = await db.prepare('SELECT * FROM runner_commands WHERE id=? AND machine_id=?').bind(runnerCommand[1], machineId).first<Row>(); if (!command) throw new HttpError(404, 'Runner command not found.');
+        if (runnerCommand[2] === 'events') { const received = await db.prepare('INSERT OR IGNORE INTO runner_event_receipts VALUES(?,?,?)').bind(command.id, required(body.eventId, 'Event ID'), stamp()).run(); if (received.meta.changes) { const event = body.event as Row || {}, eventType = String(event.type || 'runtime.event'), eventPayload = (event.payload || event) as Row; if (eventType === 'approval.request') { const approvalId = id(), requestId = String(eventPayload.request_id || eventPayload.id || ''); await db.prepare('INSERT INTO approvals VALUES(?,?,?,?,?,NULL)').bind(approvalId, body.runId, requestId, 'pending', stamp()).run(); await appendRunEvent(db, String(body.runId), eventType, { ...eventPayload, approvalId }, String(body.eventId)); await db.prepare("UPDATE runs SET state='waiting_approval',updated_at=? WHERE id=?").bind(stamp(), body.runId).run(); } else await appendRunEvent(db, String(body.runId), eventType, eventPayload, String(body.eventId)); } return json({ ok: true }); }
+        if (['completed','failed'].includes(String(command.state))) return json({ ok: true, duplicate: true });
+        const result = body.result as Row | undefined, error = body.error ? String(body.error) : null, now = stamp();
+        if (command.kind === 'export-agent') {
+          const transfer = await db.prepare('SELECT * FROM agent_transfers WHERE export_command_id=?').bind(command.id).first<Row>();
+          await db.prepare('UPDATE runner_commands SET state=?,finished_at=?,result_json=? WHERE id=?').bind(error ? 'failed' : 'completed', now, JSON.stringify(error ? { error } : { exported: true }), command.id).run();
+          if (!transfer) return json({ ok: true });
+          if (error || !result || !Array.isArray(result.files) || !result.checksum) { await db.prepare("UPDATE agent_transfers SET state='failed',detail=?,updated_at=? WHERE id=?").bind(`${error || 'The source runner returned an invalid transfer bundle.'} Source data was preserved.`, now, transfer.id).run(); return json({ ok: true }); }
+          const encoded = JSON.stringify(result), chunks = Array.from({ length: Math.ceil(encoded.length / 80_000) }, (_, position) => ({ position, data: encoded.slice(position * 80_000, (position + 1) * 80_000) }));
+          await db.prepare('DELETE FROM transfer_chunks WHERE transfer_id=?').bind(transfer.id).run(); for (let offset = 0; offset < chunks.length; offset += 50) await db.batch(chunks.slice(offset, offset + 50).map(chunk => db.prepare('INSERT INTO transfer_chunks VALUES(?,?,?)').bind(transfer.id, chunk.position, chunk.data)));
+          const importCommandId = await enqueueRunnerCommand(db, String(transfer.destination_machine_id), String(transfer.agent_id), 'import-agent', { transferId: transfer.id }); await db.prepare("UPDATE agent_transfers SET state='importing',detail='Importing data on the destination computer.',import_command_id=?,checksum=?,updated_at=? WHERE id=?").bind(importCommandId, result.checksum, now, transfer.id).run(); return json({ ok: true });
+        }
+        if (command.kind === 'import-agent') {
+          const transfer = await db.prepare('SELECT * FROM agent_transfers WHERE import_command_id=?').bind(command.id).first<Row>(); await db.prepare('UPDATE runner_commands SET state=?,finished_at=?,result_json=? WHERE id=?').bind(error ? 'failed' : 'completed', now, JSON.stringify(result || { error }), command.id).run();
+          if (transfer) { const verified = !error && result && String(result.checksum) === String(transfer.checksum); await db.prepare('UPDATE agent_transfers SET state=?,detail=?,updated_at=? WHERE id=?').bind(verified ? 'completed' : 'failed', verified ? `Transfer verified (${Number(result?.files || 0)} files). Source data was preserved.` : `${error || 'Destination checksum did not match the source.'} Source data was preserved.`, now, transfer.id).run(); if (verified) await db.prepare('DELETE FROM transfer_chunks WHERE transfer_id=?').bind(transfer.id).run(); } return json({ ok: true });
+        }
+        if (command.kind === 'stop') { const payload = JSON.parse(String(command.payload_json)) as Row; await db.batch([db.prepare('UPDATE runner_commands SET state=?,finished_at=?,result_json=? WHERE id=?').bind(error ? 'failed' : 'completed', now, JSON.stringify(result || { error }), command.id), db.prepare("UPDATE runs SET state=?,error=?,updated_at=? WHERE id=? AND state IN ('running','waiting_approval')").bind(error ? 'failed' : 'cancelled', error, now, payload.runId)]); await appendRunEvent(db, String(payload.runId), error ? 'run.failed' : 'run.cancelled', error ? { error } : { source: 'runner' }); return json({ ok: true }); }
+        await db.batch([db.prepare('UPDATE runner_commands SET state=?,finished_at=?,result_json=? WHERE id=?').bind(error ? 'failed' : 'completed', now, JSON.stringify(result || { error }), command.id), db.prepare('UPDATE runs SET state=?,result=?,error=?,updated_at=? WHERE command_id=?').bind(error ? 'failed' : 'completed', result ? String(result.text || result.final_response || result.message || '') : null, error, now, command.id)]);
+        const run = await db.prepare('SELECT id FROM runs WHERE command_id=?').bind(command.id).first<Row>(); if (run) await appendRunEvent(db, String(run.id), error ? 'run.failed' : 'run.completed', error ? { error } : { result }); return json({ ok: true });
+      }
+      throw new HttpError(404, 'Runner endpoint not found.');
+    }
+    if (pathname === "/v1/agents/sync" && request.method === "POST") {
+      const agents = Array.isArray(body.agents) ? body.agents as Agent[] : [], now = stamp();
+      for (const agent of agents) { const existing = await db.prepare('SELECT 1 FROM agent_profiles WHERE id=?').bind(agent.id).first(); if (!existing) { const profile = draftProfile(agent); await db.prepare('INSERT INTO agent_profiles VALUES(?,?,?,?)').bind(profile.id, 1, JSON.stringify({ ...profile, revision: 1 }), now).run(); } }
+      const rows = (await db.prepare('SELECT json FROM agent_profiles ORDER BY updated_at').all<Row>()).results; return json({ agents: rows.map(row => { const profile = normalizeProfile(JSON.parse(String(row.json))); return { id: profile.id, name: profile.name, role: profile.role, description: profile.description, tone: profile.tone, instructions: profile.prompt.text, memory: [], profile }; }) });
+    }
     if (pathname === "/v1/migrate" && request.method === "POST") return json({ migrated: false, reason: "hosted" });
-    if (pathname === "/v1/workspace/model/import" && request.method === "POST") return json({ model: body.model || { provider: "xai", model: "grok-4-1-fast", baseUrl: "" }, revision: 0 });
+    if (pathname === '/v1/health' && request.method === 'GET') return json({ ok: true, runtime: { available: true, message: 'Hosted coordinator is ready.' }, activeRuns: 0, queuedRuns: 0, secrets: [] });
+    if (pathname === "/v1/workspace/model/import" && request.method === "POST") { const existing = await db.prepare('SELECT * FROM workspace_settings WHERE id=1').first<Row>(); if (existing) return json({ model: JSON.parse(String(existing.json)), revision: Number(existing.revision) }); await db.prepare('INSERT INTO workspace_settings VALUES(1,?,?)').bind(0, JSON.stringify(body.model || DEFAULT_MODEL)).run(); return json({ model: body.model || DEFAULT_MODEL, revision: 0 }); }
+    if (pathname === '/v1/workspace/model') { const current = await db.prepare('SELECT * FROM workspace_settings WHERE id=1').first<Row>(); if (request.method === 'GET') return json(current ? { model: JSON.parse(String(current.json)), revision: Number(current.revision) } : { model: DEFAULT_MODEL, revision: 0 }); if (request.method === 'PUT') { const revision = Number(body.revision || 0); if (current && Number(current.revision) !== revision) throw new HttpError(409, 'Workspace settings changed elsewhere.'); await db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').bind(revision + 1, JSON.stringify(body.model || DEFAULT_MODEL)).run(); return json({ model: body.model, revision: revision + 1 }); } }
+    if (pathname === '/v1/machines') {
+      if (request.method === 'GET') return json({ machines: await machineList(db) });
+      if (request.method === 'POST') { const code = crypto.randomUUID().replaceAll('-','') + crypto.randomUUID().replaceAll('-',''), pairingId = id(), expiresAt = new Date(Date.now() + 600_000).toISOString(), platform = ['linux','darwin','win32'].includes(String(body.platform)) ? String(body.platform) : 'linux', base = `${new URL(request.url).origin}/api/control`; await db.prepare('INSERT INTO machine_pairings VALUES(?,?,?,?,?,?,?)').bind(pairingId, await digest(code), String(body.name || 'New computer').slice(0,80), platform, expiresAt, null, stamp()).run(); const command = `npm run harness -- runner-install --coordinator ${JSON.stringify(base)} --pairing-code ${JSON.stringify(code)}`; return json({ id: pairingId, expiresAt, platform, command }, 201); }
+    }
+    const hostedMachine = pathname.match(/^\/v1\/machines\/([^/]+)\/(test|reconnect|revoke)$/);
+    if (hostedMachine && request.method === 'POST') {
+      const machine = await db.prepare('SELECT * FROM machines WHERE id=? AND revoked_at IS NULL').bind(decodeURIComponent(hostedMachine[1])).first<Row>(); if (!machine) throw new HttpError(404, 'Computer not found.'); const mapped = mapMachine(machine);
+      if (hostedMachine[2] === 'revoke') { await db.prepare("UPDATE machines SET status='revoked',revoked_at=?,credential_hash=NULL,updated_at=? WHERE id=?").bind(stamp(), stamp(), machine.id).run(); return json({ ok: true, message: `${mapped.name} was revoked.` }); }
+      if (hostedMachine[2] === 'reconnect') return json({ ok: mapped.status === 'online', message: mapped.status === 'online' ? `${mapped.name} is connected.` : `Waiting for ${mapped.name} to reconnect. The runner only needs outbound HTTPS access.` });
+      const profileRow = body.agentId ? await db.prepare('SELECT json FROM agent_profiles WHERE id=?').bind(body.agentId).first<Row>() : null, profile = profileRow ? normalizeProfile(JSON.parse(String(profileRow.json))) : null, issues: string[] = [];
+      if (mapped.status !== 'online') issues.push('Runner is offline.'); if (profile?.computer.access === 'private' && !mapped.capabilities.container) issues.push('Container execution is unavailable.'); if (profile?.computer.access === 'direct' && !mapped.capabilities.direct) issues.push(`Direct execution is unavailable. ${mapped.capabilities.detail || 'Install Hermes and the Open Harness policy extension on the runner.'}`); if (profile?.computer.desktop === 'existing' && !mapped.capabilities.desktop) issues.push(mapped.platform === 'darwin' ? 'Grant Accessibility and Screen Recording to the runner.' : mapped.platform === 'win32' ? 'Sign in to an interactive Windows session and start the runner there.' : 'Start a graphical session with DISPLAY or Wayland and enable AT-SPI.'); if (profile?.computer.desktop === 'virtual' && !mapped.capabilities.virtualDesktop) issues.push('Private virtual desktops are available on Linux runners only.');
+      return json({ ok: !issues.length, message: issues.length ? issues.join(' ') : `${mapped.name} is ready for this agent.`, machine: mapped });
+    }
+    const hostedProfile = pathname.match(/^\/v1\/agents\/([^/]+)\/(profile|tools|models|connection-check|connector-check|stop|transfer)$/);
+    if (hostedProfile) {
+      const agentId = decodeURIComponent(hostedProfile[1]), action = hostedProfile[2], row = await db.prepare('SELECT * FROM agent_profiles WHERE id=?').bind(agentId).first<Row>(); if (!row) throw new HttpError(404, 'Agent profile not found.'); const profile = normalizeProfile(JSON.parse(String(row.json)));
+      if (action === 'profile' && request.method === 'GET') { const machine = (await machineList(db)).find(item => item.id === profile.computer.machineId), transfer = await db.prepare('SELECT state,detail FROM agent_transfers WHERE agent_id=? ORDER BY created_at DESC LIMIT 1').bind(agentId).first<Row>(); return json({ profile, effectiveModel: profile.model.inherit ? DEFAULT_MODEL : profile.model, activeRevision: null, pending: Boolean(await db.prepare("SELECT 1 FROM runs WHERE agent_id=? AND state IN ('running','waiting_approval') LIMIT 1").bind(agentId).first()), secretNames: [], machine, transfer }); }
+      if (action === 'profile' && request.method === 'PUT') { if (Number(body.revision) !== Number(row.revision)) throw new HttpError(409, 'This profile changed elsewhere. Reload before saving.'); const saved = normalizeProfile({ ...(body as unknown as AgentProfile), id: agentId, revision: Number(row.revision) + 1 }); const machine = await db.prepare('SELECT * FROM machines WHERE id=? AND revoked_at IS NULL').bind(saved.computer.machineId).first<Row>(); if (!machine) throw new HttpError(400, 'Choose a connected computer.'); if (machine.reserved_agent_id && machine.reserved_agent_id !== agentId) throw new HttpError(409, 'This computer is reserved for another agent.'); const now = stamp(); await db.batch([db.prepare('UPDATE agent_profiles SET revision=?,json=?,updated_at=? WHERE id=?').bind(saved.revision, JSON.stringify(saved), now, agentId), db.prepare('UPDATE machines SET reserved_agent_id=NULL,updated_at=? WHERE id=? AND reserved_agent_id=?').bind(now, profile.computer.machineId, agentId), db.prepare('UPDATE machines SET reserved_agent_id=?,updated_at=? WHERE id=?').bind(saved.computer.reserveMachine ? agentId : null, now, saved.computer.machineId)]); await beginHostedTransfer(db, agentId, profile.computer.machineId, saved.computer.machineId); await startReadyTransfers(db, profile.computer.machineId); const transfer = await db.prepare('SELECT state,detail FROM agent_transfers WHERE agent_id=? ORDER BY created_at DESC LIMIT 1').bind(agentId).first<Row>(); return json({ profile: saved, effectiveModel: saved.model.inherit ? DEFAULT_MODEL : saved.model, activeRevision: null, pending: Boolean(await db.prepare("SELECT 1 FROM runs WHERE agent_id=? AND state IN ('running','waiting_approval') LIMIT 1").bind(agentId).first()), secretNames: [], machine: mapMachine(machine), transfer }); }
+      if (action === 'tools' && request.method === 'GET') return json({ source: 'unavailable', tools: [], error: 'Tool discovery runs on the selected computer after it connects.' });
+      if (action === 'models' && request.method === 'GET') return json({ models: [], error: 'Enter a model ID or refresh from a connected runner.' });
+      if (action === 'connection-check' && request.method === 'POST') return json({ ok: true, message: 'The selected runner will verify this model when the next task starts.' });
+      if (action === 'connector-check' && request.method === 'POST') return json({ status: 'unchecked', error: 'Connection checks run on the selected computer.', tools: [] });
+      if (action === 'stop' && request.method === 'POST') { const runs = (await db.prepare("SELECT * FROM runs WHERE agent_id=? AND state IN ('queued','running','waiting_approval')").bind(agentId).all<Row>()).results; for (const run of runs) { if (run.command_id) await db.prepare('INSERT INTO runner_commands(id,machine_id,agent_id,kind,payload_json,state,created_at) VALUES(?,?,?,?,?,?,?)').bind(id(), run.machine_id, agentId, 'stop', JSON.stringify({ runId: run.id, commandId: run.command_id }), 'queued', stamp()).run(); else await db.prepare("UPDATE runs SET state='cancelled',updated_at=? WHERE id=?").bind(stamp(), run.id).run(); } return json({ ok: true, stopped: runs.length, pending: runs.some(run => run.command_id) }); }
+      if (action === 'transfer' && request.method === 'POST') { const destination = required(body.destinationMachineId, 'Destination computer'), machine = await db.prepare('SELECT * FROM machines WHERE id=? AND revoked_at IS NULL').bind(destination).first<Row>(); if (!machine) throw new HttpError(404, 'Destination computer not found.'); if (machine.reserved_agent_id && machine.reserved_agent_id !== agentId) throw new HttpError(409, 'This computer is reserved for another agent.'); await beginHostedTransfer(db, agentId, profile.computer.machineId, destination); await startReadyTransfers(db, profile.computer.machineId); return json(await activeTransfer(db, agentId) || { state: 'completed', detail: 'The agent is already assigned to this computer.' }, 202); }
+    }
     if (pathname === "/v1/routines" && request.method === "GET") return json({ routines: [] });
-    if (pathname === "/v1/runs" && request.method === "GET") return json({ runs: [] });
+    if (pathname === '/v1/runs') {
+      if (request.method === 'GET') return json({ runs: await Promise.all((await db.prepare('SELECT * FROM runs ORDER BY created_at DESC LIMIT 100').all<Row>()).results.map(row => publicRun(db, row))) });
+      if (request.method === 'POST') { const agentId = required(body.agentId, 'Agent'), row = await db.prepare('SELECT json FROM agent_profiles WHERE id=?').bind(agentId).first<Row>(); if (!row) throw new HttpError(404, 'Agent profile not found.'); const profile = normalizeProfile(JSON.parse(String(row.json))), runId = id(), now = stamp(), conversationId = String(body.conversationId || id()); await db.prepare('INSERT INTO runs(id,agent_id,conversation_id,prompt,state,machine_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').bind(runId, agentId, conversationId, String(body.prompt || ''), 'queued', profile.computer.machineId, now, now).run(); const run = await db.prepare('SELECT * FROM runs WHERE id=?').bind(runId).first<Row>() as Row; await appendRunEvent(db, runId, 'run.queued', { machineId: profile.computer.machineId }); await dispatchHostedRun(db, run, profile); return json(await publicRun(db, await db.prepare('SELECT * FROM runs WHERE id=?').bind(runId).first<Row>() as Row), 202); }
+    }
+    const hostedRun = pathname.match(/^\/v1\/runs\/([^/]+)(?:\/(events|stop|steer|approval))?$/);
+    if (hostedRun) { const run = await db.prepare('SELECT * FROM runs WHERE id=?').bind(hostedRun[1]).first<Row>(); if (!run) throw new HttpError(404, 'Run not found.'); const action = hostedRun[2]; if (!action && request.method === 'GET') return json(await publicRun(db, run)); if (action === 'events' && request.method === 'GET') { const after = Number(new URL(request.url).searchParams.get('after') || 0), events = (await db.prepare('SELECT * FROM run_events WHERE run_id=? AND seq>? ORDER BY seq LIMIT 500').bind(run.id, after).all<Row>()).results.map(row => ({ seq: row.seq, id: row.id, runId: row.run_id, type: row.type, payload: JSON.parse(String(row.payload_json)), createdAt: row.created_at })); return json({ events, run: await publicRun(db, run) }); } if (['stop','steer','approval'].includes(action || '') && request.method === 'POST') { if (!run.command_id) throw new HttpError(409, 'Run has not reached its runner.'); let commandBody: Row = { ...body, runId: run.id, commandId: run.command_id }; if (action === 'approval') { const approval = await db.prepare("SELECT * FROM approvals WHERE id=? AND run_id=? AND state='pending'").bind(body.approvalId, run.id).first<Row>(); if (!approval) throw new HttpError(404, 'Approval not found.'); const decision = body.decision === 'approve' ? 'approve' : 'deny'; commandBody = { runId: run.id, commandId: run.command_id, requestId: approval.gateway_request_id, decision }; const now = stamp(); await db.batch([db.prepare("UPDATE approvals SET state=?,resolved_at=? WHERE id=? AND state='pending'").bind(decision, now, approval.id), db.prepare("UPDATE runs SET state='running',updated_at=? WHERE id=?").bind(now, run.id)]); await appendRunEvent(db, String(run.id), 'approval.resolved', { approvalId: approval.id, decision }); } await enqueueRunnerCommand(db, String(run.machine_id), String(run.agent_id), String(action), commandBody); return json({ ok: true, pending: true }); } }
+    if (pathname === '/v1/secrets' && request.method === 'POST') throw new HttpError(409, 'For hosted coordination, store model credentials in the runner environment on the computer that executes this agent.');
 
     if (pathname === "/v1/boards") {
       if (request.method === "GET") return json({ boards: await listBoards(db, url.searchParams.get("includeArchived") === "1") });

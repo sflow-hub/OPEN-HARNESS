@@ -5,6 +5,7 @@ This module deliberately returns errors rather than raising inside middleware:
 Hermes skips middleware exceptions, which would otherwise fail open.
 """
 import json
+import os
 from pathlib import Path
 
 _GRANT = None
@@ -14,7 +15,7 @@ def load_grant():
     global _GRANT
     if _GRANT is None:
         try:
-            grant = json.loads(Path('/run/open-harness/policy.json').read_text())
+            grant = json.loads(Path(os.environ.get('OPEN_HARNESS_POLICY_PATH', '/run/open-harness/policy.json')).read_text())
             names = grant['allowedTools']
             if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
                 raise ValueError('Invalid tool grant')
