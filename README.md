@@ -18,7 +18,7 @@ The host home directory, Docker socket, and other agents' private directories ar
 
 ## Set up and run
 
-Docker must be installed and its daemon running.
+Docker must be installed. Open Harness starts Docker Desktop or the Docker service when you launch the local app, then waits for the daemon before starting its control service.
 
 ```bash
 npm ci
@@ -27,7 +27,7 @@ npm run harness:setup
 npm run dev
 ```
 
-Open `http://localhost:3000`. Development mode starts both the UI and persistent control service. Run `npm run harness:doctor` whenever runtime health is unclear.
+Open `http://localhost:3000`. Development mode starts Docker, the UI, and the persistent control service. The one-time `harness:setup` command builds the pinned Hermes image. Run `npm run harness:doctor` whenever runtime health is unclear. Set `OPEN_HARNESS_SKIP_DOCKER_START=1` only when another process manages your Docker daemon.
 
 For automatic startup:
 

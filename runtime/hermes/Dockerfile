@@ -5,7 +5,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends git curl ripgre
 RUN git clone https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent \
   && cd /opt/hermes-agent && git checkout "$HERMES_COMMIT" \
   && pip install --no-cache-dir -e '.[all]'
-RUN npm install -g agent-browser @askjo/camofox-browser
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+  && apt-get install -y --no-install-recommends nodejs make g++ \
+  && rm -rf /var/lib/apt/lists/*
+RUN npm install -g \
+  --allow-scripts=@askjo/camofox-browser,agent-browser,better-sqlite3 \
+  agent-browser@0.37.1 @askjo/camofox-browser@1.16.0
 COPY runtime/hermes/ /opt/open-harness/
 RUN pip install --no-cache-dir /opt/open-harness/extension
 RUN useradd -m -u 10001 hermes && mkdir -p /workspace/private /workspace/shared /home/hermes/.hermes \

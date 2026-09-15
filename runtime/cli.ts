@@ -18,7 +18,7 @@ if (command === "doctor" || command === "status") {
   else { mkdirSync(state, { recursive: true }); run("docker", ["build", "-f", "runtime/hermes/Dockerfile", "-t", "open-harness-hermes:2026.9.11", "."]); }
 } else if (command === "install-service") {
   const unitDir = resolve(process.env.XDG_CONFIG_HOME || `${process.env.HOME}/.config`, "systemd/user"); mkdirSync(unitDir, { recursive: true });
-  const unit = `[Unit]\nDescription=Open Harness local control service\nAfter=docker.service\n\n[Service]\nType=simple\nWorkingDirectory=${project}\nExecStart=/usr/bin/env npm run harness:serve\nRestart=on-failure\nEnvironment=OPEN_HARNESS_STATE_DIR=${state}\n\n[Install]\nWantedBy=default.target\n`;
+  const unit = `[Unit]\nDescription=Open Harness local control service\nAfter=docker-desktop.service docker.service\n\n[Service]\nType=simple\nWorkingDirectory=${project}\nExecStart=/usr/bin/env npm run harness:serve\nRestart=on-failure\nEnvironment=OPEN_HARNESS_STATE_DIR=${state}\n\n[Install]\nWantedBy=default.target\n`;
   writeFileSync(resolve(unitDir, "open-harness.service"), unit); run("systemctl", ["--user", "daemon-reload"]); if (!process.exitCode) run("systemctl", ["--user", "enable", "--now", "open-harness.service"]);
 } else if (command === "start") {
   run("systemctl", ["--user", "start", "open-harness.service"]);
