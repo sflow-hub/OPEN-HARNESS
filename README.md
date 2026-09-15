@@ -55,6 +55,8 @@ Use the settings icon on any agent card, or **Agent settings** in a conversation
 
 Open **Agent settings → Computer → Add computer**, choose Linux, macOS, or Windows, and run the generated one-time command from an Open Harness checkout on that machine. The command checks its runtime, pairs the runner, and installs automatic startup through systemd, launchd, or Windows Task Scheduler. Pairing codes expire after ten minutes and can be used only once. The runner initiates every connection over HTTP(S); it never opens an inbound port and does not need SSH credentials.
 
+Remote coordinators must use HTTPS; plain HTTP is accepted only on loopback. On a headless Linux VPS, the installer reports the `loginctl enable-linger` command when the user service needs permission to remain active after logout.
+
 For a coordinator reachable beyond localhost, put it behind HTTPS and set:
 
 ```bash

@@ -72,7 +72,7 @@ export class Machines {
     const commands = {
       linux: `npm run harness -- runner-install --coordinator ${quotedUrl} --pairing-code ${quotedCode}`,
       darwin: `npm run harness -- runner-install --coordinator ${quotedUrl} --pairing-code ${quotedCode}`,
-      win32: `npm run harness -- runner-install --coordinator ${quotedUrl} --pairing-code ${quotedCode}`,
+      win32: `npm.cmd run harness -- runner-install --coordinator ${quotedUrl} --pairing-code ${quotedCode}`,
     };
     return { id, code, expiresAt, platform: target, command: commands[target as keyof typeof commands] };
   }

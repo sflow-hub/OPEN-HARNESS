@@ -24,12 +24,14 @@ function capabilities() {
 async function pair(): Promise<Credentials> {
   const coordinator = String(args.get('coordinator') || '').replace(/\/$/, ''), code = String(args.get('pairing-code') || '');
   if (!coordinator || !code) throw new Error('Use --coordinator URL and --pairing-code CODE, or keep an existing runner connection.');
+  const target = new URL(coordinator), loopback = ['localhost', '127.0.0.1', '::1'].includes(target.hostname); if (target.protocol !== 'https:' && !(target.protocol === 'http:' && loopback)) throw new Error('Remote coordinators must use HTTPS. Plain HTTP is accepted only for a coordinator on this computer.');
   const response = await fetch(`${coordinator}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, name: hostname(), platform: platform(), arch: arch(), capabilities: capabilities() }) });
   const value = await response.json() as any; if (!response.ok) throw new Error(value.error || 'Pairing failed.');
   const saved = { coordinator, machineId: value.machineId, token: value.token };
   writeFileSync(credentialPath, JSON.stringify(saved, null, 2), { mode: 0o600 }); chmodSync(credentialPath, 0o600); return saved;
 }
 const credentials = args.has('pairing-code') ? await pair() : existsSync(credentialPath) ? JSON.parse(readFileSync(credentialPath, 'utf8')) as Credentials : await pair();
+const savedTarget = new URL(credentials.coordinator), savedLoopback = ['localhost', '127.0.0.1', '::1'].includes(savedTarget.hostname); if (savedTarget.protocol !== 'https:' && !(savedTarget.protocol === 'http:' && savedLoopback)) throw new Error('The saved remote coordinator URL is not HTTPS. Pair this runner again using a secure URL.');
 if (args.has('once')) { console.log(`Paired ${credentials.machineId}.`); process.exit(0); }
 const headers = { Authorization: `Bearer ${credentials.token}`, 'X-Open-Harness-Machine': credentials.machineId, 'Content-Type': 'application/json' };
 async function request(path: string, init: RequestInit = {}, retry = false): Promise<any> {
