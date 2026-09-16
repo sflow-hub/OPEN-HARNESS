@@ -1,7 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { hostname, platform, arch } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import type { AgentProfile, MachineInfo } from '../lib/agent-profile';
+import { dockerStatus } from './hermes';
 
 type MachineRow = { id: string; name: string; platform: string; arch: string; status: string; last_seen_at: string | null; local: number; reserved_agent_id: string | null; capabilities_json: string; credential_hash: string | null; revoked_at: string | null };
 type CommandRow = { id: string; machine_id: string; agent_id: string | null; kind: string; payload_json: string; state: string; created_at: string; leased_at: string | null; finished_at: string | null; result_json: string | null };
@@ -39,7 +41,9 @@ export class Machines {
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );`);
     const stamp = now();
-    const capabilities = { container: true, direct: true, desktop: process.env.OPEN_HARNESS_MOCK === '1' || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === 'darwin' || process.platform === 'win32'), virtualDesktop: process.platform === 'linux', detail: 'Managed by this Open Harness installation.' };
+    const mock = process.env.OPEN_HARNESS_MOCK === '1', container = mock || dockerStatus().available;
+    const direct = mock || ([process.env.HERMES_PYTHON, process.platform === 'win32' ? 'python' : 'python3', 'python'].filter(Boolean) as string[]).some(executable => spawnSync(executable, ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore', timeout: 8_000 }).status === 0);
+    const capabilities = { container, direct, desktop: mock || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === 'darwin' || process.platform === 'win32'), virtualDesktop: process.platform === 'linux' && container, detail: container || direct ? 'Managed by this Open Harness installation.' : 'Finish computer setup from Workspace settings.' };
     db.prepare(`INSERT INTO machines(id,name,platform,arch,status,last_seen_at,local,reserved_agent_id,capabilities_json,credential_hash,revoked_at,created_at,updated_at)
       VALUES('local',?,?,?,?,?,1,NULL,?,NULL,NULL,?,?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,platform=excluded.platform,arch=excluded.arch,status='online',last_seen_at=excluded.last_seen_at,capabilities_json=excluded.capabilities_json,updated_at=excluded.updated_at`)
@@ -68,11 +72,11 @@ export class Machines {
     const code = Buffer.from(randomBytes(18)).toString('base64url');
     const id = crypto.randomUUID(), created = now(), expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
     this.db.prepare('INSERT INTO machine_pairings VALUES(?,?,?,?,?,?,?)').run(id, hash(code), String(input.name || 'New computer').trim().slice(0, 80) || 'New computer', target, expiresAt, null, created);
-    const quotedUrl = JSON.stringify(coordinatorUrl), quotedCode = JSON.stringify(code);
+    const sh = (value: string) => `'${value.replaceAll("'", "'\\''")}'`, ps = (value: string) => value.replaceAll("'", "''");
     const commands = {
-      linux: `npm run harness -- runner-install --coordinator ${quotedUrl} --pairing-code ${quotedCode}`,
-      darwin: `npm run harness -- runner-install --coordinator ${quotedUrl} --pairing-code ${quotedCode}`,
-      win32: `npm.cmd run harness -- runner-install --coordinator ${quotedUrl} --pairing-code ${quotedCode}`,
+      linux: `curl -fsSL ${sh(`${coordinatorUrl}/v1/install/runner.sh`)} | sh -s -- --coordinator ${sh(coordinatorUrl)} --pairing-code ${sh(code)}`,
+      darwin: `curl -fsSL ${sh(`${coordinatorUrl}/v1/install/runner.sh`)} | sh -s -- --coordinator ${sh(coordinatorUrl)} --pairing-code ${sh(code)}`,
+      win32: `$env:OPEN_HARNESS_COORDINATOR='${ps(coordinatorUrl)}'; $env:OPEN_HARNESS_PAIRING_CODE='${ps(code)}'; irm '${ps(`${coordinatorUrl}/v1/install/runner.ps1`)}' | iex`,
     };
     return { id, code, expiresAt, platform: target, command: commands[target as keyof typeof commands] };
   }

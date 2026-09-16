@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Open Harness",
+  "version": "0.3.0",
+  "identifier": "dev.openharness.desktop",
+  "build": {
+    "frontendDist": "../desktop/shell"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [],
+      "pubkey": ""
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": ["binaries/node"],
+    "resources": ["resources/bundle/**/*"],
+    "shortDescription": "Run personal AI agents on computers you control.",
+    "longDescription": "Open Harness gives every agent a configurable private workspace, selected folders, or direct computer access.",
+    "category": "DeveloperTool",
+    "linux": { "appimage": { "bundleMediaFramework": false } },
+    "windows": { "nsis": { "installMode": "currentUser" } }
+  }
+}

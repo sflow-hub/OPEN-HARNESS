@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentProfile, ModelChoice, ToolCatalog, ToolInfo } from '../lib/agent-profile';
@@ -25,6 +25,13 @@ export function runtimeProbe(container: string, input: object): Promise<Record<s
     child.on('close', code => { clearTimeout(timer); try { const value = JSON.parse(output.trim()); if (code || value.error) reject(new Error(value.error || 'Runtime check failed.')); else resolve(value); } catch { reject(new Error('Runtime check returned an invalid response. Rebuild the Hermes image.')); } });
     child.stdin.end(JSON.stringify(input) + '\n');
   });
+}
+export function nativeRuntimeProbe(profileHome: string, input: object): Record<string, unknown> {
+  const executable = ([process.env.HERMES_PYTHON, process.platform === 'win32' ? 'python' : 'python3', 'python'].filter(Boolean) as string[]).find(name => spawnSync(name, ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore', timeout: 8_000 }).status === 0);
+  if (!executable) throw new Error('Direct access needs the Hermes host runtime. Finish the direct-access setup on this computer.');
+  const result = spawnSync(executable, [join(import.meta.dirname, 'hermes', 'inspect_runtime.py')], { input: JSON.stringify(input) + '\n', encoding: 'utf8', env: { ...process.env, HERMES_HOME: profileHome }, maxBuffer: 5_000_000, timeout: 25_000 });
+  if (result.status || !result.stdout) throw new Error(result.stderr || 'Direct computer access check failed.');
+  const value = JSON.parse(result.stdout) as Record<string, unknown>; if (value.error) throw new Error(String(value.error)); return value;
 }
 export async function discoverTools(agentId: string, root: string, profile?: AgentProfile): Promise<ToolCatalog> {
   if (process.env.OPEN_HARNESS_MOCK === '1') return { source: 'mock', tools: [...mockTools, ...COORDINATION_TOOLS] };

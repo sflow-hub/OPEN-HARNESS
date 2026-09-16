@@ -1,0 +1,14 @@
+.git
+.github
+.open-harness
+.next
+.vinext
+dist
+node_modules
+outputs
+playwright-report
+src-tauri
+test-results
+work
+*.log
+*.tsbuildinfo

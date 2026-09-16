@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +34,25 @@ async function waitRun(id: string) {
 
 test.before(async () => { stateDir = mkdtempSync(join(tmpdir(), "open-harness-control-")); await start(); });
 test.after(() => child.kill("SIGTERM"));
+
+test("reports first-run readiness and serves no-checkout runner installers", async () => {
+  const readiness = await request('/v1/onboarding/status');
+  assert.equal(readiness.executionReady, true);
+  assert.equal(readiness.credentialMode, 'coordinator');
+  assert.ok(readiness.checks.every((check: any) => check.id && check.detail));
+  const installer = await fetch(`${base}/v1/install/runner.sh`);
+  assert.equal(installer.status, 200);
+  assert.match(await installer.text(), /nodejs\.org\/dist/);
+  const runnerFile = await fetch(`${base}/v1/install/file?path=${encodeURIComponent('runtime/runner.mjs')}`);
+  assert.equal(runnerFile.status, 200);
+  assert.match(await runnerFile.text(), /Open Harness runner/);
+  const pairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ name: 'Easy server', platform: 'linux' }) });
+  assert.match(pairing.command, /^curl -fsSL/);
+  assert.match(pairing.command, /--pairing-code/);
+  const paired = spawnSync(process.execPath, ['runtime/runner.mjs', '--coordinator', base, '--pairing-code', pairing.code, '--once', '1'], { cwd: join(import.meta.dirname, '..'), encoding: 'utf8', env: { ...process.env, OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_RUNNER_STATE_DIR: join(stateDir, 'installed-runner') } });
+  assert.equal(paired.status, 0, paired.stderr);
+  assert.match(paired.stdout, /Paired machine-/);
+});
 
 test("authenticates local clients, migrates once, and protects its secret file", async () => {
   assert.equal((await fetch(`${base}/v1/health`)).status, 401);

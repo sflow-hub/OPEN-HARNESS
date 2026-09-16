@@ -1,0 +1,20 @@
+FROM node:22-bookworm AS builder
+WORKDIR /source
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+ENV NEXT_PUBLIC_OPEN_HARNESS_SELF_HOSTED=1
+RUN npm run build && npm run runner:bundle \
+  && npx esbuild runtime/service.ts --bundle --platform=node --format=esm --target=node22 --packages=external --banner:js="import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);" --outfile=runtime/service.mjs
+
+FROM node:22-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends docker.io ca-certificates curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/open-harness
+COPY --from=builder /source/dist/standalone ./app
+COPY --from=builder /source/runtime/service.mjs /source/runtime/runner.mjs ./runtime/
+COPY --from=builder /source/runtime/hermes ./runtime/hermes
+COPY --from=builder /source/runtime/installers ./runtime/installers
+COPY --from=builder /source/desktop/supervisor.mjs ./supervisor.mjs
+ENV OPEN_HARNESS_STATE_DIR=/data OPEN_HARNESS_INTERNAL_CONTROL_URL=http://127.0.0.1:4317
+EXPOSE 3000
+CMD ["node", "/opt/open-harness/supervisor.mjs"]

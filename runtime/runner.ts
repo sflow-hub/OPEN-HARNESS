@@ -17,8 +17,8 @@ const credentialPath = join(stateRoot, 'connection.json');
 const spool = join(stateRoot, 'spool'); mkdirSync(spool, { recursive: true });
 
 function capabilities() {
-  const container = dockerStatus(false).available;
-  const python = spawnSync(process.env.HERMES_PYTHON || 'python3', ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore' }).status === 0;
+  const container = dockerStatus().available;
+  const python = ([process.env.HERMES_PYTHON, process.platform === 'win32' ? 'python' : 'python3', 'python'].filter(Boolean) as string[]).some(executable => spawnSync(executable, ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore' }).status === 0);
   return { container, direct: python, desktop: Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === 'darwin' || process.platform === 'win32'), virtualDesktop: process.platform === 'linux' && container, detail: python ? 'Hermes host runtime is installed.' : 'Install the Hermes host runtime to enable direct access.' };
 }
 async function pair(): Promise<Credentials> {

@@ -47,13 +47,16 @@ import {
 } from "../lib/control-client";
 
 import AgentSettings from "../components/agent-settings";
+import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import { profileAgent, type ModelChoice } from "../lib/agent-profile";
 
 const STORAGE_KEY = "open-harness.workspace.v1";
 const SETTINGS_KEY = "open-harness.settings.v1";
+const ONBOARDING_KEY = "open-harness.onboarding.v1";
 type View = "home" | "chat" | "files" | "routines" | "tasks";
 type ModelSettings = { provider: Provider; model: string; maxSteps?: number; baseUrl?: string };
+const providerCredential = (provider: string) => ({ xai: "XAI_API_KEY", openai: "OPENAI_API_KEY", openrouter: "OPENROUTER_API_KEY" } as Record<string, string>)[provider] || "";
 const defaultSettings: ModelSettings = {
   provider: "xai",
   model: PROVIDERS.xai.model,
@@ -111,12 +114,15 @@ export default function Home() {
   const [workspaceModelRevision, setWorkspaceModelRevision] = useState(0);
   const [server, setServer] = useState({
     xai: false,
+    openai: false,
     openrouter: false,
     local: false,
     localModel: "",
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
+  const [editingAgentTab, setEditingAgentTab] = useState<'profile' | 'computer'>('profile');
   const [mobileOpen, setMobileOpen] = useState(false);
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
@@ -222,10 +228,11 @@ export default function Home() {
           setWorkspace(current => ({ ...current, agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })) }));
           const defaults = await client.request<{ model: ModelChoice; revision: number }>("/v1/workspace/model/import", {
             method: "POST",
-            body: JSON.stringify({ model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: ({ xai: "XAI_API_KEY", openrouter: "OPENROUTER_API_KEY" } as Record<string, string>)[settings.provider] || "" } }),
+            body: JSON.stringify({ model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: providerCredential(settings.provider) } }),
           });
           setSettings({ provider: defaults.model.provider as Provider, model: defaults.model.model, baseUrl: defaults.model.baseUrl });
           setWorkspaceModelRevision(defaults.revision);
+          if (localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
         }
         const [{ routines: savedRoutines }, { runs }] = await Promise.all([
           client.request<{ routines: Array<Record<string, unknown>> }>(
@@ -1900,7 +1907,7 @@ export default function Home() {
                     maxLength={1000}
                   />
                   <small>
-                    Stored by the local service with restricted permissions. Secret values are never included in exports.
+                    Stored in the coordinator’s protected credential store. Secret values are never included in exports.
                   </small>
                 </label>
               )}
@@ -1916,6 +1923,16 @@ export default function Home() {
               closes.
             </p>
             <div className="button-row">
+              <button
+                className="subtle-button"
+                onClick={() => { setSettingsOpen(false); setOnboardingOpen(true); }}
+              >
+                <Sparkles size={14} /> Run setup again
+              </button>
+              <button className="subtle-button" onClick={async () => {
+                try { const bundle = await controlRef.current.request<Record<string, unknown>>('/v1/support-bundle'); download(`open-harness-diagnostics-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(bundle, null, 2), 'application/json'); }
+                catch (error) { setNotice(error instanceof Error ? error.message : 'Could not create diagnostics.'); }
+              }}><Download size={14} /> Download diagnostics</button>
               <button
                 className="subtle-button"
                 onClick={() =>
@@ -1938,19 +1955,14 @@ export default function Home() {
             </div>
             <div className="modal-footer">
               <span className="muted small">
-                MIT licensed · Open Harness v0.2 · Hermes {runtime?.hermes.release}
+                MIT licensed · Open Harness v{runtime?.version || '0.3.0'} · Hermes {runtime?.hermes.release}
               </span>
               <button
                 className="light-button"
                 onClick={async () => {
                   try {
                     if (apiKey && runtime) {
-                      const name =
-                        settings.provider === "xai"
-                          ? "XAI_API_KEY"
-                          : settings.provider === "openrouter"
-                            ? "OPENROUTER_API_KEY"
-                            : "MODEL_API_KEY";
+                      const name = providerCredential(settings.provider) || "MODEL_API_KEY";
                       await controlRef.current.request("/v1/secrets", {
                         method: "POST",
                         body: JSON.stringify({ name, value: apiKey }),
@@ -1958,7 +1970,7 @@ export default function Home() {
                       setApiKey("");
                     }
                     const saved = await controlRef.current.request<{ revision: number }>("/v1/workspace/model", {
-                      method: "PUT", body: JSON.stringify({ revision: workspaceModelRevision, model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: settings.provider === "xai" ? "XAI_API_KEY" : settings.provider === "openrouter" ? "OPENROUTER_API_KEY" : "" } }),
+                      method: "PUT", body: JSON.stringify({ revision: workspaceModelRevision, model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: providerCredential(settings.provider) } }),
                     });
                     setWorkspaceModelRevision(saved.revision);
                     setSettingsOpen(false);
@@ -1978,7 +1990,20 @@ export default function Home() {
           </section>
         </div>
       )}
-      {editingAgent && <AgentSettings key={editingAgent.id} agent={editingAgent} client={controlRef.current} onClose={() => setEditingAgent(null)} onSaved={profile => {
+      {onboardingOpen && runtime && <Onboarding client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: providerCredential(settings.provider) }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
+        setSettings({ provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl });
+        setWorkspaceModelRevision(revision);
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify({ provider: model.provider, model: model.model, baseUrl: model.baseUrl }));
+      }} onComputerSettings={() => {
+        localStorage.setItem(ONBOARDING_KEY, 'done');
+        setOnboardingOpen(false);
+        setEditingAgentTab('computer');
+        setEditingAgent(agent);
+      }} onFinished={() => {
+        localStorage.setItem(ONBOARDING_KEY, 'done');
+        setOnboardingOpen(false);
+      }} />}
+      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} agent={editingAgent} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={profile => {
         setWorkspace(current => ({ ...current, agents: current.agents.some(a => a.id === profile.id)
           ? current.agents.map(a => a.id === profile.id ? profileAgent(profile, a.memory) : a)
           : [...current.agents, profileAgent(profile)] }));

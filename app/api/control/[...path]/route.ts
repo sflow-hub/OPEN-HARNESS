@@ -3,6 +3,17 @@ import { hostedRuntimeSchema, hostedTaskSchema } from "../../../../db/schema";
 import type { AgentTask, TaskBoard, TaskStage, WorkflowCategory } from "../../../../lib/task-types";
 import { DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, type AgentProfile } from '../../../../lib/agent-profile';
 import type { Agent } from '../../../../lib/types';
+import runnerInstallSh from '../../../../runtime/installers/install-runner.sh?raw';
+import runnerInstallPs1 from '../../../../runtime/installers/install-runner.ps1?raw';
+import runnerBundle from '../../../../runtime/runner.mjs?raw';
+import hermesDockerfile from '../../../../runtime/hermes/Dockerfile?raw';
+import hermesNotice from '../../../../runtime/hermes/NOTICE.md?raw';
+import hermesInit from '../../../../runtime/hermes/container-init.sh?raw';
+import hermesCoordination from '../../../../runtime/hermes/coordination.mjs?raw';
+import hermesInspect from '../../../../runtime/hermes/inspect_runtime.py?raw';
+import hermesEntry from '../../../../runtime/hermes/managed_entry.py?raw';
+import policyExtension from '../../../../runtime/hermes/extension/open_harness_policy.py?raw';
+import policyProject from '../../../../runtime/hermes/extension/pyproject.toml?raw';
 
 export const runtime = "edge";
 
@@ -12,6 +23,7 @@ const categories: WorkflowCategory[] = ["backlog", "ready", "in_progress", "revi
 const priorities = new Set(["low", "normal", "high", "urgent"]);
 const stamp = () => new Date().toISOString();
 const id = () => crypto.randomUUID();
+const runnerFiles: Record<string,string> = { 'runtime/runner.mjs': runnerBundle, 'runtime/hermes/Dockerfile': hermesDockerfile, 'runtime/hermes/NOTICE.md': hermesNotice, 'runtime/hermes/container-init.sh': hermesInit, 'runtime/hermes/coordination.mjs': hermesCoordination, 'runtime/hermes/inspect_runtime.py': hermesInspect, 'runtime/hermes/managed_entry.py': hermesEntry, 'runtime/hermes/extension/open_harness_policy.py': policyExtension, 'runtime/hermes/extension/pyproject.toml': policyProject };
 
 function database() {
   const db = (env as unknown as { DB?: D1Database }).DB;
@@ -339,7 +351,10 @@ async function handler(request: Request, context: RouteContext) {
     await prepare(db);
     const { path } = await context.params;
     const pathname = `/${path.join("/")}`, url = new URL(request.url), body = await input(request);
-    const runnerFacing = pathname === '/v1/runner/pair' || pathname.startsWith('/v1/runner/') || pathname.startsWith('/internal/');
+    if (request.method === 'GET' && pathname === '/v1/install/runner.sh') return new Response(runnerInstallSh, { headers: { 'Content-Type': 'text/x-shellscript; charset=utf-8', 'Cache-Control': 'no-store' } });
+    if (request.method === 'GET' && pathname === '/v1/install/runner.ps1') return new Response(runnerInstallPs1, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
+    if (request.method === 'GET' && pathname === '/v1/install/file') { const file = runnerFiles[String(url.searchParams.get('path') || '')]; if (!file) throw new HttpError(404, 'Runner file not found.'); return new Response(file, { headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'public, max-age=300', 'X-Content-Type-Options': 'nosniff' } }); }
+    const runnerFacing = pathname === '/v1/runner/pair' || pathname.startsWith('/v1/runner/') || pathname.startsWith('/internal/') || pathname.startsWith('/v1/install/');
     if (!runnerFacing && !request.headers.get('oai-authenticated-user-id')) throw new HttpError(401, 'Sign in to manage this workspace.');
 
     if (pathname === "/v1/bootstrap" && request.method === "GET") return json({ token: "hosted-site", runtime: { available: true, version: 'runner', message: "Connect a computer to run agents from this hosted dashboard." }, version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } });
@@ -425,11 +440,32 @@ async function handler(request: Request, context: RouteContext) {
     }
     if (pathname === "/v1/migrate" && request.method === "POST") return json({ migrated: false, reason: "hosted" });
     if (pathname === '/v1/health' && request.method === 'GET') return json({ ok: true, runtime: { available: true, message: 'Hosted coordinator is ready.' }, activeRuns: 0, queuedRuns: 0, secrets: [] });
+    if (pathname === '/v1/support-bundle' && request.method === 'GET') return json({ generatedAt: stamp(), version: '0.3.0', platform: { os: 'hosted', arch: 'managed' }, machines: await machineList(db), recentRuns: (await db.prepare('SELECT id,agent_id,state,machine_id,created_at,updated_at,error FROM runs ORDER BY created_at DESC LIMIT 25').all<Row>()).results, note: 'Secret values, prompts, messages, results, and file contents are excluded.' });
+    if (pathname === '/v1/onboarding/status' && request.method === 'GET') {
+      const connected = await machineList(db), online = connected.filter(machine => machine.status === 'online');
+      const privateReady = online.some(machine => machine.capabilities.container), directReady = online.some(machine => machine.capabilities.direct), desktopReady = online.some(machine => machine.capabilities.desktop);
+      return json({ platform: 'unknown', platformLabel: 'hosted coordinator', executionReady: privateReady || directReady, recommendedAccess: privateReady ? 'private' : 'direct', credentialMode: 'runner', checks: [
+        { id: 'coordinator', label: 'Open Harness', state: 'ready', detail: 'The hosted coordinator is running.' },
+        { id: 'container-engine', label: 'Connected computer', state: online.length ? 'ready' : 'missing', detail: online.length ? `${online.length} computer${online.length === 1 ? '' : 's'} connected.` : 'Connect a computer or VPS to run agents.' },
+        { id: 'agent-runtime', label: 'Agent runtime', state: privateReady || directReady ? 'ready' : 'missing', detail: privateReady ? 'A connected computer supports private agent workspaces.' : directReady ? 'A connected computer supports direct access.' : 'Finish runner setup on a connected computer.' },
+        { id: 'desktop', label: 'Desktop control', state: desktopReady ? 'ready' : 'unavailable', detail: desktopReady ? 'A connected computer has a graphical session.' : 'No connected computer currently reports desktop access.' },
+      ] });
+    }
+    if (pathname === '/v1/onboarding/action' && request.method === 'POST') throw new HttpError(409, 'Finish this setup on the connected computer, then check again.');
+    if (pathname === '/v1/onboarding/model-test' && request.method === 'POST') return json({ ok: true, message: 'Model choice saved. The runner will verify its local credential when the first task starts.' });
     if (pathname === "/v1/workspace/model/import" && request.method === "POST") { const existing = await db.prepare('SELECT * FROM workspace_settings WHERE id=1').first<Row>(); if (existing) return json({ model: JSON.parse(String(existing.json)), revision: Number(existing.revision) }); await db.prepare('INSERT INTO workspace_settings VALUES(1,?,?)').bind(0, JSON.stringify(body.model || DEFAULT_MODEL)).run(); return json({ model: body.model || DEFAULT_MODEL, revision: 0 }); }
     if (pathname === '/v1/workspace/model') { const current = await db.prepare('SELECT * FROM workspace_settings WHERE id=1').first<Row>(); if (request.method === 'GET') return json(current ? { model: JSON.parse(String(current.json)), revision: Number(current.revision) } : { model: DEFAULT_MODEL, revision: 0 }); if (request.method === 'PUT') { const revision = Number(body.revision || 0); if (current && Number(current.revision) !== revision) throw new HttpError(409, 'Workspace settings changed elsewhere.'); await db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').bind(revision + 1, JSON.stringify(body.model || DEFAULT_MODEL)).run(); return json({ model: body.model, revision: revision + 1 }); } }
     if (pathname === '/v1/machines') {
       if (request.method === 'GET') return json({ machines: await machineList(db) });
-      if (request.method === 'POST') { const code = crypto.randomUUID().replaceAll('-','') + crypto.randomUUID().replaceAll('-',''), pairingId = id(), expiresAt = new Date(Date.now() + 600_000).toISOString(), platform = ['linux','darwin','win32'].includes(String(body.platform)) ? String(body.platform) : 'linux', base = `${new URL(request.url).origin}/api/control`; await db.prepare('INSERT INTO machine_pairings VALUES(?,?,?,?,?,?,?)').bind(pairingId, await digest(code), String(body.name || 'New computer').slice(0,80), platform, expiresAt, null, stamp()).run(); const sitesToken = String((env as unknown as { RUNNER_SITES_BYPASS_TOKEN?: string }).RUNNER_SITES_BYPASS_TOKEN || ''), command = `${platform === 'win32' ? 'npm.cmd' : 'npm'} run harness -- runner-install --coordinator ${JSON.stringify(base)} --pairing-code ${JSON.stringify(code)}${sitesToken ? ` --sites-token ${JSON.stringify(sitesToken)}` : ''}`; return json({ id: pairingId, expiresAt, platform, command }, 201); }
+      if (request.method === 'POST') {
+        const code = crypto.randomUUID().replaceAll('-','') + crypto.randomUUID().replaceAll('-',''), pairingId = id(), expiresAt = new Date(Date.now() + 600_000).toISOString(), platform = ['linux','darwin','win32'].includes(String(body.platform)) ? String(body.platform) : 'linux', base = `${new URL(request.url).origin}/api/control`;
+        await db.prepare('INSERT INTO machine_pairings VALUES(?,?,?,?,?,?,?)').bind(pairingId, await digest(code), String(body.name || 'New computer').slice(0,80), platform, expiresAt, null, stamp()).run();
+        const sitesToken = String((env as unknown as { RUNNER_SITES_BYPASS_TOKEN?: string }).RUNNER_SITES_BYPASS_TOKEN || ''), sh = (value: string) => `'${value.replaceAll("'", "'\\''")}'`, ps = (value: string) => value.replaceAll("'", "''");
+        const command = platform === 'win32'
+          ? `$env:OPEN_HARNESS_COORDINATOR='${ps(base)}'; $env:OPEN_HARNESS_PAIRING_CODE='${ps(code)}';${sitesToken ? ` $env:OPEN_HARNESS_SITES_TOKEN='${ps(sitesToken)}'; irm -Headers @{'OAI-Sites-Authorization'="Bearer $env:OPEN_HARNESS_SITES_TOKEN"}` : ' irm'} '${ps(`${base}/v1/install/runner.ps1`)}' | iex`
+          : `curl -fsSL${sitesToken ? ` -H ${sh(`OAI-Sites-Authorization: Bearer ${sitesToken}`)}` : ''} ${sh(`${base}/v1/install/runner.sh`)} | sh -s -- --coordinator ${sh(base)} --pairing-code ${sh(code)}${sitesToken ? ` --sites-token ${sh(sitesToken)}` : ''}`;
+        return json({ id: pairingId, expiresAt, platform, command }, 201);
+      }
     }
     const hostedMachine = pathname.match(/^\/v1\/machines\/([^/]+)\/(test|reconnect|revoke)$/);
     if (hostedMachine && request.method === 'POST') {
@@ -438,6 +474,7 @@ async function handler(request: Request, context: RouteContext) {
       if (hostedMachine[2] === 'reconnect') return json({ ok: mapped.status === 'online', message: mapped.status === 'online' ? `${mapped.name} is connected.` : `Waiting for ${mapped.name} to reconnect. The runner only needs outbound HTTPS access.` });
       const profileRow = body.agentId ? await db.prepare('SELECT json FROM agent_profiles WHERE id=?').bind(body.agentId).first<Row>() : null, profile = profileRow ? normalizeProfile(JSON.parse(String(profileRow.json))) : null, issues: string[] = [];
       if (mapped.status !== 'online') issues.push('Runner is offline.'); if (profile?.computer.access === 'private' && !mapped.capabilities.container) issues.push('Container execution is unavailable.'); if (profile?.computer.access === 'direct' && !mapped.capabilities.direct) issues.push(`Direct execution is unavailable. ${mapped.capabilities.detail || 'Install Hermes and the Open Harness policy extension on the runner.'}`); if (profile?.computer.desktop === 'existing' && !mapped.capabilities.desktop) issues.push(mapped.platform === 'darwin' ? 'Grant Accessibility and Screen Recording to the runner.' : mapped.platform === 'win32' ? 'Sign in to an interactive Windows session and start the runner there.' : 'Start a graphical session with DISPLAY or Wayland and enable AT-SPI.'); if (profile?.computer.desktop === 'virtual' && !mapped.capabilities.virtualDesktop) issues.push('Private virtual desktops are available on Linux runners only.');
+      if (!issues.length && profile && hostedMachine[2] === 'test') { try { const result = await hostedProbe(db, profile, 'probe-runtime', { action: 'computer' }); return json({ ok: Boolean(result.ok), message: String(result.message || `${mapped.name} is ready for this agent.`), machine: mapped }); } catch (error) { issues.push(error instanceof Error ? error.message : 'Computer access check failed.'); } }
       return json({ ok: !issues.length, message: issues.length ? issues.join(' ') : `${mapped.name} is ready for this agent.`, machine: mapped });
     }
     const hostedProfile = pathname.match(/^\/v1\/agents\/([^/]+)\/(profile|tools|models|connection-check|connector-check|stop|transfer)$/);

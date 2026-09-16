@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync, readdirSync, readFileSync, statSync, unlinkSy
 import { resolve, join } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validId } from "./profiles";
-import { discoverTools, discoverModels, prepareProfile, runtimeProbe } from "./profile-runtime";
+import { discoverTools, discoverModels, nativeRuntimeProbe, prepareProfile, runtimeProbe } from "./profile-runtime";
 import { profileAgent, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
 import { Store, type RunRow } from "./db";
 import { SecretStore } from "./secrets";
@@ -13,6 +13,7 @@ import { coordinationSocket } from "./coordination-socket";
 import { TaskError, TaskStore } from "./tasks";
 import { MachineError, Machines } from "./machines";
 import { exportAgentFiles, importAgentFiles, type TransferBundle } from './transfer-files';
+import { onboardingAction, onboardingStatus } from './readiness';
 
 const root = resolve(process.env.OPEN_HARNESS_STATE_DIR || ".open-harness");
 mkdirSync(root, { recursive: true }); mkdirSync(join(root, "shared"), { recursive: true }); mkdirSync(join(root, "agents"), { recursive: true });
@@ -38,6 +39,10 @@ let pumping = false;
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": allowedOrigin(res.req.headers.origin), "Vary": "Origin", "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" });
   res.end(JSON.stringify(body));
+}
+function raw(res: ServerResponse, status: number, contentType: string, value: string | Buffer) {
+  res.writeHead(status, { 'Content-Type': contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  res.end(value);
 }
 function allowedOrigin(origin?: string) { return origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ? origin : "http://localhost:3000"; }
 async function body(req: IncomingMessage) {
@@ -279,6 +284,18 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
   try {
     if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); return json(res, 200, { token: secrets.token, runtime: dockerStatus(), version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } }); }
+    if (req.method === 'GET' && (url.pathname === '/v1/install/runner.sh' || url.pathname === '/v1/install/runner.ps1')) {
+      const name = url.pathname.endsWith('.ps1') ? 'install-runner.ps1' : 'install-runner.sh';
+      return raw(res, 200, name.endsWith('.ps1') ? 'text/plain; charset=utf-8' : 'text/x-shellscript; charset=utf-8', readFileSync(join(import.meta.dirname, 'installers', name)));
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/install/file') {
+      const requested = String(url.searchParams.get('path') || '').replaceAll('\\', '/');
+      const allowed = new Set(['runtime/runner.mjs', 'runtime/hermes/Dockerfile', 'runtime/hermes/NOTICE.md', 'runtime/hermes/container-init.sh', 'runtime/hermes/coordination.mjs', 'runtime/hermes/inspect_runtime.py', 'runtime/hermes/managed_entry.py', 'runtime/hermes/extension/open_harness_policy.py', 'runtime/hermes/extension/pyproject.toml']);
+      if (!allowed.has(requested)) return json(res, 404, { error: 'Runner file not found.' });
+      const target = requested === 'runtime/runner.mjs' ? join(import.meta.dirname, 'runner.mjs') : join(import.meta.dirname, requested.slice('runtime/'.length));
+      if (!existsSync(target)) return json(res, 503, { error: 'The standalone runner bundle is unavailable. Run npm run runner:bundle on this source installation.' });
+      return raw(res, 200, 'application/octet-stream', readFileSync(target));
+    }
     if (req.method === 'POST' && url.pathname === '/v1/runner/pair') return json(res, 201, machines.pair(await body(req)));
     const runner = url.pathname.startsWith('/v1/runner/') ? runnerIdentity(req) : null;
     if (url.pathname.startsWith('/v1/runner/') && !runner) return json(res, 401, { error: 'Invalid or revoked runner credential.' });
@@ -294,15 +311,54 @@ const server = createServer(async (req, res) => {
     }
     const internalAgent = url.pathname.startsWith("/internal/") ? authenticatedAgent(req) : null;
     if (!authenticated(req) && !internalAgent) return json(res, 401, { error: "Invalid local control token." });
-    if (req.method === "GET" && url.pathname === "/v1/health") return json(res, 200, { ok: true, runtime: dockerStatus(), activeRuns: store.activeCount(), queuedRuns: store.listRuns().filter(run => run.state === "queued").length, secrets: secrets.names() });
+    if (req.method === "GET" && url.pathname === "/v1/health") return json(res, 200, { ok: true, runtime: dockerStatus(), activeRuns: store.activeCount(), queuedRuns: store.listRuns().filter(run => run.state === "queued").length, secrets: secrets.names(), secretStorage: secrets.backend });
+    if (req.method === 'GET' && url.pathname === '/v1/support-bundle') return json(res, 200, {
+      generatedAt: new Date().toISOString(), version: '0.3.0', hermes: { release: 'v2026.9.11', commit: '939e45c91d751fadd94dcd1b873ac3cb44846213' },
+      platform: { os: process.platform, arch: process.arch, node: process.version }, readiness: onboardingStatus(), machines: machines.list(),
+      agents: profiles.list().map(profile => ({ id: profile.id, revision: profile.revision, machineId: profile.computer.machineId, access: profile.computer.access, desktop: profile.computer.desktop })),
+      recentRuns: store.listRuns(25).map(run => ({ id: run.id, agentId: run.agent_id, state: run.state, createdAt: run.created_at, updatedAt: run.updated_at, error: run.error })),
+      configuredCredentialNames: secrets.names(), secretStorage: secrets.backend, note: 'Secret values, prompts, messages, results, file contents, and model responses are excluded.',
+    });
+    if (req.method === 'GET' && url.pathname === '/v1/onboarding/status') return json(res, 200, onboardingStatus());
+    if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action)); }
+    if (req.method === 'POST' && url.pathname === '/v1/onboarding/model-test') {
+      const input = await body(req), model = validateModel(input.model);
+      if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { ok: true, message: 'Model connection is ready.' });
+      if (model.credentialRef && !secrets.has(model.credentialRef)) return json(res, 200, { ok: false, message: 'Save your API key first.' });
+      const endpoints: Record<string,string> = { xai: 'https://api.x.ai/v1', openrouter: 'https://openrouter.ai/api/v1', openai: 'https://api.openai.com/v1' };
+      const baseUrl = (model.baseUrl || endpoints[model.provider] || '').replace(/\/$/, '');
+      if (!baseUrl) return json(res, 200, { ok: false, message: 'Enter the address of your model server.' });
+      const key = model.credentialRef ? secrets.environment()[model.credentialRef] : '';
+      try {
+        const response = await fetch(`${baseUrl}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(15_000), redirect: 'error' });
+        if (response.ok) return json(res, 200, { ok: true, message: 'Model connection is ready.' });
+        const messages: Record<number,string> = { 401: 'The API key was rejected.', 403: 'The provider denied access.', 404: 'The model server address was not found.', 429: 'The provider rate limit was reached. Try again shortly.' };
+        return json(res, 200, { ok: false, message: messages[response.status] || `The provider returned HTTP ${response.status}.` });
+      } catch (error) { return json(res, 200, { ok: false, message: error instanceof Error ? error.message : 'Could not reach the model provider.' }); }
+    }
     if (url.pathname === '/v1/machines') {
       if (req.method === 'GET') return json(res, 200, { machines: machines.list() });
-      if (req.method === 'POST') { const input = await body(req); const publicUrl = String(process.env.OPEN_HARNESS_PUBLIC_URL || `http://${req.headers.host || `127.0.0.1:${port}`}`).replace(/\/$/, ''); return json(res, 201, machines.createPairing(input, publicUrl)); }
+      if (req.method === 'POST') {
+        const input = await body(req), publicUrl = String(input.coordinatorUrl || process.env.OPEN_HARNESS_PUBLIC_URL || `http://${req.headers.host || `127.0.0.1:${port}`}`).replace(/\/$/, '');
+        let target: URL; try { target = new URL(publicUrl); } catch { return json(res, 400, { error: 'Enter a valid public coordinator address.' }); }
+        const loopback = ['localhost', '127.0.0.1', '::1'].includes(target.hostname);
+        if (target.protocol !== 'https:' && !loopback) return json(res, 400, { error: 'The public coordinator address must use HTTPS.' });
+        if (loopback && process.env.OPEN_HARNESS_MOCK !== '1') return json(res, 409, { error: 'This address only works on this computer. Enter the HTTPS address that the new computer can reach.' });
+        return json(res, 201, machines.createPairing(input, publicUrl));
+      }
     }
     const machineMatch = url.pathname.match(/^\/v1\/machines\/([^/]+)\/(test|reconnect|revoke)$/);
     if (machineMatch && req.method === 'POST') {
       const machineId = decodeURIComponent(machineMatch[1]), action = machineMatch[2], input = await body(req);
-      if (action === 'test') return json(res, 200, machines.test(machineId, input.agentId ? profiles.get(String(input.agentId)) || undefined : undefined));
+      if (action === 'test') {
+        const profile = input.agentId ? profiles.get(String(input.agentId)) || undefined : undefined, checked = machines.test(machineId, profile);
+        if (!checked.ok || !profile || process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, checked);
+        try {
+          ensureProfileDirs(profile.id);
+          const result = machineId === 'local' ? profile.computer.access === 'direct' ? nativeRuntimeProbe(join(root, 'agents', profile.id, 'profile'), { action: 'computer' }) : await runtimeProbe(ensureContainer(profile.id, root, profile.computer), { action: 'computer' }) : await runnerProbe(profile, 'probe-runtime', { action: 'computer' });
+          return json(res, 200, { ...checked, ok: Boolean(result.ok), message: String(result.message || checked.message), machine: checked.machine });
+        } catch (error) { return json(res, 200, { ...checked, ok: false, message: error instanceof Error ? error.message : 'Computer access check failed.' }); }
+      }
       if (action === 'reconnect') return json(res, 200, machines.reconnect(machineId));
       return json(res, 200, machines.revoke(machineId));
     }

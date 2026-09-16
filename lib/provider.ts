@@ -1,6 +1,7 @@
 import { toolDefinitions, type Model, type ModelReply } from "./harness";
 export const PROVIDERS = {
   xai: { label: "xAI", baseURL: "https://api.x.ai/v1", model: "grok-4.6" },
+  openai: { label: "OpenAI", baseURL: "https://api.openai.com/v1", model: "gpt-5.4" },
   openrouter: {
     label: "OpenRouter",
     baseURL: "https://openrouter.ai/api/v1",
@@ -20,6 +21,8 @@ export function createModel(options: {
     options.apiKey?.trim() ||
     (provider === "xai"
       ? env.XAI_API_KEY
+      : provider === "openai"
+        ? env.OPENAI_API_KEY
       : provider === "openrouter"
         ? env.OPENROUTER_API_KEY
         : env.MODEL_API_KEY);

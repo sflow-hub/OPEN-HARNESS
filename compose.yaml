@@ -1,0 +1,38 @@
+name: open-harness
+services:
+  docker:
+    image: docker:28-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    volumes:
+      - harness-docker:/var/lib/docker
+      - harness-data:/data
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  open-harness:
+    build:
+      context: .
+      dockerfile: Dockerfile.coordinator
+    depends_on:
+      docker:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://docker:2375
+      OPEN_HARNESS_STATE_DIR: /data
+      OPEN_HARNESS_PUBLIC_URL: ${OPEN_HARNESS_PUBLIC_URL:-http://localhost:3000/api/local}
+    volumes:
+      - harness-data:/data
+    ports:
+      - "${OPEN_HARNESS_LISTEN_ADDRESS:-127.0.0.1}:3000:3000"
+    restart: unless-stopped
+
+volumes:
+  harness-data:
+  harness-docker:

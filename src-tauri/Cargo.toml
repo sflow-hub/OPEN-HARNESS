@@ -1,0 +1,20 @@
+[package]
+name = "open-harness-desktop"
+version = "0.3.0"
+description = "The no-terminal desktop installer for Open Harness"
+edition = "2021"
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", features = ["tray-icon"] }
+tauri-plugin-shell = "2.3.6"
+tauri-plugin-single-instance = "2.4.4"
+tauri-plugin-updater = "2.9.0"
+serde_json = "1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

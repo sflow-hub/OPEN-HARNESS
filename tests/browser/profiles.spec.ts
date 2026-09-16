@@ -11,7 +11,24 @@ async function seed(request: APIRequestContext) {
     await request.put(control + `/v1/agents/${agent.id}/profile`, { headers, data: { ...draftProfile(agent), revision: profile.revision } });
   }
 }
-test.beforeEach(async ({ request, page }) => { await seed(request); await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`); await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible(); });
+test.beforeEach(async ({ request, page }) => { await seed(request); await page.addInitScript(() => localStorage.setItem('open-harness.onboarding.v1', 'done')); await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`); await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible(); });
+
+test('guides first-time users through computer and model readiness', async ({ page }, testInfo) => {
+  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await page.getByRole('button', { name: 'Run setup again' }).click();
+  const setup = page.getByRole('dialog', { name: 'Welcome to Open Harness' });
+  await expect(setup).toBeVisible();
+  await setup.getByRole('button', { name: /Use this computer/ }).click();
+  await expect(page.getByRole('dialog', { name: 'Check this computer' }).getByText('The pinned Hermes runtime is ready.')).toBeVisible();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByRole('dialog', { name: 'Connect your model' })).toBeVisible();
+  await page.getByRole('dialog', { name: 'Connect your model' }).getByLabel('API key').fill('test-key');
+  await page.getByRole('button', { name: 'Save and test' }).click();
+  await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeVisible();
+  await page.getByRole('button', { name: 'Start using Open Harness' }).click();
+  await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeHidden();
+});
 
 test('edits identity, model, prompt and tools, then persists on reload', async ({ page }) => {
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
@@ -122,8 +139,8 @@ test('configures computer access and creates an OS-specific pairing command', as
   await panel.getByLabel('Computer name').fill('Design workstation');
   await panel.getByLabel('Computer operating system').selectOption('win32');
   await panel.getByRole('button', { name: 'Create pairing command' }).click();
-  await expect(panel.getByLabel('Run on the computer')).toContainText('runner-install');
-  await expect(panel.getByLabel('Run on the computer')).toContainText('--pairing-code');
+  await expect(panel.getByLabel('Run on the computer')).toContainText('runner.ps1');
+  await expect(panel.getByLabel('Run on the computer')).toContainText('OPEN_HARNESS_PAIRING_CODE');
   await panel.getByRole('button', { name: 'Close add computer' }).click();
   await panel.getByRole('button', { name: 'Save changes' }).click();
   await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();

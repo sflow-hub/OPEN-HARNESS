@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import type { ComputerConfig } from '../lib/agent-profile';
+import { HERMES_IMAGE } from './readiness';
 
 type Pending = { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout };
 export type NativeGatewayOptions = { cwd: string; env: NodeJS.ProcessEnv; entry: string; python?: string };
@@ -128,8 +129,8 @@ export function dockerStatus(requireImage = true) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { available: true, version: "mock", message: "Deterministic Hermes runtime is ready." };
   const version = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { encoding: "utf8", timeout: 5000 });
   if (version.status === 0) {
-    if (requireImage && spawnSync("docker", ["image", "inspect", "open-harness-hermes:2026.9.11"], { stdio: "ignore" }).status !== 0)
-      return { available: false, version: version.stdout.trim(), message: "Docker is ready, but the pinned Hermes image is not built. Run npm run harness:setup." };
+    if (requireImage && spawnSync("docker", ["image", "inspect", HERMES_IMAGE], { stdio: "ignore" }).status !== 0)
+      return { available: false, version: version.stdout.trim(), message: "Docker is ready, but the pinned Hermes runtime still needs its first-time setup." };
     return { available: true, version: version.stdout.trim(), message: "Docker is ready." };
   }
   const detail = (version.stderr || version.stdout || "").trim();
@@ -171,7 +172,7 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
     "-v", `${stateRoot}/agents/${safe}/managed:/run/open-harness:ro`,
     "-v", `${profile}:/home/hermes/.hermes`, "-v", `${privateDir}:/workspace/private`, "-v", `${shared}:/workspace/shared`,
     ...mounts,
-    "open-harness-hermes:2026.9.11"], { encoding: "utf8" });
-  if (run.status !== 0) throw new Error(run.stderr.trim() || "Could not create the agent container. Run npm run harness:setup first.");
+    HERMES_IMAGE], { encoding: "utf8" });
+  if (run.status !== 0) throw new Error(run.stderr.trim() || "Could not create the private agent workspace. Open Readiness in Settings and finish setup.");
   return name;
 }

@@ -17,9 +17,31 @@ This is independent software and is not affiliated with xAI or Nous Research.
 
 The host home directory, Docker socket, and other agents' private directories are not mounted. Containers provide the filesystem boundary; Hermes execution guards still apply inside it.
 
-## Set up and run
+## Install for everyday use
 
-Docker must be installed for the default isolated workspace. Open Harness starts Docker Desktop or the Docker service when you launch the local app, then waits for the daemon before starting its coordinator.
+Open the repository’s **Releases** page and download the installer for your computer:
+
+- Windows: the `.exe` installer
+- macOS: the `.dmg` for Apple silicon or Intel
+- Linux: the `.AppImage`, `.deb`, or `.rpm`
+
+Install [Docker Desktop](https://docs.docker.com/get-started/get-docker/) if you want private agent workspaces. Then open Open Harness. The first-run guide checks the computer, starts Docker when possible, prepares the pinned Hermes runtime, connects a model, and creates the first private workspace. It gives a direct installation link and a plain-language explanation when it cannot complete a step itself.
+
+The desktop app includes Node, the dashboard, coordinator, and runner. Users do not need Git, npm, a source checkout, or terminal commands. Closing the window keeps active work running in the tray. Signed release builds check for signed updates at startup.
+
+### Self-host with Docker Compose
+
+Download and unzip the source release, install Docker, then run this command from that folder:
+
+```bash
+docker compose up -d
+```
+
+Open `http://localhost:3000`. Compose starts the dashboard, coordinator, a private Docker engine for agent containers, and persistent data volumes. No host Node or Python installation is required. By default the dashboard listens only on this computer. To expose it, put it behind an authenticated HTTPS reverse proxy, set `OPEN_HARNESS_LISTEN_ADDRESS=0.0.0.0`, and set `OPEN_HARNESS_PUBLIC_URL=https://agents.example.com/api/local`.
+
+### Develop from source
+
+Contributors need Node.js 22.13+ and Docker:
 
 ```bash
 npm ci
@@ -28,7 +50,7 @@ npm run harness:setup
 npm run dev
 ```
 
-Open `http://localhost:3000`. Development mode starts Docker, the UI, and the persistent control service. The one-time `harness:setup` command builds the pinned Hermes image. Run `npm run harness:doctor` whenever runtime health is unclear. Set `OPEN_HARNESS_SKIP_DOCKER_START=1` only when another process manages your Docker daemon.
+Open `http://localhost:3000`. Development mode starts the UI and persistent control service. Run `npm run harness:doctor` whenever runtime health is unclear. Set `OPEN_HARNESS_SKIP_DOCKER_START=1` only when another process manages the Docker daemon.
 
 For automatic startup:
 
@@ -43,7 +65,7 @@ The installed user service owns background work. The UI and control service bind
 
 ## Models and secrets
 
-Configure xAI, OpenRouter, or another model in **Settings**. Credentials are stored by the control service in `.open-harness/secrets.json` with mode `0600`, are written only to managed profiles, and are never returned to the browser or included in browser exports. Agents inherit workspace model settings unless their profile overrides them.
+Configure xAI, OpenAI, OpenRouter, or another model in **Settings**. The desktop coordinator uses Windows account encryption, macOS Keychain, or the Linux password vault when available. Headless servers fall back to `.open-harness/secrets.json` with mode `0600`. Credentials are written only to managed profiles and are never returned to the browser, diagnostics, or normal exports. Agents inherit workspace model settings unless their profile overrides them.
 
 The **Try a guided run** action remains an explicitly scripted demonstration. Normal tasks always enter the persistent Hermes queue; there is no silent fallback to the old four-tool loop.
 
@@ -53,11 +75,11 @@ Use the settings icon on any agent card, or **Agent settings** in a conversation
 
 ### Connect another computer
 
-Open **Agent settings → Computer → Add computer**, choose Linux, macOS, or Windows, and run the generated one-time command from an Open Harness checkout on that machine. The command checks its runtime, pairs the runner, and installs automatic startup through systemd, launchd, or Windows Task Scheduler. Pairing codes expire after ten minutes and can be used only once. The runner initiates every connection over HTTP(S); it never opens an inbound port and does not need SSH credentials.
+Open **Agent settings → Computer → Add computer**, choose Linux, macOS, or Windows, and copy the generated one-line command. It downloads a small self-contained runner and its own Node runtime, checks Docker, prepares Hermes, pairs once, and installs automatic startup through systemd, launchd, or Windows Task Scheduler. It does not need Git, npm, a source checkout, an inbound port, or SSH credentials. Pairing codes expire after ten minutes and work once.
 
 Remote coordinators must use HTTPS; plain HTTP is accepted only on loopback. On a headless Linux VPS, the installer reports the `loginctl enable-linger` command when the user service needs permission to remain active after logout.
 
-For a coordinator reachable beyond localhost, put it behind HTTPS and set:
+For a self-hosted coordinator, enter its public HTTPS address in the connection wizard. The address can come from Tailscale Serve or an authenticated reverse proxy. Source installations can also set it before starting:
 
 ```bash
 OPEN_HARNESS_BIND=0.0.0.0
@@ -114,7 +136,10 @@ Stopping a parent run also stops descendants and their associated Hermes session
 | `runtime/hermes.ts` | Hermes TUI gateway JSON-RPC adapter and container lifecycle |
 | `runtime/hermes/Dockerfile` | Reproducible pinned Hermes/Python 3.12 runtime |
 | `runtime/hermes/coordination.mjs` | Agent-scoped named handoff and scheduling MCP tools |
-| `components/agent-settings.tsx` | Accessible four-tab profile editor |
+| `components/agent-settings.tsx` | Accessible five-tab profile and computer editor |
+| `components/onboarding.tsx` | First-run computer readiness and model connection guide |
+| `src-tauri/` | Windows, macOS, and Linux desktop shell, tray, sidecar, and signed updater |
+| `compose.yaml` | No-Node self-hosted dashboard, coordinator, and private container engine |
 | `runtime/profiles.ts` | Profile revisions, inheritance, migration, and run snapshots |
 | `runtime/profile-runtime.ts` | Runtime catalogs, connection checks, and configuration compiler |
 | `runtime/hermes/extension/` | Managed Hermes allowlist middleware |

@@ -44,3 +44,11 @@ next-env.d.ts
 /test-results/
 /playwright-report/
 __pycache__/
+/src-tauri/target/
+/src-tauri/binaries/
+/src-tauri/resources/bundle/
+/src-tauri/gen/
+/src-tauri/icons/Square*Logo.png
+/src-tauri/icons/StoreLogo.png
+/src-tauri/icons/64x64.png
+/src-tauri/icons/icon.png

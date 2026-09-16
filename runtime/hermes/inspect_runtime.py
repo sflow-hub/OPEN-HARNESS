@@ -15,6 +15,13 @@ async def mcp_check(spec):
             return {'status': 'connected', 'tools': [{'name': t.name, 'description': t.description or ''} for t in result.tools]}
 
 def main(spec):
+    if spec['action'] == 'computer':
+        import os
+        probe = os.path.expanduser('~/.open-harness-access-check')
+        with open(probe, 'w', encoding='utf-8') as handle:
+            handle.write('ready')
+        os.remove(probe)
+        return {'ok': True, 'message': 'Commands and private file access are ready.'}
     if spec['action'] == 'mcp':
         return asyncio.run(asyncio.wait_for(mcp_check(spec), timeout=20))
     if spec['action'] == 'connection':
