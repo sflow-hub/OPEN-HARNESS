@@ -123,7 +123,7 @@ test('keyboard tab navigation and phone layout keep save controls visible', asyn
   await page.screenshot({ path: `test-results/profile-${testInfo.project.name}.png`, fullPage: true });
 });
 
-test('configures computer access and creates an OS-specific pairing command', async ({ page }) => {
+test('configures computer access and automatically selects a paired computer', async ({ page, request }) => {
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
   const panel = page.getByRole('dialog', { name: 'Agent settings' });
   await expect(panel.getByText('Loading saved profile…')).toBeHidden();
@@ -141,7 +141,13 @@ test('configures computer access and creates an OS-specific pairing command', as
   await panel.getByRole('button', { name: 'Create pairing command' }).click();
   await expect(panel.getByLabel('Run on the computer')).toContainText('runner.ps1');
   await expect(panel.getByLabel('Run on the computer')).toContainText('OPEN_HARNESS_PAIRING_CODE');
-  await panel.getByRole('button', { name: 'Close add computer' }).click();
+  await expect(panel.getByText('Waiting for this computer. It will be selected automatically when it connects.')).toBeVisible();
+  const command = await panel.getByLabel('Run on the computer').inputValue();
+  const code = command.match(/OPEN_HARNESS_PAIRING_CODE='([^']+)'/)?.[1];
+  expect(code).toBeTruthy();
+  await request.post(control + '/v1/runner/pair', { data: { code, name: 'Design workstation', platform: 'win32', arch: 'x64', capabilities: { container: true, direct: true, desktop: true, virtualDesktop: false } } });
+  await expect(panel.getByText('Design workstation connected and was selected for this agent.')).toBeVisible({ timeout: 5_000 });
+  await expect(panel.getByLabel('Connected computer')).toHaveValue(/machine-/);
   await panel.getByRole('button', { name: 'Save changes' }).click();
   await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
 });

@@ -75,7 +75,7 @@ Use the settings icon on any agent card, or **Agent settings** in a conversation
 
 ### Connect another computer
 
-Open **Agent settings → Computer → Add computer**, choose Linux, macOS, or Windows, and copy the generated one-line command. It downloads a small self-contained runner and its own Node runtime, checks Docker, prepares Hermes, pairs once, and installs automatic startup through systemd, launchd, or Windows Task Scheduler. It does not need Git, npm, a source checkout, an inbound port, or SSH credentials. Pairing codes expire after ten minutes and work once.
+Open **Agent settings → Computer → Add computer**, choose Linux, macOS, or Windows, and copy the generated one-line command. It downloads a small self-contained runner and its own Node runtime, checks Docker, prepares Hermes, pairs once, and installs automatic startup through systemd, launchd, or Windows Task Scheduler. The wizard watches the connection and selects the new computer automatically. It does not need Git, npm, a source checkout, an inbound port, or SSH credentials. Pairing codes expire after ten minutes and work once.
 
 Remote coordinators must use HTTPS; plain HTTP is accepted only on loopback. On a headless Linux VPS, the installer reports the `loginctl enable-linger` command when the user service needs permission to remain active after logout.
 
