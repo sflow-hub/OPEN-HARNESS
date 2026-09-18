@@ -139,6 +139,44 @@ export function dockerStatus(requireImage = true) {
     : "Docker is required to run isolated Hermes agents." };
 }
 
+function execDocker(args: string[], timeout: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise(resolve => {
+    let done = false, stdout = "", stderr = "";
+    const settle = (code: number | null) => { if (!done) { done = true; resolve({ code, stdout, stderr }); } };
+    const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"], timeout, killSignal: "SIGKILL" });
+    child.stdout.on("data", chunk => stdout += chunk);
+    child.stderr.on("data", chunk => stderr += chunk);
+    child.on("error", () => settle(null));
+    child.on("exit", code => settle(code));
+  });
+}
+async function probeDockerStatus(): Promise<ReturnType<typeof dockerStatus>> {
+  if (process.env.OPEN_HARNESS_MOCK === "1") return { available: true, version: "mock", message: "Deterministic Hermes runtime is ready." };
+  const version = await execDocker(["version", "--format", "{{.Server.Version}}"], 5000);
+  if (version.code === 0) {
+    if ((await execDocker(["image", "inspect", HERMES_IMAGE], 5000)).code !== 0)
+      return { available: false, version: version.stdout.trim(), message: "Docker is ready, but the pinned Hermes runtime still needs its first-time setup." };
+    return { available: true, version: version.stdout.trim(), message: "Docker is ready." };
+  }
+  const detail = (version.stderr || version.stdout || "").trim();
+  return { available: false, version: null, message: detail.includes("daemon") || detail.includes("sock")
+    ? "Docker is installed, but its daemon is not running. Start Docker Desktop or the Docker service."
+    : "Docker is required to run isolated Hermes agents." };
+}
+// dockerStatus()'s spawnSync calls block the event loop for up to ~10s; called from a
+// coordinator request handler, a wedged (not just down) daemon would freeze every other
+// in-flight request for that long. Probe asynchronously, cache briefly, and refresh in the
+// background instead — request handlers get the last known answer immediately.
+let cachedStatus: { value: ReturnType<typeof dockerStatus>; at: number } | null = null;
+let statusRefresh: Promise<void> | null = null;
+const DOCKER_STATUS_TTL_MS = 5_000;
+export function dockerStatusCached(): Promise<ReturnType<typeof dockerStatus>> {
+  const stale = !cachedStatus || Date.now() - cachedStatus.at > DOCKER_STATUS_TTL_MS;
+  if (stale && !statusRefresh) statusRefresh = probeDockerStatus().then(value => { cachedStatus = { value, at: Date.now() }; }).finally(() => { statusRefresh = null; });
+  if (cachedStatus) return Promise.resolve(cachedStatus.value);
+  return statusRefresh!.then(() => cachedStatus!.value);
+}
+
 export function ensureContainer(agentId: string, stateRoot: string, computer?: ComputerConfig) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);

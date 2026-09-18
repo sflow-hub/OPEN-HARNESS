@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentProfile, ModelChoice, ToolCatalog, ToolInfo } from '../lib/agent-profile';
-import { dockerStatus, ensureContainer, HermesGateway } from './hermes';
+import { dockerStatusCached, ensureContainer, HermesGateway } from './hermes';
 
 export const COORDINATION_TOOLS: ToolInfo[] = [
   { id: 'mcp_open_harness_task', name: 'Task board', group: 'other', description: 'Read and update assigned board tasks.', available: true },
@@ -36,7 +36,7 @@ export function nativeRuntimeProbe(profileHome: string, input: object): Record<s
 }
 export async function discoverTools(agentId: string, root: string, profile?: AgentProfile): Promise<ToolCatalog> {
   if (process.env.OPEN_HARNESS_MOCK === '1') return { source: 'mock', tools: [...mockTools, ...COORDINATION_TOOLS] };
-  const status = dockerStatus(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
+  const status = await dockerStatusCached(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
   try { const result = await runtimeProbe(ensureContainer(agentId, root, profile?.computer), { action: 'catalog' }); return { source: 'runtime', tools: [...(result.tools as ToolInfo[]).filter(t => t.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }; }
   catch (error) { return { source: 'unavailable', tools: [], error: error instanceof Error ? error.message : 'Tool inventory is unavailable.' }; }
 }
