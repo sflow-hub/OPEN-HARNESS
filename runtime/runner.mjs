@@ -4,7 +4,7 @@ import { createRequire as __openHarnessCreateRequire } from 'node:module'; const
 import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync4, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
 import { homedir, hostname, platform as platform2, arch } from "node:os";
 import { join as join3, resolve as resolve3 } from "node:path";
-import { spawnSync as spawnSync4 } from "node:child_process";
+import { spawn as spawn3, spawnSync as spawnSync4 } from "node:child_process";
 
 // runtime/hermes.ts
 import { spawn, spawnSync } from "node:child_process";
@@ -181,31 +181,20 @@ var HermesGateway = class extends EventEmitter {
     this.emit("exit", Object.assign(new Error("Agent runtime stopped."), { interrupted: true }));
   }
 };
-function dockerStatus(requireImage = true) {
-  if (process.env.OPEN_HARNESS_MOCK === "1") return { available: true, version: "mock", message: "Deterministic Hermes runtime is ready." };
-  const version = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { encoding: "utf8", timeout: 5e3 });
-  if (version.status === 0) {
-    if (requireImage && spawnSync("docker", ["image", "inspect", HERMES_IMAGE], { stdio: "ignore" }).status !== 0)
-      return { available: false, version: version.stdout.trim(), message: "Docker is ready, but the pinned Hermes runtime still needs its first-time setup." };
-    return { available: true, version: version.stdout.trim(), message: "Docker is ready." };
-  }
-  const detail = (version.stderr || version.stdout || "").trim();
-  return { available: false, version: null, message: detail.includes("daemon") || detail.includes("sock") ? "Docker is installed, but its daemon is not running. Start Docker Desktop or the Docker service." : "Docker is required to run isolated Hermes agents." };
-}
 function ensureContainer(agentId, stateRoot2, computer) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
   const selected = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
   const signature = createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources })).digest("hex").slice(0, 24);
-  const inspect = spawnSync("docker", ["inspect", "-f", '{{.State.Running}} {{index .Config.Labels "open-harness.config"}}', name], { encoding: "utf8" });
+  const inspect = spawnSync("docker", ["inspect", "-f", '{{.State.Running}} {{index .Config.Labels "open-harness.config"}}', name], { encoding: "utf8", timeout: 1e4 });
   if (inspect.status === 0) {
     const [running, currentSignature] = inspect.stdout.trim().split(/\s+/);
     if (currentSignature !== signature) {
-      spawnSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+      spawnSync("docker", ["rm", "-f", name], { stdio: "ignore", timeout: 2e4 });
     } else if (running !== "true") {
-      const started = spawnSync("docker", ["start", name], { encoding: "utf8" });
-      if (started.status !== 0) throw new Error(started.stderr.trim() || "Could not start the agent container.");
+      const started = spawnSync("docker", ["start", name], { encoding: "utf8", timeout: 2e4 });
+      if (started.status !== 0) throw new Error(started.error?.code === "ETIMEDOUT" ? "Docker did not respond within 20s. Check the Docker daemon." : started.stderr.trim() || "Could not start the agent container.");
       return name;
     } else {
       return name;
@@ -254,8 +243,8 @@ function ensureContainer(agentId, stateRoot2, computer) {
     `${shared}:/workspace/shared`,
     ...mounts,
     HERMES_IMAGE
-  ], { encoding: "utf8" });
-  if (run2.status !== 0) throw new Error(run2.stderr.trim() || "Could not create the private agent workspace. Open Readiness in Settings and finish setup.");
+  ], { encoding: "utf8", timeout: 3e4 });
+  if (run2.status !== 0) throw new Error(run2.error?.code === "ETIMEDOUT" ? "Docker did not respond within 30s. Check the Docker daemon." : run2.stderr.trim() || "Could not create the private agent workspace. Open Readiness in Settings and finish setup.");
   return name;
 }
 
@@ -264,6 +253,7 @@ import { spawn as spawn2, spawnSync as spawnSync2 } from "node:child_process";
 import { mkdirSync, writeFileSync, renameSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 var COORDINATION_TOOLS = [
+  { id: "mcp_open_harness_task", name: "Task board", group: "other", description: "Read and update assigned board tasks.", available: true },
   { id: "mcp_open_harness_delegate_named_agent", name: "Hand off to another agent", group: "delegation", description: "Assign explicit task context to another named agent.", available: true },
   { id: "mcp_open_harness_create_open_harness_routine", name: "Create a routine", group: "scheduling", description: "Schedule work through Open Harness.", available: true }
 ];
@@ -574,10 +564,34 @@ var credentialPath = join3(stateRoot, "connection.json");
 var spool = join3(stateRoot, "spool");
 mkdirSync4(spool, { recursive: true });
 var runnerSecrets = new SecretStore(join3(stateRoot, "secrets.json"));
-function capabilities() {
-  const container = dockerStatus().available;
-  const python = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean).some((executable) => spawnSync4(executable, ["-c", "import hermes_cli, open_harness_policy"], { stdio: "ignore" }).status === 0);
+var pythons = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean);
+function exitCode(command2, args2, timeout) {
+  return new Promise((resolve4) => {
+    let done = false;
+    const settle = (code) => {
+      if (!done) {
+        done = true;
+        resolve4(code);
+      }
+    };
+    const child = spawn3(command2, args2, { stdio: "ignore", timeout, killSignal: "SIGKILL" });
+    child.on("error", () => settle(null));
+    child.on("exit", (code) => settle(code));
+  });
+}
+async function probeCapabilities() {
+  const [container, python] = await Promise.all([
+    process.env.OPEN_HARNESS_MOCK === "1" ? true : exitCode("docker", ["image", "inspect", HERMES_IMAGE], 5e3).then((code) => code === 0),
+    Promise.all(pythons.map(async (name) => await exitCode(name, ["-c", "import hermes_cli, open_harness_policy"], 8e3) === 0)).then((found) => found.some(Boolean))
+  ]);
   return { container, direct: python, desktop: Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === "darwin" || process.platform === "win32"), virtualDesktop: process.platform === "linux" && container, detail: python ? "Hermes host runtime is installed." : "Install the Hermes host runtime to enable direct access." };
+}
+var known = null;
+var probing = null;
+function capabilities() {
+  return probing ??= probeCapabilities().then((value) => known = value).finally(() => {
+    probing = null;
+  });
 }
 async function pair() {
   const coordinator = String(args.get("coordinator") || "").replace(/\/$/, ""), code = String(args.get("pairing-code") || ""), sitesToken = String(args.get("sites-token") || "");
@@ -585,7 +599,7 @@ async function pair() {
   const target = new URL(coordinator), loopback = ["localhost", "127.0.0.1", "::1"].includes(target.hostname);
   if (target.protocol !== "https:" && !(target.protocol === "http:" && loopback)) throw new Error("Remote coordinators must use HTTPS. Plain HTTP is accepted only for a coordinator on this computer.");
   const encryption = await generateRunnerKeyPair();
-  const response = await fetch(`${coordinator}/v1/runner/pair`, { method: "POST", headers: { "Content-Type": "application/json", ...sitesToken ? { "OAI-Sites-Authorization": `Bearer ${sitesToken}` } : {} }, body: JSON.stringify({ code, name: hostname(), platform: platform2(), arch: arch(), capabilities: capabilities(), encryptionPublicKey: encryption.publicKey }) });
+  const response = await fetch(`${coordinator}/v1/runner/pair`, { method: "POST", headers: { "Content-Type": "application/json", ...sitesToken ? { "OAI-Sites-Authorization": `Bearer ${sitesToken}` } : {} }, body: JSON.stringify({ code, name: hostname(), platform: platform2(), arch: arch(), capabilities: await capabilities(), encryptionPublicKey: encryption.publicKey }) });
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || "Pairing failed.");
   const saved = { coordinator, machineId: value.machineId, token: value.token, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey, ...sitesToken ? { sitesToken } : {} };
@@ -685,7 +699,7 @@ async function control(command2) {
     }
     if (command2.kind === "import-agent") {
       const profile = command2.payload.profile;
-      if (profile) validateComputerTarget(profile, capabilities(), Array.isArray(command2.payload.requiredSecrets) ? command2.payload.requiredSecrets.map(String) : [], (name) => runnerSecrets.has(name) || Boolean(process.env[name]));
+      if (profile) validateComputerTarget(profile, await capabilities(), Array.isArray(command2.payload.requiredSecrets) ? command2.payload.requiredSecrets.map(String) : [], (name) => runnerSecrets.has(name) || Boolean(process.env[name]));
       const bundle = command2.payload.bundle || (await request(`/v1/runner/transfers/${encodeURIComponent(command2.payload.transferId)}`)).bundle;
       const imported = importAgentFiles(stateRoot, command2.agentId, bundle);
       if (profile?.computer.desktop !== "none" && profile) {
@@ -709,7 +723,7 @@ async function control(command2) {
           for (const name of Object.keys(probeInput.env)) if (!probeInput.env[name] && localSecrets[name]) probeInput.env[name] = localSecrets[name];
         }
         if (direct) {
-          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6 });
+          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
           if (result.status || !result.stdout) throw new Error(result.stderr || "Native runtime probe failed.");
           await finish(command2, JSON.parse(result.stdout));
         } else await finish(command2, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), probeInput));
@@ -718,7 +732,7 @@ async function control(command2) {
       const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join3(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join3(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
       if (command2.kind === "probe-tools") {
         const input = direct ? (() => {
-          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6 });
+          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
           if (result.status || !result.stdout) throw new Error(result.stderr || "Tool discovery failed.");
           return JSON.parse(result.stdout);
         })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), { action: "catalog" });
@@ -749,11 +763,15 @@ async function control(command2) {
 }
 console.log(`Open Harness runner ${credentials.machineId} connected to ${credentials.coordinator}`);
 await flushSpool();
+if (!known) void capabilities().catch(() => {
+});
 var lastHeartbeat = 0;
 for (; ; ) {
   try {
     if (Date.now() - lastHeartbeat > 15e3) {
-      await request("/v1/runner/heartbeat", { method: "POST", body: JSON.stringify({ capabilities: capabilities(), encryptionPublicKey: credentials.encryptionPublicKey, activeCommandIds: [.../* @__PURE__ */ new Set([...admittedCommands, ...[...active.values()].map((item) => item.commandId)])] }) });
+      void capabilities().catch(() => {
+      });
+      await request("/v1/runner/heartbeat", { method: "POST", body: JSON.stringify({ ...known ? { capabilities: known } : {}, encryptionPublicKey: credentials.encryptionPublicKey, activeCommandIds: [.../* @__PURE__ */ new Set([...admittedCommands, ...[...active.values()].map((item) => item.commandId)])] }) });
       lastHeartbeat = Date.now();
     }
     const result = await request("/v1/runner/commands");

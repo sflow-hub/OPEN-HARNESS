@@ -12,6 +12,7 @@
     "build": "vinext build && node desktop/fix-standalone.mjs",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "pretest": "node runtime/check-node.mjs",
     "test": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "harness": "node --import tsx runtime/cli.ts",

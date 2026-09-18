@@ -129,7 +129,7 @@ export function dockerStatus(requireImage = true) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { available: true, version: "mock", message: "Deterministic Hermes runtime is ready." };
   const version = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { encoding: "utf8", timeout: 5000 });
   if (version.status === 0) {
-    if (requireImage && spawnSync("docker", ["image", "inspect", HERMES_IMAGE], { stdio: "ignore" }).status !== 0)
+    if (requireImage && spawnSync("docker", ["image", "inspect", HERMES_IMAGE], { stdio: "ignore", timeout: 5000 }).status !== 0)
       return { available: false, version: version.stdout.trim(), message: "Docker is ready, but the pinned Hermes runtime still needs its first-time setup." };
     return { available: true, version: version.stdout.trim(), message: "Docker is ready." };
   }
@@ -145,14 +145,14 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
   const name = `open-harness-${safe}`;
   const selected = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
   const signature = createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources })).digest('hex').slice(0, 24);
-  const inspect = spawnSync("docker", ["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"open-harness.config\"}}", name], { encoding: "utf8" });
+  const inspect = spawnSync("docker", ["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"open-harness.config\"}}", name], { encoding: "utf8", timeout: 10_000 });
   if (inspect.status === 0) {
     const [running, currentSignature] = inspect.stdout.trim().split(/\s+/);
     if (currentSignature !== signature) {
-      spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
+      spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 });
     } else if (running !== "true") {
-      const started = spawnSync("docker", ["start", name], { encoding: "utf8" });
-      if (started.status !== 0) throw new Error(started.stderr.trim() || "Could not start the agent container.");
+      const started = spawnSync("docker", ["start", name], { encoding: "utf8", timeout: 20_000 });
+      if (started.status !== 0) throw new Error((started.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ? 'Docker did not respond within 20s. Check the Docker daemon.' : started.stderr.trim() || "Could not start the agent container.");
       return name;
     } else {
       return name;
@@ -172,7 +172,7 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
     "-v", `${stateRoot}/agents/${safe}/managed:/run/open-harness:ro`,
     "-v", `${profile}:/home/hermes/.hermes`, "-v", `${privateDir}:/workspace/private`, "-v", `${shared}:/workspace/shared`,
     ...mounts,
-    HERMES_IMAGE], { encoding: "utf8" });
-  if (run.status !== 0) throw new Error(run.stderr.trim() || "Could not create the private agent workspace. Open Readiness in Settings and finish setup.");
+    HERMES_IMAGE], { encoding: "utf8", timeout: 30_000 });
+  if (run.status !== 0) throw new Error((run.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ? 'Docker did not respond within 30s. Check the Docker daemon.' : run.stderr.trim() || "Could not create the private agent workspace. Open Readiness in Settings and finish setup.");
   return name;
 }
