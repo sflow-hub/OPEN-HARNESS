@@ -2,6 +2,15 @@
   "name": "open-harness",
   "version": "0.3.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sflow-hub/OPEN-HARNESS.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sflow-hub/OPEN-HARNESS/issues"
+  },
+  "homepage": "https://github.com/sflow-hub/OPEN-HARNESS#readme",
   "engines": {
     "node": ">=22.13.0"
   },
