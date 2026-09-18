@@ -1,7 +1,7 @@
 export const hostedTaskSchema = [
   `CREATE TABLE IF NOT EXISTS task_boards (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
-    revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    revision INTEGER NOT NULL DEFAULT 1, settings_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS task_stages (
     id TEXT PRIMARY KEY, board_id TEXT NOT NULL, name TEXT NOT NULL, category TEXT NOT NULL,
@@ -11,7 +11,7 @@ export const hostedTaskSchema = [
   `CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY, board_id TEXT NOT NULL, stage_id TEXT NOT NULL, title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '', owner_agent_id TEXT, priority TEXT NOT NULL DEFAULT 'normal',
-    due_at TEXT, position REAL NOT NULL, archived INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1,
+    due_at TEXT, position REAL NOT NULL, archived INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1, active_run_id TEXT,
     collaborators_json TEXT NOT NULL DEFAULT '[]', labels_json TEXT NOT NULL DEFAULT '[]',
     checklist_json TEXT NOT NULL DEFAULT '[]', comments_json TEXT NOT NULL DEFAULT '[]', activity_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -19,6 +19,8 @@ export const hostedTaskSchema = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_tasks_board_stage_position ON tasks(board_id, stage_id, position)`,
   `CREATE INDEX IF NOT EXISTS idx_tasks_owner_archived ON tasks(owner_agent_id, archived)`,
+  `CREATE TABLE IF NOT EXISTS task_runs (task_id TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE, attempt INTEGER NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, started_at TEXT NOT NULL, PRIMARY KEY(task_id,run_id))`,
+  `CREATE INDEX IF NOT EXISTS idx_task_runs_task_attempt ON task_runs(task_id,attempt)`,
 ];
 
 export const hostedRuntimeSchema = [

@@ -190,11 +190,18 @@ function mapStage(row: Row): TaskStage {
   return { id: String(row.id), boardId: String(row.board_id), name: String(row.name), category: String(row.category) as WorkflowCategory, position: Number(row.position) };
 }
 
+function boardSettings(stages: TaskStage[], raw: unknown) {
+  const input = array<Row>(raw)[0] || (() => { try { return JSON.parse(String(raw || '{}')) as Row; } catch { return {}; } })();
+  const fallback = (category: WorkflowCategory) => stages.find(stage => stage.category === category)?.id || '';
+  const valid = (value: unknown, valueFallback: string) => stages.some(stage => stage.id === value) ? String(value) : valueFallback;
+  return { runStageId: valid(input.runStageId, fallback('in_progress')), doneStageId: valid(input.doneStageId, fallback('review')), autoRunOnDrop: input.autoRunOnDrop === undefined ? true : Boolean(input.autoRunOnDrop), allowAgentDispatch: input.allowAgentDispatch === undefined ? true : Boolean(input.allowAgentDispatch) };
+}
+
 async function getBoard(db: D1Database, boardId: string): Promise<TaskBoard> {
   const row = await db.prepare("SELECT * FROM task_boards WHERE id=?").bind(boardId).first<Row>();
   if (!row) throw new HttpError(404, "Board not found.");
   const stages = (await db.prepare("SELECT * FROM task_stages WHERE board_id=? ORDER BY position,id").bind(boardId).all<Row>()).results.map(mapStage);
-  return { id: String(row.id), name: String(row.name), archived: Boolean(row.archived), revision: Number(row.revision), stages, createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
+  return { id: String(row.id), name: String(row.name), archived: Boolean(row.archived), revision: Number(row.revision), stages, settings: boardSettings(stages, row.settings_json), createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
 }
 
 async function listBoards(db: D1Database, includeArchived: boolean) {
@@ -207,21 +214,21 @@ function mapTask(row: Row): AgentTask {
     id: String(row.id), boardId: String(row.board_id), stageId: String(row.stage_id), title: String(row.title), description: String(row.description || ""),
     ownerAgentId: row.owner_agent_id ? String(row.owner_agent_id) : null, collaboratorAgentIds: array<string>(row.collaborators_json),
     priority: String(row.priority) as AgentTask["priority"], labels: array<string>(row.labels_json), dueAt: row.due_at ? String(row.due_at) : null,
-    position: Number(row.position), archived: Boolean(row.archived), revision: Number(row.revision), activeRunId: null, runState: null,
+    position: Number(row.position), archived: Boolean(row.archived), revision: Number(row.revision), activeRunId: row.active_run_id ? String(row.active_run_id) : null, runState: row.run_state ? String(row.run_state) as AgentTask['runState'] : null,
     checklist: array<AgentTask["checklist"][number]>(row.checklist_json), comments: array<AgentTask["comments"][number]>(row.comments_json),
     activity: array<AgentTask["activity"][number]>(row.activity_json), runs: [], createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }
 
 async function getTask(db: D1Database, taskId: string) {
-  const row = await db.prepare("SELECT * FROM tasks WHERE id=?").bind(taskId).first<Row>();
+  const row = await db.prepare("SELECT tasks.*,runs.state AS run_state FROM tasks LEFT JOIN runs ON runs.id=tasks.active_run_id WHERE tasks.id=?").bind(taskId).first<Row>();
   if (!row) throw new HttpError(404, "Task not found.");
   return mapTask(row);
 }
 
 async function listTasks(db: D1Database, includeArchived: boolean) {
   const where = includeArchived ? "" : "WHERE tasks.archived=0 AND task_boards.archived=0";
-  const rows = (await db.prepare(`SELECT tasks.* FROM tasks JOIN task_boards ON task_boards.id=tasks.board_id ${where} ORDER BY tasks.position,tasks.created_at`).all<Row>()).results;
+  const rows = (await db.prepare(`SELECT tasks.*,runs.state AS run_state FROM tasks JOIN task_boards ON task_boards.id=tasks.board_id LEFT JOIN runs ON runs.id=tasks.active_run_id ${where} ORDER BY tasks.position,tasks.created_at`).all<Row>()).results;
   return rows.map(mapTask);
 }
 
@@ -240,7 +247,7 @@ function cleanStrings(value: unknown, count: number, limit: number) {
 async function createBoard(db: D1Database, body: Row) {
   const boardId = id(), now = stamp(), name = required(body.name, "Board name");
   await db.batch([
-    db.prepare("INSERT INTO task_boards(id,name,archived,revision,created_at,updated_at) VALUES(?,?,?,?,?,?)").bind(boardId, name, 0, 1, now, now),
+    db.prepare("INSERT INTO task_boards(id,name,archived,revision,settings_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(boardId, name, 0, 1, '{}', now, now),
     ...categories.map((category, position) => db.prepare("INSERT INTO task_stages(id,board_id,name,category,position) VALUES(?,?,?,?,?)").bind(id(), boardId, category === "in_progress" ? "In Progress" : category[0].toUpperCase() + category.slice(1), category, position)),
   ]);
   return getBoard(db, boardId);
@@ -283,10 +290,47 @@ async function updateTask(db: D1Database, taskId: string, body: Row) {
 
 async function commentTask(db: D1Database, taskId: string, body: Row) {
   const task = await getTask(db, taskId), now = stamp();
-  const comments = [...task.comments, { id: id(), body: required(body.body, "Comment", 5_000), createdAt: now }];
+  const comments = [...task.comments, { id: id(), body: required(body.body, "Comment", 5_000), author: String(body.author || 'you').slice(0, 80), createdAt: now }];
   const activity = [{ id: id(), type: "commented", detail: "Comment added", createdAt: now }, ...task.activity].slice(0, 200);
   await db.prepare("UPDATE tasks SET comments_json=?,activity_json=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?").bind(JSON.stringify(comments), JSON.stringify(activity), now, taskId, task.revision).run();
   return getTask(db, taskId);
+}
+
+async function startTask(db: D1Database, taskId: string, body: Row) {
+  const task = await getTask(db, taskId), key = required(body.idempotencyKey, 'Idempotency key', 200);
+  const existing = await db.prepare('SELECT run_id FROM task_runs WHERE idempotency_key=?').bind(`${taskId}:${key}`).first<Row>();
+  if (existing) return { task: await getTask(db, taskId), run: await publicRun(db, await db.prepare('SELECT * FROM runs WHERE id=?').bind(existing.run_id).first<Row>() as Row) };
+  if (task.activeRunId && ['queued', 'running', 'waiting_approval', 'waiting_input'].includes(task.runState || '')) throw new HttpError(409, 'This task already has an active run.');
+  if (!task.ownerAgentId) throw new HttpError(400, 'Assign an owner before starting this task.');
+  if (body.revision !== undefined && Number(body.revision) !== task.revision) throw new HttpError(409, 'This task changed elsewhere. Refresh and try again.');
+  const board = await getBoard(db, task.boardId), runStage = board.stages.find(stage => stage.id === board.settings.runStageId);
+  if (!runStage) throw new HttpError(400, 'This board needs a run stage.');
+  const profileRow = await db.prepare('SELECT json FROM agent_profiles WHERE id=?').bind(task.ownerAgentId).first<Row>();
+  if (!profileRow) throw new HttpError(404, 'Task owner profile not found.');
+  const checklist = task.checklist.map(item => `- [${item.done ? 'x' : ' '}] ${item.text}`).join('\n');
+  const comments = task.comments.slice(-3).map(comment => `- ${comment.author || 'you'}: ${comment.body}`).join('\n');
+  const prompt = [`You are completing board task ${task.id}: ${task.title}`, `Stage: ${runStage.name}`, `Priority: ${task.priority}`, task.dueAt && `Due: ${task.dueAt}`, task.description && `Brief:\n${task.description}`, checklist && `Checklist:\n${checklist}`, comments && `Recent comments:\n${comments}`, body.feedback && `Requested changes:\n${String(body.feedback)}`, 'Work independently. Do not move this card; successful work is sent for review automatically. End with a short report for the card.'].filter(Boolean).join('\n\n');
+  const run = await createHostedRun(db, normalizeProfile(JSON.parse(String(profileRow.json))), prompt, `task-${task.id}-${id()}`);
+  const attempt = Number((await db.prepare('SELECT COALESCE(MAX(attempt),0)+1 AS attempt FROM task_runs WHERE task_id=?').bind(taskId).first<Row>())?.attempt || 1);
+  const now = stamp();
+  await db.batch([
+    db.prepare('INSERT INTO task_runs(task_id,run_id,attempt,idempotency_key,started_at) VALUES(?,?,?,?,?)').bind(taskId, run.id, attempt, `${taskId}:${key}`, now),
+    db.prepare('UPDATE tasks SET stage_id=?,active_run_id=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?').bind(runStage.id, run.id, now, taskId, task.revision),
+  ]);
+  return { task: await getTask(db, taskId), run: await publicRun(db, run) };
+}
+
+async function syncHostedTaskRun(db: D1Database, runId: string) {
+  const link = await db.prepare('SELECT task_id FROM task_runs WHERE run_id=?').bind(runId).first<Row>();
+  if (!link) return;
+  const run = await db.prepare('SELECT * FROM runs WHERE id=?').bind(runId).first<Row>();
+  if (!run || !['completed', 'failed', 'interrupted', 'cancelled'].includes(String(run.state))) return;
+  const task = await getTask(db, String(link.task_id));
+  if (task.activeRunId !== runId) return;
+  const now = stamp(), activity = [{ id: id(), type: `run_${run.state}`, detail: run.state === 'completed' ? 'Agent finished; moved to review' : String(run.error || `Run ${run.state}`), createdAt: now }, ...task.activity].slice(0, 200);
+  const comments = run.result ? [...task.comments, { id: id(), body: String(run.result).slice(-8000), author: 'agent', createdAt: now }] : task.comments;
+  const board = await getBoard(db, task.boardId), doneStage = board.stages.find(stage => stage.id === board.settings.doneStageId);
+  await db.prepare('UPDATE tasks SET stage_id=?,active_run_id=NULL,comments_json=?,activity_json=?,revision=revision+1,updated_at=? WHERE id=? AND active_run_id=?').bind(run.state === 'completed' && doneStage ? doneStage.id : task.stageId, JSON.stringify(comments), JSON.stringify(activity), now, task.id, runId).run();
 }
 
 async function approveTask(db: D1Database, taskId: string, body: Row) {
@@ -302,7 +346,8 @@ async function approveTask(db: D1Database, taskId: string, body: Row) {
 async function updateBoard(db: D1Database, boardId: string, body: Row) {
   const board = await getBoard(db, boardId);
   if (Number(body.revision) !== board.revision) throw new HttpError(409, "This board changed elsewhere. Refresh and try again.");
-  const result = await db.prepare("UPDATE task_boards SET name=?,archived=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?").bind(body.name === undefined ? board.name : required(body.name, "Board name"), body.archived === undefined ? Number(board.archived) : Number(Boolean(body.archived)), stamp(), boardId, board.revision).run();
+  const settings = body.settings === undefined ? board.settings : boardSettings(board.stages, JSON.stringify({ ...board.settings, ...(body.settings as Row) }));
+  const result = await db.prepare("UPDATE task_boards SET name=?,archived=?,settings_json=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?").bind(body.name === undefined ? board.name : required(body.name, "Board name"), body.archived === undefined ? Number(board.archived) : Number(Boolean(body.archived)), JSON.stringify(settings), stamp(), boardId, board.revision).run();
   if (!result.meta.changes) throw new HttpError(409, "This board changed elsewhere. Refresh and try again.");
   return getBoard(db, boardId);
 }
@@ -465,6 +510,7 @@ async function handler(request: Request, context: RouteContext) {
         if (command.kind === 'stop') { const payload = JSON.parse(String(command.payload_json)) as Row; await db.batch([db.prepare('UPDATE runner_commands SET state=?,finished_at=?,result_json=? WHERE id=?').bind(error ? 'failed' : 'completed', now, JSON.stringify(result || { error }), command.id), db.prepare("UPDATE runs SET state=?,error=?,updated_at=? WHERE id=? AND state IN ('running','waiting_approval')").bind(error ? 'failed' : 'cancelled', error, now, payload.runId), db.prepare('DELETE FROM run_credentials WHERE run_id=?').bind(payload.runId)]); await appendRunEvent(db, String(payload.runId), error ? 'run.failed' : 'run.cancelled', error ? { error } : { source: 'runner' }); return json({ ok: true }); }
         const run = await db.prepare('SELECT id FROM runs WHERE command_id=?').bind(command.id).first<Row>();
         await db.batch([db.prepare('UPDATE runner_commands SET state=?,finished_at=?,result_json=? WHERE id=?').bind(error ? 'failed' : 'completed', now, JSON.stringify(result || { error }), command.id), db.prepare('UPDATE runs SET state=?,result=?,error=?,updated_at=? WHERE command_id=?').bind(error ? 'failed' : 'completed', result ? String(result.text || result.final_response || result.message || '') : null, error, now, command.id), ...(run ? [db.prepare('DELETE FROM run_credentials WHERE run_id=?').bind(run.id)] : [])]);
+        if (run) await syncHostedTaskRun(db, String(run.id));
         if (run) { await appendRunEvent(db, String(run.id), error ? 'run.failed' : 'run.completed', error ? { error } : { result }); const relation = await db.prepare('SELECT parent_run_id FROM run_relations WHERE run_id=?').bind(run.id).first<Row>(); if (relation?.parent_run_id) await appendRunEvent(db, String(relation.parent_run_id), 'handoff.completed', { childRunId: run.id, state: error ? 'failed' : 'completed' }); } return json({ ok: true });
       }
       throw new HttpError(404, 'Runner endpoint not found.');
@@ -596,8 +642,8 @@ async function handler(request: Request, context: RouteContext) {
       if (!action && request.method === "PUT") return json(await updateTask(db, taskId, body));
       if (action === "comments" && request.method === "POST") return json(await commentTask(db, taskId, body), 201);
       if (action === "approve" && request.method === "POST") return json(await approveTask(db, taskId, body));
-      if (action === "runs" && request.method === "GET") return json({ runs: [] });
-      if ((action === "start" || action === "request-changes") && request.method === "POST") throw new HttpError(409, "Start agent tasks from the local Open Harness app.");
+      if (action === "runs" && request.method === "GET") { const rows = (await db.prepare('SELECT runs.*,task_runs.attempt,task_runs.started_at FROM task_runs JOIN runs ON runs.id=task_runs.run_id WHERE task_runs.task_id=? ORDER BY task_runs.attempt DESC').bind(taskId).all<Row>()).results; return json({ runs: await Promise.all(rows.map(async row => ({ ...await publicRun(db, row), attempt: Number(row.attempt), startedAt: String(row.started_at), output: String(row.result || '').slice(-20_000), stopReason: row.state === 'completed' ? 'end_turn' : row.error ? String(row.error) : null }))) }); }
+      if ((action === "start" || action === "request-changes") && request.method === "POST") return json(await startTask(db, taskId, { ...body, feedback: action === 'request-changes' ? body.feedback : undefined }), 202);
     }
     throw new HttpError(404, "Not found.");
   } catch (error) {

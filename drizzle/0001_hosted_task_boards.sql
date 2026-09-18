@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS task_boards (
   name TEXT NOT NULL,
   archived INTEGER NOT NULL DEFAULT 0,
   revision INTEGER NOT NULL DEFAULT 1,
+  settings_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

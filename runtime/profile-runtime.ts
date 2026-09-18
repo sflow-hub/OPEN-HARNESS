@@ -5,6 +5,7 @@ import type { AgentProfile, ModelChoice, ToolCatalog, ToolInfo } from '../lib/ag
 import { dockerStatus, ensureContainer, HermesGateway } from './hermes';
 
 export const COORDINATION_TOOLS: ToolInfo[] = [
+  { id: 'mcp_open_harness_task', name: 'Task board', group: 'other', description: 'Read and update assigned board tasks.', available: true },
   { id: 'mcp_open_harness_delegate_named_agent', name: 'Hand off to another agent', group: 'delegation', description: 'Assign explicit task context to another named agent.', available: true },
   { id: 'mcp_open_harness_create_open_harness_routine', name: 'Create a routine', group: 'scheduling', description: 'Schedule work through Open Harness.', available: true },
 ];

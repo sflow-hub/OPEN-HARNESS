@@ -11,20 +11,28 @@ export type TaskStage = {
   position: number;
 };
 
+export type TaskBoardSettings = {
+  runStageId: string;
+  doneStageId: string;
+  autoRunOnDrop: boolean;
+  allowAgentDispatch: boolean;
+};
+
 export type TaskBoard = {
   id: string;
   name: string;
   archived: boolean;
   revision: number;
   stages: TaskStage[];
+  settings: TaskBoardSettings;
   createdAt: string;
   updatedAt: string;
 };
 
 export type ChecklistItem = { id: string; text: string; done: boolean; position: number };
-export type TaskComment = { id: string; body: string; createdAt: string };
+export type TaskComment = { id: string; body: string; author: string; createdAt: string };
 export type TaskActivity = { id: string; type: string; detail: string; createdAt: string };
-export type TaskRun = PersistentRun & { attempt: number; startedAt: string };
+export type TaskRun = PersistentRun & { attempt: number; startedAt: string; output: string; stopReason: string | null };
 
 export type AgentTask = {
   id: string;

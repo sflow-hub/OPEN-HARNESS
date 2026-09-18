@@ -36,6 +36,8 @@ const remoteStopping = new Set<string>();
 const stoppingAgents = new Set<string>();
 const coordinationSockets = new Map<string, ReturnType<typeof coordinationSocket>>();
 let pumping = false;
+const maxTaskQueue = Math.max(1, Number(process.env.MAX_TASK_QUEUE || 100));
+const maxTaskRuns = Math.max(1, Number(process.env.MAX_TASK_RUNS || 3));
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": allowedOrigin(res.req.headers.origin), "Vary": "Origin", "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" });
@@ -148,7 +150,10 @@ function mapHermesEvent(run: RunRow, value: any) {
     event(run.id, "approval.request", { ...payload, approvalId });
   } else if (type === "clarify.request" || type === "secret.request" || type === "sudo.request") {
     store.setRun(run.id, { state: "waiting_input" }); event(run.id, type, payload);
-  } else event(run.id, type, payload);
+  } else {
+    if (type === 'message.delta') tasks.appendOutput(run.id, String(payload?.text || ''));
+    event(run.id, type, payload);
+  }
 }
 
 async function execute(run: RunRow) {
@@ -202,6 +207,7 @@ async function pump() {
     while (store.activeCount() < 4) {
       const next = store.queued().find(candidate =>
         !store.agentBusy(candidate.agent_id) && !stoppingAgents.has(candidate.agent_id) && !machines.transferring(candidate.agent_id) &&
+        (!tasks.isTaskRun(candidate.id) || tasks.activeRunCount() < maxTaskRuns) &&
         (candidate.depth > 0 || store.activeTopLevelCount() < 2) && (() => {
           const profile = profiles.get(candidate.agent_id); if (!profile) return true;
           try { if (machines.canAssign(profile.computer.machineId, candidate.agent_id).status !== 'online') return false; } catch { return false; }
@@ -258,7 +264,7 @@ async function waitForRun(id: string, timeoutMs = 30 * 60 * 1000) {
   throw new Error("Delegated run is still active after 30 minutes. Its run ID remains available in Open Harness.");
 }
 
-function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number }) {
+function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number; deferStart?: boolean }) {
   if (!input.agentId || !input.prompt?.trim()) throw new Error("agentId and prompt are required.");
   if (!profiles.get(input.agentId)) throw new ProfileError("Agent profile not found.", 404);
   const parent = input.parentRunId ? store.getRun(input.parentRunId) : undefined;
@@ -269,9 +275,10 @@ function createRun(input: { agentId: string; conversationId?: string; prompt: st
     while (cursor.parent_run_id) { const previous = store.getRun(cursor.parent_run_id); if (!previous) break; ancestors.add(previous.agent_id); cursor = previous; }
     if (ancestors.has(input.agentId)) throw new Error("Cyclic agent handoffs are not allowed.");
   }
+  if (store.queued(maxTaskQueue + 1).length >= maxTaskQueue) throw new TaskError(`The task queue is full (${maxTaskQueue}). Try again when work completes.`, 429);
   const stamp = new Date().toISOString();
   const run: RunRow = { id: crypto.randomUUID(), agent_id: input.agentId, conversation_id: input.conversationId || crypto.randomUUID(), prompt: input.prompt.trim(), state: "queued", session_id: null, parent_run_id: input.parentRunId || null, depth, created_at: stamp, updated_at: stamp, result: null, error: null };
-  store.createRun(run); event(run.id, "run.queued", { position: store.listRuns().filter(item => item.state === "queued").length }); void pump(); return run;
+  store.createRun(run); event(run.id, "run.queued", { position: store.listRuns().filter(item => item.state === "queued").length }); if (!input.deferStart) void pump(); return run;
 }
 function runResponse(run: RunRow) { const profile = profiles.runSnapshot(run.id) || profiles.get(run.agent_id); const machineId = profile?.computer.machineId || null; let machineConnection: string | null = null; if (machineId) { try { machineConnection = machines.get(machineId).status; } catch { machineConnection = 'revoked'; } } return { ...run, machine_id: machineId, machine_connection: machineConnection }; }
 
@@ -518,13 +525,18 @@ const server = createServer(async (req, res) => {
       if (req.method === "GET") return json(res, 200, { boards: tasks.listBoards(url.searchParams.get("includeArchived") === "1"), tasks: tasks.listTasks(url.searchParams.get("includeArchived") === "1") });
       if (req.method === "POST") return json(res, 201, tasks.createTask(await body(req)));
     }
-    const taskMatch = url.pathname.match(/^\/v1\/tasks\/([^/]+)(?:\/(comments|start|request-changes|approve|runs))?$/);
+    const taskMatch = url.pathname.match(/^\/v1\/tasks\/([^/]+)(?:\/(comments|start|request-changes|approve|runs|move|stop|check|additem))?$/);
     if (taskMatch) {
       const taskId = decodeURIComponent(taskMatch[1]), action = taskMatch[2];
       if (!action && req.method === "GET") return json(res, 200, tasks.getTask(taskId));
       if (!action && req.method === "PUT") return json(res, 200, tasks.updateTask(taskId, await body(req)));
-      if (action === "comments" && req.method === "POST") return json(res, 201, tasks.comment(taskId, await body(req)));
-      if ((action === "start" || action === "request-changes") && req.method === "POST") return json(res, 202, tasks.start(taskId, await body(req), createRun));
+      if (!action && req.method === "DELETE") { const task = tasks.getTask(taskId); if (task.activeRunId) return json(res, 409, { error: 'Stop the active run before deleting this task.' }); store.db.prepare("DELETE FROM tasks WHERE id=?").run(taskId); return json(res, 200, { ok: true }); }
+      if (action === "comments" && req.method === "POST") return json(res, 201, tasks.comment(taskId, { ...await body(req), author: 'you' }));
+      if (action === "move" && req.method === "POST") return json(res, 200, tasks.move(taskId, await body(req)));
+      if (action === "check" && req.method === "POST") { const input = await body(req); return json(res, 200, tasks.check(taskId, String(input.item || ''), input.done === undefined ? undefined : Boolean(input.done))); }
+      if (action === "additem" && req.method === "POST") { const input = await body(req); return json(res, 201, tasks.addItem(taskId, String(input.text || ''))); }
+      if ((action === "start" || action === "request-changes") && req.method === "POST") { const started = tasks.start(taskId, await body(req), input => createRun({ ...input, deferStart: true })); void pump(); return json(res, 202, started); }
+      if (action === "stop" && req.method === "POST") { const task = tasks.getTask(taskId); if (!task.activeRunId) return json(res, 409, { error: 'This task is not running.' }); return json(res, 200, { ok: true, stopped: await stopRunTree(task.activeRunId) }); }
       if (action === "approve" && req.method === "POST") { const input = await body(req); return json(res, 200, tasks.approve(taskId, input.revision === undefined ? undefined : Number(input.revision))); }
       if (action === "runs" && req.method === "GET") return json(res, 200, { runs: tasks.getTask(taskId).runs });
     }
@@ -554,6 +566,27 @@ const server = createServer(async (req, res) => {
       if (req.method === "POST" && routineMatch[2] === "toggle") { store.db.prepare("UPDATE schedules SET enabled=?,updated_at=? WHERE id=?").run(routine.enabled ? 0 : 1, new Date().toISOString(), routine.id); return json(res, 200, { enabled: !routine.enabled }); }
     }
     if (req.method === "POST" && url.pathname === "/internal/handoff") { const input = await body(req); const parent = store.listRuns().find(run => run.agent_id === internalAgent && ["running","waiting_approval","waiting_input"].includes(run.state)); if (!parent) return json(res, 409, { error: "The delegating agent has no active run." }); if (!internalAllowed(internalAgent, "mcp_open_harness_delegate_named_agent", String(req.headers["x-open-harness-run"] || parent.id))) return json(res, 403, { error: "Delegation is disabled for this run." }); const child = createRun({ agentId: input.agentId, prompt: input.prompt, parentRunId: parent.id }); event(parent.id, "handoff.created", { childRunId: child.id, targetAgentId: input.agentId, prompt: input.prompt }); const result = await waitForRun(child.id); event(parent.id, "handoff.completed", { childRunId: child.id, targetAgentId: input.agentId, state: result.state }); return json(res, 200, { runId: result.id, state: result.state, result: result.result, error: result.error }); }
+    if (req.method === "POST" && url.pathname === "/internal/task") {
+      const input = await body(req), runId = String(req.headers['x-open-harness-run'] || '');
+      if (!internalAllowed(internalAgent, 'mcp_open_harness_task', runId)) return json(res, 403, { error: 'Task board access is disabled for this run.' });
+      const profile = profiles.get(internalAgent!); if (!profile) return json(res, 403, { error: 'Agent profile not found.' });
+      const action = String(input.action || ''), taskId = String(input.taskId || ''), patch = (input.input || {}) as Record<string, unknown>;
+      const mayTouch = (task: ReturnType<typeof tasks.getTask>) => task.ownerAgentId === null || task.ownerAgentId === internalAgent || profile.board.assignOthers;
+      if (action === 'list') return json(res, 200, { boards: tasks.listBoards(), tasks: tasks.listTasks().filter(task => task.ownerAgentId === null || task.ownerAgentId === internalAgent || profile.board.assignOthers) });
+      if (action === 'columns') return json(res, 200, { boards: tasks.listBoards() });
+      if (action === 'create') return json(res, 201, tasks.createTask({ ...patch, boardId: patch.boardId || input.boardId, ownerAgentId: patch.ownerAgentId === undefined ? internalAgent : patch.ownerAgentId }));
+      const task = tasks.getTask(taskId); if (!mayTouch(task)) return json(res, 403, { error: 'Changing another agent’s card requires Board: assign others.' });
+      if (action === 'get') return json(res, 200, task);
+      if (action === 'update') return json(res, 200, tasks.updateTask(taskId, { ...patch, revision: task.revision }));
+      if (action === 'move') return json(res, 200, tasks.move(taskId, patch));
+      if (action === 'comment') return json(res, 201, tasks.comment(taskId, { body: patch.text || patch.body, author: profile.name }));
+      if (action === 'check') return json(res, 200, tasks.check(taskId, String(patch.item || ''), patch.done === undefined ? undefined : Boolean(patch.done)));
+      if (action === 'additem') return json(res, 201, tasks.addItem(taskId, String(patch.text || '')));
+      if (action === 'claim') return json(res, 200, tasks.updateTask(taskId, { revision: task.revision, ownerAgentId: internalAgent }));
+      if (action === 'release') { tasks.updateTask(taskId, { revision: task.revision, ownerAgentId: null }); return json(res, 200, tasks.comment(taskId, { body: String(patch.reason || 'Released as blocked.'), author: profile.name })); }
+      if (action === 'run') { if (task.ownerAgentId && task.ownerAgentId !== internalAgent && !profile.board.dispatch) return json(res, 403, { error: 'Starting another agent’s task requires Board: dispatch.' }); const board = tasks.getBoard(task.boardId); if (!board.settings.allowAgentDispatch) return json(res, 403, { error: 'Agent task dispatch is disabled for this board.' }); const started = tasks.start(taskId, { revision: task.revision, idempotencyKey: crypto.randomUUID() }, value => createRun({ ...value, deferStart: true })); void pump(); return json(res, 202, started); }
+      return json(res, 400, { error: 'Unknown task action.' });
+    }
     if (req.method === "POST" && url.pathname === "/internal/schedule") { if (!internalAllowed(internalAgent, "mcp_open_harness_create_open_harness_routine", String(req.headers["x-open-harness-run"] || ""))) return json(res, 403, { error: "Scheduling is disabled for this run." }); const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)), next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, internalAgent, input.name, input.prompt, minutes, input.timezone || "UTC", 1, next, stamp.toISOString(), stamp.toISOString()); return json(res, 201, { id, nextRunAt: next }); }
     return json(res, 404, { error: "Not found." });
   } catch (error) { return json(res, error instanceof ProfileError || error instanceof TaskError || error instanceof MachineError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }

@@ -169,6 +169,21 @@ test("links idempotent task runs, moves completed work to review, and approves i
   assert.equal(board.stages.find((stage: any) => stage.id === approved.stageId).category, "done");
 });
 
+test("uses board dispatch settings, sparse moves, output, and explicit task stops", async () => {
+  const board = (await request("/v1/tasks")).boards[0];
+  const configured = await request(`/v1/boards/${board.id}`, { method: "PUT", body: JSON.stringify({ revision: board.revision, settings: { ...board.settings, autoRunOnDrop: false } }) });
+  assert.equal(configured.settings.autoRunOnDrop, false);
+  const backlog = configured.stages.find((stage: any) => stage.category === 'backlog');
+  const task = await request('/v1/tasks', { method: 'POST', body: JSON.stringify({ boardId: board.id, stageId: backlog.id, title: 'Move safely', description: 'MOCK_SLOW', ownerAgentId: 'atlas' }) });
+  const moved = await request(`/v1/tasks/${task.id}/move`, { method: 'POST', body: JSON.stringify({ stageId: configured.settings.runStageId }) });
+  assert.equal(moved.stageId, configured.settings.runStageId);
+  const started = await request(`/v1/tasks/${task.id}/start`, { method: 'POST', body: JSON.stringify({ revision: moved.revision, idempotencyKey: crypto.randomUUID() }) });
+  await request(`/v1/tasks/${task.id}/stop`, { method: 'POST' });
+  const stopped = await waitRun(started.run.id);
+  assert.equal(stopped.state, 'cancelled');
+  assert.equal((await request(`/v1/tasks/${task.id}`)).activeRunId, null);
+});
+
 test("edits workflow stages and archives and restores task records", async () => {
   const board = (await request("/v1/tasks")).boards[0];
   const withStage = await request(`/v1/boards/${board.id}/stages`, { method: "POST", body: JSON.stringify({ name: "Blocked", category: "ready" }) });

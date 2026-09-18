@@ -24,6 +24,7 @@ export type AgentProfile = {
   prompt: { enabled: boolean; text: string };
   model: ModelChoice & { inherit: boolean };
   allowedTools: string[];
+  board: { assignOthers: boolean; dispatch: boolean };
   connectors: ConnectorConfig[];
   computer: ComputerConfig;
 };
@@ -49,9 +50,9 @@ export const TOOL_GROUPS = [
   ['other', 'Other tools', 'Additional tools discovered in this Hermes runtime.'],
 ] as const;
 export function draftProfile(agent: Agent): AgentProfile {
-  if (agent.profile) return { ...agent.profile, computer: agent.profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
+  if (agent.profile) return { ...agent.profile, allowedTools: [...new Set([...(agent.profile.allowedTools || []), 'mcp_open_harness_task'])], board: agent.profile.board || { assignOthers: false, dispatch: false }, computer: agent.profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
   return { id: agent.id, revision: 0, name: agent.name, role: agent.role, description: agent.description, tone: agent.tone,
-    prompt: { enabled: true, text: agent.instructions }, model: { ...DEFAULT_MODEL, inherit: true }, allowedTools: [], connectors: [], computer: { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
+    prompt: { enabled: true, text: agent.instructions }, model: { ...DEFAULT_MODEL, inherit: true }, allowedTools: ['mcp_open_harness_task'], board: { assignOthers: false, dispatch: false }, connectors: [], computer: { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
 }
 export function profileAgent(profile: AgentProfile, memory: string[] = []): Agent {
   return { id: profile.id, name: profile.name, role: profile.role, description: profile.description, tone: profile.tone, instructions: profile.prompt.text, memory, profile };

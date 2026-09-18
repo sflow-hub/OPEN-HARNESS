@@ -9,6 +9,11 @@ const controlUrl = process.env.OPEN_HARNESS_CONTROL_URL;
 const sitesToken = process.env.OPEN_HARNESS_SITES_TOKEN;
 const tools = [
   {
+    name: "task",
+    description: "Read and manage board tasks. You may always work on your own or unassigned cards; changing another agent's card requires that profile's board permission.",
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "columns", "get", "create", "update", "move", "comment", "check", "additem", "claim", "release", "run"] }, taskId: { type: "string" }, boardId: { type: "string" }, input: { type: "object" } }, required: ["action"], additionalProperties: false },
+  },
+  {
     name: "delegate_named_agent",
     description: "Assign a bounded task to another named Open Harness agent and return the durable run ID. Delegation depth is limited to two and cycles are rejected.",
     inputSchema: { type: "object", properties: { agentId: { type: "string", description: "Target agent ID" }, prompt: { type: "string" } }, required: ["agentId", "prompt"], additionalProperties: false },
@@ -37,7 +42,7 @@ async function dispatch(message) {
   if (message.method === "tools/list") return { tools };
   if (message.method === "tools/call") {
     const name = message.params?.name, args = message.params?.arguments || {};
-    const value = name === "delegate_named_agent" ? await call("/internal/handoff", args) : name === "create_open_harness_routine" ? await call("/internal/schedule", args) : (() => { throw new Error(`Unknown tool: ${name}`); })();
+    const value = name === "delegate_named_agent" ? await call("/internal/handoff", args) : name === "create_open_harness_routine" ? await call("/internal/schedule", args) : name === "task" ? await call("/internal/task", args) : (() => { throw new Error(`Unknown tool: ${name}`); })();
     return { content: [{ type: "text", text: JSON.stringify(value) }] };
   }
   if (message.method === "notifications/initialized") return undefined;
