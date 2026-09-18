@@ -39,6 +39,7 @@ export const TOOL_GROUPS = [
   ['files', 'Files', 'Read, search, create, and edit workspace files.'],
   ['web', 'Web', 'Search the web and extract information from pages.'],
   ['browser', 'Browser', 'Navigate pages, interact with websites, and take screenshots.'],
+  ['desktop', 'Desktop control', 'Control the selected graphical desktop. Requires Desktop access in this agent’s Computer settings.'],
   ['memory', 'Memory', 'Recall and update durable preferences and context.'],
   ['skills', 'Skills', 'Discover, use, and save reusable skills.'],
   ['recall', 'Session recall', 'Find relevant information from earlier conversations.'],
@@ -54,4 +55,10 @@ export function draftProfile(agent: Agent): AgentProfile {
 }
 export function profileAgent(profile: AgentProfile, memory: string[] = []): Agent {
   return { id: profile.id, name: profile.name, role: profile.role, description: profile.description, tone: profile.tone, instructions: profile.prompt.text, memory, profile };
+}
+export function runToolGrants(profile: AgentProfile): string[] {
+  return profile.allowedTools.filter(id =>
+    (profile.computer.desktop !== 'none' || id !== 'computer_use') &&
+    (!id.startsWith('mcp_') || id.startsWith('mcp_open_harness_') || profile.connectors.some(connector => connector.enabled && id.startsWith(`mcp_${connector.name}_`)))
+  );
 }

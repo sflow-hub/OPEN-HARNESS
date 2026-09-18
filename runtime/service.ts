@@ -3,11 +3,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { mkdirSync, writeFileSync, readdirSync, readFileSync, statSync, unlinkSync, existsSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { Profiles, ProfileError, validateModel, validId } from "./profiles";
+import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
 import { discoverTools, discoverModels, nativeRuntimeProbe, prepareProfile, runtimeProbe } from "./profile-runtime";
 import { profileAgent, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
 import { Store, type RunRow } from "./db";
 import { SecretStore } from "./secrets";
+import { validateComputerTarget } from './computer-validation';
 import { HermesGateway, dockerStatus, ensureContainer } from "./hermes";
 import { coordinationSocket } from "./coordination-socket";
 import { TaskError, TaskStore } from "./tasks";
@@ -92,17 +93,29 @@ async function executeRemote(run: RunRow, snapshot: AgentProfile & { effectiveMo
 async function waitRunnerCommand(commandId: string) {
   for (;;) { const command = machines.command(commandId); if (!command) throw new Error('Transfer command disappeared.'); if (command.state === 'completed') return command.result; if (command.state === 'failed') throw new Error(String((command.result as { error?: string } | null)?.error || 'Runner transfer command failed.')); await new Promise(resolve => setTimeout(resolve, 500)); }
 }
-async function performTransfer(transfer: { id: string; agentId: string; sourceMachineId: string; destinationMachineId: string }) {
+async function performTransfer(transfer: { id: string; agentId: string; sourceMachineId: string; destinationMachineId: string; pendingProfile?: AgentProfile }) {
   try {
     while (store.agentBusy(transfer.agentId)) await new Promise(resolve => setTimeout(resolve, 500));
     machines.setTransfer(transfer.id, 'exporting', 'Exporting managed files, memory, and skills.');
-    const bundle = transfer.sourceMachineId === 'local' ? exportAgentFiles(root, transfer.agentId) : (() => { const source = machines.get(transfer.sourceMachineId); if (source.status === 'revoked') throw new Error('Source computer was revoked before export.'); return waitRunnerCommand(machines.enqueue(transfer.sourceMachineId, transfer.agentId, 'export-agent', {}).id) as Promise<TransferBundle>; })();
+    const bundle = transfer.sourceMachineId === 'local' ? exportAgentFiles(root, transfer.agentId) : (() => { const source = machines.get(transfer.sourceMachineId); if (source.status === 'revoked') throw new Error('Source computer was revoked before export.'); return waitRunnerCommand(machines.enqueue(transfer.sourceMachineId, transfer.agentId, 'export-agent', { transferId: transfer.id }).id) as Promise<TransferBundle>; })();
     const resolvedBundle = await bundle;
     machines.setTransfer(transfer.id, 'importing', 'Importing data on the destination computer.');
-    const result = transfer.destinationMachineId === 'local' ? importAgentFiles(root, transfer.agentId, resolvedBundle) : await waitRunnerCommand(machines.enqueue(transfer.destinationMachineId, transfer.agentId, 'import-agent', { bundle: resolvedBundle }).id) as { checksum: string };
+    const pending = transfer.pendingProfile, effective = pending ? profiles.effective(pending) : null;
+    const requiredSecrets = pending ? [effective?.credentialRef || '', ...pending.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(name => Boolean(name) && !secrets.has(name) && !process.env[name]) : [];
+    let result: { checksum: string; validated?: boolean };
+    if (transfer.destinationMachineId === 'local') {
+      if (pending) validateComputerTarget(pending, machines.get('local').capabilities, requiredSecrets, name => secrets.has(name) || Boolean(process.env[name]));
+      result = { ...importAgentFiles(root, transfer.agentId, resolvedBundle), validated: true };
+      if (pending?.computer.desktop !== 'none' && pending && process.env.OPEN_HARNESS_MOCK !== '1') {
+        const check = { action: 'computer', desktop: pending.computer.desktop };
+        const tested = pending.computer.desktop === 'existing' ? nativeRuntimeProbe(join(root, 'agents', pending.id, 'profile'), check) : await runtimeProbe(ensureContainer(pending.id, root, pending.computer), check);
+        if (!tested.ok) throw new Error(String(tested.message || 'Desktop control is not ready on this computer.'));
+      }
+    } else result = await waitRunnerCommand(machines.enqueue(transfer.destinationMachineId, transfer.agentId, 'import-agent', { transferId: transfer.id, bundle: resolvedBundle, profile: pending, requiredSecrets }).id) as { checksum: string; validated?: boolean };
     machines.setTransfer(transfer.id, 'verifying', 'Verifying transferred files.'); if (result.checksum !== resolvedBundle.checksum) throw new Error('Destination checksum does not match the source.');
+    if (transfer.pendingProfile) { profiles.applyTransferredProfile(transfer.pendingProfile); machines.reserve(transfer.sourceMachineId, transfer.agentId, false); machines.reserve(transfer.destinationMachineId, transfer.agentId, transfer.pendingProfile.computer.reserveMachine); }
     machines.setTransfer(transfer.id, 'completed', `Transfer verified (${resolvedBundle.files.length} files). Source data was preserved.`);
-  } catch (error) { machines.setTransfer(transfer.id, 'failed', `${error instanceof Error ? error.message : 'Transfer failed.'} Source data was preserved.`); }
+  } catch (error) { if (transfer.pendingProfile) machines.reserve(transfer.destinationMachineId, transfer.agentId, false); machines.setTransfer(transfer.id, 'failed', `${error instanceof Error ? error.message : 'Transfer failed.'} Source assignment and data were preserved.`); }
   void pump();
 }
 function ensureProfileDirs(id: string) { validId(id); for (const folder of ['profile', 'private', 'managed']) mkdirSync(join(root, 'agents', id, folder), { recursive: true }); }
@@ -347,6 +360,8 @@ const server = createServer(async (req, res) => {
         return json(res, 201, machines.createPairing(input, publicUrl));
       }
     }
+    const machineSecretsMatch = url.pathname.match(/^\/v1\/machines\/([^/]+)\/secrets$/);
+    if (machineSecretsMatch && req.method === 'GET') { machines.get(decodeURIComponent(machineSecretsMatch[1])); return json(res, 200, { secrets: secrets.names(), storage: 'coordinator' }); }
     const machineMatch = url.pathname.match(/^\/v1\/machines\/([^/]+)\/(test|reconnect|revoke)$/);
     if (machineMatch && req.method === 'POST') {
       const machineId = decodeURIComponent(machineMatch[1]), action = machineMatch[2], input = await body(req);
@@ -355,7 +370,8 @@ const server = createServer(async (req, res) => {
         if (!checked.ok || !profile || process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, checked);
         try {
           ensureProfileDirs(profile.id);
-          const result = machineId === 'local' ? profile.computer.access === 'direct' ? nativeRuntimeProbe(join(root, 'agents', profile.id, 'profile'), { action: 'computer' }) : await runtimeProbe(ensureContainer(profile.id, root, profile.computer), { action: 'computer' }) : await runnerProbe(profile, 'probe-runtime', { action: 'computer' });
+          const check = { action: 'computer', desktop: profile.computer.desktop };
+          const result = machineId === 'local' ? profile.computer.access === 'direct' ? nativeRuntimeProbe(join(root, 'agents', profile.id, 'profile'), check) : await runtimeProbe(ensureContainer(profile.id, root, profile.computer), check) : await runnerProbe(profile, 'probe-runtime', check);
           return json(res, 200, { ...checked, ok: Boolean(result.ok), message: String(result.message || checked.message), machine: checked.machine });
         } catch (error) { return json(res, 200, { ...checked, ok: false, message: error instanceof Error ? error.message : 'Computer access check failed.' }); }
       }
@@ -366,7 +382,9 @@ const server = createServer(async (req, res) => {
     if (agentComputerMatch && req.method === 'POST') {
       const agentId = validId(decodeURIComponent(agentComputerMatch[1])), input = await body(req), profile = profiles.get(agentId); if (!profile) return json(res, 404, { error: 'Agent profile not found.' });
       if (agentComputerMatch[2] === 'stop') { const runs = store.listRuns().filter(run => run.agent_id === agentId && ['queued','running','waiting_approval','waiting_input'].includes(run.state)); let stopped = 0; for (const run of runs) stopped += await stopRunTree(run.id); return json(res, 200, { ok: true, stopped, pending: remoteActive.has(runs[0]?.id) }); }
-      return json(res, 202, machines.transfer(agentId, profile.computer.machineId, String(input.destinationMachineId || '')));
+      const destination = String(input.destinationMachineId || ''), pending = { ...profile, computer: { ...profile.computer, machineId: destination } };
+      const transfer = machines.transfer(agentId, profile.computer.machineId, destination, pending); void performTransfer(transfer);
+      return json(res, 202, transfer);
     }
     if (req.method === "POST" && url.pathname === "/v1/agents/sync") {
       const input = await body(req);
@@ -388,9 +406,10 @@ const server = createServer(async (req, res) => {
       const profile = profiles.get(id);
       if (action === 'profile' && req.method === 'PUT') {
         const input = await body(req); if (input.id !== id) throw new ProfileError('Profile ID does not match the selected agent.');
-        const current = profiles.get(id); machines.canAssign(input.computer?.machineId || 'local', id);
-        const saved = profiles.save(input); ensureProfileDirs(id); if (current && current.computer.machineId !== saved.computer.machineId) machines.reserve(current.computer.machineId, id, false); machines.reserve(saved.computer.machineId, id, saved.computer.reserveMachine);
-        if (current && current.computer.machineId !== saved.computer.machineId) void performTransfer(machines.transfer(id, current.computer.machineId, saved.computer.machineId));
+        const current = profiles.get(id), desired = validateProfile(input); if (machines.transferring(id)) throw new MachineError('This agent is already transferring. Wait for it to finish before editing its computer.', 409); machines.canAssign(desired.computer.machineId, id);
+        const moving = Boolean(current && current.computer.machineId !== desired.computer.machineId), saved = profiles.save(moving ? { ...desired, computer: current!.computer } : desired); ensureProfileDirs(id);
+        if (moving) { const pending = { ...desired, revision: saved.revision }; machines.reserve(desired.computer.machineId, id, desired.computer.reserveMachine); void performTransfer(machines.transfer(id, current!.computer.machineId, desired.computer.machineId, pending)); }
+        else machines.reserve(saved.computer.machineId, id, saved.computer.reserveMachine);
         return json(res, 200, profileResponse(saved));
       }
       if (!profile) return json(res, 404, { error: 'Agent profile not found.' });

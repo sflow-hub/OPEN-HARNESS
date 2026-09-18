@@ -1,10 +1,10 @@
 import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);
 
 // runtime/runner.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync3, chmodSync as chmodSync2, readdirSync as readdirSync2, unlinkSync } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync4, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
 import { homedir, hostname, platform as platform2, arch } from "node:os";
 import { join as join3, resolve as resolve3 } from "node:path";
-import { spawnSync as spawnSync3 } from "node:child_process";
+import { spawnSync as spawnSync4 } from "node:child_process";
 
 // runtime/hermes.ts
 import { spawn, spawnSync } from "node:child_process";
@@ -285,7 +285,7 @@ var mockTools = [
   ["delegate_task", "delegation"]
 ].map(([id, group]) => ({ id, group, name: id.replaceAll("_", " "), description: "Deterministic test runtime tool.", available: true }));
 function groupTool(tool) {
-  const group = { file: "files", terminal: "terminal", process: "terminal", code_execution: "code", execute_code: "code", web: "web", browser: "browser", memory: "memory", skills: "skills", session_search: "recall", delegation: "delegation", delegate: "delegation", cronjob: "scheduling" }[tool.group] || (tool.id.startsWith("mcp_") ? "mcp" : tool.group);
+  const group = { file: "files", terminal: "terminal", process: "terminal", code_execution: "code", execute_code: "code", web: "web", browser: "browser", computer_use: "desktop", memory: "memory", skills: "skills", session_search: "recall", delegation: "delegation", delegate: "delegation", cronjob: "scheduling" }[tool.group] || (tool.id.startsWith("mcp_") ? "mcp" : tool.group);
   return { ...tool, group };
 }
 function runtimeProbe(container, input) {
@@ -317,6 +317,15 @@ function runtimeProbe(container, input) {
     });
     child.stdin.end(JSON.stringify(input) + "\n");
   });
+}
+function nativeRuntimeProbe(profileHome, input) {
+  const executable = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean).find((name) => spawnSync2(name, ["-c", "import hermes_cli, open_harness_policy"], { stdio: "ignore", timeout: 8e3 }).status === 0);
+  if (!executable) throw new Error("Direct access needs the Hermes host runtime. Finish the direct-access setup on this computer.");
+  const result = spawnSync2(executable, [join(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(input) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: profileHome }, maxBuffer: 5e6, timeout: 25e3 });
+  if (result.status || !result.stdout) throw new Error(result.stderr || "Direct computer access check failed.");
+  const value = JSON.parse(result.stdout);
+  if (value.error) throw new Error(String(value.error));
+  return value;
 }
 function atomic(path, data) {
   writeFileSync(`${path}.tmp`, data, { mode: 384 });
@@ -422,16 +431,152 @@ function importAgentFiles(stateRoot2, agentId, bundle) {
   return { checksum, files: bundle.files.length };
 }
 
+// runtime/secrets.ts
+import { chmodSync as chmodSync2, existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname2 } from "node:path";
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { createHash as createHash3 } from "node:crypto";
+var service = "dev.openharness.secrets";
+function command(name, args2, input) {
+  return spawnSync3(name, args2, { input, encoding: "utf8", timeout: 8e3, windowsHide: true, maxBuffer: 2e6 });
+}
+var account = (path) => `open-harness-${createHash3("sha256").update(path).digest("hex").slice(0, 16)}`;
+function loadVault(path) {
+  if (process.env.OPEN_HARNESS_DISABLE_OS_VAULT === "1") return null;
+  try {
+    if (process.platform === "darwin") {
+      const result = command("security", ["find-generic-password", "-s", service, "-a", account(path), "-w"]);
+      return result.status === 0 ? { value: result.stdout.trim(), backend: "macOS Keychain" } : null;
+    }
+    if (process.platform === "linux" && process.env.DBUS_SESSION_BUS_ADDRESS) {
+      const result = command("secret-tool", ["lookup", "application", service, "workspace", account(path)]);
+      return result.status === 0 && result.stdout.trim() ? { value: result.stdout.trim(), backend: "system password vault" } : null;
+    }
+    if (process.platform === "win32") {
+      const script = "$p=$args[0];if(Test-Path -LiteralPath $p){$b=[IO.File]::ReadAllBytes($p);$d=[Security.Cryptography.ProtectedData]::Unprotect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($d))}";
+      const result = command("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, `${process.env.APPDATA || dirname2(process.execPath)}\\Open Harness\\${account(path)}.dpapi`]);
+      return result.status === 0 && result.stdout ? { value: result.stdout, backend: "Windows account vault" } : null;
+    }
+  } catch {
+  }
+  return null;
+}
+function saveVault(path, value) {
+  if (process.env.OPEN_HARNESS_DISABLE_OS_VAULT === "1") return null;
+  try {
+    if (process.platform === "darwin") return command("security", ["add-generic-password", "-U", "-s", service, "-a", account(path), "-w", value]).status === 0 ? "macOS Keychain" : null;
+    if (process.platform === "linux" && process.env.DBUS_SESSION_BUS_ADDRESS) return command("secret-tool", ["store", "--label=Open Harness credentials", "application", service, "workspace", account(path)], value).status === 0 ? "system password vault" : null;
+    if (process.platform === "win32") {
+      const target = `${process.env.APPDATA || dirname2(process.execPath)}\\Open Harness\\${account(path)}.dpapi`;
+      const script = "$p=$args[0];$v=[Console]::In.ReadToEnd();$d=Split-Path -Parent $p;New-Item -ItemType Directory -Force -Path $d|Out-Null;$b=[Text.Encoding]::UTF8.GetBytes($v);$e=[Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[IO.File]::WriteAllBytes($p,$e)";
+      return command("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, target], value).status === 0 ? "Windows account vault" : null;
+    }
+  } catch {
+  }
+  return null;
+}
+var SecretStore = class {
+  constructor(path) {
+    this.path = path;
+    this.backend = "restricted local file";
+    mkdirSync3(dirname2(path), { recursive: true });
+    const vaulted = loadVault(path);
+    try {
+      this.values = vaulted?.value ? JSON.parse(vaulted.value) : existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : {};
+    } catch {
+      this.values = {};
+    }
+    if (vaulted) this.backend = vaulted.backend;
+    if (!this.values.controlToken) {
+      this.values.controlToken = crypto.randomUUID() + crypto.randomUUID();
+      this.save();
+    }
+    if (existsSync3(path)) chmodSync2(path, 384);
+  }
+  get token() {
+    return this.values.controlToken;
+  }
+  set(name, value) {
+    if (!/^[A-Z][A-Z0-9_]{1,80}$/.test(name)) throw new Error("Invalid secret name.");
+    this.values[name] = value;
+    this.save();
+  }
+  has(name) {
+    return Boolean(this.values[name]);
+  }
+  names() {
+    return Object.keys(this.values).filter((key) => key !== "controlToken");
+  }
+  environment() {
+    return Object.fromEntries(Object.entries(this.values).filter(([key]) => key !== "controlToken"));
+  }
+  save() {
+    const serialized = JSON.stringify(this.values);
+    const backend = saveVault(this.path, serialized);
+    if (backend) {
+      this.backend = backend;
+      if (existsSync3(this.path)) unlinkSync(this.path);
+      return;
+    }
+    this.backend = "restricted local file";
+    writeFileSync3(this.path, JSON.stringify(this.values, null, 2), { mode: 384 });
+    chmodSync2(this.path, 384);
+  }
+};
+
+// lib/runner-crypto.ts
+function bytes(value) {
+  const binary = atob(value), output = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) output[index] = binary.charCodeAt(index);
+  return output;
+}
+async function generateRunnerKeyPair() {
+  const pair2 = await crypto.subtle.generateKey({ name: "RSA-OAEP", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["encrypt", "decrypt"]);
+  return { publicKey: JSON.stringify(await crypto.subtle.exportKey("jwk", pair2.publicKey)), privateKey: JSON.stringify(await crypto.subtle.exportKey("jwk", pair2.privateKey)) };
+}
+async function decryptRunnerSecret(privateKey, payload) {
+  if (payload.version !== 1) throw new Error("Unsupported encrypted credential version.");
+  const rsa = await crypto.subtle.importKey("jwk", JSON.parse(privateKey), { name: "RSA-OAEP", hash: "SHA-256" }, false, ["decrypt"]);
+  const rawKey = await crypto.subtle.decrypt({ name: "RSA-OAEP" }, rsa, bytes(payload.key));
+  const aes = await crypto.subtle.importKey("raw", rawKey, { name: "AES-GCM" }, false, ["decrypt"]);
+  const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes(payload.iv) }, aes, bytes(payload.data));
+  return new TextDecoder().decode(clear);
+}
+
+// runtime/computer-validation.ts
+import { accessSync, constants, statSync } from "node:fs";
+function validateComputerTarget(profile, capabilities2, requiredSecrets = [], hasSecret = () => true) {
+  const issues = [];
+  if (profile.computer.access === "private" && !capabilities2.container) issues.push("Container execution is unavailable. Install and start Docker, then retry the transfer.");
+  if (profile.computer.access === "direct" && !capabilities2.direct) issues.push(capabilities2.detail || "The Hermes host runtime is unavailable. Finish direct-access setup, then retry the transfer.");
+  if (profile.computer.desktop === "existing" && !capabilities2.desktop) issues.push("The existing desktop is unavailable. Sign in to a graphical session and grant the runner the requested desktop permissions.");
+  if (profile.computer.desktop === "virtual" && !capabilities2.virtualDesktop) issues.push("A private virtual desktop requires a Linux runner with container support.");
+  if (profile.computer.access === "folders") {
+    for (const folder of profile.computer.folders) {
+      try {
+        if (!statSync(folder.path).isDirectory()) throw new Error("not a directory");
+        accessSync(folder.path, constants.R_OK | (folder.mode === "write" ? constants.W_OK : 0));
+      } catch {
+        issues.push(`${folder.path} is not an accessible ${folder.mode === "write" ? "read/write" : "read-only"} folder on this computer.`);
+      }
+    }
+  }
+  for (const name of [...new Set(requiredSecrets.filter(Boolean))]) if (!hasSecret(name)) issues.push(`Credential ${name} is missing on this computer. Add it in Agent settings, then retry the transfer.`);
+  if (issues.length) throw new Error(issues.join(" "));
+  return { ok: true };
+}
+
 // runtime/runner.ts
 var args = /* @__PURE__ */ new Map();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith("--")) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith("--") ? "" : process.argv[++i] || "");
 var stateRoot = resolve3(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join3(homedir(), ".open-harness-runner"));
 var credentialPath = join3(stateRoot, "connection.json");
 var spool = join3(stateRoot, "spool");
-mkdirSync3(spool, { recursive: true });
+mkdirSync4(spool, { recursive: true });
+var runnerSecrets = new SecretStore(join3(stateRoot, "secrets.json"));
 function capabilities() {
   const container = dockerStatus().available;
-  const python = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean).some((executable) => spawnSync3(executable, ["-c", "import hermes_cli, open_harness_policy"], { stdio: "ignore" }).status === 0);
+  const python = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean).some((executable) => spawnSync4(executable, ["-c", "import hermes_cli, open_harness_policy"], { stdio: "ignore" }).status === 0);
   return { container, direct: python, desktop: Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === "darwin" || process.platform === "win32"), virtualDesktop: process.platform === "linux" && container, detail: python ? "Hermes host runtime is installed." : "Install the Hermes host runtime to enable direct access." };
 }
 async function pair() {
@@ -439,15 +584,22 @@ async function pair() {
   if (!coordinator || !code) throw new Error("Use --coordinator URL and --pairing-code CODE, or keep an existing runner connection.");
   const target = new URL(coordinator), loopback = ["localhost", "127.0.0.1", "::1"].includes(target.hostname);
   if (target.protocol !== "https:" && !(target.protocol === "http:" && loopback)) throw new Error("Remote coordinators must use HTTPS. Plain HTTP is accepted only for a coordinator on this computer.");
-  const response = await fetch(`${coordinator}/v1/runner/pair`, { method: "POST", headers: { "Content-Type": "application/json", ...sitesToken ? { "OAI-Sites-Authorization": `Bearer ${sitesToken}` } : {} }, body: JSON.stringify({ code, name: hostname(), platform: platform2(), arch: arch(), capabilities: capabilities() }) });
+  const encryption = await generateRunnerKeyPair();
+  const response = await fetch(`${coordinator}/v1/runner/pair`, { method: "POST", headers: { "Content-Type": "application/json", ...sitesToken ? { "OAI-Sites-Authorization": `Bearer ${sitesToken}` } : {} }, body: JSON.stringify({ code, name: hostname(), platform: platform2(), arch: arch(), capabilities: capabilities(), encryptionPublicKey: encryption.publicKey }) });
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || "Pairing failed.");
-  const saved = { coordinator, machineId: value.machineId, token: value.token, ...sitesToken ? { sitesToken } : {} };
-  writeFileSync3(credentialPath, JSON.stringify(saved, null, 2), { mode: 384 });
-  chmodSync2(credentialPath, 384);
+  const saved = { coordinator, machineId: value.machineId, token: value.token, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey, ...sitesToken ? { sitesToken } : {} };
+  writeFileSync4(credentialPath, JSON.stringify(saved, null, 2), { mode: 384 });
+  chmodSync3(credentialPath, 384);
   return saved;
 }
-var credentials = args.has("pairing-code") ? await pair() : existsSync3(credentialPath) ? JSON.parse(readFileSync2(credentialPath, "utf8")) : await pair();
+var credentials = args.has("pairing-code") ? await pair() : existsSync4(credentialPath) ? JSON.parse(readFileSync3(credentialPath, "utf8")) : await pair();
+if (!credentials.encryptionPrivateKey || !credentials.encryptionPublicKey) {
+  const encryption = await generateRunnerKeyPair();
+  credentials = { ...credentials, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey };
+  writeFileSync4(credentialPath, JSON.stringify(credentials, null, 2), { mode: 384 });
+  chmodSync3(credentialPath, 384);
+}
 var savedTarget = new URL(credentials.coordinator);
 var savedLoopback = ["localhost", "127.0.0.1", "::1"].includes(savedTarget.hostname);
 if (savedTarget.protocol !== "https:" && !(savedTarget.protocol === "http:" && savedLoopback)) throw new Error("The saved remote coordinator URL is not HTTPS. Pair this runner again using a secure URL.");
@@ -473,110 +625,126 @@ var active = /* @__PURE__ */ new Map();
 var admittedCommands = /* @__PURE__ */ new Set();
 async function deliver(record) {
   const file = join3(spool, `${record.id}.json`);
-  if (!existsSync3(file)) writeFileSync3(file, JSON.stringify(record), { mode: 384 });
+  if (!existsSync4(file)) writeFileSync4(file, JSON.stringify(record), { mode: 384 });
   await request(record.path, { method: "POST", body: JSON.stringify(record.body) }, true);
-  if (existsSync3(file)) unlinkSync(file);
+  if (existsSync4(file)) unlinkSync2(file);
 }
 async function flushSpool() {
   for (const name of readdirSync2(spool).filter((name2) => name2.endsWith(".json"))) {
     try {
-      await deliver(JSON.parse(readFileSync2(join3(spool, name), "utf8")));
+      await deliver(JSON.parse(readFileSync3(join3(spool, name), "utf8")));
     } catch {
     }
   }
 }
-async function emit(command, event) {
+async function emit(command2, event) {
   const eventId = crypto.randomUUID();
-  await deliver({ id: eventId, path: `/v1/runner/commands/${command.id}/events`, body: { eventId, runId: command.payload.runId, event } });
+  await deliver({ id: eventId, path: `/v1/runner/commands/${command2.id}/events`, body: { eventId, runId: command2.payload.runId, event } });
 }
-async function finish(command, result, error) {
-  await deliver({ id: `complete-${command.id}`, path: `/v1/runner/commands/${command.id}/complete`, body: error ? { error: error instanceof Error ? error.message : String(error) } : { result } });
+async function finish(command2, result, error) {
+  await deliver({ id: `complete-${command2.id}`, path: `/v1/runner/commands/${command2.id}/complete`, body: error ? { error: error instanceof Error ? error.message : String(error) } : { result } });
 }
-async function run(command) {
-  const payload = command.payload;
+async function run(command2) {
+  const payload = command2.payload;
   const profile = payload.snapshot, direct = profile.computer.access === "direct";
   try {
     const agentRoot = join3(stateRoot, "agents", profile.id), shared = join3(stateRoot, "shared");
-    mkdirSync3(shared, { recursive: true });
+    mkdirSync4(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean);
-    const localSecrets = Object.fromEntries(needed.filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
+    const availableSecrets = { ...runnerSecrets.environment(), ...process.env };
+    const localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]]));
     const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...payload.secrets }) };
     const coordinatorForContainer = credentials.coordinator.replace("://localhost", "://host.docker.internal").replace("://127.0.0.1", "://host.docker.internal");
     prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join3(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { controlUrl: coordinatorForContainer, sitesToken: credentials.sitesToken });
     const gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join3(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join3(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
-    gateway.on("event", (event) => void emit(command, event));
+    gateway.on("event", (event) => void emit(command2, event));
     await gateway.start();
     const session = await gateway.request("session.create", { cwd: direct ? shared : "/workspace/shared", profile: "default" });
     const sessionId = String(session?.session_id || session?.id || "");
     if (!sessionId) throw new Error("Hermes did not return a session ID.");
-    active.set(payload.runId, { gateway, sessionId, commandId: command.id });
+    active.set(payload.runId, { gateway, sessionId, commandId: command2.id });
     const result = await gateway.submitPrompt(sessionId, payload.prompt);
     active.delete(payload.runId);
-    await finish(command, result);
+    await finish(command2, result);
   } catch (error) {
     active.delete(payload.runId);
-    await finish(command, void 0, error);
+    await finish(command2, void 0, error);
   }
 }
-async function control(command) {
+async function control(command2) {
   try {
-    if (command.kind === "export-agent") {
-      await finish(command, exportAgentFiles(stateRoot, command.agentId));
+    if (command2.kind === "store-secret") {
+      const name = String(command2.payload.name || ""), value = await decryptRunnerSecret(credentials.encryptionPrivateKey, command2.payload.encrypted);
+      runnerSecrets.set(name, value);
+      await finish(command2, { stored: true, name, backend: runnerSecrets.backend });
       return;
     }
-    if (command.kind === "import-agent") {
-      const bundle = command.payload.bundle || (await request(`/v1/runner/transfers/${encodeURIComponent(command.payload.transferId)}`)).bundle;
-      await finish(command, importAgentFiles(stateRoot, command.agentId, bundle));
+    if (command2.kind === "export-agent") {
+      await finish(command2, exportAgentFiles(stateRoot, command2.agentId));
       return;
     }
-    if (command.kind.startsWith("probe-")) {
-      const profile = command.payload.profile, direct = profile.computer.access === "direct", shared = join3(stateRoot, "shared"), agentRoot = join3(stateRoot, "agents", profile.id);
-      mkdirSync3(shared, { recursive: true });
-      const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => process.env[name]).map((name) => [name, process.env[name]])), secretSource = { environment: () => ({ ...localSecrets, ...command.payload.secrets || {} }) };
-      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command.payload.coordinationToken || "", `probe-${command.id}`, direct ? { cwd: shared, coordinationCommand: join3(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { sitesToken: credentials.sitesToken });
-      if (command.kind === "probe-runtime") {
-        const probeInput = { ...command.payload.input || {} };
+    if (command2.kind === "import-agent") {
+      const profile = command2.payload.profile;
+      if (profile) validateComputerTarget(profile, capabilities(), Array.isArray(command2.payload.requiredSecrets) ? command2.payload.requiredSecrets.map(String) : [], (name) => runnerSecrets.has(name) || Boolean(process.env[name]));
+      const bundle = command2.payload.bundle || (await request(`/v1/runner/transfers/${encodeURIComponent(command2.payload.transferId)}`)).bundle;
+      const imported = importAgentFiles(stateRoot, command2.agentId, bundle);
+      if (profile?.computer.desktop !== "none" && profile) {
+        const check = { action: "computer", desktop: profile.computer.desktop };
+        const result = profile.computer.desktop === "existing" ? nativeRuntimeProbe(join3(stateRoot, "agents", profile.id, "profile"), check) : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), check);
+        if (!result.ok) throw new Error(String(result.message || "Desktop control is not ready on the destination computer."));
+      }
+      await finish(command2, { ...imported, validated: true });
+      return;
+    }
+    if (command2.kind.startsWith("probe-")) {
+      const profile = command2.payload.profile, direct = profile.computer.access === "direct", shared = join3(stateRoot, "shared"), agentRoot = join3(stateRoot, "agents", profile.id);
+      mkdirSync4(shared, { recursive: true });
+      const availableSecrets = { ...runnerSecrets.environment(), ...process.env }, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]])), secretSource = { environment: () => ({ ...localSecrets, ...command2.payload.secrets || {} }) };
+      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command2.payload.coordinationToken || "", `probe-${command2.id}`, direct ? { cwd: shared, coordinationCommand: join3(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { sitesToken: credentials.sitesToken });
+      if (command2.kind === "probe-runtime") {
+        const probeInput = { ...command2.payload.input || {} };
+        if (probeInput.action === "computer") probeInput.desktop = profile.computer.desktop;
         if (probeInput.action === "connection" && !probeInput.apiKey) probeInput.apiKey = localSecrets[profile.effectiveModel.credentialRef] || "";
         if (probeInput.action === "mcp" && probeInput.env) {
           for (const name of Object.keys(probeInput.env)) if (!probeInput.env[name] && localSecrets[name]) probeInput.env[name] = localSecrets[name];
         }
         if (direct) {
-          const result = spawnSync3(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6 });
+          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6 });
           if (result.status || !result.stdout) throw new Error(result.stderr || "Native runtime probe failed.");
-          await finish(command, JSON.parse(result.stdout));
-        } else await finish(command, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), probeInput));
+          await finish(command2, JSON.parse(result.stdout));
+        } else await finish(command2, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), probeInput));
         return;
       }
       const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join3(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join3(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
-      if (command.kind === "probe-tools") {
+      if (command2.kind === "probe-tools") {
         const input = direct ? (() => {
-          const result = spawnSync3(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6 });
+          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6 });
           if (result.status || !result.stdout) throw new Error(result.stderr || "Tool discovery failed.");
           return JSON.parse(result.stdout);
         })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), { action: "catalog" });
-        await finish(command, { source: "runtime", tools: [...(input.tools || []).filter((tool) => tool.group !== "cronjob").map(groupTool), ...COORDINATION_TOOLS] });
+        await finish(command2, { source: "runtime", tools: [...(input.tools || []).filter((tool) => tool.group !== "cronjob").map(groupTool), ...COORDINATION_TOOLS] });
         return;
       }
       await gateway.start();
       try {
-        await finish(command, await discoverModels(gateway));
+        await finish(command2, await discoverModels(gateway));
       } finally {
         await gateway.stop();
       }
       return;
     }
-    const live = active.get(String(command.payload.runId));
+    const live = active.get(String(command2.payload.runId));
     if (!live) throw new Error("The requested run is no longer active on this runner.");
-    if (command.kind === "stop") {
+    if (command2.kind === "stop") {
       await live.gateway.request("session.interrupt", { session_id: live.sessionId }, 5e3).catch(() => {
       });
       await live.gateway.stop();
     }
-    if (command.kind === "steer") await live.gateway.request("session.steer", { session_id: live.sessionId, text: String(command.payload.text || "") });
-    if (command.kind === "approval") await live.gateway.request("approval.respond", { request_id: command.payload.requestId, decision: command.payload.decision });
-    await finish(command, { ok: true });
+    if (command2.kind === "steer") await live.gateway.request("session.steer", { session_id: live.sessionId, text: String(command2.payload.text || "") });
+    if (command2.kind === "approval") await live.gateway.request("approval.respond", { request_id: command2.payload.requestId, decision: command2.payload.decision });
+    await finish(command2, { ok: true });
   } catch (error) {
-    await finish(command, void 0, error);
+    await finish(command2, void 0, error);
   }
 }
 console.log(`Open Harness runner ${credentials.machineId} connected to ${credentials.coordinator}`);
@@ -585,13 +753,14 @@ var lastHeartbeat = 0;
 for (; ; ) {
   try {
     if (Date.now() - lastHeartbeat > 15e3) {
-      await request("/v1/runner/heartbeat", { method: "POST", body: JSON.stringify({ capabilities: capabilities(), activeCommandIds: [.../* @__PURE__ */ new Set([...admittedCommands, ...[...active.values()].map((item) => item.commandId)])] }) });
+      await request("/v1/runner/heartbeat", { method: "POST", body: JSON.stringify({ capabilities: capabilities(), encryptionPublicKey: credentials.encryptionPublicKey, activeCommandIds: [.../* @__PURE__ */ new Set([...admittedCommands, ...[...active.values()].map((item) => item.commandId)])] }) });
       lastHeartbeat = Date.now();
     }
     const result = await request("/v1/runner/commands");
-    for (const command of result.commands) {
-      admittedCommands.add(command.id);
-      void (command.kind === "run" ? run(command) : control(command)).finally(() => admittedCommands.delete(command.id));
+    for (const command2 of result.commands) {
+      if (admittedCommands.has(command2.id)) continue;
+      admittedCommands.add(command2.id);
+      void (command2.kind === "run" ? run(command2) : control(command2)).finally(() => admittedCommands.delete(command2.id));
     }
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);

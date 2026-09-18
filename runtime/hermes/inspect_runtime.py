@@ -21,6 +21,27 @@ def main(spec):
         with open(probe, 'w', encoding='utf-8') as handle:
             handle.write('ready')
         os.remove(probe)
+        if spec.get('desktop') in ('existing', 'virtual'):
+            import io
+            try:
+                from tools.computer_use.doctor import run_doctor
+            except ImportError:
+                return {'ok': False, 'message': 'Hermes desktop helper is missing. Run hermes computer-use install on this computer.'}
+            output = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(output):
+                    status = run_doctor(json_output=True)
+            except Exception:
+                return {'ok': False, 'message': 'Desktop helper could not run. Run hermes computer-use doctor in the runner session for setup instructions.'}
+            try:
+                report = json.loads(output.getvalue())
+            except (ValueError, TypeError):
+                return {'ok': False, 'message': 'Desktop helper is unavailable. Run hermes computer-use doctor in the runner session for setup instructions.'}
+            failed = [check for check in report.get('checks', []) if check.get('status') == 'fail']
+            if status or report.get('overall') != 'ok':
+                detail = ' '.join(f"{check.get('name', 'Desktop check')}: {check.get('hint') or check.get('message', 'needs attention')}" for check in failed[:4])
+                return {'ok': False, 'message': detail or 'Desktop helper is not ready. Run hermes computer-use doctor in the runner session.'}
+            return {'ok': True, 'message': 'Commands, files, and desktop control are ready.'}
         return {'ok': True, 'message': 'Commands and private file access are ready.'}
     if spec['action'] == 'mcp':
         return asyncio.run(asyncio.wait_for(mcp_check(spec), timeout=20))

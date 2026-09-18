@@ -87,7 +87,7 @@ OPEN_HARNESS_PUBLIC_URL=https://agents.example.com
 npm run harness:serve
 ```
 
-The dashboard token remains available only from the coordinator machine. Public runner endpoints accept scoped runner credentials or one-time pairing codes. A hosted Open Harness Site stores profiles, machines, runs, commands, and replayable events in D1; model credentials for hosted coordination belong in the selected runner's environment.
+The dashboard token remains available only from the coordinator machine. Public runner endpoints accept scoped runner credentials or one-time pairing codes. A hosted Open Harness Site stores profiles, machines, runs, commands, and replayable events in D1. Model credentials entered in the hosted dashboard are encrypted to the selected runner’s public key; the coordinator keeps ciphertext only, and the runner saves the decrypted value in its OS credential vault.
 
 Each agent starts with a private container. **Selected folders** mounts only the named host folders and preserves their read-only or read-write setting. **Direct computer access** runs Hermes under the runner's OS account; install the pinned host runtime and policy extension before selecting it:
 

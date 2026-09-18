@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
+import { DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, runToolGrants, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
 import type { Agent } from '../lib/types';
 
 export class ProfileError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
@@ -39,7 +39,7 @@ export function validateProfile(value: AgentProfile): AgentProfile {
     return { id: short(folder.id || crypto.randomUUID(), 'Folder ID', 100, true), path: folder.path.trim(), mode: folder.mode };
   });
   const computer: ComputerConfig = { machineId: short(computerInput.machineId || 'local', 'Machine', 100, true), access: computerInput.access, desktop: computerInput.desktop, reserveMachine: Boolean(computerInput.reserveMachine), folders: computerInput.access === 'folders' ? folders : [], resources: { cpu: Math.round(resources.cpu * 100) / 100, memoryMb: Math.round(resources.memoryMb), concurrency: resources.concurrency } };
-  return { id: validId(value.id), revision: value.revision, name: short(value.name, 'Name', 30, true).trim(), role: short(value.role, 'Role', 60, true).trim(), description: short(value.description, 'Description', 180), tone: value.tone, prompt: { enabled: value.prompt.enabled, text: short(value.prompt.text, 'System prompt', 12000) }, model: { ...validateModel(value.model.inherit ? { ...DEFAULT_MODEL, ...value.model, model: value.model.model || DEFAULT_MODEL.model } : value.model), inherit: value.model.inherit }, allowedTools: [...new Set(value.allowedTools)], connectors, computer };
+  return { id: validId(value.id), revision: value.revision, name: short(value.name, 'Name', 30, true).trim(), role: short(value.role, 'Role', 60, true).trim(), description: short(value.description, 'Description', 180), tone: value.tone, prompt: { enabled: value.prompt.enabled, text: short(value.prompt.text, 'System prompt', 12000) }, model: { ...validateModel(value.model.inherit ? { ...DEFAULT_MODEL, ...value.model, model: value.model.model || DEFAULT_MODEL.model } : value.model), inherit: value.model.inherit }, allowedTools: [...new Set(value.allowedTools)].filter(id => computer.desktop !== 'none' || id !== 'computer_use'), connectors, computer };
 }
 export class Profiles {
   constructor(readonly db: DatabaseSync) {
@@ -62,6 +62,13 @@ export class Profiles {
     try { this.db.prepare('INSERT INTO agent_profiles VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(profile.id, profile.revision, JSON.stringify(profile)); this.db.prepare('INSERT INTO profile_revisions VALUES(?,?,?)').run(profile.id, profile.revision, JSON.stringify(profile)); this.db.prepare(`INSERT INTO agents(id,name,role,instructions,config_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role=excluded.role,instructions=excluded.instructions,updated_at=excluded.updated_at`).run(profile.id, profile.name, profile.role, profile.prompt.text, '{}', new Date().toISOString()); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return profile;
   }
+  applyTransferredProfile(input: AgentProfile) {
+    const current = this.get(input.id); if (!current) throw new ProfileError('Agent profile not found.', 404);
+    const profile = validateProfile({ ...input, revision: current.revision });
+    this.db.exec('BEGIN IMMEDIATE');
+    try { this.db.prepare('UPDATE agent_profiles SET json=? WHERE id=?').run(JSON.stringify(profile), profile.id); this.db.prepare('UPDATE profile_revisions SET json=? WHERE agent_id=? AND revision=?').run(JSON.stringify(profile), profile.id, profile.revision); this.db.prepare('UPDATE agents SET name=?,role=?,instructions=?,updated_at=? WHERE id=?').run(profile.name, profile.role, profile.prompt.text, new Date().toISOString(), profile.id); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    return profile;
+  }
   import(agent: Agent & { config?: Partial<ModelChoice> }) {
     const existing = this.get(agent.id); if (existing) return existing;
     const draft = draftProfile({ ...agent, description: agent.description || '', tone: agent.tone || 0 }); draft.revision = 0;
@@ -70,7 +77,7 @@ export class Profiles {
     if (!agent.profile) draft.connectors = legacy.map(c => ({ id: c.id, name: c.name, command: c.command, args: JSON.parse(c.args_json), secretRef: c.secret_ref || '', enabled: Boolean(c.enabled) }));
     return this.save(draft);
   }
-  snapshot(runId: string, profile: AgentProfile) { const allowedTools = profile.allowedTools.filter(id => !id.startsWith('mcp_') || id.startsWith('mcp_open_harness_') || profile.connectors.some(c => c.enabled && id.startsWith(`mcp_${c.name}_`)));
+  snapshot(runId: string, profile: AgentProfile) { const allowedTools = runToolGrants(profile);
     const value = { ...profile, allowedTools, effectiveModel: this.effective(profile), workspaceRevision: this.defaults().revision }; this.db.prepare('INSERT INTO run_profiles VALUES(?,?,?,?)').run(runId, profile.id, profile.revision, JSON.stringify(value)); return value; }
   runSnapshot(runId: string): (AgentProfile & { effectiveModel: ModelChoice }) | null { const row = this.db.prepare('SELECT json FROM run_profiles WHERE run_id=?').get(runId) as { json: string } | undefined; return row ? JSON.parse(row.json) : null; }
 }

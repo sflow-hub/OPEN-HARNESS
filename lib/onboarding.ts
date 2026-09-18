@@ -16,5 +16,7 @@ export type OnboardingStatus = {
   executionReady: boolean;
   recommendedAccess: 'private' | 'direct';
   credentialMode: 'coordinator' | 'runner';
+  credentialMachineId?: string;
+  credentialNames?: string[];
   checks: ReadinessCheck[];
 };

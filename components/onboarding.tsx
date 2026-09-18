@@ -49,7 +49,7 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
   }
   useEffect(() => {
     let cancelled = false;
-    Promise.all([client.request<OnboardingStatus>('/v1/onboarding/status'), client.request<{ secrets: string[] }>('/v1/health')]).then(([value, health]) => { if (!cancelled) { setStatus(value); setSecretNames(health.secrets); } }, error => { if (!cancelled) setMessage(error instanceof Error ? error.message : 'Could not check this computer.'); }).finally(() => { if (!cancelled) setBusy(''); });
+    Promise.all([client.request<OnboardingStatus>('/v1/onboarding/status'), client.request<{ secrets: string[] }>('/v1/health')]).then(([value, health]) => { if (!cancelled) { setStatus(value); setSecretNames(value.credentialNames || health.secrets); } }, error => { if (!cancelled) setMessage(error instanceof Error ? error.message : 'Could not check this computer.'); }).finally(() => { if (!cancelled) setBusy(''); });
     return () => { cancelled = true; };
   }, [client]);
 
@@ -62,12 +62,12 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
 
   async function saveModel() {
     if (!modelId.trim()) { setMessage('Choose or enter a model.'); return; }
-    if (status?.credentialMode !== 'runner' && provider !== 'local' && !apiKey && !secretNames.includes(keyFor(provider))) { setMessage('Paste an API key, or choose a local model server.'); return; }
+    if (provider !== 'local' && !apiKey && !secretNames.includes(keyFor(provider))) { setMessage('Paste an API key, or choose a local model server.'); return; }
     setBusy('model'); setMessage('Saving and testing the connection…');
     const credentialRef = provider === 'local' ? '' : keyFor(provider);
     const selected: ModelChoice = { provider, model: modelId.trim(), baseUrl: provider === 'local' ? baseUrl.trim() : '', credentialRef };
     try {
-      if (status?.credentialMode !== 'runner' && apiKey && credentialRef) { await client.request('/v1/secrets', { method: 'POST', body: JSON.stringify({ name: credentialRef, value: apiKey }) }); setSecretNames(current => [...new Set([...current, credentialRef])]); }
+      if (apiKey && credentialRef) { await client.request('/v1/secrets', { method: 'POST', body: JSON.stringify({ name: credentialRef, value: apiKey, ...(status?.credentialMode === 'runner' ? { machineId: status.credentialMachineId } : {}) }) }); setSecretNames(current => [...new Set([...current, credentialRef])]); }
       const saved = await client.request<{ model: ModelChoice; revision: number }>('/v1/workspace/model', { method: 'PUT', body: JSON.stringify({ revision, model: selected }) });
       const test = await client.request<{ ok: boolean; message: string }>('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: saved.model }) });
       onModelSaved(saved.model, saved.revision); setApiKey(''); setModelReady(test.ok); setMessage(test.message);
@@ -100,7 +100,7 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
         <p className="onboarding-lead">Use an API key from a model provider, or connect a compatible model server running on your network.</p>
         <label>Provider<select value={provider} onChange={event => { const next = event.target.value as Provider; setProvider(next); setModelId(PROVIDERS[next].model); setBaseUrl(''); setMessage(''); }}>{Object.entries(PROVIDERS).map(([id, value]) => <option key={id} value={id}>{value.label}</option>)}</select></label>
         <label>Model<input value={modelId} onChange={event => setModelId(event.target.value)} placeholder="Model ID" /></label>
-        {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="http://127.0.0.1:11434/v1" /><small>Enter the OpenAI-compatible API address shown by your model app.</small></label> : status?.credentialMode === 'runner' ? <div className="onboarding-runner-secret"><strong>Add the key to your runner</strong><p>Set <code>{keyFor(provider)}</code> for the runner service on the computer that will execute this agent. The hosted coordinator never stores it.</p><a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a provider key <ExternalLink size={11} /></a></div> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(keyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>The key is stored on your coordinator and is only sent to runs that use it. <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a></small></label>}
+        {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="http://127.0.0.1:11434/v1" /><small>Enter the OpenAI-compatible API address shown by your model app.</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(keyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a></small></label>}
         {message && <p className={`onboarding-message ${modelReady ? 'success' : ''}`} role="status">{message}</p>}
         <div className="onboarding-actions"><button type="button" className="subtle-button" onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</button><button type="button" className="light-button" disabled={busy === 'model'} onClick={saveModel}>{busy === 'model' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Save and test</button></div>
       </div>}

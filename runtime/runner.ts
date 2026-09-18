@@ -4,17 +4,21 @@ import { homedir, hostname, platform, arch } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { HermesGateway, dockerStatus, ensureContainer } from './hermes';
-import { COORDINATION_TOOLS, discoverModels, groupTool, prepareProfile, runtimeProbe } from './profile-runtime';
+import { COORDINATION_TOOLS, discoverModels, groupTool, nativeRuntimeProbe, prepareProfile, runtimeProbe } from './profile-runtime';
 import type { AgentProfile } from '../lib/agent-profile';
 import { exportAgentFiles, importAgentFiles } from './transfer-files';
+import { SecretStore } from './secrets';
+import { decryptRunnerSecret, generateRunnerKeyPair, type EncryptedRunnerSecret } from '../lib/runner-crypto';
+import { validateComputerTarget } from './computer-validation';
 
-type Credentials = { coordinator: string; machineId: string; token: string; sitesToken?: string };
-type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models'; payload: any };
+type Credentials = { coordinator: string; machineId: string; token: string; sitesToken?: string; encryptionPublicKey: string; encryptionPrivateKey: string };
+type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'store-secret'; payload: any };
 const args = new Map<string,string>();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith('--')) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith('--') ? '' : process.argv[++i] || '');
 const stateRoot = resolve(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join(homedir(), '.open-harness-runner'));
 const credentialPath = join(stateRoot, 'connection.json');
 const spool = join(stateRoot, 'spool'); mkdirSync(spool, { recursive: true });
+const runnerSecrets = new SecretStore(join(stateRoot, 'secrets.json'));
 
 function capabilities() {
   const container = dockerStatus().available;
@@ -25,12 +29,14 @@ async function pair(): Promise<Credentials> {
   const coordinator = String(args.get('coordinator') || '').replace(/\/$/, ''), code = String(args.get('pairing-code') || ''), sitesToken = String(args.get('sites-token') || '');
   if (!coordinator || !code) throw new Error('Use --coordinator URL and --pairing-code CODE, or keep an existing runner connection.');
   const target = new URL(coordinator), loopback = ['localhost', '127.0.0.1', '::1'].includes(target.hostname); if (target.protocol !== 'https:' && !(target.protocol === 'http:' && loopback)) throw new Error('Remote coordinators must use HTTPS. Plain HTTP is accepted only for a coordinator on this computer.');
-  const response = await fetch(`${coordinator}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(sitesToken ? { 'OAI-Sites-Authorization': `Bearer ${sitesToken}` } : {}) }, body: JSON.stringify({ code, name: hostname(), platform: platform(), arch: arch(), capabilities: capabilities() }) });
+  const encryption = await generateRunnerKeyPair();
+  const response = await fetch(`${coordinator}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(sitesToken ? { 'OAI-Sites-Authorization': `Bearer ${sitesToken}` } : {}) }, body: JSON.stringify({ code, name: hostname(), platform: platform(), arch: arch(), capabilities: capabilities(), encryptionPublicKey: encryption.publicKey }) });
   const value = await response.json() as any; if (!response.ok) throw new Error(value.error || 'Pairing failed.');
-  const saved = { coordinator, machineId: value.machineId, token: value.token, ...(sitesToken ? { sitesToken } : {}) };
+  const saved: Credentials = { coordinator, machineId: value.machineId, token: value.token, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey, ...(sitesToken ? { sitesToken } : {}) };
   writeFileSync(credentialPath, JSON.stringify(saved, null, 2), { mode: 0o600 }); chmodSync(credentialPath, 0o600); return saved;
 }
-const credentials = args.has('pairing-code') ? await pair() : existsSync(credentialPath) ? JSON.parse(readFileSync(credentialPath, 'utf8')) as Credentials : await pair();
+let credentials = args.has('pairing-code') ? await pair() : existsSync(credentialPath) ? JSON.parse(readFileSync(credentialPath, 'utf8')) as Credentials : await pair();
+if (!credentials.encryptionPrivateKey || !credentials.encryptionPublicKey) { const encryption = await generateRunnerKeyPair(); credentials = { ...credentials, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey }; writeFileSync(credentialPath, JSON.stringify(credentials, null, 2), { mode: 0o600 }); chmodSync(credentialPath, 0o600); }
 const savedTarget = new URL(credentials.coordinator), savedLoopback = ['localhost', '127.0.0.1', '::1'].includes(savedTarget.hostname); if (savedTarget.protocol !== 'https:' && !(savedTarget.protocol === 'http:' && savedLoopback)) throw new Error('The saved remote coordinator URL is not HTTPS. Pair this runner again using a secure URL.');
 if (args.has('once')) { console.log(`Paired ${credentials.machineId}.`); process.exit(0); }
 const headers = { Authorization: `Bearer ${credentials.token}`, 'X-Open-Harness-Machine': credentials.machineId, 'Content-Type': 'application/json', ...(credentials.sitesToken ? { 'OAI-Sites-Authorization': `Bearer ${credentials.sitesToken}` } : {}) };
@@ -55,7 +61,8 @@ async function run(command: RunnerCommand) {
   try {
     const agentRoot = join(stateRoot, 'agents', profile.id), shared = join(stateRoot, 'shared'); mkdirSync(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean);
-    const localSecrets = Object.fromEntries(needed.filter(name => process.env[name]).map(name => [name, process.env[name] as string]));
+    const availableSecrets = { ...runnerSecrets.environment(), ...process.env } as Record<string,string>;
+    const localSecrets = Object.fromEntries(needed.filter(name => availableSecrets[name]).map(name => [name, availableSecrets[name]]));
     const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...payload.secrets }) };
     const coordinatorForContainer = credentials.coordinator.replace('://localhost', '://host.docker.internal').replace('://127.0.0.1', '://host.docker.internal');
     prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { controlUrl: coordinatorForContainer, sitesToken: credentials.sitesToken });
@@ -71,14 +78,29 @@ async function run(command: RunnerCommand) {
 }
 async function control(command: RunnerCommand) {
   try {
+    if (command.kind === 'store-secret') { const name = String(command.payload.name || ''), value = await decryptRunnerSecret(credentials.encryptionPrivateKey, command.payload.encrypted as EncryptedRunnerSecret); runnerSecrets.set(name, value); await finish(command, { stored: true, name, backend: runnerSecrets.backend }); return; }
     if (command.kind === 'export-agent') { await finish(command, exportAgentFiles(stateRoot, command.agentId)); return; }
-    if (command.kind === 'import-agent') { const bundle = command.payload.bundle || (await request(`/v1/runner/transfers/${encodeURIComponent(command.payload.transferId)}`)).bundle; await finish(command, importAgentFiles(stateRoot, command.agentId, bundle)); return; }
+    if (command.kind === 'import-agent') {
+      const profile = command.payload.profile as AgentProfile | undefined;
+      if (profile) validateComputerTarget(profile, capabilities(), Array.isArray(command.payload.requiredSecrets) ? command.payload.requiredSecrets.map(String) : [], name => runnerSecrets.has(name) || Boolean(process.env[name]));
+      const bundle = command.payload.bundle || (await request(`/v1/runner/transfers/${encodeURIComponent(command.payload.transferId)}`)).bundle;
+      const imported = importAgentFiles(stateRoot, command.agentId, bundle);
+      if (profile?.computer.desktop !== 'none' && profile) {
+        const check = { action: 'computer', desktop: profile.computer.desktop };
+        const result = profile.computer.desktop === 'existing'
+          ? nativeRuntimeProbe(join(stateRoot, 'agents', profile.id, 'profile'), check)
+          : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), check);
+        if (!result.ok) throw new Error(String(result.message || 'Desktop control is not ready on the destination computer.'));
+      }
+      await finish(command, { ...imported, validated: true }); return;
+    }
     if (command.kind.startsWith('probe-')) {
       const profile = command.payload.profile as AgentProfile & { effectiveModel: any }, direct = profile.computer.access === 'direct', shared = join(stateRoot, 'shared'), agentRoot = join(stateRoot, 'agents', profile.id); mkdirSync(shared, { recursive: true });
-      const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter(name => process.env[name]).map(name => [name, process.env[name] as string])), secretSource = { environment: () => ({ ...localSecrets, ...(command.payload.secrets || {}) }) };
+      const availableSecrets = { ...runnerSecrets.environment(), ...process.env } as Record<string,string>, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter(name => availableSecrets[name]).map(name => [name, availableSecrets[name]])), secretSource = { environment: () => ({ ...localSecrets, ...(command.payload.secrets || {}) }) };
       prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command.payload.coordinationToken || '', `probe-${command.id}`, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { sitesToken: credentials.sitesToken });
       if (command.kind === 'probe-runtime') {
         const probeInput = { ...(command.payload.input || {}) } as any;
+        if (probeInput.action === 'computer') probeInput.desktop = profile.computer.desktop;
         if (probeInput.action === 'connection' && !probeInput.apiKey) probeInput.apiKey = localSecrets[profile.effectiveModel.credentialRef] || '';
         if (probeInput.action === 'mcp' && probeInput.env) for (const name of Object.keys(probeInput.env)) if (!probeInput.env[name] && localSecrets[name]) probeInput.env[name] = localSecrets[name];
         if (direct) { const result = spawnSync(process.env.HERMES_PYTHON || 'python3', [join(import.meta.dirname, 'hermes', 'inspect_runtime.py')], { input: JSON.stringify(probeInput) + '\n', encoding: 'utf8', env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile') }, maxBuffer: 5_000_000 }); if (result.status || !result.stdout) throw new Error(result.stderr || 'Native runtime probe failed.'); await finish(command, JSON.parse(result.stdout)); }
@@ -103,9 +125,9 @@ await flushSpool();
 let lastHeartbeat = 0;
 for (;;) {
   try {
-    if (Date.now() - lastHeartbeat > 15_000) { await request('/v1/runner/heartbeat', { method: 'POST', body: JSON.stringify({ capabilities: capabilities(), activeCommandIds: [...new Set([...admittedCommands, ...[...active.values()].map(item => item.commandId)])] }) }); lastHeartbeat = Date.now(); }
+    if (Date.now() - lastHeartbeat > 15_000) { await request('/v1/runner/heartbeat', { method: 'POST', body: JSON.stringify({ capabilities: capabilities(), encryptionPublicKey: credentials.encryptionPublicKey, activeCommandIds: [...new Set([...admittedCommands, ...[...active.values()].map(item => item.commandId)])] }) }); lastHeartbeat = Date.now(); }
     const result = await request('/v1/runner/commands');
-    for (const command of result.commands as RunnerCommand[]) { admittedCommands.add(command.id); void (command.kind === 'run' ? run(command) : control(command)).finally(() => admittedCommands.delete(command.id)); }
+    for (const command of result.commands as RunnerCommand[]) { if (admittedCommands.has(command.id)) continue; admittedCommands.add(command.id); void (command.kind === 'run' ? run(command) : control(command)).finally(() => admittedCommands.delete(command.id)); }
   } catch (error) { console.error(error instanceof Error ? error.message : error); }
   await new Promise(resolve => setTimeout(resolve, 1000));
 }

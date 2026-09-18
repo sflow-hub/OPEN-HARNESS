@@ -10,10 +10,10 @@ const tabs = [{ id: 'profile', label: 'Profile', icon: UserRound }, { id: 'compu
 type Tab = typeof tabs[number]['id'];
 const serialize = (value: AgentProfile) => JSON.stringify(value);
 const errorText = (error: unknown) => error instanceof Error ? error.message : 'Could not reach the local service. Your draft is still here.';
-function Toggle({ checked, onChange, label, description, mixed = false }: { checked: boolean; onChange: (on: boolean) => void; label: string; description?: string; mixed?: boolean }) {
+function Toggle({ checked, onChange, label, description, mixed = false, disabled = false }: { checked: boolean; onChange: (on: boolean) => void; label: string; description?: string; mixed?: boolean; disabled?: boolean }) {
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => { if (ref.current) ref.current.indeterminate = mixed; }, [mixed]);
-  return <label className="profile-switch-row"><span><strong>{label}</strong>{description && <small>{description}</small>}</span><input ref={ref} type="checkbox" role="switch" aria-label={label} checked={checked} onChange={e => onChange(e.target.checked)} /><span className={`profile-switch ${mixed ? 'mixed' : ''}`} aria-hidden="true" /></label>;
+  return <label className="profile-switch-row"><span><strong>{label}</strong>{description && <small>{description}</small>}</span><input ref={ref} type="checkbox" role="switch" aria-label={label} checked={checked} disabled={disabled} onChange={e => onChange(e.target.checked)} /><span className={`profile-switch ${mixed ? 'mixed' : ''}`} aria-hidden="true" /></label>;
 }
 export default function AgentSettings({ agent, client, onClose, onSaved, initialTab = 'profile' }: Props) {
   const [draft, setDraft] = useState(() => draftProfile(agent));
@@ -38,6 +38,7 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
   const [secretName, setSecretName] = useState('');
   const [secretValue, setSecretValue] = useState('');
   const [secretBusy, setSecretBusy] = useState(false);
+  const [credentialStorage, setCredentialStorage] = useState<'coordinator' | 'runner'>('coordinator');
   const [machines, setMachines] = useState<MachineInfo[]>([]);
   const [computerBusy, setComputerBusy] = useState(false);
   const [computerStatus, setComputerStatus] = useState('');
@@ -63,7 +64,7 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
   const base = `/v1/agents/${encodeURIComponent(agent.id)}`;
   function edit(patch: Partial<AgentProfile>) { setSuccess(''); setDraft(current => ({ ...current, ...patch })); }
   function editModel(patch: Partial<AgentProfile['model']>) { setConnection(''); edit({ model: { ...draft.model, ...patch } }); }
-  function editComputer(patch: Partial<AgentProfile['computer']>) { setComputerStatus(''); edit({ computer: { ...draft.computer, ...patch } }); }
+  function editComputer(patch: Partial<AgentProfile['computer']>) { setComputerStatus(''); const computer = { ...draft.computer, ...patch }; edit({ computer, ...(computer.desktop === 'none' ? { allowedTools: draft.allowedTools.filter(id => id !== 'computer_use') } : {}) }); }
   function close() { if (saving) return; if (dirty || secretValue) setDiscard(true); else onClose(); }
   useEffect(() => {
     let cancelled = false;
@@ -78,8 +79,8 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
         } else {
           try { const value = await client.request<ProfileResponse>(`${base}/profile`); if (!cancelled && !dirtyRef.current) { setDraft(value.profile); setBaseline(serialize(value.profile)); setActiveRevision(value.activeRevision); setSecretNames(value.secretNames); setTransfer(value.transfer || null); } } catch { /* A new agent can be saved without a server profile yet. */ }
         }
-        const [health, machineResult] = await Promise.all([client.request<{ secrets: string[] }>('/v1/health'), client.request<{ machines: MachineInfo[] }>('/v1/machines')]);
-        if (!cancelled) { setSecretNames(health.secrets); setMachines(machineResult.machines); }
+        const machineResult = await client.request<{ machines: MachineInfo[] }>('/v1/machines');
+        if (!cancelled) setMachines(machineResult.machines);
       } catch (err) { if (!cancelled) setError(`Profile service unavailable. You can edit a draft, but it has not been saved. ${errorText(err)}`); }
       finally { if (!cancelled) setLoading(false); }
     }
@@ -88,6 +89,26 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
     // Load once per editor; subsequent local edits stay intact when parent state changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.id]);
+  useEffect(() => {
+    if (loading || !draft.computer.machineId) return;
+    let cancelled = false;
+    client.request<{ secrets: string[]; storage: 'coordinator' | 'runner' }>(`/v1/machines/${encodeURIComponent(draft.computer.machineId)}/secrets`).then(value => { if (!cancelled) { setSecretNames(value.secrets); setCredentialStorage(value.storage); } }, err => { if (!cancelled) setComputerStatus(errorText(err)); });
+    return () => { cancelled = true; };
+  }, [client, draft.computer.machineId, loading]);
+  useEffect(() => {
+    if (!transfer || !['queued','exporting','importing','verifying'].includes(transfer.state)) return;
+    let cancelled = false, timer: ReturnType<typeof setTimeout>;
+    async function watchTransfer() {
+      try {
+        const value = await client.request<ProfileResponse>(`${base}/profile`); if (cancelled) return;
+        setTransfer(value.transfer || null);
+        if (value.transfer && ['completed','failed'].includes(value.transfer.state) && !dirtyRef.current) { setDraft(value.profile); setBaseline(serialize(value.profile)); setSecretNames(value.secretNames); onSaved(value.profile); }
+      } catch { /* Keep the saved transfer visible through temporary dashboard disconnects. */ }
+      if (!cancelled) timer = setTimeout(watchTransfer, 2_000);
+    }
+    timer = setTimeout(watchTransfer, 1_000);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [base, client, onSaved, transfer]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (discard) setDiscard(false); else close(); }
@@ -161,7 +182,7 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
     if (!secretName.trim() || !secretValue) { setError('Enter a credential name and its secret value.'); return; }
     setSecretBusy(true); setError('');
     try {
-      await client.request('/v1/secrets', { method: 'POST', body: JSON.stringify({ name: secretName.trim(), value: secretValue }) });
+      await client.request('/v1/secrets', { method: 'POST', body: JSON.stringify({ name: secretName.trim(), value: secretValue, machineId: draft.computer.machineId }) });
       setSecretNames(current => [...new Set([...current, secretName.trim()])]);
       if (!draft.model.inherit) editModel({ credentialRef: secretName.trim() });
       setSecretValue(''); setSuccess('Credential stored securely. Save the profile to use your selection.');
@@ -176,7 +197,7 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
   const tools = [...catalog.tools, ...unknown];
   const selectedMachine = machines.find(item => item.id === draft.computer.machineId);
   const platformName = (value?: string) => ({ linux: 'Linux', darwin: 'macOS', win32: 'Windows', unknown: 'Unknown OS' } as Record<string,string>)[value || 'unknown'];
-  const credentialForm = <details className="profile-advanced"><summary><Plus size={14} /> Add a saved credential</summary><div className="profile-two-columns"><label>Credential name<input value={secretName} onChange={e => setSecretName(e.target.value.toUpperCase())} placeholder="MY_PROVIDER_API_KEY" autoComplete="off" /></label><label>Secret value<input type="password" value={secretValue} onChange={e => setSecretValue(e.target.value)} autoComplete="new-password" placeholder="Paste a key — it is never shown again" /></label></div><button type="button" className="subtle-button" disabled={secretBusy} onClick={() => void storeCredential()}>{secretBusy ? 'Storing…' : 'Store credential'}</button><p className="profile-help">Stored in this coordinator’s protected credential store. Secret values are never returned or included in normal exports.</p></details>;
+  const credentialForm = <details className="profile-advanced"><summary><Plus size={14} /> Add a saved credential</summary><div className="profile-two-columns"><label>Credential name<input value={secretName} onChange={e => setSecretName(e.target.value.toUpperCase())} placeholder="MY_PROVIDER_API_KEY" autoComplete="off" /></label><label>Secret value<input type="password" value={secretValue} onChange={e => setSecretValue(e.target.value)} autoComplete="new-password" placeholder="Paste a key — it is never shown again" /></label></div><button type="button" className="subtle-button" disabled={secretBusy} onClick={() => void storeCredential()}>{secretBusy ? 'Storing…' : 'Store credential'}</button><p className="profile-help">{credentialStorage === 'runner' ? 'Encrypted for the selected computer and saved by its runner. The hosted coordinator cannot decrypt it.' : 'Stored in this coordinator’s protected credential store and delivered only to runs that select it.'} Secret values are never returned or included in normal exports.</p></details>;
   return <div className="modal-backdrop profile-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) close(); }}>
     <section ref={dialogRef} className="agent-settings-panel" role="dialog" aria-modal="true" aria-labelledby="agent-settings-title">
       <header className="profile-header"><div className={`avatar tone-${draft.tone}`}><UserRound size={24} /></div><div><div className="eyebrow">MAKE IT YOURS</div><h2 id="agent-settings-title">Agent settings</h2><p>{draft.name || 'Your new agent'} <span>· {draft.role || 'Give it a role'}</span></p></div><button className="profile-close" type="button" aria-label="Close agent settings" onClick={close}><X size={21} /></button></header>
@@ -224,7 +245,7 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
           const filtered = members.filter(t => `${t.name} ${t.id} ${t.description} ${title}`.toLowerCase().includes(search.toLowerCase()));
           if (search && !filtered.length) return null;
           const enabled = members.filter(t => draft.allowedTools.includes(t.id)).length;
-          return <details key={id} className="profile-tool-group" open={search ? true : undefined}><summary><ChevronDown size={15} /><span><strong>{title}</strong><small>{enabled} / {members.length} enabled</small></span><span className="profile-group-toggle" onClick={e => e.stopPropagation()}><input type="checkbox" aria-label={`Enable ${title}`} aria-checked={enabled > 0 && enabled < members.length ? 'mixed' : enabled > 0} checked={members.length > 0 && enabled === members.length} disabled={!members.length} onChange={e => toggleTools(members.map(t => t.id), e.target.checked)} /><span aria-hidden="true" /></span></summary><p className="profile-help">{description}</p>{filtered.map(tool => <Toggle key={tool.id} label={tool.name} description={`${tool.description.slice(0,180)} · ${tool.available ? 'Available now' : tool.reason || 'Unavailable'}`} checked={draft.allowedTools.includes(tool.id)} onChange={on => toggleTools([tool.id], on)} />)}{!members.length && <p className="profile-help">No tools discovered for this group.</p>}</details>;
+          return <details key={id} className="profile-tool-group" open={search ? true : undefined}><summary><ChevronDown size={15} /><span><strong>{title}</strong><small>{enabled} / {members.length} enabled</small></span><span className="profile-group-toggle" onClick={e => e.stopPropagation()}><input type="checkbox" aria-label={`Enable ${title}`} aria-checked={enabled > 0 && enabled < members.length ? 'mixed' : enabled > 0} checked={members.length > 0 && enabled === members.length} disabled={!members.length || (id === 'desktop' && draft.computer.desktop === 'none')} onChange={e => toggleTools(members.map(t => t.id), e.target.checked)} /><span aria-hidden="true" /></span></summary><p className="profile-help">{id === 'desktop' && draft.computer.desktop === 'none' ? 'Choose a desktop in Computer settings to enable this tool.' : description}</p>{filtered.map(tool => <Toggle key={tool.id} label={tool.name} description={`${tool.description.slice(0,180)} · ${id === 'desktop' && draft.computer.desktop === 'none' ? 'Choose a desktop first' : tool.available ? 'Available now' : tool.reason || 'Unavailable'}`} checked={draft.allowedTools.includes(tool.id)} disabled={id === 'desktop' && draft.computer.desktop === 'none'} onChange={on => toggleTools([tool.id], on)} />)}{!members.length && <p className="profile-help">No tools discovered for this group.</p>}</details>;
         })}<p className="profile-info">These switches control Hermes tools. Enabled Terminal can still read workspace files or make network requests. Container isolation remains the filesystem boundary.</p><div className="profile-section-heading"><h3><Cable size={18} /> MCP connections</h3><p>Test the connection to discover its tools, then enable the ones this agent needs.</p></div>{draft.connectors.map((c, index) => {
           const change = (patch: Partial<typeof c>) => { setConnectorChecks(current => ({ ...current, [c.id]: '' })); edit({ connectors: draft.connectors.map((other, i) => i === index ? { ...other, ...patch } : other) }); };
           return <div className="profile-connector" key={c.id}><Toggle label={c.name || 'New connection'} description="Connection changes apply to the next task." checked={c.enabled} onChange={enabled => change({ enabled })} /><div className="profile-two-columns"><label>Connection name<input value={c.name} onChange={e => change({ name: e.target.value })} placeholder="my-research-tools" /></label><label>Executable<input value={c.command} onChange={e => change({ command: e.target.value })} placeholder="npx" /></label></div><label>Arguments — one per line<textarea rows={3} value={c.args.join('\n')} onChange={e => change({ args: e.target.value.split('\n') })} placeholder={'-y\n@vendor/mcp-server'} /></label><label>Required saved credential<select value={c.secretRef} onChange={e => change({ secretRef: e.target.value })}><option value="">None</option>{[...new Set([...secretNames, ...(c.secretRef ? [c.secretRef] : [])])].map(name => <option key={name}>{name}</option>)}</select></label><div className="profile-actions"><button type="button" className="subtle-button" disabled={connectorChecks[c.id] === 'Checking…'} onClick={async () => { setConnectorChecks(current => ({ ...current, [c.id]: 'Checking…' })); try { const r = await client.request<{ status: string; error?: string; tools: ToolInfo[] }>(`${base}/connector-check`, { method: 'POST', body: JSON.stringify({ connector: c }) }); setConnectorChecks(current => ({ ...current, [c.id]: r.error || `${r.status} · ${r.tools.length} tools discovered` })); if (r.status === 'connected') setCatalog(old => ({ ...old, tools: [...old.tools.filter(t => !t.id.startsWith(`mcp_${c.name}_`)), ...r.tools] })); } catch (err) { setConnectorChecks(current => ({ ...current, [c.id]: errorText(err) })); } }}>Test connection</button><button type="button" className="subtle-button" onClick={() => edit({ connectors: draft.connectors.filter((_, i) => i !== index), allowedTools: draft.allowedTools.filter(id => !id.startsWith(`mcp_${c.name}_`)) })}><Trash2 size={13} /> Remove</button></div><p role="status" className="profile-help">{connectorChecks[c.id] || 'Not checked. Executable availability alone does not prove a connection.'}</p></div>;

@@ -38,8 +38,12 @@ export class Machines {
     CREATE TABLE IF NOT EXISTS agent_transfers (
       id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, source_machine_id TEXT NOT NULL,
       destination_machine_id TEXT NOT NULL, state TEXT NOT NULL, detail TEXT,
-      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, pending_profile_json TEXT
     );`);
+    try { db.exec('ALTER TABLE agent_transfers ADD COLUMN pending_profile_json TEXT'); } catch {}
+    const interrupted = db.prepare("SELECT agent_id,destination_machine_id FROM agent_transfers WHERE state IN ('queued','exporting','importing','verifying')").all() as Array<{ agent_id: string; destination_machine_id: string }>;
+    for (const transfer of interrupted) db.prepare('UPDATE machines SET reserved_agent_id=NULL,updated_at=? WHERE id=? AND reserved_agent_id=?').run(now(), transfer.destination_machine_id, transfer.agent_id);
+    db.prepare("UPDATE agent_transfers SET state='failed',detail='The coordinator restarted during transfer. The source assignment and data were preserved.',updated_at=? WHERE state IN ('queued','exporting','importing','verifying')").run(now());
     const stamp = now();
     const mock = process.env.OPEN_HARNESS_MOCK === '1', container = mock || dockerStatus().available;
     const direct = mock || ([process.env.HERMES_PYTHON, process.platform === 'win32' ? 'python' : 'python3', 'python'].filter(Boolean) as string[]).some(executable => spawnSync(executable, ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore', timeout: 8_000 }).status === 0);
@@ -103,7 +107,18 @@ export class Machines {
   }
   reconcileLeases(machineId: string, activeCommandIds: string[]) {
     const active = new Set(activeCommandIds), cutoff = new Date(Date.now() - 45_000).toISOString(), rows = this.db.prepare("SELECT * FROM runner_commands WHERE machine_id=? AND state='leased' AND leased_at<?").all(machineId, cutoff) as CommandRow[], uncertain = rows.filter(row => !active.has(row.id));
-    for (const row of uncertain) this.db.prepare("UPDATE runner_commands SET state='failed',finished_at=?,result_json=? WHERE id=? AND state='leased'").run(now(), JSON.stringify({ error: 'The runner restarted after accepting this command. It was not replayed because its outcome is uncertain.', interrupted: true }), row.id);
+    for (const row of uncertain) {
+      const stamp = now(), error = 'The runner restarted after accepting this command. It was not replayed because its outcome is uncertain.';
+      this.db.prepare("UPDATE runner_commands SET state='failed',finished_at=?,result_json=? WHERE id=? AND state='leased'").run(stamp, JSON.stringify({ error, interrupted: true }), row.id);
+      if (row.kind === 'export-agent' || row.kind === 'import-agent') {
+        const transferId = String((JSON.parse(row.payload_json) as { transferId?: string }).transferId || '');
+        const transfer = transferId ? this.db.prepare("SELECT id,destination_machine_id,agent_id FROM agent_transfers WHERE id=? AND state IN ('exporting','importing','verifying')").get(transferId) as { id: string; destination_machine_id: string; agent_id: string } | undefined : undefined;
+        if (transfer) {
+          this.db.prepare("UPDATE agent_transfers SET state='failed',detail=?,updated_at=? WHERE id=?").run(`${error} Source assignment and data were preserved.`, stamp, transfer.id);
+          this.db.prepare('UPDATE machines SET reserved_agent_id=NULL,updated_at=? WHERE id=? AND reserved_agent_id=?').run(stamp, transfer.destination_machine_id, transfer.agent_id);
+        }
+      }
+    }
     return uncertain.map(row => ({ ...row, payload: JSON.parse(row.payload_json) }));
   }
   reserve(machineId: string, agentId: string, reserve: boolean) {
@@ -128,7 +143,7 @@ export class Machines {
   receiveEvent(machineId: string, commandId: string, eventId: string) { const command = this.command(commandId); if (!command || command.machineId !== machineId) throw new MachineError('Runner command not found.', 404); const changed = this.db.prepare('INSERT OR IGNORE INTO runner_event_receipts VALUES(?,?,?)').run(commandId, eventId, now()); return Boolean(changed.changes); }
   poll(machineId: string) { const rows = this.db.prepare("SELECT * FROM runner_commands WHERE machine_id=? AND state='queued' ORDER BY created_at LIMIT 10").all(machineId) as CommandRow[]; const leased = now(); for (const row of rows) this.db.prepare("UPDATE runner_commands SET state='leased',leased_at=? WHERE id=? AND state='queued'").run(leased, row.id); return rows.map(row => ({ id: row.id, agentId: row.agent_id, kind: row.kind, payload: JSON.parse(row.payload_json), createdAt: row.created_at })); }
   finish(machineId: string, commandId: string, result: unknown, failed = false) { const existing = this.command(commandId); if (!existing || existing.machineId !== machineId) throw new MachineError('Runner command not found.', 404); if (['completed','failed'].includes(existing.state)) return { ok: true, duplicate: true }; this.db.prepare("UPDATE runner_commands SET state=?,finished_at=?,result_json=? WHERE id=? AND machine_id=? AND state IN ('queued','leased')").run(failed ? 'failed' : 'completed', now(), JSON.stringify(result), commandId, machineId); return { ok: true }; }
-  transfer(agentId: string, source: string, destination: string) { this.canAssign(destination, agentId); const id = crypto.randomUUID(), stamp = now(); this.db.prepare('INSERT INTO agent_transfers VALUES(?,?,?,?,?,?,?,?)').run(id, agentId, source, destination, 'queued', 'Waiting for active work to finish.', stamp, stamp); return { id, agentId, sourceMachineId: source, destinationMachineId: destination, state: 'queued', detail: 'Waiting for active work to finish.' }; }
+  transfer(agentId: string, source: string, destination: string, pendingProfile?: AgentProfile) { if (this.transferring(agentId)) throw new MachineError('This agent is already transferring. Wait for it to finish before changing computers again.', 409); if (source === destination) throw new MachineError('This agent is already on that computer.', 409); this.canAssign(destination, agentId); const id = crypto.randomUUID(), stamp = now(); this.db.prepare('INSERT INTO agent_transfers(id,agent_id,source_machine_id,destination_machine_id,state,detail,created_at,updated_at,pending_profile_json) VALUES(?,?,?,?,?,?,?,?,?)').run(id, agentId, source, destination, 'queued', 'Waiting for active work to finish.', stamp, stamp, pendingProfile ? JSON.stringify(pendingProfile) : null); return { id, agentId, sourceMachineId: source, destinationMachineId: destination, state: 'queued', detail: 'Waiting for active work to finish.', pendingProfile }; }
   transferring(agentId: string) { return Boolean(this.db.prepare("SELECT 1 FROM agent_transfers WHERE agent_id=? AND state IN ('queued','exporting','importing','verifying') LIMIT 1").get(agentId)); }
   transferStatus(agentId: string) { const row = this.db.prepare('SELECT state,detail FROM agent_transfers WHERE agent_id=? ORDER BY created_at DESC LIMIT 1').get(agentId) as { state: string; detail: string } | undefined; return row || null; }
   setTransfer(id: string, state: string, detail: string) { this.db.prepare('UPDATE agent_transfers SET state=?,detail=?,updated_at=? WHERE id=?').run(state, detail, now(), id); }
