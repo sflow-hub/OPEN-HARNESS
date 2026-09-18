@@ -48,6 +48,10 @@ function raw(res: ServerResponse, status: number, contentType: string, value: st
   res.end(value);
 }
 function allowedOrigin(origin?: string) { return origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ? origin : "http://localhost:3000"; }
+// A DNS-rebinding page reaches this service from 127.0.0.1 and sends no Origin header,
+// because from the browser's point of view the request is same-origin. The one thing it
+// cannot forge is the Host header, which still carries the attacker's own name.
+function loopbackHost(host?: string) { return Boolean(host && /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host)); }
 async function body(req: IncomingMessage) {
   let text = ""; for await (const chunk of req) { text += chunk; if (text.length > 5_000_000) throw new Error("Request too large."); }
   return text ? JSON.parse(text) : {};
@@ -303,7 +307,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") { res.writeHead(204, { "Access-Control-Allow-Origin": allowedOrigin(origin), "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" }); return res.end(); }
   const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
   try {
-    if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); return json(res, 200, { token: secrets.token, runtime: dockerStatus(), version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } }); }
+    if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); if (!loopbackHost(req.headers.host)) return json(res, 403, { error: 'Dashboard bootstrap requires a loopback address. Open Open Harness at http://localhost:3000.' }); return json(res, 200, { token: secrets.token, runtime: dockerStatus(), version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } }); }
     if (req.method === 'GET' && (url.pathname === '/v1/install/runner.sh' || url.pathname === '/v1/install/runner.ps1')) {
       const name = url.pathname.endsWith('.ps1') ? 'install-runner.ps1' : 'install-runner.sh';
       return raw(res, 200, name.endsWith('.ps1') ? 'text/plain; charset=utf-8' : 'text/x-shellscript; charset=utf-8', readFileSync(join(import.meta.dirname, 'installers', name)));
@@ -326,7 +330,8 @@ const server = createServer(async (req, res) => {
       const input = await body(req), commandId = runnerCommand[1];
       if (runnerCommand[2] === 'complete') { const command = machines.command(commandId); machines.finish(runner, commandId, input.result || { error: input.error }, Boolean(input.error)); if (command?.agentId) void pump(); return json(res, 200, { ok: true }); }
       const eventId = String(input.eventId || ''); if (!eventId) return json(res, 400, { error: 'Event ID is required.' });
-      if (machines.receiveEvent(runner, commandId, eventId)) { const run = store.getRun(String(input.runId || '')); if (run) mapHermesEvent(run, input.event); }
+      const claimedRunId = String(input.runId || '');
+      if (machines.receiveEvent(runner, commandId, eventId, claimedRunId)) { const run = store.getRun(claimedRunId); if (run) mapHermesEvent(run, input.event); }
       return json(res, 200, { ok: true });
     }
     const internalAgent = url.pathname.startsWith("/internal/") ? authenticatedAgent(req) : null;
@@ -592,16 +597,49 @@ const server = createServer(async (req, res) => {
   } catch (error) { return json(res, error instanceof ProfileError || error instanceof TaskError || error instanceof MachineError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
 });
 
+// createRun throws for an agent that no longer exists, for a full queue, and for depth
+// and cycle violations. An unguarded throw here escapes the timer callback and takes the
+// whole coordinator down, and because next_run_at is only advanced on success the same
+// routine is still due on restart — a crash loop with no log and no way out. Every
+// routine is therefore isolated, and a routine that can never succeed is disabled rather
+// than retried forever.
+function advanceRoutine(routine: any, now: Date) {
+  const next = new Date(now.getTime() + Number(routine.interval_minutes) * 60000).toISOString();
+  store.db.prepare("UPDATE schedules SET last_run_at=?,next_run_at=?,updated_at=? WHERE id=?").run(now.toISOString(), next, now.toISOString(), routine.id);
+}
+function runDueRoutine(routine: any, now: Date) {
+  const scheduledFor = routine.next_run_at;
+  if (store.db.prepare("SELECT 1 FROM schedule_runs WHERE schedule_id=? AND scheduled_for=?").get(routine.id, scheduledFor)) return;
+  try {
+    const run = createRun({ agentId: routine.agent_id, prompt: routine.prompt });
+    store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, scheduledFor);
+    advanceRoutine(routine, now);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Routine could not start.";
+    if (error instanceof ProfileError) {
+      store.db.prepare("UPDATE schedules SET enabled=0,updated_at=? WHERE id=?").run(now.toISOString(), routine.id);
+      console.error(`Routine ${routine.id} was disabled because its agent no longer exists: ${message}`);
+      return;
+    }
+    console.error(`Routine ${routine.id} could not start and will retry at its next interval: ${message}`);
+    advanceRoutine(routine, now);
+  }
+}
 setInterval(() => {
-  const now = new Date(), due = store.db.prepare("SELECT * FROM schedules WHERE enabled=1 AND next_run_at<=?").all(now.toISOString()) as any[];
-  for (const routine of due) {
-    const scheduledFor = routine.next_run_at;
-    const duplicate = store.db.prepare("SELECT 1 FROM schedule_runs WHERE schedule_id=? AND scheduled_for=?").get(routine.id, scheduledFor); if (duplicate) continue;
-    const run = createRun({ agentId: routine.agent_id, prompt: routine.prompt }); store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, scheduledFor);
-    const next = new Date(now.getTime() + Number(routine.interval_minutes) * 60000).toISOString(); store.db.prepare("UPDATE schedules SET last_run_at=?,next_run_at=?,updated_at=? WHERE id=?").run(now.toISOString(), next, now.toISOString(), routine.id);
+  try {
+    const now = new Date(), due = store.db.prepare("SELECT * FROM schedules WHERE enabled=1 AND next_run_at<=?").all(now.toISOString()) as any[];
+    for (const routine of due) runDueRoutine(routine, now);
+  } catch (error) {
+    console.error(`The routine scheduler skipped this tick: ${error instanceof Error ? error.message : "unknown error"}`);
   }
 }, 30_000).unref();
 
 const bind = process.env.OPEN_HARNESS_BIND || '127.0.0.1';
 server.listen(port, bind, () => console.log(`Open Harness coordinator listening on http://${bind}:${port}`));
+// Without these the coordinator exits silently when anything throws outside a request —
+// a timer callback, a detached promise — leaving no record of why the service stopped.
+// In-flight runs are marked interrupted on the next start, so exiting is safe; being
+// unable to tell that it happened is not.
+process.on("unhandledRejection", reason => console.error(`Unhandled rejection in the coordinator: ${reason instanceof Error ? reason.stack || reason.message : String(reason)}`));
+process.on("uncaughtException", error => { console.error(`The coordinator stopped on an unhandled error: ${error.stack || error.message}`); process.exit(1); });
 process.on("SIGTERM", async () => { for (const gateway of gateways.values()) await gateway.stop().catch(() => {}); for (const socket of coordinationSockets.values()) await socket.then(s => s.close()).catch(() => {}); server.close(); });

@@ -111,6 +111,9 @@ test('pairs and authenticates a remote runner, dispatches work once, and revokes
   let command: { id: string; payload: { runId: string } } | undefined;
   for (let i = 0; i < 80 && !command; i++) { const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { runId: string; bundle?: { checksum: string } } }> }; for (const item of value.commands) { if (item.kind === 'import-agent') await fetch(`${base}/v1/runner/commands/${item.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { checksum: item.payload.bundle?.checksum, validated: true } }) }); if (item.kind === 'run' && item.payload.runId === created.id) command = item; } if (!command) await new Promise(resolve => setTimeout(resolve, 20)); }
   assert.ok(command); const duplicate = crypto.randomUUID();
+  // C5: an event claiming a run other than the one this command was issued for is rejected
+  // before it can touch any run's event log (verified below by the message.delta count staying 1).
+  assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: crypto.randomUUID(), runId: `${created.id}-other`, event: { type: 'message.delta', payload: { text: 'forged' } } }) })).status, 403);
   for (let i = 0; i < 2; i++) assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: duplicate, runId: created.id, event: { type: 'message.delta', payload: { text: 'once' } } }) })).status, 200);
   assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { final_response: 'remote complete' } }) })).status, 200);
   assert.equal((await waitRun(created.id)).result, 'remote complete');
