@@ -1,8 +1,13 @@
 .git
 .github
-.open-harness
+# Local credentials and coordinator state must never enter the build context.
+.env
+.env.*
+!.env.example
+.open-harness*
 .next
 .vinext
+.wrangler
 dist
 node_modules
 outputs

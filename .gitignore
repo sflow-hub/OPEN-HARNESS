@@ -39,7 +39,7 @@ next-env.d.ts
 
 !.env.example
 *.tsbuildinfo
-/.open-harness/
+.open-harness*/
 
 /test-results/
 /playwright-report/
