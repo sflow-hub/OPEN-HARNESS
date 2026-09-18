@@ -50,9 +50,9 @@ test('a running task keeps its snapshot; the next queued task uses the new profi
   const first = await run('MOCK_SLOW MOCK_TOOL:terminal'); await waitRun(first.id, ['running']);
   const next = await run('MOCK_TOOL:terminal');
   const current = await profile(); const saved = await save({ ...current, allowedTools: [], prompt: { enabled: false, text: current.prompt.text } }); assert.equal(saved.pending, true);
-  const policy = JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')); assert.deepEqual(policy.allowedTools, ['terminal']);
+  const policy = JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')); assert.deepEqual(policy.allowedTools, ['terminal', 'mcp_open_harness_task']);
   assert.equal((await waitRun(first.id)).state, 'completed'); assert.equal((await waitRun(next.id)).state, 'failed');
-  assert.deepEqual(JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')).allowedTools, []);
+  assert.deepEqual(JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')).allowedTools, ['mcp_open_harness_task']);
   assert.equal(readFileSync(join(state, 'agents/atlas/profile/SOUL.md'), 'utf8'), '');
 });
 test('disabling a connector removes its tools at execution even if individually selected', async () => {
