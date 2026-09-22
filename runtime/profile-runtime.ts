@@ -54,22 +54,33 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
   // OPENAI_API_KEY to a host that is not OpenAI's (GHSA-76xc-57q6-vm5m), so aliasing the
   // credential to that name silently sends "no-key-required" and the provider answers 401.
   // The supported route is a providers: entry naming the env var to read.
-  const customEndpoint = ['local', 'custom'].includes(effective.provider) && Boolean(effective.baseUrl);
-  if (effective.credentialRef && secretValues[effective.credentialRef]) {
+  // Any explicit endpoint is a custom endpoint, whichever provider the user picked: Hermes
+  // ignores base_url on its native providers (a proxy for xAI still resolved to api.x.ai)
+  // and only the custom path honours the URL and carries the key via key_env.
+  const customEndpoint = Boolean(effective.baseUrl);
+  // Hermes has no provider called "openai"; its API-key provider is "openai-api".
+  const hermesProvider = customEndpoint ? 'custom' : ({ local: 'custom', openai: 'openai-api' } as Record<string, string>)[effective.provider] || effective.provider;
+  // Hermes will not hand a native provider's variable (XAI_API_KEY, OPENAI_API_KEY, ...) to a
+  // custom endpoint, so a credential saved under one of those names would reach a proxy as
+  // "no-key-required". Custom endpoints read the key from a name only Open Harness uses.
+  const customKeyEnv = 'OPEN_HARNESS_MODEL_API_KEY';
+  const hasCredential = Boolean(effective.credentialRef && secretValues[effective.credentialRef]);
+  if (hasCredential) {
     env[effective.credentialRef] = secretValues[effective.credentialRef];
-    const providerEnv = ({ xai: 'XAI_API_KEY', openrouter: 'OPENROUTER_API_KEY', anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY' } as Record<string, string>)[effective.provider];
-    if (providerEnv) env[providerEnv] = secretValues[effective.credentialRef];
+    if (customEndpoint) env[customKeyEnv] = secretValues[effective.credentialRef];
+    const providerEnv = ({ xai: 'XAI_API_KEY', openrouter: 'OPENROUTER_API_KEY', anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', 'openai-api': 'OPENAI_API_KEY' } as Record<string, string>)[effective.provider];
+    if (providerEnv && !customEndpoint) env[providerEnv] = secretValues[effective.credentialRef];
   }
   // Only the env var NAME is written here; the value stays in the profile .env.
   const providers = customEndpoint
-    ? { custom: { name: 'custom', enabled: true, base_url: effective.baseUrl, ...(effective.credentialRef ? { key_env: effective.credentialRef } : {}), ...(effective.model ? { default_model: effective.model } : {}) } }
+    ? { custom: { name: 'custom', base_url: effective.baseUrl, ...(hasCredential ? { key_env: customKeyEnv } : {}), ...(effective.model ? { default_model: effective.model } : {}) } }
     : undefined;
   for (const c of profile.connectors.filter(c => c.enabled)) {
     const connectorEnv = c.secretRef && secretValues[c.secretRef] ? { [c.secretRef]: secretValues[c.secretRef] } : {};
     Object.assign(env, connectorEnv);
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: '${' + c.secretRef + '}' } : {} };
   }
-  const config = { model: { default: effective.model, provider: effective.provider === 'local' ? 'custom' : effective.provider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ['open_harness_policy'] }, ...(providers ? { providers } : {}), mcp_servers: mcp };
+  const config = { model: { default: effective.model, provider: hermesProvider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ['open_harness_policy'] }, ...(providers ? { providers } : {}), mcp_servers: mcp };
   // plugins.enabled is an allow-LIST of plugin keys, and Hermes treats a missing or
   // non-list value as "nothing enabled". Any other shape silently gates the managed
   // policy extension off, managed_entry.py then aborts, and every run dies at startup.

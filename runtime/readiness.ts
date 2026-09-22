@@ -6,6 +6,22 @@ import { stateSharing } from './hermes';
 
 export const HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || 'open-harness-hermes:2026.9.11';
 
+// Every layer of the managed-run handshake -- the policy extension, managed_entry.py,
+// inspect_runtime.py, the config shape -- ships inside the image, so an image built before
+// a fix keeps the bug while its tag never changes. The image carries this number as a
+// label. Anything else means "rebuild", including no label at all: contract 1 is the set
+// of images built before the label existed. Bump it whenever runtime/hermes/ changes.
+export const RUNTIME_CONTRACT = 2;
+export const RUNTIME_LABEL = 'dev.openharness.runtime';
+export type ImageContract = 'missing' | 'stale' | 'current';
+export function classifyContract(result: { status: number | null; stdout: string }): ImageContract {
+  if (result.status !== 0) return 'missing';
+  return result.stdout.trim() === String(RUNTIME_CONTRACT) ? 'current' : 'stale';
+}
+export function imageContract(run: (name: string, args: string[]) => { status: number | null; stdout: string } = command): ImageContract {
+  return classifyContract(run('docker', ['image', 'inspect', '-f', `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE]));
+}
+
 const platform = (['linux', 'darwin', 'win32'].includes(process.platform) ? process.platform : 'unknown') as OnboardingStatus['platform'];
 const labels = { linux: 'Linux', darwin: 'macOS', win32: 'Windows', unknown: 'this operating system' } as const;
 const installUrls = {
@@ -56,7 +72,8 @@ export function onboardingStatus(credentialNames: string[] = [], stateRoot = pro
 
   const installed = command('docker', ['--version']).status === 0;
   const daemon = installed && command('docker', ['version', '--format', '{{.Server.Version}}']).status === 0;
-  const image = daemon && command('docker', ['image', 'inspect', HERMES_IMAGE]).status === 0;
+  const contract: ImageContract = daemon ? imageContract() : 'missing';
+  const image = contract === 'current';
   const native = pythonReady();
   const container: ReadinessCheck = !installed
     ? { id: 'container-engine', label: 'Private workspaces', state: 'missing', detail: `Install Docker on ${labels[platform]} to give agents isolated workspaces.`, helpUrl: installUrls[platform] }
@@ -65,6 +82,8 @@ export function onboardingStatus(credentialNames: string[] = [], stateRoot = pro
       : { id: 'container-engine', label: 'Private workspaces', state: 'ready', detail: 'Docker is running.' };
   const runtime: ReadinessCheck = image
     ? { id: 'agent-runtime', label: 'Agent runtime', state: 'ready', detail: 'The pinned Hermes runtime is ready for isolated agents.' }
+    : contract === 'stale'
+      ? { id: 'agent-runtime', label: 'Agent runtime', state: 'action', detail: 'The agent runtime on this computer was built before a fix and must be rebuilt. Layers already downloaded are reused.', action: 'prepare-runtime', actionLabel: 'Update agent runtime' }
     : daemon
       ? { id: 'agent-runtime', label: 'Agent runtime', state: 'action', detail: 'One final download and setup is needed. This can take several minutes the first time.', action: 'prepare-runtime', actionLabel: 'Set up agent runtime' }
       : native

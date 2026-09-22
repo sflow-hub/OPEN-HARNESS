@@ -4,7 +4,7 @@ import { homedir, hostname, platform, arch } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { HermesGateway, ensureContainer } from './hermes';
-import { HERMES_IMAGE } from './readiness';
+import { HERMES_IMAGE, RUNTIME_LABEL, classifyContract } from './readiness';
 import { COORDINATION_TOOLS, discoverModels, groupTool, nativeRuntimeProbe, prepareProfile, runtimeProbe } from './profile-runtime';
 import type { AgentProfile, MachineInfo } from '../lib/agent-profile';
 import { exportAgentFiles, importAgentFiles } from './transfer-files';
@@ -33,9 +33,19 @@ function exitCode(command: string, args: string[], timeout: number) {
     child.on('error', () => settle(null)); child.on('exit', code => settle(code));
   });
 }
+// Like exitCode, but keeps stdout: the image label is the answer, not the exit status.
+function output(command: string, args: string[], timeout: number) {
+  return new Promise<{ status: number | null; stdout: string }>(resolve => {
+    let done = false, stdout = ''; const settle = (status: number | null) => { if (!done) { done = true; resolve({ status, stdout }); } };
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'], timeout, killSignal: 'SIGKILL' });
+    child.stdout.on('data', chunk => stdout += chunk); child.on('error', () => settle(null)); child.on('exit', code => settle(code));
+  });
+}
 async function probeCapabilities(): Promise<Capabilities> {
   const [container, python] = await Promise.all([
-    process.env.OPEN_HARNESS_MOCK === '1' ? true : exitCode('docker', ['image', 'inspect', HERMES_IMAGE], 5_000).then(code => code === 0),
+    // An image built before a fix must not advertise container capability; the coordinator
+    // would dispatch to it and every run would die at gateway startup.
+    process.env.OPEN_HARNESS_MOCK === '1' ? true : output('docker', ['image', 'inspect', '-f', `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE], 5_000).then(result => classifyContract(result) === 'current'),
     Promise.all(pythons.map(async name => (await exitCode(name, ['-c', 'import hermes_cli, open_harness_policy'], 8_000)) === 0)).then(found => found.some(Boolean)),
   ]);
   return { container, direct: python, desktop: Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === 'darwin' || process.platform === 'win32'), virtualDesktop: process.platform === 'linux' && container, detail: python ? 'Hermes host runtime is installed.' : 'Install the Hermes host runtime to enable direct access.' };

@@ -11,14 +11,23 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
 RUN npm install -g \
   --allow-scripts=@askjo/camofox-browser,agent-browser,better-sqlite3 \
   agent-browser@0.37.1 @askjo/camofox-browser@1.16.0
-COPY runtime/hermes/ /opt/open-harness/
-RUN chmod +x /opt/open-harness/container-init.sh
-RUN pip install --no-cache-dir /opt/open-harness/extension
 RUN useradd -m -u 10001 hermes && mkdir -p /workspace/private /workspace/shared /home/hermes/.hermes \
   && chown -R hermes:hermes /workspace /home/hermes
 USER hermes
 ENV HERMES_HOME=/home/hermes/.hermes HERMES_TUI=1 PYTHONUNBUFFERED=1
 RUN hermes computer-use install
+# Everything above is upstream and rarely changes. Open Harness's own files come last so
+# that an edit to runtime/hermes/ rebuilds only these layers instead of re-cloning Hermes,
+# re-running pip install .[all] and reinstalling the browsers.
+USER root
+COPY runtime/hermes/ /opt/open-harness/
+RUN chmod +x /opt/open-harness/container-init.sh \
+  && pip install --no-cache-dir /opt/open-harness/extension
+USER hermes
 WORKDIR /workspace/shared
+# Read by Open Harness to tell whether this image predates a fix; must equal
+# RUNTIME_CONTRACT in runtime/readiness.ts. Last so bumping it invalidates nothing heavier.
+ARG OPEN_HARNESS_RUNTIME=2
+LABEL dev.openharness.runtime=$OPEN_HARNESS_RUNTIME
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/opt/open-harness/container-init.sh"]

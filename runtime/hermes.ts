@@ -6,7 +6,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { ComputerConfig } from '../lib/agent-profile';
-import { HERMES_IMAGE } from './readiness';
+import { HERMES_IMAGE, RUNTIME_LABEL, classifyContract, imageContract } from './readiness';
+
+const FIRST_SETUP_MESSAGE = "Docker is ready, but the pinned Hermes runtime still needs its first-time setup.";
+const STALE_IMAGE_MESSAGE = "Docker is ready, but the agent runtime on this computer was built before a fix. Open Settings → Readiness and update it.";
 
 type Pending = { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout };
 export type NativeGatewayOptions = { cwd: string; env: NodeJS.ProcessEnv; entry: string; python?: string };
@@ -147,8 +150,10 @@ export function dockerStatus(requireImage = true) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { available: true, version: "mock", message: "Deterministic Hermes runtime is ready." };
   const version = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { encoding: "utf8", timeout: 5000 });
   if (version.status === 0) {
-    if (requireImage && spawnSync("docker", ["image", "inspect", HERMES_IMAGE], { stdio: "ignore", timeout: 5000 }).status !== 0)
-      return { available: false, version: version.stdout.trim(), message: "Docker is ready, but the pinned Hermes runtime still needs its first-time setup." };
+    if (requireImage) {
+      const contract = imageContract();
+      if (contract !== 'current') return { available: false, version: version.stdout.trim(), message: contract === 'missing' ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE };
+    }
     return { available: true, version: version.stdout.trim(), message: "Docker is ready." };
   }
   const detail = (version.stderr || version.stdout || "").trim();
@@ -172,8 +177,9 @@ async function probeDockerStatus(): Promise<ReturnType<typeof dockerStatus>> {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { available: true, version: "mock", message: "Deterministic Hermes runtime is ready." };
   const version = await execDocker(["version", "--format", "{{.Server.Version}}"], 5000);
   if (version.code === 0) {
-    if ((await execDocker(["image", "inspect", HERMES_IMAGE], 5000)).code !== 0)
-      return { available: false, version: version.stdout.trim(), message: "Docker is ready, but the pinned Hermes runtime still needs its first-time setup." };
+    const label = await execDocker(["image", "inspect", "-f", `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE], 5000);
+    const contract = classifyContract({ status: label.code, stdout: label.stdout });
+    if (contract !== 'current') return { available: false, version: version.stdout.trim(), message: contract === 'missing' ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE };
     return { available: true, version: version.stdout.trim(), message: "Docker is ready." };
   }
   const detail = (version.stderr || version.stdout || "").trim();
@@ -227,14 +233,33 @@ export function stateSharing(stateRoot: string): SharingProbe {
   return value;
 }
 
+// A container is reused by name for as long as this signature matches. The image ID is
+// part of it: a container created from a superseded image would otherwise be reused
+// forever, so updating the runtime would appear to change nothing.
+export function containerSignature(selected: ComputerConfig, imageId: string) {
+  return createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, imageId })).digest('hex').slice(0, 24);
+}
+// Short-lived so a rebuild from Settings takes effect without restarting the coordinator.
+let imageIdCache: { id: string; at: number } | null = null;
+function currentImageId() {
+  if (imageIdCache && Date.now() - imageIdCache.at < 5_000) return imageIdCache.id;
+  const result = spawnSync("docker", ["image", "inspect", "-f", "{{.Id}}", HERMES_IMAGE], { encoding: "utf8", timeout: 10_000 });
+  imageIdCache = { id: result.status === 0 ? result.stdout.trim() : '', at: Date.now() };
+  return imageIdCache.id;
+}
+
 export function ensureContainer(agentId: string, stateRoot: string, computer?: ComputerConfig) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
   const sharing = stateSharing(stateRoot);
   if (!sharing.ok) throw new Error(sharing.detail);
+  // Refuse here, not just in readiness: a container from an image that predates a fix
+  // would start and then die with "gateway exited during startup", which says nothing.
+  const contract = imageContract();
+  if (contract !== 'current') throw new Error(contract === 'missing' ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE);
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
   const selected = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
-  const signature = createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources })).digest('hex').slice(0, 24);
+  const signature = containerSignature(selected, currentImageId());
   const inspect = spawnSync("docker", ["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"open-harness.config\"}}", name], { encoding: "utf8", timeout: 10_000 });
   if (inspect.status === 0) {
     const [running, currentSignature] = inspect.stdout.trim().split(/\s+/);

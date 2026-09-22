@@ -47,8 +47,37 @@ test('a custom endpoint carries its credential through a providers entry', () =>
   const entry = config.providers?.custom;
   assert.ok(entry, 'providers.custom is missing for a custom endpoint');
   assert.equal(entry.base_url, 'http://localhost:9/v1');
-  assert.equal(entry.key_env, 'SOME_KEY');
-  assert.equal(entry.enabled, true);
+  assert.equal(entry.key_env, 'OPEN_HARNESS_MODEL_API_KEY');
+  assert.equal(config.model.provider, 'custom');
+});
+
+// The neutral name must carry the same value the credential was saved under.
+test('a custom endpoint gets its credential under the Open Harness env name', () => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-contract-'));
+  prepareProfile(root, profile, model, { environment: () => ({ SOME_KEY: 'value' }) }, 'token', 'run-1');
+  assert.match(readFileSync(join(root, 'agents', profile.id, 'profile', '.env'), 'utf8'), /^OPEN_HARNESS_MODEL_API_KEY="value"$/m);
+});
+
+// Hermes ignores base_url on its native providers, so a proxy in front of xAI would have
+// been bypassed silently. An explicit endpoint always takes the custom path, key included.
+test('a first-party provider with an explicit endpoint is routed as a custom endpoint', () => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-contract-'));
+  const proxied: ModelChoice = { provider: 'xai', model: 'grok-4.6', credentialRef: 'XAI_API_KEY', baseUrl: 'http://proxy.internal/v1' };
+  prepareProfile(root, { ...profile, model: { ...proxied, inherit: false } }, proxied, { environment: () => ({ XAI_API_KEY: 'value' }) }, 'token', 'run-1');
+  const config = JSON.parse(readFileSync(join(root, 'agents', profile.id, 'profile', 'config.yaml'), 'utf8'));
+  assert.equal(config.model.provider, 'custom');
+  assert.equal(config.providers.custom.base_url, 'http://proxy.internal/v1');
+  assert.equal(config.providers.custom.key_env, 'OPEN_HARNESS_MODEL_API_KEY');
+});
+
+// Hermes has no provider named "openai"; the API-key one is "openai-api".
+test('the openai choice maps to the provider name Hermes actually has', () => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-contract-'));
+  const openai: ModelChoice = { provider: 'openai', model: 'gpt-5', credentialRef: 'OPENAI_API_KEY', baseUrl: '' };
+  prepareProfile(root, { ...profile, model: { ...openai, inherit: false } }, openai, { environment: () => ({ OPENAI_API_KEY: 'value' }) }, 'token', 'run-1');
+  const dir = join(root, 'agents', profile.id, 'profile');
+  assert.equal(JSON.parse(readFileSync(join(dir, 'config.yaml'), 'utf8')).model.provider, 'openai-api');
+  assert.match(readFileSync(join(dir, '.env'), 'utf8'), /OPENAI_API_KEY=/);
 });
 
 // The credential value belongs in the profile .env, never in config.yaml.

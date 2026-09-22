@@ -1,8 +1,14 @@
 # Reinstall only the policy extension on top of the existing pinned image.
 # Identical result to a full rebuild of runtime/hermes/Dockerfile, but reuses
 # every heavy layer instead of re-cloning Hermes and re-running pip install .[all].
+# Build with the extension directory as the context:
+#   docker build -f runtime/hermes/extension/Dockerfile.patch -t open-harness-hermes:2026.9.11 runtime/hermes/extension
+# It must carry the same runtime label as the full Dockerfile, or Open Harness will
+# keep reporting the image as out of date.
 FROM open-harness-hermes:2026.9.11
 USER root
 COPY . /opt/open-harness/extension/
 RUN pip install --no-cache-dir --force-reinstall --no-deps /opt/open-harness/extension
 USER hermes
+ARG OPEN_HARNESS_RUNTIME=2
+LABEL dev.openharness.runtime=$OPEN_HARNESS_RUNTIME

@@ -38,12 +38,46 @@ in commit `603b19b` and covered by `tests/managed-runtime-contract.test.ts`:
    directory hits this whenever the checkout lives outside the shared roots. This is now
    probed per state root and reported with its real cause.
 
+## Second real-runtime pass — September 21–22, 2026
+
+Same setup as the first pass. Closed the gaps that pass left open; all evidence is from a
+coordinator in `mode: live` unless noted.
+
+- **Runtime contract.** The image now carries `dev.openharness.runtime` and readiness
+  compares it with `RUNTIME_CONTRACT`. With an older-contract image under the pinned tag,
+  `harness doctor` reports "Update agent runtime", `executionReady: false`, exit 1, and a
+  run is refused with that cause instead of starting a container that dies at gateway
+  startup. With the current image restored: ready, exit 0, run completes.
+- **Container recreation.** The container signature includes the image ID. After retagging
+  a rebuilt image (new ID, same contract) the next run recreated the container (`.Image`
+  changed, newer `Created`), then completed.
+- **First-party providers**, offline inside the image via Hermes's own resolver:
+  `xai` and `openrouter` resolve the key from the profile `.env`. Hermes has no provider
+  called `openai`; Open Harness now writes `openai-api`, which resolves `OPENAI_API_KEY`.
+- **Explicit endpoint on a first-party provider.** Hermes ignores `base_url` on its native
+  providers (a proxy for xAI still resolved to `api.x.ai`), so any explicit endpoint now
+  takes the custom path. Hermes also refuses to hand a native provider's variable to a
+  custom endpoint, so the credential is written under `OPEN_HARNESS_MODEL_API_KEY` and
+  `key_env` names that. Live run: provider `xai`, credential saved as `XAI_API_KEY`,
+  endpoint set to the local server — the request arrived as `Bearer xai-PROXY-…`.
+  (The offline resolver reports a placeholder for this path even on a copy of a profile
+  that provably sent the key; treat the gateway run as authoritative for custom endpoints.)
+- **State directory.** `harness setup` on a simulated fresh checkout on the unshared drive
+  chose `~/.open-harness/<project>`, recorded it in `.env`, and stayed silent on the next
+  run; on this checkout, which already holds state, it changed nothing.
+- **Cheap rebuilds.** `runtime/hermes/Dockerfile` now installs Open Harness files after the
+  upstream layers and passes `docker build --check`. It was **not** built end to end on
+  this machine: a from-scratch build does not fit on the root disk. The labeled image was
+  produced with `runtime/hermes/extension/Dockerfile.patch`, which shares the label.
+- Suites: 93 node tests, Playwright 36/36 desktop+mobile, `tsc`, `eslint`, `vinext build`.
+
 ## Still pending
 
 Not yet exercised against a real runtime: authentication and inference against a paid
 provider, real MCP servers, filesystem isolation, process-tree termination, Direct
-Computer Access, native subagent restrictions, and the broader code-repair, browsing,
-durable skill-use, named-agent teamwork and scheduled-run scenarios.
+Computer Access, native subagent restrictions, a full from-scratch build of the reordered
+Dockerfile, and the broader code-repair, browsing, durable skill-use, named-agent
+teamwork and scheduled-run scenarios.
 
 The deterministic control and browser suites still run under `OPEN_HARNESS_MOCK=1` and
 do not by themselves establish live acceptance.

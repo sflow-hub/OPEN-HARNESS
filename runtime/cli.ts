@@ -1,15 +1,22 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { createConnection } from "node:net";
-import { dockerStatus } from "./hermes";
-import { onboardingStatus, HERMES_IMAGE } from "./readiness";
+import { dockerStatus, stateSharing } from "./hermes";
+import { onboardingStatus, imageContract, HERMES_IMAGE } from "./readiness";
+import { chooseStateDir, withEnvValue } from "./state-dir";
 
 const argv = process.argv.slice(2);
 const command = argv.find(arg => !arg.startsWith("-")) || (argv.includes("--help") || argv.includes("-h") ? "help" : argv.includes("--version") || argv.includes("-v") ? "version" : "status");
 const wantsJson = argv.includes("--json");
 const project = resolve(import.meta.dirname, "..");
-const state = resolve(process.env.OPEN_HARNESS_STATE_DIR || `${project}/.open-harness`);
+// dev and harness:serve load the project .env through --env-file-if-exists. The CLI must see
+// the same OPEN_HARNESS_STATE_DIR, or doctor and install-service would describe a different
+// data folder from the one the coordinator actually uses. Variables already set are kept.
+try { process.loadEnvFile(resolve(project, ".env")); } catch {}
+const projectDefault = `${project}/.open-harness`;
+const state = resolve(process.env.OPEN_HARNESS_STATE_DIR || projectDefault);
 const version = (() => { try { return String(JSON.parse(readFileSync(resolve(project, "package.json"), "utf8")).version || "unknown"); } catch { return "unknown"; } })();
 function run(name: string, args: string[]) { const result = spawnSync(name, args, { cwd: project, stdio: "inherit" }); process.exitCode = result.status || 0; }
 
@@ -33,7 +40,9 @@ Options:
   -v, --version     Print the Open Harness version
 
 Environment:
-  OPEN_HARNESS_STATE_DIR   Where state.db and secrets live (default: <project>/.open-harness)
+  OPEN_HARNESS_STATE_DIR   Where state.db and secrets live (default: <project>/.open-harness;
+                           setup picks ~/.open-harness/<project> and records it in .env when
+                           Docker cannot read the project folder)
   OPEN_HARNESS_PORT        Coordinator port (default: 4317)
   OPEN_HARNESS_HERMES_IMAGE  Override the pinned agent runtime image`;
 
@@ -57,7 +66,7 @@ async function diagnose() {
   const port = Number(process.env.OPEN_HARNESS_PORT || 4317);
   const listening = await reachable(port);
   const initialized = existsSync(`${state}/state.db`);
-  const status = onboardingStatus();
+  const status = onboardingStatus([], state);
   return {
     version,
     node: { version: process.versions.node, required: ">=22.13.0", ok: nodeOk },
@@ -66,7 +75,7 @@ async function diagnose() {
     hermesImage: HERMES_IMAGE,
     platform: status.platformLabel,
     executionReady: status.executionReady,
-    checks: status.checks.map(check => ({ id: check.id, label: check.label, state: check.state, detail: check.detail, helpUrl: check.helpUrl, action: check.action })),
+    checks: status.checks.map(check => ({ id: check.id, label: check.label, state: check.state, detail: check.detail, helpUrl: check.helpUrl, action: check.action, actionLabel: check.actionLabel })),
   };
 }
 
@@ -81,7 +90,7 @@ function report(data: Awaited<ReturnType<typeof diagnose>>) {
   for (const check of data.checks) {
     if (check.id === "coordinator") continue; // Already reported above, and measured rather than assumed.
     console.log(`${mark[check.state] || "?   "} ${check.label}: ${check.detail}`);
-    if (check.state === "action" && check.id === "agent-runtime") console.log(`       Run "npm run harness:setup" to build ${data.hermesImage}.`);
+    if (check.state === "action" && check.id === "agent-runtime") console.log(`       Run "npm run harness:setup" to ${check.actionLabel === "Update agent runtime" ? "update" : "build"} ${data.hermesImage}.`);
     if (check.helpUrl) console.log(`       ${check.helpUrl}`);
   }
 }
@@ -102,7 +111,26 @@ if (command === "help") {
   }
 } else if (command === "setup") {
   const docker = dockerStatus(false); if (!docker.available) { console.error(docker.message); process.exitCode = 1; }
-  else { mkdirSync(state, { recursive: true }); run("docker", ["build", "-f", "runtime/hermes/Dockerfile", "-t", HERMES_IMAGE, "."]); }
+  else {
+    run("docker", ["build", "-f", "runtime/hermes/Dockerfile", "-t", HERMES_IMAGE, "."]);
+    if (!process.exitCode) {
+      // The sharing probe runs a container from the image, so it has to come after the build.
+      const choice = chooseStateDir({
+        explicit: process.env.OPEN_HARNESS_STATE_DIR, projectDefault, homeDefault: join(homedir(), ".open-harness", basename(project)),
+        hasState: dir => existsSync(join(dir, "state.db")) || existsSync(join(dir, "secrets.json")),
+        dockerCanRead: dir => stateSharing(dir).ok,
+      });
+      mkdirSync(choice.path, { recursive: true });
+      if (choice.reason === "home") {
+        const envPath = resolve(project, ".env"), existing = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+        const updated = withEnvValue(existing, "OPEN_HARNESS_STATE_DIR", choice.path);
+        if (updated !== null) writeFileSync(envPath, updated, { mode: 0o600 });
+        console.log(`Open Harness will keep its data in ${choice.path}.`);
+        console.log(`Docker cannot read ${projectDefault}, so agents started there would never receive their profile or model credential.`);
+        console.log(`Recorded as OPEN_HARNESS_STATE_DIR in .env; edit that line to choose another folder.`);
+      }
+    }
+  }
 } else if (command === "install-service") {
   const unitDir = resolve(process.env.XDG_CONFIG_HOME || `${process.env.HOME}/.config`, "systemd/user"); mkdirSync(unitDir, { recursive: true });
   const unit = `[Unit]\nDescription=Open Harness local control service\nAfter=docker-desktop.service docker.service\n\n[Service]\nType=simple\nWorkingDirectory=${project}\nExecStart=/usr/bin/env npm run harness:serve\nRestart=on-failure\nEnvironment=OPEN_HARNESS_STATE_DIR=${state}\n\n[Install]\nWantedBy=default.target\n`;
@@ -115,7 +143,7 @@ if (command === "help") {
   run(process.execPath, ['--import', 'tsx', 'runtime/runner.ts', ...process.argv.slice(3)]);
 } else if (command === 'runner-install') {
   const docker = dockerStatus(false);
-  if (docker.available && spawnSync('docker', ['image', 'inspect', HERMES_IMAGE], { stdio: 'ignore', timeout: 7_000 }).status !== 0) {
+  if (docker.available && imageContract() !== 'current') {
     const built = spawnSync('docker', ['build', '-f', 'runtime/hermes/Dockerfile', '-t', HERMES_IMAGE, '.'], { cwd: project, stdio: 'inherit' }); if (built.status !== 0) process.exit(built.status || 1);
   }
   const nativeReady = spawnSync(process.env.HERMES_PYTHON || 'python3', ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore', timeout: 8_000 }).status === 0;
