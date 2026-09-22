@@ -16,7 +16,7 @@ maturity and what's outstanding before a 1.0, not a scheduled feature list.
 
 ## Before 1.0
 
-- **Real-runtime verification.** Everything in the current automated suite runs against an explicitly mocked Hermes runtime (`OPEN_HARNESS_MOCK=1`). Filesystem isolation, process-tree termination, real model/provider inference, real MCP servers, and Direct Computer Access all still need at least one verified pass against the real pinned Hermes container, tracked in `runtime/VERIFICATION.md`.
+- **Real-runtime verification.** The automated suite still runs against an explicitly mocked Hermes runtime (`OPEN_HARNESS_MOCK=1`). A first real-runtime pass on 2026-09-21 covered credential storage, profile preparation, plugin loading, gateway startup and an authenticated round trip to an OpenAI-compatible endpoint, and fixed four defects the mocked suite could not see. Filesystem isolation, process-tree termination, paid-provider inference, real MCP servers, and Direct Computer Access remain unverified. Tracked in `runtime/VERIFICATION.md`.
 - **Desktop CSP validation.** A Content-Security-Policy was recently defined for the Tauri webview; it needs a real `npm run desktop:dev` smoke test to confirm it doesn't break the dashboard before it ships in a signed release.
 - **Release secret provisioning.** Signed desktop builds require code-signing and notarization secrets to be present in GitHub Actions; unverified from a source checkout.
 
