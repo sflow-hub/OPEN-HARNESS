@@ -1,4 +1,5 @@
 import type { AgentProfile } from "./agent-profile";
+import type { Team } from "./team";
 export type Agent = {
   profile?: AgentProfile;
   id: string;
@@ -41,8 +42,9 @@ export type Conversation = {
   updatedAt: string;
 };
 export type Workspace = {
-  version: 1;
+  version: 2;
   agents: Agent[];
+  teams: Team[];
   files: Artifact[];
   conversations: Conversation[];
 };
@@ -54,7 +56,8 @@ export type RunEvent =
   | { type: "done" }
   | { type: "error"; message: string };
 export const initialWorkspace: Workspace = {
-  version: 1,
+  version: 2,
+  teams: [],
   files: [],
   conversations: [],
   agents: [

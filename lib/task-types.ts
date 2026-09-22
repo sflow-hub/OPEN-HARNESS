@@ -18,15 +18,35 @@ export type TaskBoardSettings = {
   allowAgentDispatch: boolean;
 };
 
+// The six board colors are the agent avatar tones, in tone order, so a project and an
+// agent picked from the same palette read as the same color across the workspace.
+export const BOARD_COLORS = ["sage", "blue", "amber", "violet", "rose", "teal"] as const;
+export type BoardColor = typeof BOARD_COLORS[number];
+
 export type TaskBoard = {
   id: string;
   name: string;
+  description: string;
+  color: BoardColor;
+  defaultOwnerAgentId: string | null;
+  position: number;
   archived: boolean;
   revision: number;
   stages: TaskStage[];
   settings: TaskBoardSettings;
   createdAt: string;
   updatedAt: string;
+};
+
+// Counts the Projects view needs for every board, including boards whose tasks the
+// current filters hide, so the server sends them rather than the client deriving them.
+export type BoardSummary = {
+  boardId: string;
+  total: number;
+  archivedCount: number;
+  byCategory: Record<WorkflowCategory, number>;
+  activeRuns: number;
+  ownerAgentIds: string[];
 };
 
 export type ChecklistItem = { id: string; text: string; done: boolean; position: number };
@@ -36,6 +56,7 @@ export type TaskRun = PersistentRun & { attempt: number; startedAt: string; outp
 
 export type AgentTask = {
   id: string;
+  teamId: string | null;
   boardId: string;
   stageId: string;
   title: string;
@@ -58,4 +79,4 @@ export type AgentTask = {
   updatedAt: string;
 };
 
-export type TaskSnapshot = { boards: TaskBoard[]; tasks: AgentTask[] };
+export type TaskSnapshot = { boards: TaskBoard[]; tasks: AgentTask[]; summaries: BoardSummary[] };

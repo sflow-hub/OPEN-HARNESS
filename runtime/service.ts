@@ -8,10 +8,13 @@ import { discoverTools, discoverModels, nativeRuntimeProbe, prepareProfile, runt
 import { profileAgent, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
 import { Store, type RunRow } from "./db";
 import { SecretStore } from "./secrets";
+import { Credentials, CredentialError } from "./credentials";
+import type { CredentialRecord, CredentialUsage, CredentialUse } from "../lib/credentials";
 import { validateComputerTarget } from './computer-validation';
 import { HermesGateway, dockerStatusCached, ensureContainer } from "./hermes";
 import { coordinationSocket } from "./coordination-socket";
 import { TaskError, TaskStore } from "./tasks";
+import { TeamError, TeamStore } from "./teams";
 import { MachineError, Machines } from "./machines";
 import { exportAgentFiles, importAgentFiles, type TransferBundle } from './transfer-files';
 import { onboardingAction, onboardingStatus } from './readiness';
@@ -19,11 +22,13 @@ import { onboardingAction, onboardingStatus } from './readiness';
 const root = resolve(process.env.OPEN_HARNESS_STATE_DIR || ".open-harness");
 mkdirSync(root, { recursive: true }); mkdirSync(join(root, "shared"), { recursive: true }); mkdirSync(join(root, "agents"), { recursive: true });
 const store = new Store(join(root, "state.db"));
+const secrets = new SecretStore(join(root, "secrets.json"));
+const credentials = new Credentials(store.db, secrets);
+const profiles = new Profiles(store.db);
+const teams = new TeamStore(store.db);
 const tasks = new TaskStore(store.db);
 store.runListener = run => tasks.syncRun(run);
 tasks.reconcile();
-const secrets = new SecretStore(join(root, "secrets.json"));
-const profiles = new Profiles(store.db);
 const machines = new Machines(store.db);
 const importedWorkspace = store.db.prepare("SELECT payload_json FROM migrations WHERE key='browser-v1'").get() as { payload_json: string } | undefined;
 const importedAgents = importedWorkspace ? JSON.parse(importedWorkspace.payload_json).agents || [] : [];
@@ -70,9 +75,43 @@ function event(runId: string, type: string, payload: unknown) { return store.app
 function profileResponse(profile: AgentProfile) {
   const live = store.listRuns().find(run => run.agent_id === profile.id && ["running", "waiting_approval", "waiting_input"].includes(run.state));
   const snapshot = live ? profiles.runSnapshot(live.id) : null;
-  return { profile, effectiveModel: profiles.effective(profile), activeRevision: snapshot?.revision ?? null, pending: Boolean(snapshot && (snapshot.revision !== profile.revision || JSON.stringify(snapshot.effectiveModel) !== JSON.stringify(profiles.effective(profile)) || JSON.stringify(snapshot.computer) !== JSON.stringify(profile.computer))), secretNames: secrets.names(), machine: machines.get(profile.computer.machineId), transfer: machines.transferStatus(profile.id) };
+  return { profile, effectiveModel: profiles.effective(profile), activeRevision: snapshot?.revision ?? null, pending: Boolean(snapshot && (snapshot.revision !== profile.revision || JSON.stringify(snapshot.effectiveModel) !== JSON.stringify(profiles.effective(profile)) || JSON.stringify(snapshot.computer) !== JSON.stringify(profile.computer))), secretNames: secrets.names(), credentials: credentialRecords(), machine: machines.get(profile.computer.machineId), transfer: machines.transferStatus(profile.id) };
 }
 
+function credentialUses(ref: string): CredentialUsage {
+  const uses: CredentialUse[] = [];
+  // Reported once rather than fanned out, so the delete dialog can say "the workspace
+  // default, which N agents inherit" instead of listing every inheriting agent twice.
+  if (profiles.defaults().model.credentialRef === ref) uses.push({ kind: "workspace-default" });
+  for (const profile of profiles.list()) {
+    if (!profile.model.inherit && profile.model.credentialRef === ref) uses.push({ kind: "agent-model", agentId: profile.id, agentName: profile.name });
+    for (const connector of profile.connectors) if (connector.secretRef === ref) uses.push({ kind: "agent-connector", agentId: profile.id, agentName: profile.name, connectorName: connector.name, enabled: connector.enabled });
+  }
+  const activeRuns = store.listRuns().filter(run => ["running", "waiting_approval", "waiting_input"].includes(run.state)).filter(run => {
+    const snapshot = profiles.runSnapshot(run.id);
+    return Boolean(snapshot && (snapshot.effectiveModel.credentialRef === ref || snapshot.connectors.some(c => c.enabled && c.secretRef === ref)));
+  }).length;
+  return { uses, agentCount: new Set(uses.filter(use => "agentId" in use).map(use => (use as { agentId: string }).agentId)).size, activeRuns };
+}
+function credentialRecord(row: ReturnType<Credentials["row"]>): CredentialRecord {
+  return { ref: row.ref, label: row.label, provider: row.provider, fingerprint: row.fingerprint, length: row.length, present: credentials.present(row.ref), createdAt: row.created_at, updatedAt: row.updated_at, lastUsedAt: row.last_used_at, usage: credentialUses(row.ref) };
+}
+function credentialRecords() { return credentials.rows().map(credentialRecord); }
+// Points every reference at a different credential so one can be deleted without
+// silently breaking agents. Server-side read-modify-write, so profiles.save() always
+// sees a matching revision -- but it still bumps, which 409s any stale open editor.
+function reassignCredential(from: string, to: string) {
+  const updated: string[] = [];
+  const defaults = profiles.defaults();
+  if (defaults.model.credentialRef === from) { profiles.setDefaults({ ...defaults.model, credentialRef: to }, defaults.revision); updated.push("workspace"); }
+  for (const profile of profiles.list()) {
+    const model = !profile.model.inherit && profile.model.credentialRef === from ? { ...profile.model, credentialRef: to } : profile.model;
+    const connectors = profile.connectors.map(c => c.secretRef === from ? { ...c, secretRef: to } : c);
+    if (model === profile.model && connectors.every((c, i) => c === profile.connectors[i])) continue;
+    profiles.save({ ...profile, model, connectors }); updated.push(profile.id);
+  }
+  return updated;
+}
 function selectedSecrets(profile: AgentProfile, effective: ReturnType<Profiles['effective']>) {
   const names = new Set([effective.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean));
   const available = secrets.environment(); return Object.fromEntries([...names].filter(name => available[name]).map(name => [name, available[name]]));
@@ -167,6 +206,7 @@ async function execute(run: RunRow) {
     const profile = profiles.get(run.agent_id);
     if (!profile) throw new Error("Agent profile not found. Open Agent settings and save this agent.");
     const snapshot = profiles.snapshot(run.id, profile);
+    credentials.touch([snapshot.effectiveModel.credentialRef, ...snapshot.connectors.filter(c => c.enabled).map(c => c.secretRef)]);
     const assigned = machines.canAssign(snapshot.computer.machineId, run.agent_id);
     event(run.id, "run.started", { runId: run.id, agentId: run.agent_id, machineId: assigned.id, machineName: assigned.name });
     event(run.id, "profile.applied", { revision: snapshot.revision, model: snapshot.effectiveModel, allowedTools: snapshot.allowedTools, computer: snapshot.computer });
@@ -301,13 +341,30 @@ function mimeType(name: string) {
 function workspaceDir(url: URL) { const scope = url.searchParams.get("scope") || "shared", agentId = url.searchParams.get("agentId") || ""; return { scope, dir: scope === "private" ? join(root, "agents", agentId.replace(/[^a-zA-Z0-9_.-]/g, "-"), "private") : join(root, "shared") }; }
 function safeFile(dir: string, name: string) { if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(name) || name.includes("..")) throw new Error("Invalid filename."); const target = join(dir, name); if (!target.startsWith(dir + "/")) throw new Error("Invalid path."); return target; }
 
+function validTaskMutation(input: Record<string, unknown>, current?: ReturnType<TaskStore["getTask"]>) {
+  const teamId = input.teamId === undefined ? current?.teamId || null : input.teamId ? String(input.teamId) : null;
+  let ownerAgentId: string | null;
+  if (input.ownerAgentId === undefined) {
+    ownerAgentId = current?.ownerAgentId || null;
+    if (!current && input.boardId) ownerAgentId = tasks.getBoard(String(input.boardId)).defaultOwnerAgentId;
+  } else ownerAgentId = input.ownerAgentId ? String(input.ownerAgentId) : null;
+  const collaboratorAgentIds = input.collaboratorAgentIds === undefined ? current?.collaboratorAgentIds || [] : Array.isArray(input.collaboratorAgentIds) ? input.collaboratorAgentIds.map(String) : [];
+  const allowLegacy = Boolean(current && !current.teamId && !teamId && input.collaboratorAgentIds === undefined);
+  return { ...input, ...teams.validateAssignment(teamId, ownerAgentId, collaboratorAgentIds, allowLegacy) };
+}
+
+function agentMayTouchTask(agentId: string, assignOthers: boolean, task: ReturnType<TaskStore["getTask"]>) {
+  if (task.teamId && !teams.isMember(task.teamId, agentId)) return false;
+  return task.ownerAgentId === null || task.ownerAgentId === agentId || task.collaboratorAgentIds.includes(agentId) || assignOthers;
+}
+
 const server = createServer(async (req, res) => {
   const origin = req.headers.origin;
   if (origin && !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return json(res, 403, { error: "Open Harness accepts local browser clients only." });
   if (req.method === "OPTIONS") { res.writeHead(204, { "Access-Control-Allow-Origin": allowedOrigin(origin), "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" }); return res.end(); }
   const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
   try {
-    if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); if (!loopbackHost(req.headers.host)) return json(res, 403, { error: 'Dashboard bootstrap requires a loopback address. Open Open Harness at http://localhost:3000.' }); return json(res, 200, { token: secrets.token, runtime: await dockerStatusCached(), version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } }); }
+    if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); if (!loopbackHost(req.headers.host)) return json(res, 403, { error: 'Dashboard bootstrap requires a loopback address. Open Open Harness at http://localhost:3000.' }); return json(res, 200, { token: secrets.token, mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } }); }
     if (req.method === 'GET' && (url.pathname === '/v1/install/runner.sh' || url.pathname === '/v1/install/runner.ps1')) {
       const name = url.pathname.endsWith('.ps1') ? 'install-runner.ps1' : 'install-runner.sh';
       return raw(res, 200, name.endsWith('.ps1') ? 'text/plain; charset=utf-8' : 'text/x-shellscript; charset=utf-8', readFileSync(join(import.meta.dirname, 'installers', name)));
@@ -339,13 +396,13 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/v1/health") return json(res, 200, { ok: true, runtime: await dockerStatusCached(), activeRuns: store.activeCount(), queuedRuns: store.listRuns().filter(run => run.state === "queued").length, secrets: secrets.names(), secretStorage: secrets.backend });
     if (req.method === 'GET' && url.pathname === '/v1/support-bundle') return json(res, 200, {
       generatedAt: new Date().toISOString(), version: '0.3.0', hermes: { release: 'v2026.9.11', commit: '939e45c91d751fadd94dcd1b873ac3cb44846213' },
-      platform: { os: process.platform, arch: process.arch, node: process.version }, readiness: onboardingStatus(), machines: machines.list(),
+      platform: { os: process.platform, arch: process.arch, node: process.version }, readiness: onboardingStatus(secrets.names()), machines: machines.list(),
       agents: profiles.list().map(profile => ({ id: profile.id, revision: profile.revision, machineId: profile.computer.machineId, access: profile.computer.access, desktop: profile.computer.desktop })),
       recentRuns: store.listRuns(25).map(run => ({ id: run.id, agentId: run.agent_id, state: run.state, createdAt: run.created_at, updatedAt: run.updated_at, error: run.error })),
-      configuredCredentialNames: secrets.names(), secretStorage: secrets.backend, note: 'Secret values, prompts, messages, results, file contents, and model responses are excluded.',
+      credentials: credentials.rows().map(row => ({ ref: row.ref, label: row.label, provider: row.provider, present: credentials.present(row.ref), createdAt: row.created_at, updatedAt: row.updated_at, lastUsedAt: row.last_used_at })), secretStorage: secrets.backend, note: 'Secret values, prompts, messages, results, file contents, and model responses are excluded.',
     });
-    if (req.method === 'GET' && url.pathname === '/v1/onboarding/status') return json(res, 200, onboardingStatus());
-    if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action)); }
+    if (req.method === 'GET' && url.pathname === '/v1/onboarding/status') return json(res, 200, onboardingStatus(secrets.names()));
+    if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action, secrets.names())); }
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/model-test') {
       const input = await body(req), model = validateModel(input.model);
       if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { ok: true, message: 'Model connection is ready.' });
@@ -373,7 +430,7 @@ const server = createServer(async (req, res) => {
       }
     }
     const machineSecretsMatch = url.pathname.match(/^\/v1\/machines\/([^/]+)\/secrets$/);
-    if (machineSecretsMatch && req.method === 'GET') { machines.get(decodeURIComponent(machineSecretsMatch[1])); return json(res, 200, { secrets: secrets.names(), storage: 'coordinator' }); }
+    if (machineSecretsMatch && req.method === 'GET') { machines.get(decodeURIComponent(machineSecretsMatch[1])); return json(res, 200, { secrets: secrets.names(), credentials: credentialRecords(), storage: 'coordinator' }); }
     const machineMatch = url.pathname.match(/^\/v1\/machines\/([^/]+)\/(test|reconnect|revoke)$/);
     if (machineMatch && req.method === 'POST') {
       const machineId = decodeURIComponent(machineMatch[1]), action = machineMatch[2], input = await body(req);
@@ -404,6 +461,22 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { synced: input.agents?.length || 0, agents: profiles.list().map(p => profileAgent(p)) });
     }
     if (req.method === "GET" && url.pathname === "/v1/agents") return json(res, 200, { agents: profiles.list().map(p => profileAgent(p)) });
+    if (url.pathname === "/v1/teams") {
+      if (req.method === "GET") return json(res, 200, { teams: teams.list(url.searchParams.get("includeRetired") === "1") });
+      if (req.method === "POST") return json(res, 201, teams.create(await body(req)));
+    }
+    if (url.pathname === "/v1/teams/sync" && req.method === "POST") {
+      const input = await body(req), saved = [];
+      for (const team of Array.isArray(input.teams) ? input.teams : []) saved.push(teams.import(team));
+      return json(res, 200, { teams: saved });
+    }
+    const teamMatch = url.pathname.match(/^\/v1\/teams\/([^/]+)$/);
+    if (teamMatch) {
+      const teamId = decodeURIComponent(teamMatch[1]);
+      if (req.method === "GET") { const team = teams.get(teamId, url.searchParams.get("includeRetired") === "1"); return team ? json(res, 200, team) : json(res, 404, { error: "Team not found." }); }
+      if (req.method === "PUT") return json(res, 200, teams.update(teamId, await body(req)));
+      if (req.method === "DELETE") return json(res, 200, teams.retire(teamId));
+    }
     if (req.method === "POST" && url.pathname === "/v1/workspace/model/import") {
       const input = await body(req);
       return json(res, 200, profiles.defaults().revision ? profiles.defaults() : profiles.setDefaults(input.model, 0));
@@ -412,7 +485,7 @@ const server = createServer(async (req, res) => {
       if (req.method === "GET") return json(res, 200, profiles.defaults());
       if (req.method === "PUT") { const input = await body(req); return json(res, 200, profiles.setDefaults(input.model, input.revision)); }
     }
-    const profileMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(profile|tools|models|connection-check|connector-check)$/);
+    const profileMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(profile|credential|tools|models|connection-check|connector-check)$/);
     if (profileMatch) {
       const id = validId(decodeURIComponent(profileMatch[1])), action = profileMatch[2];
       const profile = profiles.get(id);
@@ -425,6 +498,13 @@ const server = createServer(async (req, res) => {
         return json(res, 200, profileResponse(saved));
       }
       if (!profile) return json(res, 404, { error: 'Agent profile not found.' });
+      if (action === 'credential' && req.method === 'PUT') {
+        const input = await body(req);
+        if (input.inherit) return json(res, 200, profileResponse(profiles.save({ ...profile, model: { ...profile.model, inherit: true } })));
+        const ref = String(input.ref || '');
+        if (ref && !credentials.has(ref)) throw new CredentialError('That credential no longer exists.', 404);
+        return json(res, 200, profileResponse(profiles.save({ ...profile, model: { ...profiles.effective(profile), inherit: false, credentialRef: ref } })));
+      }
       if (action === 'profile' && req.method === 'GET') return json(res, 200, profileResponse(profile));
       if (action === 'tools' && req.method === 'GET') {
         ensureProfileDirs(id);
@@ -511,15 +591,19 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { migrated: true });
     }
     if (url.pathname === "/v1/boards") {
-      if (req.method === "GET") return json(res, 200, { boards: tasks.listBoards(url.searchParams.get("includeArchived") === "1") });
+      if (req.method === "GET") return json(res, 200, { boards: tasks.listBoards(url.searchParams.get("includeArchived") === "1"), summaries: tasks.boardSummaries() });
       if (req.method === "POST") return json(res, 201, tasks.createBoard(await body(req)));
     }
-    const boardMatch = url.pathname.match(/^\/v1\/boards\/([^/]+)(?:\/(stages))?$/);
+    // Ahead of boardMatch: its ([^/]+) would otherwise read "reorder" as a board id.
+    if (url.pathname === "/v1/boards/reorder" && req.method === "POST") return json(res, 200, { boards: tasks.reorderBoards((await body(req)).ids), summaries: tasks.boardSummaries() });
+    const boardMatch = url.pathname.match(/^\/v1\/boards\/([^/]+)(?:\/(stages|duplicate))?$/);
     if (boardMatch) {
       const boardId = decodeURIComponent(boardMatch[1]);
       if (!boardMatch[2] && req.method === "GET") return json(res, 200, tasks.getBoard(boardId));
       if (!boardMatch[2] && req.method === "PUT") return json(res, 200, tasks.updateBoard(boardId, await body(req)));
+      if (!boardMatch[2] && req.method === "DELETE") return json(res, 200, tasks.deleteBoard(boardId));
       if (boardMatch[2] === "stages" && req.method === "POST") return json(res, 201, tasks.addStage(boardId, await body(req)));
+      if (boardMatch[2] === "duplicate" && req.method === "POST") return json(res, 201, tasks.duplicateBoard(boardId, await body(req)));
     }
     const stageMatch = url.pathname.match(/^\/v1\/stages\/([^/]+)$/);
     if (stageMatch) {
@@ -527,17 +611,17 @@ const server = createServer(async (req, res) => {
       if (req.method === "DELETE") return json(res, 200, tasks.removeStage(decodeURIComponent(stageMatch[1]), url.searchParams.get("moveToStageId") || undefined));
     }
     if (url.pathname === "/v1/tasks") {
-      if (req.method === "GET") return json(res, 200, { boards: tasks.listBoards(url.searchParams.get("includeArchived") === "1"), tasks: tasks.listTasks(url.searchParams.get("includeArchived") === "1") });
-      if (req.method === "POST") return json(res, 201, tasks.createTask(await body(req)));
+      if (req.method === "GET") return json(res, 200, { boards: tasks.listBoards(url.searchParams.get("includeArchived") === "1"), tasks: tasks.listTasks(url.searchParams.get("includeArchived") === "1"), summaries: tasks.boardSummaries() });
+      if (req.method === "POST") return json(res, 201, tasks.createTask(validTaskMutation(await body(req))));
     }
     const taskMatch = url.pathname.match(/^\/v1\/tasks\/([^/]+)(?:\/(comments|start|request-changes|approve|runs|move|stop|check|additem))?$/);
     if (taskMatch) {
       const taskId = decodeURIComponent(taskMatch[1]), action = taskMatch[2];
       if (!action && req.method === "GET") return json(res, 200, tasks.getTask(taskId));
-      if (!action && req.method === "PUT") return json(res, 200, tasks.updateTask(taskId, await body(req)));
+      if (!action && req.method === "PUT") { const current = tasks.getTask(taskId); return json(res, 200, tasks.updateTask(taskId, validTaskMutation(await body(req), current))); }
       if (!action && req.method === "DELETE") { const task = tasks.getTask(taskId); if (task.activeRunId) return json(res, 409, { error: 'Stop the active run before deleting this task.' }); store.db.prepare("DELETE FROM tasks WHERE id=?").run(taskId); return json(res, 200, { ok: true }); }
       if (action === "comments" && req.method === "POST") return json(res, 201, tasks.comment(taskId, { ...await body(req), author: 'you' }));
-      if (action === "move" && req.method === "POST") return json(res, 200, tasks.move(taskId, await body(req)));
+      if (action === "move" && req.method === "POST") { const current = tasks.getTask(taskId), input = await body(req); validTaskMutation(input, current); return json(res, 200, tasks.move(taskId, input)); }
       if (action === "check" && req.method === "POST") { const input = await body(req); return json(res, 200, tasks.check(taskId, String(input.item || ''), input.done === undefined ? undefined : Boolean(input.done))); }
       if (action === "additem" && req.method === "POST") { const input = await body(req); return json(res, 201, tasks.addItem(taskId, String(input.text || ''))); }
       if ((action === "start" || action === "request-changes") && req.method === "POST") { const started = tasks.start(taskId, await body(req), input => createRun({ ...input, deferStart: true })); void pump(); return json(res, 202, started); }
@@ -557,11 +641,67 @@ const server = createServer(async (req, res) => {
       if (action === "approval" && req.method === "POST") { const input = await body(req), approval = store.approval(String(input.approvalId)); if (!approval || approval.run_id !== run.id) return json(res, 404, { error: "Approval not found." }); const live = active.get(run.id), remote = remoteActive.get(run.id); if (!live && !remote) return json(res, 409, { error: "Run is not active." }); const decision = input.decision === "approve" ? "approve" : "deny"; if (live) await live.gateway.request("approval.respond", { request_id: approval.gateway_request_id, decision }); else machines.enqueue(remote!.machineId, run.agent_id, 'approval', { runId: run.id, commandId: remote!.commandId, requestId: approval.gateway_request_id, decision }); store.resolveApproval(String(input.approvalId), decision); store.setRun(run.id, { state: "running" }); event(run.id, "approval.resolved", { approvalId: input.approvalId, decision }); return json(res, 200, { ok: true }); }
     }
     if (req.method === "POST" && url.pathname === "/v1/runs/stop-all") { let stopped = 0; for (const run of store.listRuns().filter(item => !item.parent_run_id && ["queued","running","waiting_approval","waiting_input"].includes(item.state))) stopped += await stopRunTree(run.id); return json(res, 200, { stopped }); }
-    if (req.method === "POST" && url.pathname === "/v1/secrets") { const input = await body(req); secrets.set(String(input.name), String(input.value)); return json(res, 200, { ok: true, name: input.name }); }
+    if (url.pathname === "/v1/credentials") {
+      if (req.method === "GET") return json(res, 200, { credentials: credentialRecords(), backend: credentials.backend });
+      if (req.method === "POST") { const input = await body(req); return json(res, 201, credentialRecord(credentials.create(input))); }
+    }
+    const credentialMatch = url.pathname.match(/^\/v1\/credentials\/([^/]+)(?:\/(value))?$/);
+    if (credentialMatch) {
+      const ref = decodeURIComponent(credentialMatch[1]), action = credentialMatch[2];
+      if (action === "value" && req.method === "POST") { const input = await body(req); return json(res, 200, credentialRecord(credentials.rotate(ref, input.value))); }
+      if (action) return json(res, 405, { error: "Unsupported credential action." });
+      if (req.method === "GET") return json(res, 200, credentialRecord(credentials.row(ref)));
+      if (req.method === "PUT") { const input = await body(req); return json(res, 200, credentialRecord(credentials.relabel(ref, input))); }
+      if (req.method === "DELETE") {
+        const usage = credentialUses(credentials.row(ref).ref), reassignTo = url.searchParams.get("reassignTo") || "";
+        if (reassignTo) { if (reassignTo === ref || !credentials.has(reassignTo)) return json(res, 400, { error: "Choose a different saved credential to move these to." }); const reassigned = reassignCredential(ref, reassignTo); credentials.remove(ref); return json(res, 200, { ok: true, reassigned }); }
+        // Refuse by default rather than silently breaking agents; the client re-sends with
+        // force=1 once it has shown the operator exactly what references this.
+        if (usage.uses.length && url.searchParams.get("force") !== "1") return json(res, 409, { error: "This credential is still in use.", usage });
+        credentials.remove(ref); return json(res, 200, { ok: true, reassigned: [] });
+      }
+    }
+    if (req.method === "POST" && url.pathname === "/v1/secrets") {
+      const input = await body(req), name = String(input.name);
+      const row = credentials.has(name) ? credentials.rotate(name, input.value) : credentials.create({ ref: name, value: input.value });
+      return json(res, 200, { ok: true, name: row.ref });
+    }
     if (/^\/v1\/agents\/[^/]+\/connectors/.test(url.pathname)) return json(res, 410, { error: 'Connection settings moved into Agent settings. Reload the app.' });
     if (url.pathname === "/v1/files") { const { scope, dir } = workspaceDir(url); mkdirSync(dir, { recursive: true }); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = safeFile(dir, name); if (!existsSync(target)) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readFileSync(target, encoding), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(dir), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = safeFile(dir, String(input.name || "")); writeFileSync(target, content, { encoding, mode: 0o600 }); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = safeFile(dir, String(url.searchParams.get("name") || "")); if (existsSync(target)) unlinkSync(target); return json(res, 200, { ok: true }); } }
     if (req.method === "GET" && url.pathname === "/v1/routines") return json(res, 200, { routines: store.db.prepare("SELECT * FROM schedules ORDER BY created_at DESC").all() });
     if (req.method === "POST" && url.pathname === "/v1/routines") { const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)); const next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, input.agentId, input.name, input.prompt, minutes, input.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone, 1, next, stamp.toISOString(), stamp.toISOString()); return json(res, 201, { id, nextRunAt: next }); }
+    // A routine with a typo, a wrong agent, or a runaway interval could previously only
+    // be paused, never corrected or removed — so every mistake was permanent.
+    const routineItem = url.pathname.match(/^\/v1\/routines\/([^/]+)$/);
+    if (routineItem) {
+      const routine = store.db.prepare("SELECT * FROM schedules WHERE id=?").get(routineItem[1]) as any;
+      if (!routine) return json(res, 404, { error: "Routine not found." });
+      if (req.method === "DELETE") {
+        store.db.prepare("DELETE FROM schedule_runs WHERE schedule_id=?").run(routine.id);
+        store.db.prepare("DELETE FROM schedules WHERE id=?").run(routine.id);
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === "PUT") {
+        const input = await body(req), stamp = new Date().toISOString();
+        const name = input.name === undefined ? routine.name : String(input.name).trim().slice(0, 200);
+        const prompt = input.prompt === undefined ? routine.prompt : String(input.prompt).trim().slice(0, 20_000);
+        if (!name || !prompt) return json(res, 400, { error: "A routine needs a name and a task." });
+        const agentId = input.agentId === undefined ? routine.agent_id : String(input.agentId);
+        if (!profiles.list().some(profile => profile.id === agentId)) return json(res, 400, { error: "That agent no longer exists." });
+        // Clamped like the hosted route: an interval of 0 or a negative number would
+        // otherwise land as "every minute, forever".
+        const minutes = input.intervalMinutes === undefined
+          ? Number(routine.interval_minutes)
+          : Math.max(1, Math.min(525_600, Math.round(Number(input.intervalMinutes))));
+        if (!Number.isFinite(minutes)) return json(res, 400, { error: "Enter how often this should run, in minutes." });
+        // Re-base the next run so a shortened interval takes effect now rather than
+        // waiting out the old one.
+        const next = new Date(Date.now() + minutes * 60_000).toISOString();
+        store.db.prepare("UPDATE schedules SET agent_id=?,name=?,prompt=?,interval_minutes=?,next_run_at=?,updated_at=? WHERE id=?")
+          .run(agentId, name, prompt, minutes, next, stamp, routine.id);
+        return json(res, 200, { ...routine, agent_id: agentId, name, prompt, interval_minutes: minutes, next_run_at: next, updated_at: stamp });
+      }
+    }
     const routineMatch = url.pathname.match(/^\/v1\/routines\/([^/]+)\/(run|toggle|history)$/);
     if (routineMatch) {
       const routine = store.db.prepare("SELECT * FROM schedules WHERE id=?").get(routineMatch[1]) as any;
@@ -570,31 +710,47 @@ const server = createServer(async (req, res) => {
       if (req.method === "POST" && routineMatch[2] === "run") { const stamp = new Date().toISOString(), run = createRun({ agentId: routine.agent_id, prompt: routine.prompt }); store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, stamp); store.db.prepare("UPDATE schedules SET last_run_at=?,updated_at=? WHERE id=?").run(stamp, stamp, routine.id); return json(res, 202, run); }
       if (req.method === "POST" && routineMatch[2] === "toggle") { store.db.prepare("UPDATE schedules SET enabled=?,updated_at=? WHERE id=?").run(routine.enabled ? 0 : 1, new Date().toISOString(), routine.id); return json(res, 200, { enabled: !routine.enabled }); }
     }
-    if (req.method === "POST" && url.pathname === "/internal/handoff") { const input = await body(req); const parent = store.listRuns().find(run => run.agent_id === internalAgent && ["running","waiting_approval","waiting_input"].includes(run.state)); if (!parent) return json(res, 409, { error: "The delegating agent has no active run." }); if (!internalAllowed(internalAgent, "mcp_open_harness_delegate_named_agent", String(req.headers["x-open-harness-run"] || parent.id))) return json(res, 403, { error: "Delegation is disabled for this run." }); const child = createRun({ agentId: input.agentId, prompt: input.prompt, parentRunId: parent.id }); event(parent.id, "handoff.created", { childRunId: child.id, targetAgentId: input.agentId, prompt: input.prompt }); const result = await waitForRun(child.id); event(parent.id, "handoff.completed", { childRunId: child.id, targetAgentId: input.agentId, state: result.state }); return json(res, 200, { runId: result.id, state: result.state, result: result.result, error: result.error }); }
+    if (req.method === "POST" && url.pathname === "/internal/handoff") { const input = await body(req); const parent = store.listRuns().find(run => run.agent_id === internalAgent && ["running","waiting_approval","waiting_input"].includes(run.state)); if (!parent) return json(res, 409, { error: "The delegating agent has no active run." }); if (!internalAllowed(internalAgent, "mcp_open_harness_delegate_named_agent", String(req.headers["x-open-harness-run"] || parent.id))) return json(res, 403, { error: "Delegation is disabled for this run." }); const targetId = String(input.agentId || ""); if (!internalAgent || !teams.sharesActiveTeam(internalAgent, targetId)) return json(res, 403, { error: "Named handoffs require both agents to share an active team." }); const child = createRun({ agentId: targetId, prompt: input.prompt, parentRunId: parent.id }); event(parent.id, "handoff.created", { childRunId: child.id, targetAgentId: targetId, prompt: input.prompt }); const result = await waitForRun(child.id); event(parent.id, "handoff.completed", { childRunId: child.id, targetAgentId: targetId, state: result.state }); return json(res, 200, { runId: result.id, state: result.state, result: result.result, error: result.error }); }
     if (req.method === "POST" && url.pathname === "/internal/task") {
       const input = await body(req), runId = String(req.headers['x-open-harness-run'] || '');
       if (!internalAllowed(internalAgent, 'mcp_open_harness_task', runId)) return json(res, 403, { error: 'Task board access is disabled for this run.' });
       const profile = profiles.get(internalAgent!); if (!profile) return json(res, 403, { error: 'Agent profile not found.' });
       const action = String(input.action || ''), taskId = String(input.taskId || ''), patch = (input.input || {}) as Record<string, unknown>;
-      const mayTouch = (task: ReturnType<typeof tasks.getTask>) => task.ownerAgentId === null || task.ownerAgentId === internalAgent || profile.board.assignOthers;
-      if (action === 'list') return json(res, 200, { boards: tasks.listBoards(), tasks: tasks.listTasks().filter(task => task.ownerAgentId === null || task.ownerAgentId === internalAgent || profile.board.assignOthers) });
+      const mayTouch = (task: ReturnType<typeof tasks.getTask>) => agentMayTouchTask(internalAgent!, profile.board.assignOthers, task);
+      if (action === 'list') return json(res, 200, { boards: tasks.listBoards(), tasks: tasks.listTasks().filter(mayTouch) });
       if (action === 'columns') return json(res, 200, { boards: tasks.listBoards() });
-      if (action === 'create') return json(res, 201, tasks.createTask({ ...patch, boardId: patch.boardId || input.boardId, ownerAgentId: patch.ownerAgentId === undefined ? internalAgent : patch.ownerAgentId }));
+      if (action === 'create') {
+        const candidate = { ...patch, boardId: patch.boardId || input.boardId, ownerAgentId: patch.ownerAgentId === undefined ? internalAgent : patch.ownerAgentId };
+        if (candidate.ownerAgentId !== internalAgent && !profile.board.assignOthers) return json(res, 403, { error: 'Assigning another agent requires Board: assign others.' });
+        return json(res, 201, tasks.createTask(validTaskMutation(candidate)));
+      }
+      if (action === 'board_create' || action === 'board_update') {
+        if (!profile.board.manageProjects) return json(res, 403, { error: 'Creating or changing projects requires Board: manage projects.' });
+        // An allowlist, not a denylist: an agent may shape a project's identity and nothing
+        // else, so it can never re-enable dispatch or unarchive a project a person closed.
+        const safe = Object.fromEntries(['name', 'description', 'color', 'defaultOwnerAgentId'].filter(key => key in patch).map(key => [key, patch[key]]));
+        if (action === 'board_create') return json(res, 201, tasks.createBoard(safe));
+        const boardId = String(patch.boardId || input.boardId || '');
+        return json(res, 200, tasks.updateBoard(boardId, { ...safe, revision: tasks.getBoard(boardId).revision }));
+      }
       const task = tasks.getTask(taskId); if (!mayTouch(task)) return json(res, 403, { error: 'Changing another agent’s card requires Board: assign others.' });
       if (action === 'get') return json(res, 200, task);
-      if (action === 'update') return json(res, 200, tasks.updateTask(taskId, { ...patch, revision: task.revision }));
-      if (action === 'move') return json(res, 200, tasks.move(taskId, patch));
+      if (action === 'update') {
+        if (patch.ownerAgentId !== undefined && patch.ownerAgentId !== internalAgent && patch.ownerAgentId !== task.ownerAgentId && !profile.board.assignOthers) return json(res, 403, { error: 'Assigning another agent requires Board: assign others.' });
+        return json(res, 200, tasks.updateTask(taskId, validTaskMutation({ ...patch, revision: task.revision }, task)));
+      }
+      if (action === 'move') { validTaskMutation(patch, task); return json(res, 200, tasks.move(taskId, patch)); }
       if (action === 'comment') return json(res, 201, tasks.comment(taskId, { body: patch.text || patch.body, author: profile.name }));
       if (action === 'check') return json(res, 200, tasks.check(taskId, String(patch.item || ''), patch.done === undefined ? undefined : Boolean(patch.done)));
       if (action === 'additem') return json(res, 201, tasks.addItem(taskId, String(patch.text || '')));
-      if (action === 'claim') return json(res, 200, tasks.updateTask(taskId, { revision: task.revision, ownerAgentId: internalAgent }));
-      if (action === 'release') { tasks.updateTask(taskId, { revision: task.revision, ownerAgentId: null }); return json(res, 200, tasks.comment(taskId, { body: String(patch.reason || 'Released as blocked.'), author: profile.name })); }
+      if (action === 'claim') return json(res, 200, tasks.updateTask(taskId, validTaskMutation({ revision: task.revision, ownerAgentId: internalAgent }, task)));
+      if (action === 'release') { tasks.updateTask(taskId, validTaskMutation({ revision: task.revision, ownerAgentId: null }, task)); return json(res, 200, tasks.comment(taskId, { body: String(patch.reason || 'Released as blocked.'), author: profile.name })); }
       if (action === 'run') { if (task.ownerAgentId && task.ownerAgentId !== internalAgent && !profile.board.dispatch) return json(res, 403, { error: 'Starting another agent’s task requires Board: dispatch.' }); const board = tasks.getBoard(task.boardId); if (!board.settings.allowAgentDispatch) return json(res, 403, { error: 'Agent task dispatch is disabled for this board.' }); const started = tasks.start(taskId, { revision: task.revision, idempotencyKey: crypto.randomUUID() }, value => createRun({ ...value, deferStart: true })); void pump(); return json(res, 202, started); }
       return json(res, 400, { error: 'Unknown task action.' });
     }
     if (req.method === "POST" && url.pathname === "/internal/schedule") { if (!internalAllowed(internalAgent, "mcp_open_harness_create_open_harness_routine", String(req.headers["x-open-harness-run"] || ""))) return json(res, 403, { error: "Scheduling is disabled for this run." }); const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)), next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, internalAgent, input.name, input.prompt, minutes, input.timezone || "UTC", 1, next, stamp.toISOString(), stamp.toISOString()); return json(res, 201, { id, nextRunAt: next }); }
     return json(res, 404, { error: "Not found." });
-  } catch (error) { return json(res, error instanceof ProfileError || error instanceof TaskError || error instanceof MachineError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
+  } catch (error) { return json(res, error instanceof ProfileError || error instanceof TaskError || error instanceof TeamError || error instanceof MachineError || error instanceof CredentialError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
 });
 
 // createRun throws for an agent that no longer exists, for a full queue, and for depth
@@ -635,6 +791,16 @@ setInterval(() => {
 }, 30_000).unref();
 
 const bind = process.env.OPEN_HARNESS_BIND || '127.0.0.1';
+server.on("error", error => {
+  // A bare EADDRINUSE here reaches the operator as a raw stack via uncaughtException,
+  // which buries the one fact that matters: something already holds the port.
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "EADDRINUSE") console.error(`Port ${port} on ${bind} is already in use. Another coordinator is probably running — stop it, or set OPEN_HARNESS_PORT to a free port.`);
+  else if (code === "EACCES") console.error(`Not allowed to bind ${bind}:${port}. Use a port above 1024, or set OPEN_HARNESS_PORT.`);
+  else if (code === "EADDRNOTAVAIL") console.error(`No interface on this machine has the address ${bind}. Check OPEN_HARNESS_BIND.`);
+  else console.error(`The coordinator could not listen on ${bind}:${port}: ${error.message}`);
+  process.exit(1);
+});
 server.listen(port, bind, () => console.log(`Open Harness coordinator listening on http://${bind}:${port}`));
 // Without these the coordinator exits silently when anything throws outside a request —
 // a timer callback, a detached promise — leaving no record of why the service stopped.
@@ -642,4 +808,44 @@ server.listen(port, bind, () => console.log(`Open Harness coordinator listening 
 // unable to tell that it happened is not.
 process.on("unhandledRejection", reason => console.error(`Unhandled rejection in the coordinator: ${reason instanceof Error ? reason.stack || reason.message : String(reason)}`));
 process.on("uncaughtException", error => { console.error(`The coordinator stopped on an unhandled error: ${error.stack || error.message}`); process.exit(1); });
-process.on("SIGTERM", async () => { for (const gateway of gateways.values()) await gateway.stop().catch(() => {}); for (const socket of coordinationSockets.values()) await socket.then(s => s.close()).catch(() => {}); server.close(); });
+// Agent containers run with --restart unless-stopped, so a coordinator that dies
+// without stopping them leaves containers that come back on every Docker start and
+// hold their CPU/memory reservations forever. SIGINT (Ctrl-C on `npm run harness:serve`)
+// has to clean up exactly like SIGTERM does; stopping gateways in parallel and under a
+// deadline keeps that cleanup from itself hanging on a wedged daemon.
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Open Harness coordinator stopping on ${signal}.`);
+  const deadline = setTimeout(() => { console.error("Shutdown took too long; exiting with agents possibly still running."); process.exit(1); }, 15_000);
+  deadline.unref();
+  server.close();
+  await Promise.allSettled([
+    ...[...gateways.values()].map(gateway => gateway.stop()),
+    ...[...coordinationSockets.values()].map(socket => socket.then(s => s.close())),
+  ]);
+  clearTimeout(deadline);
+  process.exit(0);
+}
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(signal, () => void shutdown(signal));
+// The desktop shell supervises this process through tauri-plugin-shell, whose only
+// stop primitive is SIGKILL — which the handlers above cannot catch, so quitting the
+// app would strand agent containers. It asks for a clean stop over stdin instead.
+// Gated on the env var so a coordinator started from a terminal never touches stdin.
+if (process.env.OPEN_HARNESS_STDIN_CONTROL === "1") {
+  let pending = "";
+  process.stdin.on("data", chunk => {
+    pending = (pending + String(chunk)).slice(-256);
+    let index = pending.indexOf("\n");
+    while (index >= 0) {
+      const line = pending.slice(0, index).trim();
+      pending = pending.slice(index + 1);
+      if (line === "shutdown") void shutdown("a shutdown request from the desktop app");
+      index = pending.indexOf("\n");
+    }
+  });
+  process.stdin.on("error", () => {});
+  // Never let an idle stdin pipe be the reason this process stays alive.
+  process.stdin.unref();
+}

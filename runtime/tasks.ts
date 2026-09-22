@@ -6,6 +6,11 @@ type Row = Record<string, any>;
 const categories = ["backlog", "ready", "in_progress", "review", "done"] as const;
 const priorities = new Set(["low", "normal", "high", "urgent"]);
 const activeStates = new Set(["queued", "running", "waiting_approval", "waiting_input"]);
+const colors = new Set(["sage", "blue", "amber", "violet", "rose", "teal"]);
+// Boards are ordered by an explicit position rather than created_at. Every writer keeps
+// positions at or above one board step, which is what makes the one-time seed below
+// idempotent across restarts: a real position is never zero.
+const boardStep = 1000;
 const stamp = () => new Date().toISOString();
 const id = () => crypto.randomUUID();
 const bool = (value: unknown) => Boolean(Number(value));
@@ -26,7 +31,8 @@ export class TaskStore {
     db.exec(`
       CREATE TABLE IF NOT EXISTS task_boards (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
-        revision INTEGER NOT NULL DEFAULT 1, settings_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        revision INTEGER NOT NULL DEFAULT 1, settings_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT 'sage', position REAL NOT NULL DEFAULT 0, default_owner_agent_id TEXT
       );
       CREATE TABLE IF NOT EXISTS task_stages (
         id TEXT PRIMARY KEY, board_id TEXT NOT NULL, name TEXT NOT NULL, category TEXT NOT NULL,
@@ -35,7 +41,7 @@ export class TaskStore {
       CREATE INDEX IF NOT EXISTS idx_task_stages_board_position ON task_stages(board_id,position);
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, board_id TEXT NOT NULL, stage_id TEXT NOT NULL, title TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '', owner_agent_id TEXT, priority TEXT NOT NULL DEFAULT 'normal',
+        description TEXT NOT NULL DEFAULT '', team_id TEXT, owner_agent_id TEXT, priority TEXT NOT NULL DEFAULT 'normal',
         due_at TEXT, position REAL NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
         revision INTEGER NOT NULL DEFAULT 1, active_run_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         FOREIGN KEY(board_id) REFERENCES task_boards(id), FOREIGN KEY(stage_id) REFERENCES task_stages(id)
@@ -78,7 +84,19 @@ export class TaskStore {
       "ALTER TABLE task_comments ADD COLUMN author TEXT NOT NULL DEFAULT 'you'",
       "ALTER TABLE task_runs ADD COLUMN output TEXT NOT NULL DEFAULT ''",
       "ALTER TABLE task_runs ADD COLUMN stop_reason TEXT",
+      "ALTER TABLE task_boards ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE task_boards ADD COLUMN color TEXT NOT NULL DEFAULT 'sage'",
+      "ALTER TABLE task_boards ADD COLUMN position REAL NOT NULL DEFAULT 0",
+      "ALTER TABLE task_boards ADD COLUMN default_owner_agent_id TEXT",
+      "ALTER TABLE tasks ADD COLUMN team_id TEXT",
     ]) try { db.exec(sql); } catch { /* already migrated */ }
+    // Create this only after the idempotent ALTER above. On an existing database,
+    // CREATE TABLE IF NOT EXISTS keeps the legacy tasks table unchanged, so indexing
+    // team_id inside the initial schema batch would fail before the column is added.
+    db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_team_archived ON tasks(team_id,archived)");
+    // Boards that predate ordering rank by creation, so the first render after an upgrade
+    // matches the order people already had. Only unseeded rows are touched.
+    db.exec(`UPDATE task_boards SET position=((SELECT COUNT(*) FROM task_boards other WHERE other.created_at<task_boards.created_at OR (other.created_at=task_boards.created_at AND other.id<task_boards.id))+1)*${boardStep} WHERE position=0`);
     db.exec("PRAGMA optimize");
     this.ensureDefaultBoard();
     const restartMessage = "The local runtime restarted. This board task was not replayed; retry it when ready.";
@@ -113,15 +131,30 @@ export class TaskStore {
     };
   }
 
+  // Board identity fields, validated the way settings() validates board automation:
+  // an absent key keeps what is stored, a bad value falls back instead of throwing.
+  private meta(input: Row, current?: Row) {
+    const stored = current || {};
+    return {
+      description: input.description === undefined ? String(stored.description || "") : String(input.description || "").slice(0, 500),
+      color: input.color === undefined ? String(stored.color || "sage") : (colors.has(String(input.color)) ? String(input.color) : String(stored.color || "sage")),
+      defaultOwnerAgentId: input.defaultOwnerAgentId === undefined
+        ? (stored.defaultOwnerAgentId === undefined ? (stored.default_owner_agent_id || null) : stored.defaultOwnerAgentId)
+        : (input.defaultOwnerAgentId ? String(input.defaultOwnerAgentId).slice(0, 120) : null),
+    };
+  }
+
   ensureDefaultBoard() {
     if (this.db.prepare("SELECT 1 FROM task_boards LIMIT 1").get()) return;
     this.createBoard({ name: "Product launch" });
   }
 
   createBoard(input: Row) {
-    const boardId = id(), createdAt = stamp(), name = required(input.name, "Board name", 120);
+    const boardId = id(), createdAt = stamp(), name = required(input.name, "Board name", 120), meta = this.meta(input);
     this.transaction(() => {
-      this.db.prepare("INSERT INTO task_boards(id,name,created_at,updated_at) VALUES(?,?,?,?)").run(boardId, name, createdAt, createdAt);
+      const position = Number((this.db.prepare("SELECT COALESCE(MAX(position),0) n FROM task_boards").get() as Row).n) + boardStep;
+      this.db.prepare("INSERT INTO task_boards(id,name,description,color,position,default_owner_agent_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
+        .run(boardId, name, meta.description, meta.color, position, meta.defaultOwnerAgentId, createdAt, createdAt);
       const names = ["Backlog", "Ready", "In progress", "Review", "Done"];
       categories.forEach((category, position) => this.db.prepare("INSERT INTO task_stages(id,board_id,name,category,position) VALUES(?,?,?,?,?)").run(id(), boardId, names[position], category, position));
     });
@@ -129,7 +162,7 @@ export class TaskStore {
   }
 
   listBoards(includeArchived = false) {
-    const rows = this.db.prepare(`SELECT * FROM task_boards ${includeArchived ? "" : "WHERE archived=0"} ORDER BY created_at`).all() as Row[];
+    const rows = this.db.prepare(`SELECT * FROM task_boards ${includeArchived ? "" : "WHERE archived=0"} ORDER BY position,created_at`).all() as Row[];
     return rows.map(row => this.board(row));
   }
 
@@ -137,7 +170,12 @@ export class TaskStore {
     const stages = (this.db.prepare("SELECT * FROM task_stages WHERE board_id=? ORDER BY position").all(row.id) as Row[]).map(stage => ({
       id: stage.id, boardId: stage.board_id, name: stage.name, category: stage.category, position: Number(stage.position),
     }));
-    return { id: row.id, name: row.name, archived: bool(row.archived), revision: Number(row.revision), stages, settings: this.settings(String(row.id), row.settings_json), createdAt: row.created_at, updatedAt: row.updated_at };
+    return {
+      id: row.id, name: row.name, description: String(row.description || ""), color: colors.has(String(row.color)) ? String(row.color) : "sage",
+      defaultOwnerAgentId: row.default_owner_agent_id || null, position: Number(row.position || 0),
+      archived: bool(row.archived), revision: Number(row.revision), stages, settings: this.settings(String(row.id), row.settings_json),
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    };
   }
 
   getBoard(boardId: string) {
@@ -152,10 +190,94 @@ export class TaskStore {
     const archived = input.archived === undefined ? board.archived : Boolean(input.archived);
     if (archived && this.db.prepare("SELECT 1 FROM tasks WHERE board_id=? AND active_run_id IS NOT NULL LIMIT 1").get(boardId)) conflict("Finish or stop active tasks before archiving this board.");
     const settings = input.settings === undefined ? board.settings : { ...board.settings, ...input.settings };
-    const repaired = this.settings(boardId, JSON.stringify(settings));
-    this.db.prepare("UPDATE task_boards SET name=?,archived=?,settings_json=?,revision=revision+1,updated_at=? WHERE id=?")
-      .run(input.name === undefined ? board.name : required(input.name, "Board name", 120), archived ? 1 : 0, JSON.stringify(repaired), stamp(), boardId);
+    const repaired = this.settings(boardId, JSON.stringify(settings)), meta = this.meta(input, board as unknown as Row);
+    this.db.prepare("UPDATE task_boards SET name=?,description=?,color=?,default_owner_agent_id=?,archived=?,settings_json=?,revision=revision+1,updated_at=? WHERE id=?")
+      .run(input.name === undefined ? board.name : required(input.name, "Board name", 120), meta.description, meta.color, meta.defaultOwnerAgentId, archived ? 1 : 0, JSON.stringify(repaired), stamp(), boardId);
     return this.getBoard(boardId);
+  }
+
+  // The client always sends the whole order, so positions are reassigned outright rather
+  // than bisected the way task positions are. Revision is deliberately left alone: someone
+  // reordering the project list must not make a colleague's open settings draft conflict.
+  reorderBoards(ids: unknown) {
+    const order = (Array.isArray(ids) ? ids : []).map(String);
+    if (!order.length) throw new Error("Send the project order.");
+    this.transaction(() => order.forEach((boardId, index) =>
+      this.db.prepare("UPDATE task_boards SET position=?,updated_at=? WHERE id=?").run((index + 1) * boardStep, stamp(), boardId)));
+    return this.listBoards(true);
+  }
+
+  deleteBoard(boardId: string) {
+    const board = this.getBoard(boardId);
+    if (!this.db.prepare("SELECT 1 FROM task_boards WHERE id<>? AND archived=0 LIMIT 1").get(boardId)) conflict("Create another project before deleting this one.");
+    const running = this.db.prepare("SELECT tasks.id FROM tasks JOIN runs ON runs.id=tasks.active_run_id WHERE tasks.board_id=? AND runs.state IN ('queued','running','waiting_approval','waiting_input') LIMIT 1").get(boardId);
+    if (running) conflict("Stop this project's running tasks before deleting it.");
+    const deletedTasks = Number((this.db.prepare("SELECT COUNT(*) n FROM tasks WHERE board_id=?").get(boardId) as Row).n);
+    // Foreign keys are enforced and tasks->task_boards is not ON DELETE CASCADE, so order
+    // matters. Deleting the tasks cascades their collaborators, labels, checklist, comments,
+    // activity, and task_runs links; rows in runs are kept as the durable execution log.
+    this.transaction(() => {
+      this.db.prepare("DELETE FROM tasks WHERE board_id=?").run(boardId);
+      this.db.prepare("DELETE FROM task_stages WHERE board_id=?").run(boardId);
+      this.db.prepare("DELETE FROM task_boards WHERE id=?").run(boardId);
+    });
+    return { ok: true, id: board.id, deletedTasks };
+  }
+
+  duplicateBoard(boardId: string, input: Row) {
+    const source = this.getBoard(boardId), target = id(), createdAt = stamp();
+    const name = required(input.name || `${source.name} copy`, "Board name", 120);
+    const meta = this.meta(input, source as unknown as Row), stageIds = new Map<string, string>();
+    this.transaction(() => {
+      const position = Number((this.db.prepare("SELECT COALESCE(MAX(position),0) n FROM task_boards").get() as Row).n) + boardStep;
+      this.db.prepare("INSERT INTO task_boards(id,name,description,color,position,default_owner_agent_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
+        .run(target, name, meta.description, meta.color, position, meta.defaultOwnerAgentId, createdAt, createdAt);
+      for (const stage of source.stages) {
+        const stageId = id(); stageIds.set(stage.id, stageId);
+        this.db.prepare("INSERT INTO task_stages(id,board_id,name,category,position) VALUES(?,?,?,?,?)").run(stageId, target, stage.name, stage.category, stage.position);
+      }
+      this.db.prepare("UPDATE task_boards SET settings_json=? WHERE id=?").run(JSON.stringify({
+        ...source.settings, runStageId: stageIds.get(source.settings.runStageId) || "", doneStageId: stageIds.get(source.settings.doneStageId) || "",
+      }), target);
+      // Comments, activity, and runs stay with the original: copying them would attribute
+      // attempts to a task that never ran them.
+      if (input.includeTasks) for (const task of this.listTasks(true).filter(item => item.boardId === source.id)) {
+        const taskId = id(), stageId = stageIds.get(task.stageId);
+        if (!stageId) continue;
+        this.db.prepare("INSERT INTO tasks(id,board_id,stage_id,title,description,team_id,owner_agent_id,priority,due_at,position,archived,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
+          .run(taskId, target, stageId, task.title, task.description, task.teamId, task.ownerAgentId, task.priority, task.dueAt, task.position, task.archived ? 1 : 0, createdAt, createdAt);
+        this.replaceCollections(taskId, { collaboratorAgentIds: task.collaboratorAgentIds, labels: task.labels, checklist: task.checklist.map(item => ({ ...item, done: false })) });
+        this.activity(taskId, "created", `Copied from ${source.name}`);
+      }
+    });
+    return this.getBoard(target);
+  }
+
+  // Counts for every board, including boards with no tasks and boards the current filters
+  // hide, so the Projects view does not have to re-derive them from the task list.
+  boardSummaries() {
+    const blank = (boardId: string) => ({
+      boardId, total: 0, archivedCount: 0,
+      byCategory: Object.fromEntries(categories.map(category => [category, 0])) as Record<string, number>,
+      activeRuns: 0, ownerAgentIds: [] as string[],
+    });
+    const summaries = new Map((this.db.prepare("SELECT id FROM task_boards").all() as Row[]).map(row => [String(row.id), blank(String(row.id))]));
+    const owners = new Map<string, Set<string>>();
+    const rows = this.db.prepare("SELECT tasks.board_id,tasks.archived,tasks.owner_agent_id,task_stages.category,COALESCE(active.state,'') state FROM tasks JOIN task_stages ON task_stages.id=tasks.stage_id LEFT JOIN runs active ON active.id=tasks.active_run_id").all() as Row[];
+    for (const row of rows) {
+      const summary = summaries.get(String(row.board_id));
+      if (!summary) continue;
+      if (bool(row.archived)) { summary.archivedCount += 1; continue; }
+      summary.total += 1;
+      if (summary.byCategory[String(row.category)] !== undefined) summary.byCategory[String(row.category)] += 1;
+      if (activeStates.has(String(row.state))) summary.activeRuns += 1;
+      if (row.owner_agent_id) {
+        const seen = owners.get(String(row.board_id)) || new Set<string>();
+        seen.add(String(row.owner_agent_id)); owners.set(String(row.board_id), seen);
+      }
+    }
+    for (const [boardId, seen] of owners) { const summary = summaries.get(boardId); if (summary) summary.ownerAgentIds = [...seen].sort(); }
+    return [...summaries.values()];
   }
 
   addStage(boardId: string, input: Row) {
@@ -200,7 +322,9 @@ export class TaskStore {
   }
 
   listTasks(includeArchived = false) {
-    const rows = this.db.prepare(`SELECT tasks.*,COALESCE(active.state,(SELECT recent.state FROM task_runs linked JOIN runs recent ON recent.id=linked.run_id WHERE linked.task_id=tasks.id ORDER BY linked.attempt DESC LIMIT 1)) run_state FROM tasks LEFT JOIN runs active ON active.id=tasks.active_run_id ${includeArchived ? "" : "WHERE tasks.archived=0"} ORDER BY tasks.position,tasks.created_at`).all() as Row[];
+    // Archiving a project has to take its cards out of the cross-project views with it,
+    // otherwise they keep showing up under "All tasks" with nowhere to open them.
+    const rows = this.db.prepare(`SELECT tasks.*,COALESCE(active.state,(SELECT recent.state FROM task_runs linked JOIN runs recent ON recent.id=linked.run_id WHERE linked.task_id=tasks.id ORDER BY linked.attempt DESC LIMIT 1)) run_state FROM tasks JOIN task_boards ON task_boards.id=tasks.board_id LEFT JOIN runs active ON active.id=tasks.active_run_id ${includeArchived ? "" : "WHERE tasks.archived=0 AND task_boards.archived=0"} ORDER BY tasks.position,tasks.created_at`).all() as Row[];
     return rows.map(row => this.task(row));
   }
 
@@ -222,7 +346,7 @@ export class TaskStore {
       result: run.result, error: run.error, output: String(run.output || run.result || '').slice(-20_000), stopReason: run.stop_reason || (run.state === 'completed' ? 'end_turn' : run.error || null), attempt: Number(run.attempt), startedAt: run.started_at,
     }));
     return {
-      id: taskId, boardId: row.board_id, stageId: row.stage_id, title: row.title, description: row.description,
+      id: taskId, teamId: row.team_id || null, boardId: row.board_id, stageId: row.stage_id, title: row.title, description: row.description,
       ownerAgentId: row.owner_agent_id || null, collaboratorAgentIds: collaborators, priority: row.priority,
       labels, dueAt: row.due_at || null, position: Number(row.position), archived: bool(row.archived),
       revision: Number(row.revision), activeRunId: row.active_run_id || null, runState: row.run_state || null,
@@ -237,8 +361,8 @@ export class TaskStore {
     const taskId = id(), createdAt = stamp();
     const position = Number((this.db.prepare("SELECT COALESCE(MAX(position),-1)+1 n FROM tasks WHERE stage_id=?").get(stageId) as Row).n);
     this.transaction(() => {
-      this.db.prepare("INSERT INTO tasks(id,board_id,stage_id,title,description,owner_agent_id,priority,due_at,position,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-        .run(taskId, board.id, stageId, required(input.title, "Task title", 240), String(input.description || "").slice(0, 20000), input.ownerAgentId || null, priorities.has(String(input.priority)) ? input.priority : "normal", input.dueAt || null, position, createdAt, createdAt);
+      this.db.prepare("INSERT INTO tasks(id,board_id,stage_id,title,description,team_id,owner_agent_id,priority,due_at,position,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+        .run(taskId, board.id, stageId, required(input.title, "Task title", 240), String(input.description || "").slice(0, 20000), input.teamId || null, (input.ownerAgentId === undefined ? board.defaultOwnerAgentId : input.ownerAgentId) || null, priorities.has(String(input.priority)) ? input.priority : "normal", input.dueAt || null, position, createdAt, createdAt);
       this.replaceCollections(taskId, input);
       this.activity(taskId, "created", "Task created");
     });
@@ -270,15 +394,17 @@ export class TaskStore {
     const boardId = input.boardId === undefined ? task.boardId : String(input.boardId);
     const stageId = input.stageId === undefined ? task.stageId : String(input.stageId);
     const owner = input.ownerAgentId === undefined ? task.ownerAgentId : input.ownerAgentId || null;
+    const teamId = input.teamId === undefined ? task.teamId : input.teamId || null;
     const archived = input.archived === undefined ? task.archived : Boolean(input.archived);
-    if (locked && (boardId !== task.boardId || stageId !== task.stageId || owner !== task.ownerAgentId || archived !== task.archived)) conflict("Owner, project, stage, and archive status are locked while this task is active.");
+    const collaboratorsChanged = input.collaboratorAgentIds !== undefined && JSON.stringify([...new Set((input.collaboratorAgentIds as unknown[]).map(String))].sort()) !== JSON.stringify([...task.collaboratorAgentIds].sort());
+    if (locked && (boardId !== task.boardId || stageId !== task.stageId || teamId !== task.teamId || owner !== task.ownerAgentId || collaboratorsChanged || archived !== task.archived)) conflict("Team, owner, collaborators, project, stage, and archive status are locked while this task is active.");
     const board = this.getBoard(boardId);
     if (!board.stages.some(stage => stage.id === stageId)) throw new Error("Stage is not on this board.");
     const priority = input.priority === undefined ? task.priority : String(input.priority);
     if (!priorities.has(priority)) throw new Error("Invalid task priority.");
     this.transaction(() => {
-      this.db.prepare("UPDATE tasks SET board_id=?,stage_id=?,title=?,description=?,owner_agent_id=?,priority=?,due_at=?,position=?,archived=?,revision=revision+1,updated_at=? WHERE id=?")
-        .run(boardId, stageId, input.title === undefined ? task.title : required(input.title, "Task title", 240), input.description === undefined ? task.description : String(input.description).slice(0, 20000), owner, priority, input.dueAt === undefined ? task.dueAt : input.dueAt || null, input.position === undefined ? task.position : Number(input.position), archived ? 1 : 0, stamp(), taskId);
+      this.db.prepare("UPDATE tasks SET board_id=?,stage_id=?,title=?,description=?,team_id=?,owner_agent_id=?,priority=?,due_at=?,position=?,archived=?,revision=revision+1,updated_at=? WHERE id=?")
+        .run(boardId, stageId, input.title === undefined ? task.title : required(input.title, "Task title", 240), input.description === undefined ? task.description : String(input.description).slice(0, 20000), teamId, owner, priority, input.dueAt === undefined ? task.dueAt : input.dueAt || null, input.position === undefined ? task.position : Number(input.position), archived ? 1 : 0, stamp(), taskId);
       this.replaceCollections(taskId, input);
       this.activity(taskId, "updated", "Task details updated");
     });

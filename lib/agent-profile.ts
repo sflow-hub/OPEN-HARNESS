@@ -1,4 +1,5 @@
 import type { Agent } from './types';
+import type { CredentialRecord } from './credentials';
 
 export type ModelChoice = { provider: string; model: string; credentialRef: string; baseUrl: string };
 export type ConnectorConfig = { id: string; name: string; command: string; args: string[]; secretRef: string; enabled: boolean };
@@ -19,19 +20,23 @@ export type MachineInfo = {
   local: boolean; reservedAgentId: string | null; assignedAgents: number;
   capabilities: { container: boolean; direct: boolean; desktop: boolean; virtualDesktop: boolean; detail?: string };
 };
+// Spread these defaults over whatever is stored rather than testing the stored object
+// directly: profiles saved before a permission existed must keep loading and saving.
+export type BoardPermissions = { assignOthers: boolean; dispatch: boolean; manageProjects: boolean };
+export const DEFAULT_BOARD: BoardPermissions = { assignOthers: false, dispatch: false, manageProjects: false };
 export type AgentProfile = {
   id: string; revision: number; name: string; role: string; description: string; tone: number;
   prompt: { enabled: boolean; text: string };
   model: ModelChoice & { inherit: boolean };
   allowedTools: string[];
-  board: { assignOthers: boolean; dispatch: boolean };
+  board: BoardPermissions;
   connectors: ConnectorConfig[];
   computer: ComputerConfig;
 };
 export type ToolInfo = { id: string; name: string; group: string; description: string; available: boolean; reason?: string };
 export type ToolCatalog = { tools: ToolInfo[]; source: 'runtime' | 'cached' | 'unavailable' | 'mock'; error?: string };
 export type ModelCatalog = { models: Array<{ id: string; provider: string; label: string }>; error?: string };
-export type ProfileResponse = { profile: AgentProfile; effectiveModel: ModelChoice; activeRevision: number | null; pending: boolean; secretNames: string[]; machine?: MachineInfo; transfer?: { state: string; detail: string } | null };
+export type ProfileResponse = { profile: AgentProfile; effectiveModel: ModelChoice; activeRevision: number | null; pending: boolean; secretNames: string[]; credentials: CredentialRecord[]; machine?: MachineInfo; transfer?: { state: string; detail: string } | null };
 export const DEFAULT_MODEL: ModelChoice = { provider: 'xai', model: 'grok-4.6', credentialRef: 'XAI_API_KEY', baseUrl: '' };
 export const DEFAULT_COMPUTER: ComputerConfig = { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
 export const TOOL_GROUPS = [
@@ -50,9 +55,9 @@ export const TOOL_GROUPS = [
   ['other', 'Other tools', 'Additional tools discovered in this Hermes runtime.'],
 ] as const;
 export function draftProfile(agent: Agent): AgentProfile {
-  if (agent.profile) return { ...agent.profile, allowedTools: [...new Set([...(agent.profile.allowedTools || []), 'mcp_open_harness_task'])], board: agent.profile.board || { assignOthers: false, dispatch: false }, computer: agent.profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
+  if (agent.profile) return { ...agent.profile, allowedTools: [...new Set([...(agent.profile.allowedTools || []), 'mcp_open_harness_task'])], board: { ...DEFAULT_BOARD, ...(agent.profile.board || {}) }, computer: agent.profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
   return { id: agent.id, revision: 0, name: agent.name, role: agent.role, description: agent.description, tone: agent.tone,
-    prompt: { enabled: true, text: agent.instructions }, model: { ...DEFAULT_MODEL, inherit: true }, allowedTools: ['mcp_open_harness_task'], board: { assignOthers: false, dispatch: false }, connectors: [], computer: { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
+    prompt: { enabled: true, text: agent.instructions }, model: { ...DEFAULT_MODEL, inherit: true }, allowedTools: ['mcp_open_harness_task'], board: { ...DEFAULT_BOARD }, connectors: [], computer: { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
 }
 export function profileAgent(profile: AgentProfile, memory: string[] = []): Agent {
   return { id: profile.id, name: profile.name, role: profile.role, description: profile.description, tone: profile.tone, instructions: profile.prompt.text, memory, profile };

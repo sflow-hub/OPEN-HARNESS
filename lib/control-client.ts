@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export type RuntimeStatus = {
   token: string;
+  mode: "live" | "test";
   runtime: { available: boolean; version: string | null; message: string };
   version: string;
   hermes: { release: string; commit: string };

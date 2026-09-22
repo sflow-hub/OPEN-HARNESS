@@ -13,6 +13,15 @@ async function seed(request: APIRequestContext) {
 }
 test.beforeEach(async ({ request, page }) => { await seed(request); await page.addInitScript(() => localStorage.setItem('open-harness.onboarding.v1', 'done')); await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`); await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible(); });
 
+test('never presents deterministic test output as a real agent reply', async ({ page }) => {
+  await page.getByRole('button', { name: 'Meet Atlas' }).click();
+  await expect(page.getByText('Automated test mode', { exact: true }).first()).toBeVisible();
+  await page.getByLabel('Message Atlas').fill('Run a real task');
+  await page.getByLabel('Message Atlas').press('Enter');
+  await expect(page.getByRole('status')).toContainText('Agent chat is disabled in automated test mode');
+  await expect(page.getByText('Hermes mock completed the task.')).toHaveCount(0);
+});
+
 test('guides first-time users through computer and model readiness', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Settings/ }).first().click();
@@ -148,11 +157,15 @@ test('configures computer access and automatically selects a paired computer', a
   await request.post(control + '/v1/runner/pair', { data: { code, name: 'Design workstation', platform: 'win32', arch: 'x64', capabilities: { container: true, direct: true, desktop: true, virtualDesktop: false } } });
   await expect(panel.getByText('Design workstation connected and was selected for this agent.')).toBeVisible({ timeout: 5_000 });
   await expect(panel.getByLabel('Connected computer')).toHaveValue(/machine-/);
+  // Keep the shared browser-test coordinator deterministic. Remote transfer behavior is
+  // covered by the runtime contract tests; leaving this mock runner selected would queue
+  // an import forever and prevent subsequent profile cases from resetting Atlas.
+  await panel.getByLabel('Connected computer').selectOption('local');
   await panel.getByRole('button', { name: 'Save changes' }).click();
   await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
 });
 
-test('group switches and Disable all tools preserve an explicit empty selection', async ({ page, request }) => {
+test('group switches and Disable all tools preserve only the required task tool', async ({ page, request }) => {
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
   const panel = page.getByRole('dialog', { name: 'Agent settings' });
   await expect(panel.getByText('Loading saved profile…')).toBeHidden();
@@ -167,7 +180,7 @@ test('group switches and Disable all tools preserve an explicit empty selection'
   await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
   const { token } = await (await request.get(control + '/v1/bootstrap')).json();
   const { profile } = await (await request.get(control + '/v1/agents/atlas/profile', { headers: { Authorization: `Bearer ${token}` } })).json();
-  expect(profile.allowedTools).toEqual([]);
+  expect(profile.allowedTools).toEqual(['mcp_open_harness_task']);
 });
 
 test('a stale save keeps the draft and can load the winning revision', async ({ page, request }) => {
@@ -186,15 +199,22 @@ test('a stale save keeps the draft and can load the winning revision', async ({ 
   await expect(panel.getByLabel('Role', { exact: true })).toHaveValue('Saved elsewhere');
 });
 
-test('creates, filters, and moves an agent task across desktop and phone layouts', async ({ page }, testInfo) => {
+test('creates, filters, and moves an agent task across desktop and phone layouts', async ({ page, request }, testInfo) => {
   const boardName = `Release board ${testInfo.project.name}`;
   const title = `Prepare release notes ${testInfo.project.name}`;
+  const teamName = `Release crew ${testInfo.project.name}`;
+  const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  await request.post(control + '/v1/teams', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { name: teamName, description: '', color: 'blue', icon: 'writing', memberAgentIds: ['atlas', 'scout'] },
+  });
+  await page.reload();
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'New board', exact: true }).click();
-  const boardDialog = page.getByRole('dialog', { name: 'New project board' });
-  await boardDialog.getByLabel('Board name').fill(boardName);
-  await boardDialog.getByRole('button', { name: 'Create board' }).click();
+  await page.getByRole('button', { name: 'New project', exact: true }).click();
+  const boardDialog = page.getByRole('dialog', { name: 'New project' });
+  await boardDialog.getByLabel('Project name').fill(boardName);
+  await boardDialog.getByRole('button', { name: 'Create project' }).click();
   await expect(boardDialog).toBeHidden();
   const projectSelect = page.locator('.task-select select');
   await expect(projectSelect).toHaveValue(/.+/);
@@ -202,6 +222,7 @@ test('creates, filters, and moves an agent task across desktop and phone layouts
   await page.getByRole('button', { name: 'New task', exact: true }).click();
   const drawer = page.locator('.task-drawer');
   await drawer.getByPlaceholder('What needs to be done?').fill(title);
+  await drawer.getByLabel('Team').selectOption({ label: teamName });
   await drawer.getByLabel('Owner').selectOption('atlas');
   await drawer.getByRole('button', { name: /Scout/ }).click();
   await drawer.getByRole('button', { name: 'Add item' }).click();
@@ -218,4 +239,44 @@ test('creates, filters, and moves an agent task across desktop and phone layouts
   await expect(page.getByText('atlas', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'By agent', exact: true }).click();
   await expect(page.locator('.agent-task-card').filter({ hasText: 'Atlas' })).toContainText('Owned');
+});
+
+test('creates, renames, duplicates, and deletes a project', async ({ page }, testInfo) => {
+  // The desktop and mobile projects share one control service, so every name is scoped to
+  // the running project and cards are located by their rename field rather than by text.
+  const name = `Launch plan ${testInfo.project.name}`;
+  const renamed = `${name} v2`;
+  const cardFor = (project: string) => page.locator('.project-card').filter({ has: page.getByRole('textbox', { name: `Rename ${project}` }) });
+  await page.getByRole('button', { name: 'Tasks', exact: true }).click();
+  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+
+  await page.getByRole('button', { name: 'New project', exact: true }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'New project' });
+  await dialog.getByLabel('Project name').fill(name);
+  await dialog.getByLabel('Description').fill(`Everything ${name} needs.`);
+  await dialog.getByLabel('blue').check();
+  await dialog.getByRole('button', { name: 'Create project' }).click();
+  await expect(dialog).toBeHidden();
+
+  // Creating a project selects it, so come back to the Projects view to manage it.
+  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  await expect(cardFor(name)).toBeVisible();
+  await expect(cardFor(name)).toContainText(`Everything ${name} needs.`);
+
+  await cardFor(name).getByRole('textbox', { name: `Rename ${name}` }).fill(renamed);
+  await cardFor(name).getByRole('textbox', { name: `Rename ${name}` }).blur();
+  await expect(cardFor(renamed)).toBeVisible();
+
+  await cardFor(renamed).getByRole('button', { name: `Duplicate ${renamed}` }).click();
+  await expect(cardFor(`${renamed} copy`)).toBeVisible();
+
+  await cardFor(`${renamed} copy`).getByRole('button', { name: `Delete ${renamed} copy` }).click();
+  const confirm = page.getByRole('alertdialog', { name: 'Delete this project?' });
+  const deleteButton = confirm.getByRole('button', { name: 'Delete project' });
+  await expect(deleteButton).toBeDisabled();
+  await confirm.getByRole('textbox').fill(`${renamed} copy`);
+  await deleteButton.click();
+  await expect(confirm).toBeHidden();
+  await expect(cardFor(`${renamed} copy`)).toHaveCount(0);
+  await expect(cardFor(renamed)).toBeVisible();
 });

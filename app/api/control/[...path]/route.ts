@@ -1,8 +1,9 @@
 import { env } from "cloudflare:workers";
 import { hostedRuntimeSchema, hostedTaskSchema } from "../../../../db/schema";
-import type { AgentTask, TaskBoard, TaskStage, WorkflowCategory } from "../../../../lib/task-types";
+import type { AgentTask, BoardSummary, TaskBoard, TaskStage, WorkflowCategory } from "../../../../lib/task-types";
 import { DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, runToolGrants, type AgentProfile } from '../../../../lib/agent-profile';
 import type { Agent } from '../../../../lib/types';
+import { normalizeTeamInput, type Team, type TeamInput } from '../../../../lib/team';
 import { encryptRunnerSecret } from '../../../../lib/runner-crypto';
 import { validateProfile } from '../../../../runtime/profiles';
 import runnerInstallSh from '../../../../runtime/installers/install-runner.sh?raw';
@@ -23,6 +24,11 @@ type Row = Record<string, unknown>;
 type RouteContext = { params: Promise<{ path: string[] }> };
 const categories: WorkflowCategory[] = ["backlog", "ready", "in_progress", "review", "done"];
 const priorities = new Set(["low", "normal", "high", "urgent"]);
+const boardColors = new Set(["sage", "blue", "amber", "violet", "rose", "teal"]);
+const activeRunStates = ["queued", "running", "waiting_approval", "waiting_input"];
+// Boards carry an explicit position. Every writer stays at or above one step, which keeps
+// the one-time seed in prepare() from ever rerunning against a deliberate order.
+const boardStep = 1000;
 const stamp = () => new Date().toISOString();
 const id = () => crypto.randomUUID();
 const runnerFiles: Record<string,string> = { 'runtime/runner.mjs': runnerBundle, 'runtime/hermes/Dockerfile': hermesDockerfile, 'runtime/hermes/NOTICE.md': hermesNotice, 'runtime/hermes/container-init.sh': hermesInit, 'runtime/hermes/coordination.mjs': hermesCoordination, 'runtime/hermes/inspect_runtime.py': hermesInspect, 'runtime/hermes/managed_entry.py': hermesEntry, 'runtime/hermes/extension/open_harness_policy.py': policyExtension, 'runtime/hermes/extension/pyproject.toml': policyProject };
@@ -70,6 +76,13 @@ async function prepare(db: D1Database) {
   await db.batch([...hostedTaskSchema, ...hostedRuntimeSchema].map(sql => db.prepare(sql)));
   try { await db.prepare('ALTER TABLE machines ADD COLUMN encryption_public_key TEXT').run(); } catch { /* Existing and new databases already have this column after the first migration. */ }
   try { await db.prepare('ALTER TABLE agent_transfers ADD COLUMN pending_profile_json TEXT').run(); } catch { /* Existing and new databases already have this column after the first migration. */ }
+  for (const column of ["description TEXT NOT NULL DEFAULT ''", "color TEXT NOT NULL DEFAULT 'sage'", "position REAL NOT NULL DEFAULT 0", "default_owner_agent_id TEXT"]) {
+    try { await db.prepare(`ALTER TABLE task_boards ADD COLUMN ${column}`).run(); } catch { /* Existing and new databases already have this column after the first migration. */ }
+  }
+  try { await db.prepare('ALTER TABLE tasks ADD COLUMN team_id TEXT').run(); } catch { /* Existing and new databases already have this column. */ }
+  try { await db.prepare('CREATE INDEX IF NOT EXISTS idx_tasks_team_archived ON tasks(team_id,archived)').run(); } catch { /* Prepared by the schema on new databases. */ }
+  // Boards that predate ordering rank by creation so the order people already had survives.
+  try { await db.prepare(`UPDATE task_boards SET position=((SELECT COUNT(*) FROM task_boards other WHERE other.created_at<task_boards.created_at OR (other.created_at=task_boards.created_at AND other.id<task_boards.id))+1)*${boardStep} WHERE position=0`).run(); } catch { /* No boards to rank yet. */ }
   const now = stamp();
   await db.batch([
     db.prepare("INSERT OR IGNORE INTO task_boards(id,name,archived,revision,created_at,updated_at) VALUES(?,?,?,?,?,?)").bind("default-board", "Open Harness", 0, 1, now, now),
@@ -186,6 +199,101 @@ async function dispatchHostedRun(db: D1Database, run: Row, profile: AgentProfile
   await appendRunEvent(db, String(run.id), 'runner.dispatched', { commandId, machineId: profile.computer.machineId });
 }
 
+async function hostedTeam(db: D1Database, row: Row): Promise<Team> {
+  const members = (await db.prepare('SELECT agent_id FROM team_members WHERE team_id=? ORDER BY created_at,agent_id').bind(row.id).all<Row>()).results;
+  return {
+    id: String(row.id), revision: Number(row.revision), name: String(row.name), description: String(row.description || ''),
+    color: String(row.color) as Team['color'], icon: String(row.icon) as Team['icon'],
+    memberAgentIds: members.map(member => String(member.agent_id)), retiredAt: row.retired_at ? String(row.retired_at) : null,
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  };
+}
+
+async function getHostedTeam(db: D1Database, teamId: string, includeRetired = false) {
+  const row = await db.prepare(`SELECT * FROM teams WHERE id=? ${includeRetired ? '' : 'AND retired_at IS NULL'}`).bind(teamId).first<Row>();
+  return row ? hostedTeam(db, row) : null;
+}
+
+async function listHostedTeams(db: D1Database, includeRetired = false) {
+  const rows = (await db.prepare(`SELECT * FROM teams ${includeRetired ? '' : 'WHERE retired_at IS NULL'} ORDER BY lower(name),created_at`).all<Row>()).results;
+  return Promise.all(rows.map(row => hostedTeam(db, row)));
+}
+
+async function validateHostedTeam(db: D1Database, input: Partial<TeamInput>, currentId = '') {
+  let value: ReturnType<typeof normalizeTeamInput>;
+  try { value = normalizeTeamInput(input); } catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Invalid team.'); }
+  const duplicate = await db.prepare('SELECT id FROM teams WHERE retired_at IS NULL AND lower(name)=lower(?) AND id<>?').bind(value.name, currentId).first<Row>();
+  if (duplicate) throw new HttpError(409, 'An active team already uses that name.');
+  for (const agentId of value.memberAgentIds) if (!await db.prepare('SELECT 1 AS ok FROM agent_profiles WHERE id=?').bind(agentId).first()) throw new HttpError(400, `Agent ${agentId} does not exist.`);
+  return value;
+}
+
+async function replaceHostedMembers(db: D1Database, teamId: string, next: string[], prior: string[] = []) {
+  for (const agentId of prior.filter(value => !next.includes(value))) {
+    const blocker = await db.prepare(`SELECT tasks.id FROM tasks WHERE tasks.team_id=? AND tasks.archived=0 AND
+      (tasks.owner_agent_id=? OR EXISTS (SELECT 1 FROM json_each(tasks.collaborators_json) WHERE value=?)) LIMIT 1`).bind(teamId, agentId, agentId).first<Row>();
+    if (blocker) throw new HttpError(409, "Reassign or archive this member's team tasks before removing them.");
+  }
+  const now = stamp();
+  await db.prepare('DELETE FROM team_members WHERE team_id=?').bind(teamId).run();
+  if (next.length) await db.batch(next.map(agentId => db.prepare('INSERT INTO team_members(team_id,agent_id,created_at) VALUES(?,?,?)').bind(teamId, agentId, now)));
+}
+
+async function createHostedTeam(db: D1Database, body: Row, requestedId?: string) {
+  const value = await validateHostedTeam(db, body as Partial<TeamInput>), teamId = requestedId && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(requestedId) ? requestedId : id(), now = stamp();
+  await db.prepare('INSERT INTO teams(id,revision,name,description,color,icon,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').bind(teamId, 1, value.name, value.description, value.color, value.icon, now, now).run();
+  await replaceHostedMembers(db, teamId, value.memberAgentIds);
+  return (await getHostedTeam(db, teamId))!;
+}
+
+async function updateHostedTeam(db: D1Database, teamId: string, body: Row) {
+  const current = await getHostedTeam(db, teamId);
+  if (!current) throw new HttpError(404, 'Team not found.');
+  if (Number(body.revision) !== current.revision) throw new HttpError(409, 'This team changed elsewhere. Reload it before saving.');
+  const value = await validateHostedTeam(db, body as Partial<TeamInput>, teamId);
+  await replaceHostedMembers(db, teamId, value.memberAgentIds, current.memberAgentIds);
+  const result = await db.prepare('UPDATE teams SET revision=revision+1,name=?,description=?,color=?,icon=?,updated_at=? WHERE id=? AND revision=? AND retired_at IS NULL').bind(value.name, value.description, value.color, value.icon, stamp(), teamId, current.revision).run();
+  if (!result.meta.changes) throw new HttpError(409, 'This team changed elsewhere. Reload it before saving.');
+  return (await getHostedTeam(db, teamId))!;
+}
+
+async function retireHostedTeam(db: D1Database, teamId: string) {
+  const current = await getHostedTeam(db, teamId);
+  if (!current) throw new HttpError(404, 'Team not found.');
+  if (await db.prepare('SELECT 1 AS ok FROM tasks WHERE team_id=? AND archived=0 LIMIT 1').bind(teamId).first()) throw new HttpError(409, "Reassign or archive this team's tasks before deleting it.");
+  const now = stamp();
+  await db.batch([
+    db.prepare('DELETE FROM team_members WHERE team_id=?').bind(teamId),
+    db.prepare('UPDATE teams SET revision=revision+1,retired_at=?,updated_at=? WHERE id=?').bind(now, now, teamId),
+  ]);
+  return (await getHostedTeam(db, teamId, true))!;
+}
+
+async function hostedTeamsOverlap(db: D1Database, sourceAgentId: string, targetAgentId: string) {
+  return Boolean(await db.prepare(`SELECT 1 AS ok FROM team_members source JOIN team_members target ON target.team_id=source.team_id
+    JOIN teams ON teams.id=source.team_id WHERE source.agent_id=? AND target.agent_id=? AND teams.retired_at IS NULL LIMIT 1`).bind(sourceAgentId, targetAgentId).first());
+}
+
+async function validateHostedTaskMutation(db: D1Database, body: Row, current?: AgentTask) {
+  const teamId = body.teamId === undefined ? current?.teamId || null : body.teamId ? String(body.teamId) : null;
+  let ownerAgentId = body.ownerAgentId === undefined ? current?.ownerAgentId || null : body.ownerAgentId ? String(body.ownerAgentId) : null;
+  if (!current && body.ownerAgentId === undefined && body.boardId) ownerAgentId = (await getBoard(db, String(body.boardId))).defaultOwnerAgentId;
+  const collaboratorAgentIds = body.collaboratorAgentIds === undefined ? current?.collaboratorAgentIds || [] : cleanStrings(body.collaboratorAgentIds, 25, 80).filter(agentId => agentId !== ownerAgentId);
+  if (!teamId) {
+    const legacy = Boolean(current && !current.teamId && body.collaboratorAgentIds === undefined);
+    if (collaboratorAgentIds.length && !legacy) throw new HttpError(400, 'Choose a team before adding collaborators.');
+    return { ...body, teamId: null, ownerAgentId, collaboratorAgentIds };
+  }
+  if (!await getHostedTeam(db, teamId)) throw new HttpError(400, 'Choose an active team.');
+  for (const agentId of [ownerAgentId, ...collaboratorAgentIds].filter(Boolean) as string[]) if (!await db.prepare('SELECT 1 AS ok FROM team_members WHERE team_id=? AND agent_id=?').bind(teamId, agentId).first()) throw new HttpError(400, 'Task owners and collaborators must belong to the selected team.');
+  return { ...body, teamId, ownerAgentId, collaboratorAgentIds };
+}
+
+async function hostedAgentMayTouchTask(db: D1Database, agentId: string, assignOthers: boolean, task: AgentTask) {
+  if (task.teamId && !await db.prepare('SELECT 1 AS ok FROM team_members JOIN teams ON teams.id=team_members.team_id WHERE team_members.team_id=? AND team_members.agent_id=? AND teams.retired_at IS NULL').bind(task.teamId, agentId).first()) return false;
+  return task.ownerAgentId === null || task.ownerAgentId === agentId || task.collaboratorAgentIds.includes(agentId) || assignOthers;
+}
+
 function mapStage(row: Row): TaskStage {
   return { id: String(row.id), boardId: String(row.board_id), name: String(row.name), category: String(row.category) as WorkflowCategory, position: Number(row.position) };
 }
@@ -197,21 +305,64 @@ function boardSettings(stages: TaskStage[], raw: unknown) {
   return { runStageId: valid(input.runStageId, fallback('in_progress')), doneStageId: valid(input.doneStageId, fallback('review')), autoRunOnDrop: input.autoRunOnDrop === undefined ? true : Boolean(input.autoRunOnDrop), allowAgentDispatch: input.allowAgentDispatch === undefined ? true : Boolean(input.allowAgentDispatch) };
 }
 
+// Board identity fields, validated the way boardSettings validates automation: a missing
+// key keeps what is stored and a bad value falls back rather than throwing.
+function boardMeta(body: Row, current?: Row) {
+  const stored = current || {};
+  return {
+    description: body.description === undefined ? String(stored.description || "") : String(body.description || "").slice(0, 500),
+    color: body.color === undefined ? String(stored.color || "sage") : (boardColors.has(String(body.color)) ? String(body.color) : String(stored.color || "sage")),
+    defaultOwnerAgentId: body.defaultOwnerAgentId === undefined
+      ? (stored.default_owner_agent_id ? String(stored.default_owner_agent_id) : null)
+      : (body.defaultOwnerAgentId ? String(body.defaultOwnerAgentId).slice(0, 120) : null),
+  };
+}
+
 async function getBoard(db: D1Database, boardId: string): Promise<TaskBoard> {
   const row = await db.prepare("SELECT * FROM task_boards WHERE id=?").bind(boardId).first<Row>();
   if (!row) throw new HttpError(404, "Board not found.");
   const stages = (await db.prepare("SELECT * FROM task_stages WHERE board_id=? ORDER BY position,id").bind(boardId).all<Row>()).results.map(mapStage);
-  return { id: String(row.id), name: String(row.name), archived: Boolean(row.archived), revision: Number(row.revision), stages, settings: boardSettings(stages, row.settings_json), createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
+  return {
+    id: String(row.id), name: String(row.name), description: String(row.description || ""),
+    color: (boardColors.has(String(row.color)) ? String(row.color) : "sage") as TaskBoard["color"],
+    defaultOwnerAgentId: row.default_owner_agent_id ? String(row.default_owner_agent_id) : null, position: Number(row.position || 0),
+    archived: Boolean(row.archived), revision: Number(row.revision), stages, settings: boardSettings(stages, row.settings_json),
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  };
 }
 
 async function listBoards(db: D1Database, includeArchived: boolean) {
-  const rows = (await db.prepare(`SELECT * FROM task_boards ${includeArchived ? "" : "WHERE archived=0"} ORDER BY created_at,id`).all<Row>()).results;
+  const rows = (await db.prepare(`SELECT * FROM task_boards ${includeArchived ? "" : "WHERE archived=0"} ORDER BY position,created_at,id`).all<Row>()).results;
   return Promise.all(rows.map(row => getBoard(db, String(row.id))));
+}
+
+// Counts for every board, including empty ones, so the Projects view does not re-derive
+// them from a task list the current filters may have trimmed.
+async function boardSummaries(db: D1Database): Promise<BoardSummary[]> {
+  const boards = (await db.prepare("SELECT id FROM task_boards").all<Row>()).results;
+  const rows = (await db.prepare("SELECT tasks.board_id,tasks.archived,tasks.owner_agent_id,task_stages.category,COALESCE(runs.state,'') AS state FROM tasks JOIN task_stages ON task_stages.id=tasks.stage_id LEFT JOIN runs ON runs.id=tasks.active_run_id").all<Row>()).results;
+  const owners = new Map<string, Set<string>>();
+  const summaries = new Map(boards.map(board => [String(board.id), {
+    boardId: String(board.id), total: 0, archivedCount: 0,
+    byCategory: Object.fromEntries(categories.map(category => [category, 0])) as Record<WorkflowCategory, number>,
+    activeRuns: 0, ownerAgentIds: [] as string[],
+  }]));
+  for (const row of rows) {
+    const summary = summaries.get(String(row.board_id));
+    if (!summary) continue;
+    if (Number(row.archived)) { summary.archivedCount += 1; continue; }
+    summary.total += 1;
+    if (summary.byCategory[String(row.category) as WorkflowCategory] !== undefined) summary.byCategory[String(row.category) as WorkflowCategory] += 1;
+    if (activeRunStates.includes(String(row.state))) summary.activeRuns += 1;
+    if (row.owner_agent_id) { const seen = owners.get(String(row.board_id)) || new Set<string>(); seen.add(String(row.owner_agent_id)); owners.set(String(row.board_id), seen); }
+  }
+  for (const [boardId, seen] of owners) { const summary = summaries.get(boardId); if (summary) summary.ownerAgentIds = [...seen].sort(); }
+  return [...summaries.values()];
 }
 
 function mapTask(row: Row): AgentTask {
   return {
-    id: String(row.id), boardId: String(row.board_id), stageId: String(row.stage_id), title: String(row.title), description: String(row.description || ""),
+    id: String(row.id), teamId: row.team_id ? String(row.team_id) : null, boardId: String(row.board_id), stageId: String(row.stage_id), title: String(row.title), description: String(row.description || ""),
     ownerAgentId: row.owner_agent_id ? String(row.owner_agent_id) : null, collaboratorAgentIds: array<string>(row.collaborators_json),
     priority: String(row.priority) as AgentTask["priority"], labels: array<string>(row.labels_json), dueAt: row.due_at ? String(row.due_at) : null,
     position: Number(row.position), archived: Boolean(row.archived), revision: Number(row.revision), activeRunId: row.active_run_id ? String(row.active_run_id) : null, runState: row.run_state ? String(row.run_state) as AgentTask['runState'] : null,
@@ -244,16 +395,78 @@ function cleanStrings(value: unknown, count: number, limit: number) {
   return Array.isArray(value) ? [...new Set(value.map(item => String(item).trim()).filter(Boolean))].slice(0, count).map(item => item.slice(0, limit)) : [];
 }
 
+async function nextBoardPosition(db: D1Database) {
+  return Number((await db.prepare("SELECT COALESCE(MAX(position),0) AS top FROM task_boards").first<Row>())?.top || 0) + boardStep;
+}
+
 async function createBoard(db: D1Database, body: Row) {
   const boardId = id(), now = stamp(), name = required(body.name, "Board name");
+  const meta = boardMeta(body), position = await nextBoardPosition(db);
   await db.batch([
-    db.prepare("INSERT INTO task_boards(id,name,archived,revision,settings_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(boardId, name, 0, 1, '{}', now, now),
+    db.prepare("INSERT INTO task_boards(id,name,archived,revision,settings_json,description,color,position,default_owner_agent_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(boardId, name, 0, 1, '{}', meta.description, meta.color, position, meta.defaultOwnerAgentId, now, now),
     ...categories.map((category, position) => db.prepare("INSERT INTO task_stages(id,board_id,name,category,position) VALUES(?,?,?,?,?)").bind(id(), boardId, category === "in_progress" ? "In Progress" : category[0].toUpperCase() + category.slice(1), category, position)),
   ]);
   return getBoard(db, boardId);
 }
 
+// The client sends the whole order, so positions are reassigned outright. Revision is left
+// alone so reordering the list cannot conflict someone's open project settings draft.
+async function reorderBoards(db: D1Database, ids: unknown) {
+  const order = (Array.isArray(ids) ? ids : []).map(String);
+  if (!order.length) throw new HttpError(400, "Send the project order.");
+  const now = stamp();
+  await db.batch(order.map((boardId, index) => db.prepare("UPDATE task_boards SET position=?,updated_at=? WHERE id=?").bind((index + 1) * boardStep, now, boardId)));
+  return listBoards(db, true);
+}
+
+async function deleteBoard(db: D1Database, boardId: string) {
+  const board = await getBoard(db, boardId);
+  const survivor = await db.prepare("SELECT 1 AS ok FROM task_boards WHERE id<>? AND archived=0 LIMIT 1").bind(boardId).first<Row>();
+  if (!survivor) throw new HttpError(409, "Create another project before deleting this one.");
+  const running = await db.prepare(`SELECT tasks.id FROM tasks JOIN runs ON runs.id=tasks.active_run_id WHERE tasks.board_id=? AND runs.state IN (${activeRunStates.map(() => "?").join(",")}) LIMIT 1`).bind(boardId, ...activeRunStates).first<Row>();
+  if (running) throw new HttpError(409, "Stop this project's running tasks before deleting it.");
+  const deletedTasks = Number((await db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE board_id=?").bind(boardId).first<Row>())?.count || 0);
+  // Explicit and ordered rather than leaning on cascade: a hosted task carries its
+  // collaborators, labels, checklist, comments, and activity as columns, and rows in runs
+  // are kept deliberately as the durable execution log.
+  await db.batch([
+    db.prepare("DELETE FROM task_runs WHERE task_id IN (SELECT id FROM tasks WHERE board_id=?)").bind(boardId),
+    db.prepare("DELETE FROM tasks WHERE board_id=?").bind(boardId),
+    db.prepare("DELETE FROM task_stages WHERE board_id=?").bind(boardId),
+    db.prepare("DELETE FROM task_boards WHERE id=?").bind(boardId),
+  ]);
+  return { ok: true, id: board.id, deletedTasks };
+}
+
+async function duplicateBoard(db: D1Database, boardId: string, body: Row) {
+  const source = await getBoard(db, boardId), target = id(), now = stamp();
+  const name = required(body.name || `${source.name} copy`, "Board name");
+  const meta = boardMeta(body, { description: source.description, color: source.color, default_owner_agent_id: source.defaultOwnerAgentId });
+  const stageIds = new Map<string, string>();
+  for (const stage of source.stages) stageIds.set(stage.id, id());
+  const settings = { ...source.settings, runStageId: stageIds.get(source.settings.runStageId) || "", doneStageId: stageIds.get(source.settings.doneStageId) || "" };
+  const statements = [
+    db.prepare("INSERT INTO task_boards(id,name,archived,revision,settings_json,description,color,position,default_owner_agent_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(target, name, 0, 1, JSON.stringify(settings), meta.description, meta.color, await nextBoardPosition(db), meta.defaultOwnerAgentId, now, now),
+    ...source.stages.map(stage => db.prepare("INSERT INTO task_stages(id,board_id,name,category,position) VALUES(?,?,?,?,?)").bind(stageIds.get(stage.id)!, target, stage.name, stage.category, stage.position)),
+  ];
+  // Comments, activity, and runs stay with the original: copying them would attribute
+  // attempts to a task that never ran them.
+  if (body.includeTasks) {
+    for (const task of (await db.prepare("SELECT * FROM tasks WHERE board_id=?").bind(boardId).all<Row>()).results) {
+      const stageId = stageIds.get(String(task.stage_id));
+      if (!stageId) continue;
+      const activity = [{ id: id(), type: "created", detail: `Copied from ${source.name}`, createdAt: now }];
+      const checklist = array<AgentTask["checklist"][number]>(task.checklist_json).map(item => ({ ...item, done: false }));
+      statements.push(db.prepare(`INSERT INTO tasks(id,board_id,stage_id,title,description,team_id,owner_agent_id,priority,due_at,position,archived,revision,collaborators_json,labels_json,checklist_json,comments_json,activity_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id(), target, stageId, task.title, task.description, task.team_id || null, task.owner_agent_id, task.priority, task.due_at, task.position, task.archived, 1, String(task.collaborators_json || "[]"), String(task.labels_json || "[]"), JSON.stringify(checklist), "[]", JSON.stringify(activity), now, now));
+    }
+  }
+  await db.batch(statements);
+  return getBoard(db, target);
+}
+
 async function createTask(db: D1Database, body: Row) {
+  body = await validateHostedTaskMutation(db, body);
   const board = await getBoard(db, required(body.boardId, "Board"));
   if (board.archived) throw new HttpError(409, "Restore this board before adding tasks.");
   const stageId = String(body.stageId || board.stages.find(stage => stage.category === "backlog")?.id || "");
@@ -262,13 +475,14 @@ async function createTask(db: D1Database, body: Row) {
   const position = Number((await db.prepare("SELECT COALESCE(MAX(position),-1)+1 AS next FROM tasks WHERE stage_id=?").bind(stageId).first<Row>())?.next || 0);
   const taskId = id(), now = stamp();
   const activity = [{ id: id(), type: "created", detail: "Task created", createdAt: now }];
-  await db.prepare(`INSERT INTO tasks(id,board_id,stage_id,title,description,owner_agent_id,priority,due_at,position,archived,revision,collaborators_json,labels_json,checklist_json,comments_json,activity_json,created_at,updated_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(taskId, board.id, stageId, required(body.title, "Task title"), String(body.description || "").slice(0, 20_000), body.ownerAgentId || null, priority, body.dueAt || null, position, 0, 1, JSON.stringify(cleanStrings(body.collaboratorAgentIds, 25, 120)), JSON.stringify(cleanStrings(body.labels, 20, 40)), JSON.stringify(cleanChecklist(body.checklist)), "[]", JSON.stringify(activity), now, now).run();
+  await db.prepare(`INSERT INTO tasks(id,board_id,stage_id,title,description,team_id,owner_agent_id,priority,due_at,position,archived,revision,collaborators_json,labels_json,checklist_json,comments_json,activity_json,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(taskId, board.id, stageId, required(body.title, "Task title"), String(body.description || "").slice(0, 20_000), body.teamId || null, body.ownerAgentId || null, priority, body.dueAt || null, position, 0, 1, JSON.stringify(cleanStrings(body.collaboratorAgentIds, 25, 120)), JSON.stringify(cleanStrings(body.labels, 20, 40)), JSON.stringify(cleanChecklist(body.checklist)), "[]", JSON.stringify(activity), now, now).run();
   return getTask(db, taskId);
 }
 
 async function updateTask(db: D1Database, taskId: string, body: Row) {
   const task = await getTask(db, taskId);
+  body = await validateHostedTaskMutation(db, body, task);
   if (Number(body.revision) !== task.revision) throw new HttpError(409, "This task changed elsewhere. Refresh and try again.");
   const boardId = body.boardId === undefined ? task.boardId : String(body.boardId);
   const board = await getBoard(db, boardId);
@@ -281,8 +495,11 @@ async function updateTask(db: D1Database, taskId: string, body: Row) {
   const collaborators = body.collaboratorAgentIds === undefined ? task.collaboratorAgentIds : cleanStrings(body.collaboratorAgentIds, 25, 120);
   const labels = body.labels === undefined ? task.labels : cleanStrings(body.labels, 20, 40);
   const checklist = body.checklist === undefined ? task.checklist : cleanChecklist(body.checklist);
-  const result = await db.prepare(`UPDATE tasks SET board_id=?,stage_id=?,title=?,description=?,owner_agent_id=?,priority=?,due_at=?,position=?,archived=?,revision=revision+1,collaborators_json=?,labels_json=?,checklist_json=?,activity_json=?,updated_at=? WHERE id=? AND revision=?`).bind(
-    boardId, stageId, body.title === undefined ? task.title : required(body.title, "Task title"), body.description === undefined ? task.description : String(body.description).slice(0, 20_000), body.ownerAgentId === undefined ? task.ownerAgentId : body.ownerAgentId || null, priority, body.dueAt === undefined ? task.dueAt : body.dueAt || null, body.position === undefined ? task.position : Number(body.position), body.archived === undefined ? Number(task.archived) : Number(Boolean(body.archived)), JSON.stringify(collaborators), JSON.stringify(labels), JSON.stringify(checklist), JSON.stringify(activity), now, taskId, task.revision,
+  const owner = body.ownerAgentId === undefined ? task.ownerAgentId : body.ownerAgentId || null, teamId = body.teamId === undefined ? task.teamId : body.teamId || null;
+  const collaboratorsChanged = JSON.stringify([...collaborators].sort()) !== JSON.stringify([...task.collaboratorAgentIds].sort());
+  if (taskIsActive(task) && (boardId !== task.boardId || stageId !== task.stageId || owner !== task.ownerAgentId || teamId !== task.teamId || collaboratorsChanged || (body.archived !== undefined && Boolean(body.archived) !== task.archived))) throw new HttpError(409, 'Team, owner, collaborators, project, stage, and archive status are locked while this task is active.');
+  const result = await db.prepare(`UPDATE tasks SET board_id=?,stage_id=?,title=?,description=?,team_id=?,owner_agent_id=?,priority=?,due_at=?,position=?,archived=?,revision=revision+1,collaborators_json=?,labels_json=?,checklist_json=?,activity_json=?,updated_at=? WHERE id=? AND revision=?`).bind(
+    boardId, stageId, body.title === undefined ? task.title : required(body.title, "Task title"), body.description === undefined ? task.description : String(body.description).slice(0, 20_000), teamId, owner, priority, body.dueAt === undefined ? task.dueAt : body.dueAt || null, body.position === undefined ? task.position : Number(body.position), body.archived === undefined ? Number(task.archived) : Number(Boolean(body.archived)), JSON.stringify(collaborators), JSON.stringify(labels), JSON.stringify(checklist), JSON.stringify(activity), now, taskId, task.revision,
   ).run();
   if (!result.meta.changes) throw new HttpError(409, "This task changed elsewhere. Refresh and try again.");
   return getTask(db, taskId);
@@ -333,6 +550,71 @@ async function syncHostedTaskRun(db: D1Database, runId: string) {
   await db.prepare('UPDATE tasks SET stage_id=?,active_run_id=NULL,comments_json=?,activity_json=?,revision=revision+1,updated_at=? WHERE id=? AND active_run_id=?').bind(run.state === 'completed' && doneStage ? doneStage.id : task.stageId, JSON.stringify(comments), JSON.stringify(activity), now, task.id, runId).run();
 }
 
+function taskIsActive(task: AgentTask) {
+  return Boolean(task.activeRunId && activeRunStates.includes(String(task.runState)));
+}
+
+async function moveTask(db: D1Database, taskId: string, body: Row) {
+  const task = await getTask(db, taskId), board = await getBoard(db, task.boardId);
+  if (taskIsActive(task)) throw new HttpError(409, "Stage and owner are locked while this task is active.");
+  await validateHostedTaskMutation(db, body, task);
+  const stageId = required(body.stageId, "Stage", 100);
+  if (!board.stages.some(stage => stage.id === stageId)) throw new HttpError(400, "Stage is not on this board.");
+  const siblings = (await db.prepare("SELECT id,position FROM tasks WHERE stage_id=? AND archived=0 AND id<>? ORDER BY position,id").bind(stageId, taskId).all<Row>()).results;
+  const before = body.beforeId ? siblings.findIndex(row => row.id === body.beforeId) : -1;
+  const next = before < 0
+    ? (siblings.length ? Number(siblings.at(-1)?.position) + 1000 : 1000)
+    : before === 0 ? Number(siblings[0].position) - 1000 : (Number(siblings[before - 1].position) + Number(siblings[before].position)) / 2;
+  const now = stamp(), stage = board.stages.find(item => item.id === stageId);
+  const activity = [{ id: id(), type: "moved", detail: `Moved to ${stage?.name || "stage"}`, createdAt: now }, ...task.activity].slice(0, 200);
+  await db.prepare("UPDATE tasks SET stage_id=?,owner_agent_id=?,position=?,activity_json=?,revision=revision+1,updated_at=? WHERE id=?")
+    .bind(stageId, body.ownerAgentId === undefined ? task.ownerAgentId : body.ownerAgentId || null, next, JSON.stringify(activity), now, taskId).run();
+  // Bisecting runs out of room eventually; respread the stage when neighbours collide.
+  const all = (await db.prepare("SELECT id,position FROM tasks WHERE stage_id=? ORDER BY position,id").bind(stageId).all<Row>()).results;
+  if (all.some((row, index) => index > 0 && Number(row.position) - Number(all[index - 1].position) < .001)) {
+    await db.batch(all.map((row, index) => db.prepare("UPDATE tasks SET position=? WHERE id=?").bind((index + 1) * 1000, row.id)));
+  }
+  return getTask(db, taskId);
+}
+
+async function checkTask(db: D1Database, taskId: string, item: string, done?: boolean) {
+  const task = await getTask(db, taskId);
+  const entry = task.checklist.find(value => value.id === item) || task.checklist[Number(item) - 1];
+  if (!entry) throw new HttpError(404, "Checklist item not found.");
+  const now = stamp(), next = done === undefined ? !entry.done : Boolean(done);
+  const checklist = task.checklist.map(value => value.id === entry.id ? { ...value, done: next } : value);
+  const activity = [{ id: id(), type: "checked", detail: `${next ? "Checked" : "Unchecked"} ${entry.text}`, createdAt: now }, ...task.activity].slice(0, 200);
+  await db.prepare("UPDATE tasks SET checklist_json=?,activity_json=?,revision=revision+1,updated_at=? WHERE id=?").bind(JSON.stringify(checklist), JSON.stringify(activity), now, taskId).run();
+  return getTask(db, taskId);
+}
+
+async function addTaskItem(db: D1Database, taskId: string, text: string) {
+  const task = await getTask(db, taskId), now = stamp();
+  const checklist = [...task.checklist, { id: id(), text: required(text, "Checklist item", 500), done: false, position: task.checklist.length }];
+  const activity = [{ id: id(), type: "checklist", detail: "Checklist item added", createdAt: now }, ...task.activity].slice(0, 200);
+  await db.prepare("UPDATE tasks SET checklist_json=?,activity_json=?,revision=revision+1,updated_at=? WHERE id=?").bind(JSON.stringify(checklist), JSON.stringify(activity), now, taskId).run();
+  return getTask(db, taskId);
+}
+
+async function deleteTask(db: D1Database, taskId: string) {
+  const task = await getTask(db, taskId);
+  if (task.activeRunId) throw new HttpError(409, "Stop the active run before deleting this task.");
+  await db.batch([db.prepare("DELETE FROM task_runs WHERE task_id=?").bind(taskId), db.prepare("DELETE FROM tasks WHERE id=?").bind(taskId)]);
+  return { ok: true };
+}
+
+// Mirrors the agent-level stop: a run that reached its runner is stopped through a queued
+// command, one that never did is cancelled outright.
+async function stopTask(db: D1Database, taskId: string) {
+  const task = await getTask(db, taskId);
+  if (!task.activeRunId) throw new HttpError(409, "This task is not running.");
+  const run = await db.prepare("SELECT * FROM runs WHERE id=?").bind(task.activeRunId).first<Row>();
+  if (!run) throw new HttpError(404, "Run not found.");
+  if (run.command_id) await enqueueRunnerCommand(db, String(run.machine_id), String(run.agent_id), 'stop', { runId: run.id, commandId: run.command_id });
+  else await db.prepare("UPDATE runs SET state='cancelled',updated_at=? WHERE id=?").bind(stamp(), run.id).run();
+  return { ok: true, stopped: 1, pending: Boolean(run.command_id) };
+}
+
 async function approveTask(db: D1Database, taskId: string, body: Row) {
   const task = await getTask(db, taskId);
   if (body.revision !== undefined && Number(body.revision) !== task.revision) throw new HttpError(409, "This task changed elsewhere. Refresh and try again.");
@@ -347,7 +629,8 @@ async function updateBoard(db: D1Database, boardId: string, body: Row) {
   const board = await getBoard(db, boardId);
   if (Number(body.revision) !== board.revision) throw new HttpError(409, "This board changed elsewhere. Refresh and try again.");
   const settings = body.settings === undefined ? board.settings : boardSettings(board.stages, JSON.stringify({ ...board.settings, ...(body.settings as Row) }));
-  const result = await db.prepare("UPDATE task_boards SET name=?,archived=?,settings_json=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?").bind(body.name === undefined ? board.name : required(body.name, "Board name"), body.archived === undefined ? Number(board.archived) : Number(Boolean(body.archived)), JSON.stringify(settings), stamp(), boardId, board.revision).run();
+  const meta = boardMeta(body, { description: board.description, color: board.color, default_owner_agent_id: board.defaultOwnerAgentId });
+  const result = await db.prepare("UPDATE task_boards SET name=?,description=?,color=?,default_owner_agent_id=?,archived=?,settings_json=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?").bind(body.name === undefined ? board.name : required(body.name, "Board name"), meta.description, meta.color, meta.defaultOwnerAgentId, body.archived === undefined ? Number(board.archived) : Number(Boolean(body.archived)), JSON.stringify(settings), stamp(), boardId, board.revision).run();
   if (!result.meta.changes) throw new HttpError(409, "This board changed elsewhere. Refresh and try again.");
   return getBoard(db, boardId);
 }
@@ -409,7 +692,7 @@ async function handler(request: Request, context: RouteContext) {
     const runnerFacing = pathname === '/v1/runner/pair' || pathname.startsWith('/v1/runner/') || pathname.startsWith('/internal/') || pathname.startsWith('/v1/install/');
     if (!runnerFacing && !request.headers.get('oai-authenticated-user-id')) throw new HttpError(401, 'Sign in to manage this workspace.');
 
-    if (pathname === "/v1/bootstrap" && request.method === "GET") return json({ token: "hosted-site", runtime: { available: true, version: 'runner', message: "Connect a computer to run agents from this hosted dashboard." }, version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } });
+    if (pathname === "/v1/bootstrap" && request.method === "GET") return json({ token: "hosted-site", mode: "live", runtime: { available: true, version: 'runner', message: "Connect a computer to run agents from this hosted dashboard." }, version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } });
     if ((pathname === '/internal/handoff' || pathname === '/internal/schedule') && request.method === 'POST') {
       const scoped = await internalRun(db, request); if (!scoped) throw new HttpError(401, 'Invalid or expired run credential.');
       const tool = pathname === '/internal/handoff' ? 'mcp_open_harness_delegate_named_agent' : 'mcp_open_harness_create_open_harness_routine';
@@ -424,10 +707,40 @@ async function handler(request: Request, context: RouteContext) {
       const targetId = required(body.agentId, 'Target agent'), ancestors = new Set<string>([String(scoped.run.agent_id)]); let parentId = relation?.parent_run_id ? String(relation.parent_run_id) : '';
       while (parentId) { const parent = await db.prepare('SELECT agent_id FROM runs WHERE id=?').bind(parentId).first<Row>(); if (parent) ancestors.add(String(parent.agent_id)); const parentRelation = await db.prepare('SELECT parent_run_id FROM run_relations WHERE run_id=?').bind(parentId).first<Row>(); parentId = parentRelation?.parent_run_id ? String(parentRelation.parent_run_id) : ''; }
       if (ancestors.has(targetId)) throw new HttpError(409, 'This handoff would create an agent cycle.');
+      if (!await hostedTeamsOverlap(db, String(scoped.run.agent_id), targetId)) throw new HttpError(403, 'Named handoffs require both agents to share an active team.');
       const target = await db.prepare('SELECT json FROM agent_profiles WHERE id=?').bind(targetId).first<Row>(); if (!target) throw new HttpError(404, 'Target agent not found.');
       const child = await createHostedRun(db, normalizeProfile(JSON.parse(String(target.json))), required(body.prompt, 'Handoff prompt', 20_000), String(scoped.run.conversation_id), String(scoped.run.id), depth + 1);
       await appendRunEvent(db, String(scoped.run.id), 'handoff.created', { childRunId: child.id, targetAgentId: targetId, prompt: body.prompt });
       return json({ runId: child.id, state: child.state }, 202);
+    }
+    if (pathname === '/internal/task' && request.method === 'POST') {
+      const scoped = await internalRun(db, request); if (!scoped) throw new HttpError(401, 'Invalid or expired run credential.');
+      if (!scoped.snapshot.allowedTools.includes('mcp_open_harness_task')) throw new HttpError(403, 'Task board access is disabled for this run.');
+      const agentId = String(scoped.run.agent_id), permissions = scoped.snapshot.board || { assignOthers: false, dispatch: false, manageProjects: false };
+      const action = String(body.action || ''), taskId = String(body.taskId || ''), patch = body.input && typeof body.input === 'object' ? body.input as Row : {};
+      if (action === 'list') { const visible = []; for (const task of await listTasks(db, false)) if (await hostedAgentMayTouchTask(db, agentId, permissions.assignOthers, task)) visible.push(task); return json({ boards: await listBoards(db, false), tasks: visible }); }
+      if (action === 'columns') return json({ boards: await listBoards(db, false) });
+      if (action === 'create') {
+        const candidate = { ...patch, boardId: patch.boardId || body.boardId, ownerAgentId: patch.ownerAgentId === undefined ? agentId : patch.ownerAgentId };
+        if (candidate.ownerAgentId !== agentId && !permissions.assignOthers) throw new HttpError(403, 'Assigning another agent requires Board: assign others.');
+        return json(await createTask(db, candidate), 201);
+      }
+      const task = await getTask(db, taskId);
+      if (!await hostedAgentMayTouchTask(db, agentId, permissions.assignOthers, task)) throw new HttpError(403, 'Changing another agent’s card requires a shared team and Board: assign others.');
+      if (action === 'get') return json(task);
+      if (action === 'update') return json(await updateTask(db, taskId, { ...patch, revision: task.revision }));
+      if (action === 'move') return json(await moveTask(db, taskId, patch));
+      if (action === 'comment') return json(await commentTask(db, taskId, { body: patch.text || patch.body, author: scoped.snapshot.name }), 201);
+      if (action === 'check') return json(await checkTask(db, taskId, String(patch.item || ''), patch.done === undefined ? undefined : Boolean(patch.done)));
+      if (action === 'additem') return json(await addTaskItem(db, taskId, String(patch.text || '')), 201);
+      if (action === 'claim') return json(await updateTask(db, taskId, { revision: task.revision, ownerAgentId: agentId }));
+      if (action === 'release') { const released = await updateTask(db, taskId, { revision: task.revision, ownerAgentId: null }); return json(await commentTask(db, taskId, { body: String(patch.reason || 'Released as blocked.'), author: scoped.snapshot.name || agentId }) || released); }
+      if (action === 'run') {
+        if (task.ownerAgentId && task.ownerAgentId !== agentId && !permissions.dispatch) throw new HttpError(403, 'Starting another agent’s task requires Board: dispatch.');
+        const board = await getBoard(db, task.boardId); if (!board.settings.allowAgentDispatch) throw new HttpError(403, 'Agent task dispatch is disabled for this board.');
+        return json(await startTask(db, taskId, { revision: task.revision, idempotencyKey: id() }), 202);
+      }
+      throw new HttpError(400, 'Unknown task action.');
     }
     if (pathname === '/v1/runner/pair' && request.method === 'POST') {
       const code = String(body.code || ''), pairing = await db.prepare('SELECT * FROM machine_pairings WHERE code_hash=?').bind(await digest(code)).first<Row>();
@@ -519,6 +832,26 @@ async function handler(request: Request, context: RouteContext) {
       const agents = Array.isArray(body.agents) ? body.agents as Agent[] : [], now = stamp();
       for (const agent of agents) { const existing = await db.prepare('SELECT 1 FROM agent_profiles WHERE id=?').bind(agent.id).first(); if (!existing) { const profile = draftProfile(agent); await db.prepare('INSERT INTO agent_profiles VALUES(?,?,?,?)').bind(profile.id, 1, JSON.stringify({ ...profile, revision: 1 }), now).run(); } }
       const rows = (await db.prepare('SELECT json FROM agent_profiles ORDER BY updated_at').all<Row>()).results; return json({ agents: rows.map(row => { const profile = normalizeProfile(JSON.parse(String(row.json))); return { id: profile.id, name: profile.name, role: profile.role, description: profile.description, tone: profile.tone, instructions: profile.prompt.text, memory: [], profile }; }) });
+    }
+    if (pathname === '/v1/teams') {
+      if (request.method === 'GET') return json({ teams: await listHostedTeams(db, url.searchParams.get('includeRetired') === '1') });
+      if (request.method === 'POST') return json(await createHostedTeam(db, body), 201);
+    }
+    if (pathname === '/v1/teams/sync' && request.method === 'POST') {
+      const saved: Team[] = [];
+      for (const value of Array.isArray(body.teams) ? body.teams as Row[] : []) {
+        const requestedId = typeof value.id === 'string' ? value.id : undefined;
+        const existing = requestedId ? await getHostedTeam(db, requestedId) : (await listHostedTeams(db)).find(team => team.name.toLowerCase() === String(value.name || '').toLowerCase());
+        saved.push(existing ? await updateHostedTeam(db, existing.id, { ...value, revision: existing.revision }) : await createHostedTeam(db, value, requestedId));
+      }
+      return json({ teams: saved });
+    }
+    const hostedTeamMatch = pathname.match(/^\/v1\/teams\/([^/]+)$/);
+    if (hostedTeamMatch) {
+      const teamId = decodeURIComponent(hostedTeamMatch[1]);
+      if (request.method === 'GET') { const team = await getHostedTeam(db, teamId, url.searchParams.get('includeRetired') === '1'); if (!team) throw new HttpError(404, 'Team not found.'); return json(team); }
+      if (request.method === 'PUT') return json(await updateHostedTeam(db, teamId, body));
+      if (request.method === 'DELETE') return json(await retireHostedTeam(db, teamId));
     }
     if (pathname === "/v1/migrate" && request.method === "POST") return json({ migrated: false, reason: "hosted" });
     if (pathname === '/v1/health' && request.method === 'GET') return json({ ok: true, runtime: { available: true, message: 'Hosted coordinator is ready.' }, activeRuns: Number((await db.prepare("SELECT COUNT(*) AS count FROM runs WHERE state IN ('running','waiting_approval')").first<Row>())?.count || 0), queuedRuns: Number((await db.prepare("SELECT COUNT(*) AS count FROM runs WHERE state='queued'").first<Row>())?.count || 0), secrets: (await db.prepare('SELECT DISTINCT name FROM machine_secrets ORDER BY name').all<Row>()).results.map(row => String(row.name)), secretStorage: 'selected runner OS vault' });
@@ -614,15 +947,19 @@ async function handler(request: Request, context: RouteContext) {
     }
 
     if (pathname === "/v1/boards") {
-      if (request.method === "GET") return json({ boards: await listBoards(db, url.searchParams.get("includeArchived") === "1") });
+      if (request.method === "GET") return json({ boards: await listBoards(db, url.searchParams.get("includeArchived") === "1"), summaries: await boardSummaries(db) });
       if (request.method === "POST") return json(await createBoard(db, body), 201);
     }
-    const boardMatch = pathname.match(/^\/v1\/boards\/([^/]+)(?:\/(stages))?$/);
+    // Ahead of boardMatch: its ([^/]+) would otherwise read "reorder" as a board id.
+    if (pathname === "/v1/boards/reorder" && request.method === "POST") return json({ boards: await reorderBoards(db, body.ids), summaries: await boardSummaries(db) });
+    const boardMatch = pathname.match(/^\/v1\/boards\/([^/]+)(?:\/(stages|duplicate))?$/);
     if (boardMatch) {
       const boardId = decodeURIComponent(boardMatch[1]);
       if (!boardMatch[2] && request.method === "GET") return json(await getBoard(db, boardId));
       if (!boardMatch[2] && request.method === "PUT") return json(await updateBoard(db, boardId, body));
-      if (boardMatch[2] && request.method === "POST") return json(await addStage(db, boardId, body), 201);
+      if (!boardMatch[2] && request.method === "DELETE") return json(await deleteBoard(db, boardId));
+      if (boardMatch[2] === "stages" && request.method === "POST") return json(await addStage(db, boardId, body), 201);
+      if (boardMatch[2] === "duplicate" && request.method === "POST") return json(await duplicateBoard(db, boardId, body), 201);
     }
     const stageMatch = pathname.match(/^\/v1\/stages\/([^/]+)$/);
     if (stageMatch) {
@@ -632,14 +969,19 @@ async function handler(request: Request, context: RouteContext) {
     }
     if (pathname === "/v1/tasks") {
       const includeArchived = url.searchParams.get("includeArchived") === "1";
-      if (request.method === "GET") return json({ boards: await listBoards(db, includeArchived), tasks: await listTasks(db, includeArchived) });
+      if (request.method === "GET") return json({ boards: await listBoards(db, includeArchived), tasks: await listTasks(db, includeArchived), summaries: await boardSummaries(db) });
       if (request.method === "POST") return json(await createTask(db, body), 201);
     }
-    const taskMatch = pathname.match(/^\/v1\/tasks\/([^/]+)(?:\/(comments|start|request-changes|approve|runs))?$/);
+    const taskMatch = pathname.match(/^\/v1\/tasks\/([^/]+)(?:\/(comments|start|request-changes|approve|runs|move|stop|check|additem))?$/);
     if (taskMatch) {
       const taskId = decodeURIComponent(taskMatch[1]), action = taskMatch[2];
       if (!action && request.method === "GET") return json(await getTask(db, taskId));
       if (!action && request.method === "PUT") return json(await updateTask(db, taskId, body));
+      if (!action && request.method === "DELETE") return json(await deleteTask(db, taskId));
+      if (action === "move" && request.method === "POST") return json(await moveTask(db, taskId, body));
+      if (action === "stop" && request.method === "POST") return json(await stopTask(db, taskId));
+      if (action === "check" && request.method === "POST") return json(await checkTask(db, taskId, String(body.item || ''), body.done === undefined ? undefined : Boolean(body.done)));
+      if (action === "additem" && request.method === "POST") return json(await addTaskItem(db, taskId, String(body.text || '')), 201);
       if (action === "comments" && request.method === "POST") return json(await commentTask(db, taskId, body), 201);
       if (action === "approve" && request.method === "POST") return json(await approveTask(db, taskId, body));
       if (action === "runs" && request.method === "GET") { const rows = (await db.prepare('SELECT runs.*,task_runs.attempt,task_runs.started_at FROM task_runs JOIN runs ON runs.id=task_runs.run_id WHERE task_runs.task_id=? ORDER BY task_runs.attempt DESC').bind(taskId).all<Row>()).results; return json({ runs: await Promise.all(rows.map(async row => ({ ...await publicRun(db, row), attempt: Number(row.attempt), startedAt: String(row.started_at), output: String(row.result || '').slice(-20_000), stopReason: row.state === 'completed' ? 'end_turn' : row.error ? String(row.error) : null }))) }); }

@@ -22,3 +22,13 @@ test('creates a signed cross-platform desktop update manifest', () => {
   assert.match(manifest.platforms['windows-x86_64'].url, /releases\/download\/v0\.3\.0/);
   assert.match(manifest.platforms['darwin-aarch64'].signature, /macos-arm64/);
 });
+
+test('desktop launches the live runtime and no user script launches mock chat', () => {
+  const root = join(import.meta.dirname, '..');
+  const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  assert.equal(manifest.scripts['dev:fast'], undefined);
+  const tauri = JSON.parse(readFileSync(join(root, 'src-tauri', 'tauri.conf.json'), 'utf8'));
+  assert.deepEqual(tauri.plugins.updater, { pubkey: '', endpoints: [] });
+  const desktop = readFileSync(join(root, 'src-tauri', 'src', 'main.rs'), 'utf8');
+  assert.match(desktop, /service_env\.insert\("OPEN_HARNESS_MOCK"\.into\(\), "0"\.into\(\)\)/);
+});

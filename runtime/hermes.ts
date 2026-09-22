@@ -11,11 +11,23 @@ import { HERMES_IMAGE } from './readiness';
 type Pending = { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout };
 export type NativeGatewayOptions = { cwd: string; env: NodeJS.ProcessEnv; entry: string; python?: string };
 
+// Python tracebacks put the useful line last, so report the tail, newest last, and
+// keep it short enough to read inside an error bubble.
+export function lastWords(stderrTail: string[], keep = 3, limit = 400) {
+  const lines = stderrTail.filter(line => line.trim()).slice(-keep);
+  if (!lines.length) return "";
+  const text = lines.join(" | ");
+  return ` Last output: ${text.length > limit ? `…${text.slice(-limit)}` : text}`;
+}
+
 export class HermesGateway extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null;
   private requestId = 0;
   private pending = new Map<string, Pending>();
   private mockApproval: ((decision: string) => void) | null = null;
+  // Hermes reports its failures on stderr and then dies. Without a copy, the exit
+  // code is all that survives, and "exited with code 1" tells an operator nothing.
+  private stderrTail: string[] = [];
   constructor(readonly container: string, readonly allowedTools: string[] | null = null, readonly native: NativeGatewayOptions | null = null) { super(); }
 
   async start() {
@@ -39,9 +51,15 @@ export class HermesGateway extends EventEmitter {
         }
       } catch { this.emit("log", { level: "warn", message: line.slice(0, 1000) }); }
     });
-    createInterface({ input: this.child.stderr }).on("line", line => this.emit("log", { level: "debug", message: line.slice(0, 1000) }));
+    this.stderrTail = [];
+    createInterface({ input: this.child.stderr }).on("line", line => {
+      const message = line.slice(0, 1000);
+      this.stderrTail.push(message);
+      if (this.stderrTail.length > 50) this.stderrTail.shift();
+      this.emit("log", { level: "debug", message });
+    });
     this.child.once("exit", code => {
-      const error = Object.assign(new Error(`Hermes ${this.native ? 'host' : 'container'} gateway exited with code ${code ?? "unknown"}. Inspect its saved work before retrying.`), { interrupted: true });
+      const error = Object.assign(new Error(`Hermes ${this.native ? 'host' : 'container'} gateway exited with code ${code ?? "unknown"}.${lastWords(this.stderrTail)} Inspect its saved work before retrying.`), { interrupted: true });
       for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
       this.pending.clear(); this.child = null; this.emit("exit", error);
     });

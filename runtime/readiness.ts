@@ -38,13 +38,13 @@ function desktopCheck(): ReadinessCheck {
   return { id: 'desktop', label: 'Desktop control', state: 'unavailable', detail: 'Desktop control is not supported on this operating system.' };
 }
 
-export function onboardingStatus(): OnboardingStatus {
+export function onboardingStatus(credentialNames: string[] = []): OnboardingStatus {
   if (process.env.OPEN_HARNESS_MOCK === '1') return {
     platform,
     platformLabel: labels[platform],
     executionReady: true,
     recommendedAccess: 'private',
-    credentialMode: 'coordinator',
+    credentialMode: 'coordinator', credentialNames,
     checks: [
       { id: 'coordinator', label: 'Open Harness', state: 'ready', detail: 'The coordinator is running.' },
       { id: 'container-engine', label: 'Private workspaces', state: 'ready', detail: 'The container engine is running.' },
@@ -75,7 +75,7 @@ export function onboardingStatus(): OnboardingStatus {
     platformLabel: labels[platform],
     executionReady: image || native,
     recommendedAccess: image ? 'private' : 'direct',
-    credentialMode: 'coordinator',
+    credentialMode: 'coordinator', credentialNames,
     checks: [{ id: 'coordinator', label: 'Open Harness', state: 'ready', detail: 'The coordinator is running and your data folder is writable.' }, container, runtime, desktopCheck()],
   };
 }
@@ -107,7 +107,7 @@ function runStreaming(name: string, args: string[], cwd?: string) {
   });
 }
 
-export async function onboardingAction(action: unknown) {
+export async function onboardingAction(action: unknown, credentialNames: string[] = []) {
   if (action === 'start-container-engine') {
     if (command('docker', ['--version']).status !== 0) throw new Error(`Docker is not installed. Use the installation guide for ${labels[platform]}, then try again.`);
     if (command('docker', ['version', '--format', '{{.Server.Version}}']).status !== 0) {
@@ -115,7 +115,7 @@ export async function onboardingAction(action: unknown) {
       if (started.status !== 0) throw new Error((started.stderr || started.stdout || '').trim() || 'Open Harness could not start Docker. Start it from your applications, then try again.');
       await waitForDocker();
     }
-    return onboardingStatus();
+    return onboardingStatus(credentialNames);
   }
   if (action === 'prepare-runtime') {
     await waitForDocker(10_000);
@@ -124,7 +124,7 @@ export async function onboardingAction(action: unknown) {
     const dockerfile = join(runtimeRoot, 'hermes', 'Dockerfile');
     if (!existsSync(dockerfile)) throw new Error('The bundled agent runtime files are missing. Reinstall Open Harness.');
     await runStreaming('docker', ['build', '-f', dockerfile, '-t', HERMES_IMAGE, projectRoot], projectRoot);
-    return onboardingStatus();
+    return onboardingStatus(credentialNames);
   }
   throw new Error('Unknown setup action.');
 }

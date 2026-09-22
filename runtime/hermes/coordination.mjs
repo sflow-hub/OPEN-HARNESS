@@ -10,12 +10,12 @@ const sitesToken = process.env.OPEN_HARNESS_SITES_TOKEN;
 const tools = [
   {
     name: "task",
-    description: "Read and manage board tasks. You may always work on your own or unassigned cards; changing another agent's card requires that profile's board permission.",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "columns", "get", "create", "update", "move", "comment", "check", "additem", "claim", "release", "run"] }, taskId: { type: "string" }, boardId: { type: "string" }, input: { type: "object" } }, required: ["action"], additionalProperties: false },
+    description: "Read and manage board tasks and projects. Team tasks are visible only to members; changing another agent's card requires that profile's board permission, and board_create and board_update require its manage-projects permission. A project's stages, automation settings, and archived state stay under human control.",
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "columns", "get", "create", "update", "move", "comment", "check", "additem", "claim", "release", "run", "board_create", "board_update"] }, taskId: { type: "string" }, boardId: { type: "string" }, input: { type: "object" } }, required: ["action"], additionalProperties: false },
   },
   {
     name: "delegate_named_agent",
-    description: "Assign a bounded task to another named Open Harness agent and return the durable run ID. Delegation depth is limited to two and cycles are rejected.",
+    description: "Assign a bounded task to another named Open Harness agent who shares an active team and return the durable run ID. Delegation depth is limited to two and cycles are rejected.",
     inputSchema: { type: "object", properties: { agentId: { type: "string", description: "Target agent ID" }, prompt: { type: "string" } }, required: ["agentId", "prompt"], additionalProperties: false },
   },
   {

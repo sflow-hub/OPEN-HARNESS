@@ -15,17 +15,23 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "node runtime/dev.mjs",
+    "predev": "node runtime/check-node.mjs",
+    "dev": "node --env-file-if-exists=.env runtime/dev.mjs",
     "docker:start": "node runtime/start-docker.mjs",
     "dev:app": "vinext dev",
+    "prebuild": "node runtime/check-node.mjs",
     "build": "vinext build && node desktop/fix-standalone.mjs",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "lint:fix": "eslint . --fix --ignore-pattern dist --ignore-pattern .next",
     "pretest": "node runtime/check-node.mjs",
     "test": "node --import tsx --test tests/*.test.ts",
+    "test:watch": "node --import tsx --test --watch tests/*.test.ts",
+    "test:coverage": "node --import tsx --test --experimental-test-coverage tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "harness": "node --import tsx runtime/cli.ts",
-    "harness:serve": "node runtime/start-docker.mjs && node --import tsx runtime/service.ts",
+    "preharness:serve": "node runtime/check-node.mjs",
+    "harness:serve": "node runtime/start-docker.mjs && node --env-file-if-exists=.env --import tsx runtime/service.ts",
     "harness:setup": "npm run harness -- setup",
     "harness:start": "npm run harness -- start",
     "harness:stop": "npm run harness -- stop",
@@ -69,6 +75,5 @@
     "vite": "8.3.0",
     "wrangler": "4.131.1"
   },
-  "type": "module",
-  "license": "MIT"
+  "type": "module"
 }

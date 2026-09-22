@@ -1,16 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   ArrowUpRight,
   Bot,
+  Bell,
+  BellOff,
   Check,
   ChevronRight,
   Copy,
   Download,
   FileText,
   FolderOpen,
+  KeyRound,
   Menu,
   MessageSquare,
   Plus,
@@ -28,6 +31,7 @@ import {
   Cable,
   CalendarClock,
   ShieldCheck,
+  Users,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -49,19 +53,35 @@ import {
 import AgentSettings from "../components/agent-settings";
 import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
-import { profileAgent, type ModelChoice } from "../lib/agent-profile";
+import TeamManager, { TeamBadge } from "../components/team-manager";
+import CredentialManager, { CredentialSwitcher } from "../components/credential-manager";
+import { fitsProvider, type CredentialRecord } from "../lib/credentials";
+import { profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
+import type { Team } from "../lib/team";
 
-const STORAGE_KEY = "open-harness.workspace.v1";
+const STORAGE_KEY = "open-harness.workspace.v2";
+const LEGACY_STORAGE_KEY = "open-harness.workspace.v1";
 const SETTINGS_KEY = "open-harness.settings.v1";
 const ONBOARDING_KEY = "open-harness.onboarding.v1";
-type View = "home" | "chat" | "files" | "routines" | "tasks";
-type ModelSettings = { provider: Provider; model: string; maxSteps?: number; baseUrl?: string };
-const providerCredential = (provider: string) => ({ xai: "XAI_API_KEY", openai: "OPENAI_API_KEY", openrouter: "OPENROUTER_API_KEY" } as Record<string, string>)[provider] || "";
+// Kept apart from SETTINGS_KEY on purpose: the onboarding save rewrites that whole
+// blob, which would silently drop anything else stored alongside it.
+const NOTIFY_KEY = "open-harness.notify.v1";
+type View = "home" | "teams" | "chat" | "files" | "routines" | "tasks";
+type ModelSettings = { provider: Provider; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
 const defaultSettings: ModelSettings = {
   provider: "xai",
   model: PROVIDERS.xai.model,
 };
 const uid = () => crypto.randomUUID();
+// Newest first: the file you care about is almost always the one just written.
+const byNewest = (a: Artifact, b: Artifact) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+function formatInterval(minutes: number) {
+  if (!Number.isFinite(minutes) || minutes < 1) return "—";
+  if (minutes % 10080 === 0) { const weeks = minutes / 10080; return weeks === 1 ? "week" : `${weeks} weeks`; }
+  if (minutes % 1440 === 0) { const days = minutes / 1440; return days === 1 ? "day" : `${days} days`; }
+  if (minutes % 60 === 0) { const hours = minutes / 60; return hours === 1 ? "hour" : `${hours} hours`; }
+  return minutes === 1 ? "minute" : `${minutes} minutes`;
+}
 const now = () => new Date().toISOString();
 function download(name: string, content: string, type = "text/plain", encoding: "utf8" | "base64" = "utf8") {
   const data = encoding === "base64" ? Uint8Array.from(atob(content), char => char.charCodeAt(0)) : content;
@@ -79,38 +99,43 @@ function Avatar({ agent, large = false }: { agent: Agent; large?: boolean }) {
     </div>
   );
 }
-function Markdown({ children }: { children: string }) {
+// Hoisted: rebuilding these per render gave react-markdown new props every time and
+// defeated its own memoization, so every poll re-parsed every message in the thread.
+const MARKDOWN_PLUGINS = [remarkGfm];
+const MARKDOWN_COMPONENTS = {
+  img: ({ src, alt }: { src?: unknown; alt?: string }) => (
+    <a
+      href={typeof src === "string" ? src : undefined}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      {alt || "Open image"}
+    </a>
+  ),
+};
+// Memoized: a run polls every 500ms, and each poll re-renders this page. Without this
+// every message in the conversation goes through the full remark/rehype pipeline again.
+const Markdown = memo(function Markdown({ children }: { children: string }) {
   return (
     <div className="markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          img: ({ src, alt }) => (
-            <a
-              href={typeof src === "string" ? src : undefined}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {alt || "Open image"}
-            </a>
-          ),
-        }}
-      >
+      <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS} components={MARKDOWN_COMPONENTS}>
         {children}
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 export default function Home() {
   const [workspace, setWorkspace] = useState<Workspace>(initialWorkspace);
+  const [retiredTeams, setRetiredTeams] = useState<Team[]>([]);
   const [ready, setReady] = useState(false);
   const [view, setView] = useState<View>("home");
   const lastWorkspaceView = useRef<View>("home");
   const [selectedAgent, setSelectedAgent] = useState("atlas");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [settings, setSettings] = useState<ModelSettings>(defaultSettings);
-  const [apiKey, setApiKey] = useState("");
+  const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
+  const [credentialsOpen, setCredentialsOpen] = useState(false);
   const [workspaceModelRevision, setWorkspaceModelRevision] = useState(0);
   const [server, setServer] = useState({
     xai: false,
@@ -120,18 +145,36 @@ export default function Home() {
     localModel: "",
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Snapshot of the settings when the dialog opened, so dismissing it can tell an
+  // untouched dialog from one holding an unsaved model change or a freshly pasted key.
+  const [settingsBaseline, setSettingsBaseline] = useState("");
+  const [confirmCloseSettings, setConfirmCloseSettings] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [editingAgentTab, setEditingAgentTab] = useState<'profile' | 'computer'>('profile');
   const [mobileOpen, setMobileOpen] = useState(false);
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
+  const [agentTeamFilter, setAgentTeamFilter] = useState("all");
   const [running, setRunning] = useState(false);
   const [persistentRun, setPersistentRun] = useState<PersistentRun | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
-  const [approval, setApproval] = useState<{ approvalId: string; detail: string } | null>(null);
+  // A queue, not a slot. Two agents can pause at once, and the second request used to
+  // overwrite the first — leaving a run blocked on an approval with no way to answer it.
+  const [approvals, setApprovals] = useState<Array<{ approvalId: string; detail: string; runId: string; agentName: string }>>([]);
   const [inputMode, setInputMode] = useState<"steer" | "followup">("steer");
   const [routines, setRoutines] = useState<Array<Record<string, unknown>>>([]);
+  const [routineDraft, setRoutineDraft] = useState<{ id?: string; name: string; prompt: string; agentId: string; intervalMinutes: number } | null>(null);
+  const [routineBusy, setRoutineBusy] = useState(false);
+  // MEMORY.md and SKILL.md are multi-section Markdown documents; window.prompt cannot
+  // realistically edit either, and there was no way to write a skill by hand at all.
+  const [docEditor, setDocEditor] = useState<
+    | { kind: "memory"; value: string }
+    | { kind: "skill"; skill: string; value: string }
+    | { kind: "new-skill"; skill: string; value: string }
+    | null
+  >(null);
+  const [docBusy, setDocBusy] = useState(false);
   const [agentContext, setAgentContext] = useState<{
     memory: string;
     user: string;
@@ -140,6 +183,8 @@ export default function Home() {
   } | null>(null);
 
   const [notice, setNotice] = useState("");
+  const [reconnecting, setReconnecting] = useState(false);
+  const [notifyWhenDone, setNotifyWhenDone] = useState(false);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [inspector, setInspector] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
@@ -155,15 +200,18 @@ export default function Home() {
     (c) => c.id === conversationId,
   );
   const file = workspace.files.find((f) => f.id === selectedFile);
-  const connected = Boolean(runtime?.runtime.available);
+  // The deterministic adapter exists for automated tests only. Treating it as a
+  // connected runtime let a source preview display canned prose as an agent reply.
+  const testMode = runtime?.mode === "test";
+  const connected = Boolean(runtime?.runtime.available && !testMode);
 
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
+      const saved = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
       // Hydrate browser-only persistence after the server-rendered first frame.
       if (saved) {
-        const parsed = JSON.parse(saved);
-        if (!validWorkspace(parsed)) throw new Error();
+        const parsed = normalizeWorkspace(JSON.parse(saved));
+        if (!parsed) throw new Error();
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setWorkspace({
           ...parsed,
@@ -186,6 +234,7 @@ export default function Home() {
         });
         setSelectedAgent(parsed.agents[0].id);
       }
+      if (localStorage.getItem(NOTIFY_KEY) === "on" && typeof Notification !== "undefined" && Notification.permission === "granted") setNotifyWhenDone(true);
       const prefs = localStorage.getItem(SETTINGS_KEY);
       if (prefs) {
         const p = JSON.parse(prefs);
@@ -224,16 +273,20 @@ export default function Home() {
           method: "POST",
           body: JSON.stringify(workspace),
         });
+        if (workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspace.teams }) });
+        const teamResult = await client.request<{ teams: Team[] }>("/v1/teams?includeRetired=1");
         if (!cancelled) {
-          setWorkspace(current => ({ ...current, agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })) }));
+          setWorkspace(current => ({ ...current, teams: teamResult.teams.filter(team => !team.retiredAt), agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })) }));
+          setRetiredTeams(teamResult.teams.filter(team => Boolean(team.retiredAt)));
           const defaults = await client.request<{ model: ModelChoice; revision: number }>("/v1/workspace/model/import", {
             method: "POST",
-            body: JSON.stringify({ model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: providerCredential(settings.provider) } }),
+            body: JSON.stringify({ model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: settings.credentialRef || "" } }),
           });
-          setSettings({ provider: defaults.model.provider as Provider, model: defaults.model.model, baseUrl: defaults.model.baseUrl });
+          setSettings({ provider: defaults.model.provider as Provider, model: defaults.model.model, baseUrl: defaults.model.baseUrl, credentialRef: defaults.model.credentialRef });
           setWorkspaceModelRevision(defaults.revision);
           if (localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
         }
+        try { const saved = await client.request<{ credentials: CredentialRecord[] }>("/v1/credentials"); if (!cancelled) setCredentials(saved.credentials); } catch {}
         const [{ routines: savedRoutines }, { runs }] = await Promise.all([
           client.request<{ routines: Array<Record<string, unknown>> }>(
             "/v1/routines",
@@ -306,11 +359,14 @@ export default function Home() {
               live.agent_id,
               existingMessage?.eventCursor || 0,
               Boolean(existingMessage?.content),
-            ).finally(() => {
-              runLock.current = false;
-              setRunning(false);
-              setPersistentRun(null);
-            });
+            )
+              .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
+              .finally(() => {
+                runLock.current = false;
+                setRunning(false);
+                setPersistentRun(null);
+                setReconnecting(false);
+              });
           }
         }
       } catch (error) {
@@ -366,15 +422,101 @@ export default function Home() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [conversation?.messages]);
+  // Agents run for minutes and the whole point is that you go and do something else.
+  // Only interrupt when the page is actually out of view — a notification for something
+  // the user is already looking at is noise.
+  const skillPath = (agentId: string, skill: string) =>
+    `/v1/agents/${encodeURIComponent(agentId)}/context/skills/${encodeURIComponent(skill)}`;
+  const saveDoc = async () => {
+    if (!docEditor || !agentContext) return;
+    setDocBusy(true);
+    try {
+      if (docEditor.kind === "memory") {
+        await controlRef.current.request(`/v1/agents/${encodeURIComponent(agent.id)}/context`, { method: "PUT", body: JSON.stringify({ memory: docEditor.value }) });
+        setAgentContext({ ...agentContext, memory: docEditor.value });
+        setNotice("Memory saved.");
+      } else {
+        const name = docEditor.skill.trim();
+        // Mirrors the server's own rule, so a bad name is caught before the round trip.
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(name)) { setNotice("Use a skill name of letters, numbers, dot, dash or underscore."); return; }
+        if (docEditor.kind === "new-skill" && agentContext.skills.includes(name)) { setNotice(`${agent.name} already has a skill called ${name}.`); return; }
+        await controlRef.current.request(skillPath(agent.id, name), { method: "PUT", body: JSON.stringify({ content: docEditor.value }) });
+        if (!agentContext.skills.includes(name)) setAgentContext({ ...agentContext, skills: [...agentContext.skills, name] });
+        setNotice(`Saved ${name}/SKILL.md.`);
+      }
+      setDocEditor(null);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not save that.");
+    } finally {
+      setDocBusy(false);
+    }
+  };
+
+  const refreshRoutines = async () => {
+    const result = await controlRef.current.request<{ routines: Array<Record<string, unknown>> }>("/v1/routines");
+    setRoutines(result.routines);
+  };
+  const saveRoutine = async () => {
+    if (!routineDraft) return;
+    const name = routineDraft.name.trim(), prompt = routineDraft.prompt.trim();
+    if (!name || !prompt) { setNotice("Give the routine a name and a task."); return; }
+    setRoutineBusy(true);
+    try {
+      const payload = JSON.stringify({ name, prompt, agentId: routineDraft.agentId, intervalMinutes: routineDraft.intervalMinutes, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+      if (routineDraft.id) await controlRef.current.request(`/v1/routines/${routineDraft.id}`, { method: "PUT", body: payload });
+      else await controlRef.current.request("/v1/routines", { method: "POST", body: payload });
+      await refreshRoutines();
+      setRoutineDraft(null);
+      setNotice(routineDraft.id ? "Routine updated." : "Routine created.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not save that routine.");
+    } finally {
+      setRoutineBusy(false);
+    }
+  };
+
+  const agentNameFor = (id: string) => workspace.agents.find(agent => agent.id === id)?.name || "Your agent";
+  const notifyDone = (title: string, body: string) => {
+    if (!notifyWhenDone || typeof Notification === "undefined") return;
+    if (Notification.permission !== "granted" || !document.hidden) return;
+    try { new Notification(title, { body, tag: "open-harness-run" }); } catch { /* the browser may refuse; the in-app notice still stands */ }
+  };
+  const toggleNotifications = async () => {
+    if (notifyWhenDone) { setNotifyWhenDone(false); localStorage.setItem(NOTIFY_KEY, "off"); return; }
+    if (typeof Notification === "undefined") { setNotice("This browser cannot show desktop notifications."); return; }
+    const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+    if (permission !== "granted") { setNotice("Your browser blocked notifications for Open Harness. Allow them in its site settings to turn this on."); return; }
+    setNotifyWhenDone(true); localStorage.setItem(NOTIFY_KEY, "on");
+  };
+
+  const applySavedProfile = (profile: AgentProfile) => setWorkspace(current => ({ ...current, agents: current.agents.some(a => a.id === profile.id)
+    ? current.agents.map(a => a.id === profile.id ? profileAgent(profile, a.memory) : a)
+    : [...current.agents, profileAgent(profile)] }));
+  const settingsSnapshot = () => JSON.stringify(settings);
+  const openSettings = () => {
+    setSettingsBaseline(settingsSnapshot());
+    setConfirmCloseSettings(false);
+    setSettingsOpen(true);
+  };
+  const closeSettings = () => { setConfirmCloseSettings(false); setSettingsOpen(false); };
+  // Dismissing this dialog used to drop an unsaved model change or a pasted API key
+  // with no warning, which is the worst version of it: the key is gone from the form
+  // and was never sent anywhere.
+  const settingsDirty = settingsOpen && settingsSnapshot() !== settingsBaseline;
+  const requestCloseSettings = () => { if (settingsDirty) setConfirmCloseSettings(true); else closeSettings(); };
+  const escapeSettingsRef = useRef<() => void>(() => {});
+  escapeSettingsRef.current = () => { if (settingsOpen) requestCloseSettings(); };
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key === "k") {
         event.preventDefault();
-        setMobileOpen(true);
+        // Cmd+K is a desktop habit too; the sidebar drawer is only a mobile concern.
+        if (window.matchMedia("(max-width: 900px)").matches) setMobileOpen(true);
         searchRef.current?.focus();
       }
       if (event.key === "Escape") {
-        setSettingsOpen(false);
+        escapeSettingsRef.current();
         setSelectedFile(null);
         setMobileOpen(false);
       }
@@ -470,11 +612,14 @@ export default function Home() {
       runLock.current = true;
       setRunning(true);
       setPersistentRun(run);
-      void followRun(run, run.conversation_id, messageId, run.agent_id, existingReply?.eventCursor || 0, Boolean(existingReply?.content)).finally(() => {
-        runLock.current = false;
-        setRunning(false);
-        setPersistentRun(null);
-      });
+      void followRun(run, run.conversation_id, messageId, run.agent_id, existingReply?.eventCursor || 0, Boolean(existingReply?.content))
+        .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
+        .finally(() => {
+          runLock.current = false;
+          setRunning(false);
+          setPersistentRun(null);
+          setReconnecting(false);
+        });
     }
   }
   function newAgent() {
@@ -585,8 +730,24 @@ export default function Home() {
   ) {
     let cursor = startCursor;
     let receivedStreamText = hasExistingText;
+    let consecutiveFailures = 0;
     while (true) {
-      const snapshot = await controlRef.current.events(run.id, cursor);
+      // The run lives on the coordinator, not here. A dropped fetch — a sleeping
+      // laptop, a coordinator restart, a blip — used to end this loop and leave the
+      // agent working with nothing watching it. Retry with backoff instead, and only
+      // give up once it is clear the coordinator is really gone.
+      let snapshot;
+      try {
+        snapshot = await controlRef.current.events(run.id, cursor);
+        if (consecutiveFailures) { setReconnecting(false); setNotice("Reconnected. Still following this task."); }
+        consecutiveFailures = 0;
+      } catch (error) {
+        consecutiveFailures += 1;
+        if (consecutiveFailures > 10) { setReconnecting(false); throw error; }
+        setReconnecting(true);
+        await new Promise(resolve => setTimeout(resolve, Math.min(8000, 500 * 2 ** (consecutiveFailures - 1))));
+        continue;
+      }
       setPersistentRun(snapshot.run);
       for (const item of snapshot.events) {
         cursor = Math.max(cursor, item.seq);
@@ -635,19 +796,20 @@ export default function Home() {
             agentId,
           );
         } else if (item.type === "approval.request") {
-          setApproval({
-            approvalId: String(payload.approvalId),
-            detail: String(
-              payload.command || payload.description || "Hermes requests approval.",
-            ),
-          });
-        } else if (item.type === "run.failed" || item.type === "run.interrupted") {
-          handleEvent(
-            { type: "error", message: String(payload.error || "Run interrupted.") },
-            cid,
-            mid,
-            agentId,
+          const detail = String(
+            payload.command || payload.description || "Hermes requests approval.",
           );
+          const approvalId = String(payload.approvalId);
+          setApprovals(current => current.some(item => item.approvalId === approvalId)
+            ? current
+            : [...current, { approvalId, detail, runId: run.id, agentName: agentNameFor(agentId) }]);
+          // An approval blocks the run and the agent's whole slot until it is answered,
+          // so this is the one the user most needs to hear about while looking elsewhere.
+          notifyDone(`${agentNameFor(agentId)} needs your approval`, detail);
+        } else if (item.type === "run.failed" || item.type === "run.interrupted") {
+          const message = String(payload.error || "Run interrupted.");
+          handleEvent({ type: "error", message }, cid, mid, agentId);
+          notifyDone(`${agentNameFor(agentId)} stopped`, message);
         } else if (item.type === "run.completed" && payload.result && !receivedStreamText) {
           receivedStreamText = true;
           handleEvent(
@@ -667,13 +829,23 @@ export default function Home() {
       }
       if (["completed", "failed", "interrupted", "cancelled"].includes(snapshot.run.state)) {
         await refreshRuntimeFiles().catch(() => {});
+        if (snapshot.run.state === "completed") notifyDone(`${agentNameFor(agentId)} finished`, "Your task is done. Open Harness to see the result.");
+        // Otherwise a resolved or abandoned request keeps its banner over a later run.
+        setApprovals(current => current.filter(item => item.runId !== snapshot.run.id));
         return snapshot.run;
       }
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      // A hidden tab still has a live run, but nobody is reading it. task-manager.tsx
+      // already backs off the same way; polling twice a second behind another window
+      // just burns the coordinator and re-renders this page for no one.
+      await new Promise((resolve) => setTimeout(resolve, document.hidden ? 4000 : 500));
     }
   }
   async function send(text = input, guided = false) {
     if (!text.trim() || !ready) return;
+    if (!guided && testMode) {
+      setNotice("Agent chat is disabled in automated test mode. Open the installed desktop app to run a real agent.");
+      return;
+    }
     if (running && !guided && persistentRun) {
       try {
         if (inputMode === "steer") {
@@ -891,8 +1063,8 @@ export default function Home() {
     if (!upload) return;
     try {
       if (upload.size > 5000000) throw new Error();
-      const parsed = JSON.parse(await upload.text());
-      if (!validWorkspace(parsed)) throw new Error();
+      const parsed = normalizeWorkspace(JSON.parse(await upload.text()));
+      if (!parsed) throw new Error();
       if (
         confirm(
           "Replace this browser’s workspace with this backup? Export your current workspace first if you want to keep it.",
@@ -921,6 +1093,10 @@ export default function Home() {
         setConversationId(null);
         setView("home");
         setNotice("Workspace imported.");
+        if (runtime && parsed.teams.length) void controlRef.current.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: parsed.teams }) })
+          .then(() => controlRef.current.request<{ teams: Team[] }>("/v1/teams"))
+          .then(result => setWorkspace(current => ({ ...current, teams: result.teams })))
+          .catch(error => setNotice(error instanceof Error ? error.message : "Team restore failed."));
       }
     } catch {
       setNotice("That file is not a valid Open Harness backup (maximum 5 MB).");
@@ -937,6 +1113,8 @@ export default function Home() {
         ),
     )
     .slice(0, 12);
+  const visibleAgents = workspace.agents.filter(candidate => agentTeamFilter === "all"
+    || (agentTeamFilter === "unassigned" ? !workspace.teams.some(team => team.memberAgentIds.includes(candidate.id)) : workspace.teams.find(team => team.id === agentTeamFilter)?.memberAgentIds.includes(candidate.id)));
 
   return (
     <div className="app-shell">
@@ -981,6 +1159,15 @@ export default function Home() {
           }}
         >
           <Bot size={16} /> Agents <span>{workspace.agents.length}</span>
+        </button>
+        <button
+          className={`nav-item ${view === "teams" ? "active" : ""}`}
+          onClick={() => {
+            setView("teams");
+            setMobileOpen(false);
+          }}
+        >
+          <Users size={16} /> Teams <span>{workspace.teams.length}</span>
         </button>
         <button
           className={`nav-item ${view === "files" ? "active" : ""}`}
@@ -1055,8 +1242,8 @@ export default function Home() {
         </div>
         <div className="sidebar-bottom">
           <span className="status-dot" />
-          {connected ? "Model configured" : "Connect a model to begin"}
-          <button onClick={() => setSettingsOpen(true)}>
+          {testMode ? "Automated test mode" : connected ? "Agent runtime ready" : "Agent runtime needs setup"}
+          <button onClick={() => openSettings()}>
             <Settings size={15} /> Settings <span>↗</span>
           </button>
           <div className="local-note">Saved on this device</div>
@@ -1077,6 +1264,8 @@ export default function Home() {
               /{" "}
               {view === "home"
                 ? "Agents"
+                : view === "teams"
+                  ? "Teams"
                 : view === "files"
                   ? "Files"
                   : view === "routines"
@@ -1092,7 +1281,8 @@ export default function Home() {
           </nav>
           <span className="badge">Open source · Yours to shape</span>
         </header>
-        {view === "tasks" && <TaskManager agents={workspace.agents} client={controlRef.current} onOpenRun={openTaskRun} />}
+        {view === "tasks" && <TaskManager agents={workspace.agents} teams={[...workspace.teams, ...retiredTeams]} client={controlRef.current} onOpenRun={openTaskRun} />}
+        {view === "teams" && <TeamManager agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onChanged={teams => { setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) })); setRetiredTeams(teams.filter(team => Boolean(team.retiredAt))); }} />}
         {view === "home" && (
           <section className="home-content">
             <div className="eyebrow">YOUR PERSONAL AGENT WORKSPACE</div>
@@ -1115,8 +1305,13 @@ export default function Home() {
                 <Plus size={13} /> Create agent
               </button>
             </div>
+            <div className="agent-team-filters" aria-label="Filter agents by team">
+              <button className={agentTeamFilter === "all" ? "active" : ""} onClick={() => setAgentTeamFilter("all")}>All</button>
+              {workspace.teams.map(team => <button className={agentTeamFilter === team.id ? "active" : ""} onClick={() => setAgentTeamFilter(team.id)} key={team.id}>{team.name}</button>)}
+              <button className={agentTeamFilter === "unassigned" ? "active" : ""} onClick={() => setAgentTeamFilter("unassigned")}>Unassigned</button>
+            </div>
             <div className="agent-grid">
-              {workspace.agents.map((a) => (
+              {visibleAgents.map((a) => (
                 <div className="agent-card-shell" key={a.id}>
                 <button
                   className="agent-card"
@@ -1127,6 +1322,7 @@ export default function Home() {
                   <ArrowUpRight className="card-arrow" size={17} />
                   <h3>{a.name}</h3>
                   <div className="role">{a.role}</div>
+                  <div className="agent-team-badges">{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).slice(0, 2).map(team => <TeamBadge team={team} key={team.id} />)}{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).length > 2 && <small>+{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).length - 2}</small>}{!workspace.teams.some(team => team.memberAgentIds.includes(a.id)) && <span className="team-badge unassigned">Unassigned</span>}</div>
                   <p>
                     {a.description ||
                       "Your custom agent. Give it a task and make it your own."}
@@ -1140,6 +1336,9 @@ export default function Home() {
                   </div>
                 </button>
                 <button className="agent-card-settings" onClick={() => setEditingAgent({ ...a })} aria-label={`Edit ${a.name} profile`} title="Agent settings"><SlidersHorizontal size={16} /></button>
+                <div className="agent-card-tools">
+                  <CredentialSwitcher agent={a} credentials={credentials} workspaceRef={settings.credentialRef || ""} client={controlRef.current} running={running && a.id === selectedAgent} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
+                </div>
                 </div>
               ))}
             </div>
@@ -1161,7 +1360,7 @@ export default function Home() {
             </div>
             <div className="home-footer">
               <span>YOUR MODELS. YOUR INSTRUCTIONS. YOUR WORK.</span>
-              <button onClick={() => setSettingsOpen(true)}>
+              <button onClick={() => openSettings()}>
                 Built to be opened up ↗
               </button>
             </div>
@@ -1176,6 +1375,7 @@ export default function Home() {
                   <strong>{agent.name}</strong>
                   <small>{agent.role}</small>
                 </div>
+                <CredentialSwitcher agent={agent} credentials={credentials} workspaceRef={settings.credentialRef || ""} client={controlRef.current} running={running} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
                 <div className="toolbar-actions">
                   <button
                     title="New conversation"
@@ -1312,7 +1512,7 @@ export default function Home() {
                       {!m.content && running && (
                         <div className="working">
                           <LoaderCircle size={13} className="spin" />
-                          Working on it…
+                          {reconnecting ? "Reconnecting — your agent is still working…" : "Working on it…"}
                         </div>
                       )}
                     </article>
@@ -1359,10 +1559,12 @@ export default function Home() {
                     <button
                       type="button"
                       className="model-choice"
-                      onClick={() => setSettingsOpen(true)}
+                      onClick={() => openSettings()}
                     >
                       <span className="status-dot" />
-                      {connected
+                      {testMode
+                        ? "Automated test mode"
+                        : connected
                         ? `Hermes ${runtime?.hermes.release}`
                         : "Start local runtime"}
                       <ChevronRight size={12} />
@@ -1435,51 +1637,35 @@ export default function Home() {
                     ? "This task continues if you close the browser. Send guidance or queue a follow-up."
                     : "Enter to send · Shift + Enter for a new line · Files are shared with all your agents"}
                 </div>
-                {approval && persistentRun && (
-                  <div className="approval-banner" role="alert">
-                    <ShieldCheck size={18} />
-                    <div>
-                      <strong>Approval required</strong>
-                      <p>{approval.detail}</p>
+                {approvals.length > 0 && (() => {
+                  const pending = approvals[0];
+                  const resolve = async (decision: "approve" | "deny") => {
+                    try {
+                      await controlRef.current.request(`/v1/runs/${pending.runId}/approval`, {
+                        method: "POST",
+                        body: JSON.stringify({ approvalId: pending.approvalId, decision }),
+                      });
+                    } catch (error) {
+                      setNotice(error instanceof Error ? error.message : "Could not send that decision.");
+                      return;
+                    }
+                    setApprovals(current => current.filter(item => item.approvalId !== pending.approvalId));
+                  };
+                  return (
+                    <div className="approval-banner" role="alert">
+                      <ShieldCheck size={18} />
+                      <div>
+                        <strong>
+                          {pending.agentName} needs approval
+                          {approvals.length > 1 && <span className="approval-count"> · {approvals.length - 1} more waiting</span>}
+                        </strong>
+                        <p>{pending.detail}</p>
+                      </div>
+                      <button className="subtle-button" onClick={() => void resolve("deny")}>Deny</button>
+                      <button className="light-button" onClick={() => void resolve("approve")}>Approve once</button>
                     </div>
-                    <button
-                      className="subtle-button"
-                      onClick={async () => {
-                        await controlRef.current.request(
-                          `/v1/runs/${persistentRun.id}/approval`,
-                          {
-                            method: "POST",
-                            body: JSON.stringify({
-                              approvalId: approval.approvalId,
-                              decision: "deny",
-                            }),
-                          },
-                        );
-                        setApproval(null);
-                      }}
-                    >
-                      Deny
-                    </button>
-                    <button
-                      className="light-button"
-                      onClick={async () => {
-                        await controlRef.current.request(
-                          `/v1/runs/${persistentRun.id}/approval`,
-                          {
-                            method: "POST",
-                            body: JSON.stringify({
-                              approvalId: approval.approvalId,
-                              decision: "approve",
-                            }),
-                          },
-                        );
-                        setApproval(null);
-                      }}
-                    >
-                      Approve once
-                    </button>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             </section>
             {inspector && (
@@ -1498,7 +1684,7 @@ export default function Home() {
                   <span>{workspace.files.length}</span>
                 </div>
                 {workspace.files.length ? (
-                  workspace.files.map((f) => (
+                  [...workspace.files].sort(byNewest).map((f) => (
                     <button
                       className="file-mini"
                       key={f.id}
@@ -1541,18 +1727,7 @@ export default function Home() {
                     <div className="memory-item">{agentContext.memory}</div>
                     <button
                       className="subtle-button"
-                      onClick={async () => {
-                        const memory = window.prompt(
-                          `Edit ${agent.name}’s durable memory`,
-                          agentContext.memory,
-                        );
-                        if (memory === null) return;
-                        await controlRef.current.request(
-                          `/v1/agents/${encodeURIComponent(agent.id)}/context`,
-                          { method: "PUT", body: JSON.stringify({ memory }) },
-                        );
-                        setAgentContext({ ...agentContext, memory });
-                      }}
+                      onClick={() => setDocEditor({ kind: "memory", value: agentContext.memory })}
                     >
                       Edit memory
                     </button>
@@ -1580,10 +1755,12 @@ export default function Home() {
                         <button onClick={() => setInput(`/${skill} `)} title={`Invoke ${skill}`}>/{skill}</button>
                         <button
                           onClick={async () => {
-                            const path = `/v1/agents/${encodeURIComponent(agent.id)}/context/skills/${encodeURIComponent(skill)}`;
-                            const current = await controlRef.current.request<{ content: string }>(path);
-                            const content = window.prompt(`Edit ${skill}/SKILL.md`, current.content);
-                            if (content !== null) await controlRef.current.request(path, { method: "PUT", body: JSON.stringify({ content }) });
+                            try {
+                              const current = await controlRef.current.request<{ content: string }>(skillPath(agent.id, skill));
+                              setDocEditor({ kind: "skill", skill, value: current.content });
+                            } catch (error) {
+                              setNotice(error instanceof Error ? error.message : `Could not open ${skill}.`);
+                            }
                           }}
                           title={`Inspect or edit ${skill}`}
                         >Edit</button>
@@ -1603,11 +1780,23 @@ export default function Home() {
                     Hermes can create and improve reusable skills as it works.
                   </p>
                 )}
+                <button
+                  className="subtle-button"
+                  onClick={() => setDocEditor({
+                    kind: "new-skill",
+                    skill: "",
+                    value: "# New skill\n\nDescribe when this skill applies, then give the steps to follow.\n",
+                  })}
+                >
+                  <Plus size={12} /> New skill
+                </button>
                 <div className="inspector-label"><Cable size={13} /> PROFILE TOOLS <span>{agent.profile?.allowedTools.length || 0}</span></div>
                 <p className="panel-help">{agent.profile?.allowedTools.length ? `${agent.profile.allowedTools.length} tools selected. Open Agent settings to check availability or change access.` : "No tools selected. Choose the capabilities this agent needs."}</p>
                 <button className="subtle-button" onClick={() => setEditingAgent({ ...agent })}><SlidersHorizontal size={13} /> Agent settings</button>
                 <div className="scope-note">
-                  {runtime?.runtime.available
+                  {testMode
+                    ? "Automated test mode does not run agents. Open the installed desktop app for live work."
+                    : runtime?.runtime.available
                     ? "Hermes is ready in this agent’s isolated workspace. External actions still follow the approval policy."
                     : runtime?.runtime.message ||
                       "Run npm run harness:doctor to connect the local Hermes runtime."}
@@ -1651,7 +1840,7 @@ export default function Home() {
               </div>
             ) : (
               <div className="file-table">
-                {workspace.files.map((f) => (
+                {[...workspace.files].sort(byNewest).map((f) => (
                   <div className="file-table-row" key={f.id}>
                     <button
                       className="file-name"
@@ -1713,33 +1902,7 @@ export default function Home() {
               <button
                 className="light-button"
                 disabled={!runtime}
-                onClick={async () => {
-                  const name = window.prompt("Routine name");
-                  if (!name) return;
-                  const task = window.prompt("What should the agent do?");
-                  if (!task) return;
-                  const minutes = Number(
-                    window.prompt("Repeat every how many minutes?", "1440"),
-                  );
-                  try {
-                    await controlRef.current.request("/v1/routines", {
-                      method: "POST",
-                      body: JSON.stringify({
-                        name,
-                        prompt: task,
-                        agentId: agent.id,
-                        intervalMinutes: Number.isFinite(minutes) ? minutes : 1440,
-                        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                      }),
-                    });
-                    const result = await controlRef.current.request<{
-                      routines: Array<Record<string, unknown>>;
-                    }>("/v1/routines");
-                    setRoutines(result.routines);
-                  } catch (error) {
-                    setNotice(error instanceof Error ? error.message : "Could not create routine.");
-                  }
-                }}
+                onClick={() => setRoutineDraft({ name: "", prompt: "", agentId: agent.id, intervalMinutes: 1440 })}
               >
                 <Plus size={14} /> New routine
               </button>
@@ -1759,11 +1922,14 @@ export default function Home() {
                       <span>
                         {String(routine.name)}
                         <small>
-                          {workspace.agents.find(
-                            (item) => item.id === routine.agent_id,
-                          )?.name || "Agent"}{" "}
-                          · every {String(routine.interval_minutes)} minutes · next{" "}
-                          {new Date(String(routine.next_run_at)).toLocaleString()}
+                          {agentNameFor(String(routine.agent_id))}
+                          {" · "}every {formatInterval(Number(routine.interval_minutes))}
+                          {" · "}next {new Date(String(routine.next_run_at)).toLocaleString()}
+                        </small>
+                        <small>
+                          {routine.last_run_at
+                            ? `Last run ${new Date(String(routine.last_run_at)).toLocaleString()}`
+                            : "Has not run yet"}
                         </small>
                       </span>
                     </div>
@@ -1773,28 +1939,58 @@ export default function Home() {
                     <button
                       className="subtle-button"
                       onClick={async () => {
-                        await controlRef.current.request(
-                          `/v1/routines/${String(routine.id)}/run`,
-                          { method: "POST" },
-                        );
-                        setNotice("Routine queued now.");
+                        try {
+                          await controlRef.current.request(`/v1/routines/${String(routine.id)}/run`, { method: "POST" });
+                          // The server stamps last_run_at and next_run_at; without this the
+                          // row keeps showing the schedule it had before you pressed the button.
+                          await refreshRoutines();
+                          setNotice("Routine queued now.");
+                        } catch (error) {
+                          setNotice(error instanceof Error ? error.message : "Could not start that routine.");
+                        }
                       }}
                     >
                       Run now
                     </button>
                     <button
+                      className="subtle-button"
+                      onClick={() => setRoutineDraft({
+                        id: String(routine.id),
+                        name: String(routine.name),
+                        prompt: String(routine.prompt),
+                        agentId: String(routine.agent_id),
+                        intervalMinutes: Number(routine.interval_minutes) || 1440,
+                      })}
+                    >
+                      Edit
+                    </button>
+                    <button
                       onClick={async () => {
-                        await controlRef.current.request(
-                          `/v1/routines/${String(routine.id)}/toggle`,
-                          { method: "POST" },
-                        );
-                        const result = await controlRef.current.request<{
-                          routines: Array<Record<string, unknown>>;
-                        }>("/v1/routines");
-                        setRoutines(result.routines);
+                        try {
+                          await controlRef.current.request(`/v1/routines/${String(routine.id)}/toggle`, { method: "POST" });
+                          await refreshRoutines();
+                        } catch (error) {
+                          setNotice(error instanceof Error ? error.message : "Could not change that routine.");
+                        }
                       }}
                     >
                       {routine.enabled ? "Pause" : "Enable"}
+                    </button>
+                    <button
+                      className="danger-text"
+                      aria-label={`Delete routine ${String(routine.name)}`}
+                      onClick={async () => {
+                        if (!window.confirm(`Delete the routine “${String(routine.name)}”? Its schedule and history are removed.`)) return;
+                        try {
+                          await controlRef.current.request(`/v1/routines/${String(routine.id)}`, { method: "DELETE" });
+                          await refreshRoutines();
+                          setNotice("Routine deleted.");
+                        } catch (error) {
+                          setNotice(error instanceof Error ? error.message : "Could not delete that routine.");
+                        }
+                      }}
+                    >
+                      <Trash2 size={16} />
                     </button>
                   </div>
                 ))}
@@ -1803,6 +1999,137 @@ export default function Home() {
           </section>
         )}
       </main>
+      {docEditor && (
+        <div className="modal-backdrop" onClick={() => !docBusy && setDocEditor(null)}>
+          <section
+            className="modal doc-editor"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="doc-editor-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-heading">
+              <div>
+                <div className="eyebrow">{docEditor.kind === "memory" ? "DURABLE MEMORY" : "REUSABLE SKILL"}</div>
+                <h2 id="doc-editor-title">
+                  {docEditor.kind === "memory"
+                    ? `${agent.name}’s memory`
+                    : docEditor.kind === "new-skill"
+                      ? "New skill"
+                      : `${docEditor.skill}/SKILL.md`}
+                </h2>
+              </div>
+              <button aria-label="Close editor" onClick={() => setDocEditor(null)}>
+                <X size={19} />
+              </button>
+            </div>
+            <div className="modal-body">
+              {docEditor.kind === "new-skill" && (
+                <label>
+                  Skill name
+                  <input
+                    autoFocus
+                    value={docEditor.skill}
+                    onChange={(e) => setDocEditor({ ...docEditor, skill: e.target.value })}
+                    placeholder="weekly-digest"
+                  />
+                  <small className="muted">Invoked in chat as /{docEditor.skill.trim() || "name"}</small>
+                </label>
+              )}
+              <label>
+                {docEditor.kind === "memory" ? "What this agent should remember" : "Markdown"}
+                <textarea
+                  className="doc-editor-text"
+                  rows={16}
+                  autoFocus={docEditor.kind !== "new-skill"}
+                  value={docEditor.value}
+                  onChange={(e) => setDocEditor({ ...docEditor, value: e.target.value })}
+                />
+              </label>
+            </div>
+            <div className="modal-footer">
+              <button className="subtle-button" disabled={docBusy} onClick={() => setDocEditor(null)}>Cancel</button>
+              <button className="light-button" disabled={docBusy} onClick={() => void saveDoc()}>
+                {docBusy ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {routineDraft && (
+        <div className="modal-backdrop" onClick={() => !routineBusy && setRoutineDraft(null)}>
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="routine-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-heading">
+              <div>
+                <div className="eyebrow">BACKGROUND WORK</div>
+                <h2 id="routine-title">{routineDraft.id ? "Edit routine" : "New routine"}</h2>
+              </div>
+              <button aria-label="Close routine" onClick={() => setRoutineDraft(null)}>
+                <X size={19} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <label>
+                Name
+                <input
+                  autoFocus
+                  value={routineDraft.name}
+                  onChange={(e) => setRoutineDraft({ ...routineDraft, name: e.target.value })}
+                  placeholder="Weekly digest"
+                />
+              </label>
+              <label>
+                What should the agent do?
+                <textarea
+                  rows={5}
+                  value={routineDraft.prompt}
+                  onChange={(e) => setRoutineDraft({ ...routineDraft, prompt: e.target.value })}
+                  placeholder="Summarize anything new in the shared files and save it as digest.md."
+                />
+              </label>
+              <label>
+                Agent
+                <select
+                  value={routineDraft.agentId}
+                  onChange={(e) => setRoutineDraft({ ...routineDraft, agentId: e.target.value })}
+                >
+                  {workspace.agents.map((item) => (
+                    <option key={item.id} value={item.id}>{item.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Run every
+                <select
+                  value={String(routineDraft.intervalMinutes)}
+                  onChange={(e) => setRoutineDraft({ ...routineDraft, intervalMinutes: Number(e.target.value) })}
+                >
+                  <option value="60">Hour</option>
+                  <option value="360">6 hours</option>
+                  <option value="720">12 hours</option>
+                  <option value="1440">Day</option>
+                  <option value="10080">Week</option>
+                </select>
+                <small className="muted">
+                  Counted from the last run, not from a clock time — a daily routine drifts if you also run it by hand.
+                </small>
+              </label>
+            </div>
+            <div className="modal-footer">
+              <button className="subtle-button" disabled={routineBusy} onClick={() => setRoutineDraft(null)}>Cancel</button>
+              <button className="light-button" disabled={routineBusy} onClick={() => void saveRoutine()}>
+                {routineBusy ? "Saving…" : routineDraft.id ? "Save changes" : "Create routine"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       <input
         type="file"
         hidden
@@ -1830,7 +2157,7 @@ export default function Home() {
         </div>
       )}
       {settingsOpen && (
-        <div className="modal-backdrop" onClick={() => setSettingsOpen(false)}>
+        <div className="modal-backdrop" onClick={requestCloseSettings}>
           <section
             className="modal"
             role="dialog"
@@ -1838,6 +2165,18 @@ export default function Home() {
             aria-labelledby="settings-title"
             onClick={(e) => e.stopPropagation()}
           >
+            {confirmCloseSettings && (
+              <div className="settings-discard" onClick={(e) => e.stopPropagation()}>
+                <div role="alertdialog" aria-labelledby="settings-discard-title">
+                  <h3 id="settings-discard-title">Discard unsaved settings?</h3>
+                  <p className="muted small">Your saved settings will stay as they are.</p>
+                  <div className="task-discard-actions">
+                    <button type="button" autoFocus onClick={() => setConfirmCloseSettings(false)}>Keep editing</button>
+                    <button type="button" className="task-primary" onClick={closeSettings}>Discard changes</button>
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="modal-heading">
               <div>
                 <div className="eyebrow">MAKE IT YOURS</div>
@@ -1846,7 +2185,7 @@ export default function Home() {
               <button
                 aria-label="Close settings"
                 autoFocus
-                onClick={() => setSettingsOpen(false)}
+                onClick={requestCloseSettings}
               >
                 <X size={19} />
               </button>
@@ -1869,8 +2208,10 @@ export default function Home() {
                         provider === "local"
                           ? server.localModel
                           : PROVIDERS[provider].model,
+                      credentialRef: credentials.some((item) => item.ref === s.credentialRef && fitsProvider(item, provider))
+                        ? s.credentialRef
+                        : credentials.find((item) => item.provider === provider)?.ref || "",
                     }));
-                    setApiKey("");
                   }}
                 >
                   {Object.entries(PROVIDERS).map(([id, p]) => (
@@ -1891,26 +2232,23 @@ export default function Home() {
                   maxLength={200}
                 />
               </label>
-              {settings.provider !== "local" && (
-                <label>
-                  API key
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder={
-                      server[settings.provider]
-                        ? "Server key configured — optional override"
-                        : "Paste your provider API key"
-                    }
-                    maxLength={1000}
-                  />
-                  <small>
-                    Stored in the coordinator’s protected credential store. Secret values are never included in exports.
-                  </small>
-                </label>
-              )}
+              <label>
+                Credential
+                <select
+                  value={settings.credentialRef || ""}
+                  onChange={(e) => { if (e.target.value === "__manage") { setCredentialsOpen(true); return; } setSettings((current) => ({ ...current, credentialRef: e.target.value })); }}
+                >
+                  <option value="">No credential</option>
+                  {credentials.filter((item) => fitsProvider(item, settings.provider)).map((item) => (
+                    <option value={item.ref} key={item.ref}>{item.label}{item.present ? "" : " — missing"}</option>
+                  ))}
+                  {settings.credentialRef && !credentials.some((item) => item.ref === settings.credentialRef) && (
+                    <option value={settings.credentialRef}>{settings.credentialRef} — missing</option>
+                  )}
+                  <option value="__manage">＋ Manage credentials…</option>
+                </select>
+                <small>Agents using “Use workspace default” run on this credential.</small>
+              </label>
               {settings.provider === "local" && <label>Model API base URL<input value={settings.baseUrl || ""} onChange={e => setSettings(current => ({ ...current, baseUrl: e.target.value }))} placeholder="http://host.docker.internal:11434/v1" /><small>Use an address reachable from the agent container.</small></label>}
               <p className="muted small">Only agents using “Use workspace default” follow these changes. Agents with their own model keep it.</p>
             </fieldset>
@@ -1925,9 +2263,24 @@ export default function Home() {
             <div className="button-row">
               <button
                 className="subtle-button"
-                onClick={() => { setSettingsOpen(false); setOnboardingOpen(true); }}
+                onClick={() => setCredentialsOpen(true)}
+              >
+                <KeyRound size={14} /> Saved credentials
+              </button>
+              <button
+                className="subtle-button"
+                onClick={() => { closeSettings(); setOnboardingOpen(true); }}
               >
                 <Sparkles size={14} /> Run setup again
+              </button>
+              <button
+                className="subtle-button"
+                aria-pressed={notifyWhenDone}
+                onClick={() => void toggleNotifications()}
+                title="Show a desktop notification when a task finishes, fails, or needs your approval — only while this window is in the background."
+              >
+                {notifyWhenDone ? <Bell size={14} /> : <BellOff size={14} />}
+                {notifyWhenDone ? "Notifications on" : "Notify me when tasks finish"}
               </button>
               <button className="subtle-button" onClick={async () => {
                 try { const bundle = await controlRef.current.request<Record<string, unknown>>('/v1/support-bundle'); download(`open-harness-diagnostics-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(bundle, null, 2), 'application/json'); }
@@ -1961,20 +2314,21 @@ export default function Home() {
                 className="light-button"
                 onClick={async () => {
                   try {
-                    if (apiKey && runtime) {
-                      const name = providerCredential(settings.provider) || "MODEL_API_KEY";
-                      await controlRef.current.request("/v1/secrets", {
-                        method: "POST",
-                        body: JSON.stringify({ name, value: apiKey }),
-                      });
-                      setApiKey("");
-                    }
                     const saved = await controlRef.current.request<{ revision: number }>("/v1/workspace/model", {
-                      method: "PUT", body: JSON.stringify({ revision: workspaceModelRevision, model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: providerCredential(settings.provider) } }),
+                      method: "PUT", body: JSON.stringify({ revision: workspaceModelRevision, model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: settings.credentialRef || "" } }),
                     });
                     setWorkspaceModelRevision(saved.revision);
-                    setSettingsOpen(false);
-                    setNotice("Hermes settings saved.");
+                    const checked = await controlRef.current.request<{ ok: boolean; message: string }>("/v1/onboarding/model-test", {
+                      method: "POST",
+                      body: JSON.stringify({ model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: settings.credentialRef || "" } }),
+                    });
+                    if (!checked.ok) {
+                      setNotice(checked.message);
+                      return;
+                    }
+                    closeSettings();
+                    setSettingsBaseline(JSON.stringify(settings));
+                    setNotice(checked.message);
                   } catch (error) {
                     setNotice(
                       error instanceof Error
@@ -1984,15 +2338,17 @@ export default function Home() {
                   }
                 }}
               >
-                Done <Check size={14} />
+                Save and test <Check size={14} />
               </button>
             </div>
           </section>
         </div>
       )}
-      {onboardingOpen && runtime && <Onboarding client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: providerCredential(settings.provider) }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
-        setSettings({ provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl });
+      {credentialsOpen && <CredentialManager client={controlRef.current} provider={settings.provider} onClose={() => setCredentialsOpen(false)} onChanged={setCredentials} />}
+      {onboardingOpen && runtime && <Onboarding client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: settings.credentialRef || "" }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
+        setSettings({ provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl, credentialRef: model.credentialRef });
         setWorkspaceModelRevision(revision);
+        void controlRef.current.request<{ credentials: CredentialRecord[] }>("/v1/credentials").then(saved => setCredentials(saved.credentials)).catch(() => {});
         localStorage.setItem(SETTINGS_KEY, JSON.stringify({ provider: model.provider, model: model.model, baseUrl: model.baseUrl }));
       }} onComputerSettings={() => {
         localStorage.setItem(ONBOARDING_KEY, 'done');
@@ -2003,11 +2359,7 @@ export default function Home() {
         localStorage.setItem(ONBOARDING_KEY, 'done');
         setOnboardingOpen(false);
       }} />}
-      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} agent={editingAgent} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={profile => {
-        setWorkspace(current => ({ ...current, agents: current.agents.some(a => a.id === profile.id)
-          ? current.agents.map(a => a.id === profile.id ? profileAgent(profile, a.memory) : a)
-          : [...current.agents, profileAgent(profile)] }));
-      }} />}
+      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} agent={editingAgent} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
       {file && (
         <div className="modal-backdrop" onClick={() => setSelectedFile(null)}>
           <section
@@ -2053,11 +2405,19 @@ export default function Home() {
   );
 }
 
+function normalizeWorkspace(value: unknown): Workspace | null {
+  if (!value || typeof value !== "object") return null;
+  const source = value as Record<string, unknown>;
+  if (source.version !== 1 && source.version !== 2) return null;
+  const normalized = { ...source, version: 2 as const, teams: Array.isArray(source.teams) ? source.teams : [] } as unknown as Workspace;
+  return validWorkspace(normalized) ? normalized : null;
+}
+
 function validWorkspace(value: unknown): value is Workspace {
   if (!value || typeof value !== "object") return false;
   const w = value as Workspace;
   return (
-    w.version === 1 &&
+    w.version === 2 &&
     Array.isArray(w.agents) &&
     w.agents.length > 0 &&
     w.agents.length <= 50 &&
@@ -2078,6 +2438,10 @@ function validWorkspace(value: unknown): value is Workspace {
         a.memory.every((m) => typeof m === "string" && m.length <= 500),
     ) &&
     new Set(w.agents.map((a) => a.id)).size === w.agents.length &&
+    Array.isArray(w.teams) &&
+    w.teams.length <= 100 &&
+    w.teams.every(team => team && typeof team.id === "string" && typeof team.name === "string" && team.name.trim() && team.name.length <= 60 && typeof team.description === "string" && team.description.length <= 240 && typeof team.color === "string" && typeof team.icon === "string" && Number.isInteger(team.revision) && Array.isArray(team.memberAgentIds) && team.memberAgentIds.every(id => w.agents.some(agent => agent.id === id))) &&
+    new Set(w.teams.map(team => team.id)).size === w.teams.length &&
     Array.isArray(w.files) &&
     w.files.length <= 40 &&
     w.files.every(

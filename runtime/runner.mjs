@@ -19,6 +19,12 @@ var HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || "open-harness-hermes
 var platform = ["linux", "darwin", "win32"].includes(process.platform) ? process.platform : "unknown";
 
 // runtime/hermes.ts
+function lastWords(stderrTail, keep = 3, limit = 400) {
+  const lines = stderrTail.filter((line) => line.trim()).slice(-keep);
+  if (!lines.length) return "";
+  const text = lines.join(" | ");
+  return ` Last output: ${text.length > limit ? `\u2026${text.slice(-limit)}` : text}`;
+}
 var HermesGateway = class extends EventEmitter {
   constructor(container, allowedTools = null, native = null) {
     super();
@@ -29,6 +35,9 @@ var HermesGateway = class extends EventEmitter {
     this.requestId = 0;
     this.pending = /* @__PURE__ */ new Map();
     this.mockApproval = null;
+    // Hermes reports its failures on stderr and then dies. Without a copy, the exit
+    // code is all that survives, and "exited with code 1" tells an operator nothing.
+    this.stderrTail = [];
   }
   async start() {
     if (process.env.OPEN_HARNESS_MOCK === "1") {
@@ -54,9 +63,15 @@ var HermesGateway = class extends EventEmitter {
         this.emit("log", { level: "warn", message: line.slice(0, 1e3) });
       }
     });
-    createInterface({ input: this.child.stderr }).on("line", (line) => this.emit("log", { level: "debug", message: line.slice(0, 1e3) }));
+    this.stderrTail = [];
+    createInterface({ input: this.child.stderr }).on("line", (line) => {
+      const message = line.slice(0, 1e3);
+      this.stderrTail.push(message);
+      if (this.stderrTail.length > 50) this.stderrTail.shift();
+      this.emit("log", { level: "debug", message });
+    });
     this.child.once("exit", (code) => {
-      const error = Object.assign(new Error(`Hermes ${this.native ? "host" : "container"} gateway exited with code ${code ?? "unknown"}. Inspect its saved work before retrying.`), { interrupted: true });
+      const error = Object.assign(new Error(`Hermes ${this.native ? "host" : "container"} gateway exited with code ${code ?? "unknown"}.${lastWords(this.stderrTail)} Inspect its saved work before retrying.`), { interrupted: true });
       for (const pending of this.pending.values()) {
         clearTimeout(pending.timer);
         pending.reject(error);
@@ -254,7 +269,7 @@ import { mkdirSync, writeFileSync, renameSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 var COORDINATION_TOOLS = [
   { id: "mcp_open_harness_task", name: "Task board", group: "other", description: "Read and update assigned board tasks.", available: true },
-  { id: "mcp_open_harness_delegate_named_agent", name: "Hand off to another agent", group: "delegation", description: "Assign explicit task context to another named agent.", available: true },
+  { id: "mcp_open_harness_delegate_named_agent", name: "Hand off to another agent", group: "delegation", description: "Assign explicit task context to a named agent on a shared team.", available: true },
   { id: "mcp_open_harness_create_open_harness_routine", name: "Create a routine", group: "scheduling", description: "Schedule work through Open Harness.", available: true }
 ];
 var mockTools = [
@@ -499,6 +514,15 @@ var SecretStore = class {
   }
   environment() {
     return Object.fromEntries(Object.entries(this.values).filter(([key]) => key !== "controlToken"));
+  }
+  // save() reserializes the whole map, which still holds controlToken, so the vault blob
+  // rewrites correctly and the dashboard token survives. The guard is defence in depth:
+  // this is the one method that could otherwise brick it.
+  delete(name) {
+    if (name === "controlToken" || !(name in this.values)) return false;
+    delete this.values[name];
+    this.save();
+    return true;
   }
   save() {
     const serialized = JSON.stringify(this.values);

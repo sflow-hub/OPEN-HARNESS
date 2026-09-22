@@ -1,7 +1,8 @@
 export const hostedTaskSchema = [
   `CREATE TABLE IF NOT EXISTS task_boards (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
-    revision INTEGER NOT NULL DEFAULT 1, settings_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    revision INTEGER NOT NULL DEFAULT 1, settings_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT 'sage', position REAL NOT NULL DEFAULT 0, default_owner_agent_id TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS task_stages (
     id TEXT PRIMARY KEY, board_id TEXT NOT NULL, name TEXT NOT NULL, category TEXT NOT NULL,
@@ -10,7 +11,7 @@ export const hostedTaskSchema = [
   `CREATE INDEX IF NOT EXISTS idx_task_stages_board_position ON task_stages(board_id, position)`,
   `CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY, board_id TEXT NOT NULL, stage_id TEXT NOT NULL, title TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '', owner_agent_id TEXT, priority TEXT NOT NULL DEFAULT 'normal',
+    description TEXT NOT NULL DEFAULT '', team_id TEXT, owner_agent_id TEXT, priority TEXT NOT NULL DEFAULT 'normal',
     due_at TEXT, position REAL NOT NULL, archived INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1, active_run_id TEXT,
     collaborators_json TEXT NOT NULL DEFAULT '[]', labels_json TEXT NOT NULL DEFAULT '[]',
     checklist_json TEXT NOT NULL DEFAULT '[]', comments_json TEXT NOT NULL DEFAULT '[]', activity_json TEXT NOT NULL DEFAULT '[]',
@@ -19,12 +20,17 @@ export const hostedTaskSchema = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_tasks_board_stage_position ON tasks(board_id, stage_id, position)`,
   `CREATE INDEX IF NOT EXISTS idx_tasks_owner_archived ON tasks(owner_agent_id, archived)`,
+  `CREATE INDEX IF NOT EXISTS idx_tasks_team_archived ON tasks(team_id, archived)`,
   `CREATE TABLE IF NOT EXISTS task_runs (task_id TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE, attempt INTEGER NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, started_at TEXT NOT NULL, PRIMARY KEY(task_id,run_id))`,
   `CREATE INDEX IF NOT EXISTS idx_task_runs_task_attempt ON task_runs(task_id,attempt)`,
 ];
 
 export const hostedRuntimeSchema = [
   `CREATE TABLE IF NOT EXISTS agent_profiles (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, json TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', color TEXT NOT NULL, icon TEXT NOT NULL, retired_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_hosted_teams_active_name ON teams(retired_at,name)`,
+  `CREATE TABLE IF NOT EXISTS team_members (team_id TEXT NOT NULL, agent_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(team_id,agent_id), FOREIGN KEY(team_id) REFERENCES teams(id) ON DELETE CASCADE)`,
+  `CREATE INDEX IF NOT EXISTS idx_hosted_team_members_agent ON team_members(agent_id,team_id)`,
   `CREATE TABLE IF NOT EXISTS workspace_settings (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, json TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL, arch TEXT NOT NULL, status TEXT NOT NULL, last_seen_at TEXT, reserved_agent_id TEXT, capabilities_json TEXT NOT NULL, credential_hash TEXT, revoked_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, encryption_public_key TEXT)`,
   `CREATE TABLE IF NOT EXISTS machine_secrets (machine_id TEXT NOT NULL, name TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(machine_id,name))`,

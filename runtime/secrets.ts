@@ -55,6 +55,10 @@ export class SecretStore {
   has(name: string) { return Boolean(this.values[name]); }
   names() { return Object.keys(this.values).filter(key => key !== "controlToken"); }
   environment() { return Object.fromEntries(Object.entries(this.values).filter(([key]) => key !== "controlToken")); }
+  // save() reserializes the whole map, which still holds controlToken, so the vault blob
+  // rewrites correctly and the dashboard token survives. The guard is defence in depth:
+  // this is the one method that could otherwise brick it.
+  delete(name: string) { if (name === "controlToken" || !(name in this.values)) return false; delete this.values[name]; this.save(); return true; }
   private save() {
     const serialized = JSON.stringify(this.values);
     const backend = saveVault(this.path, serialized);

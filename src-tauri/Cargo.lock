@@ -2536,6 +2536,7 @@ dependencies = [
 name = "open-harness-desktop"
 version = "0.3.0"
 dependencies = [
+ "open",
  "serde_json",
  "tauri",
  "tauri-build",

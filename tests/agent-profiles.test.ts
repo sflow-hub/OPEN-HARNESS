@@ -40,6 +40,16 @@ test('independent model overrides survive workspace updates and stale browser sy
   const a = await request<ProfileResponse>('/v1/agents/atlas/profile'), b = await request<ProfileResponse>('/v1/agents/scout/profile');
   assert.equal(a.effectiveModel.model, 'atlas-model'); assert.equal(a.profile.name, 'atlas'); assert.equal(b.effectiveModel.model, 'workspace-new'); assert.equal(b.profile.prompt.text, 'Keep this draft'); assert.equal(b.profile.prompt.enabled, false);
 });
+test('a profile saved before a board permission existed still loads and saves', async () => {
+  // Profiles stored by an older build have no manageProjects key. Validation must fill it
+  // in rather than reject, or every existing agent becomes unsaveable after the upgrade.
+  const current = await profile();
+  const legacy = { ...current, board: { assignOthers: true, dispatch: false } } as unknown as AgentProfile;
+  const saved = await save(legacy);
+  assert.equal(saved.profile.board.manageProjects, false);
+  assert.equal(saved.profile.board.assignOthers, true);
+  assert.equal((await profile()).board.manageProjects, false);
+});
 test('stale saves return a conflict and never replace the winning revision', async () => {
   const old = await profile(); const latest = await save({ ...old, description: 'Winning edit' });
   await assert.rejects(save({ ...old, description: 'Losing edit' }), { status: 409 });

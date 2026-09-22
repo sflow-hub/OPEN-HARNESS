@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeModels } from '../runtime/profile-runtime';
-import { HermesGateway } from '../runtime/hermes';
+import { HermesGateway, lastWords } from '../runtime/hermes';
 
 class StreamingGateway extends HermesGateway {
   constructor(readonly submit: () => Promise<unknown> = async () => ({ status: 'streaming' })) { super('test'); }
@@ -37,4 +37,17 @@ test('provider errors and gateway crashes cannot become successful empty results
 test('normalizes Hermes provider rows with string model IDs and custom providers', () => {
   const catalog = normalizeModels({ providers: [{ slug: 'openrouter', name: 'OpenRouter', models: ['vendor/fast', 'vendor/large'] }, { provider_id: 'custom-local', models: [{ id: 'local-model', name: 'Local model' }] }] });
   assert.deepEqual(catalog.models.map(m => [m.provider, m.id]), [['openrouter', 'vendor/fast'], ['openrouter', 'vendor/large'], ['custom-local', 'local-model']]);
+});
+
+test('a crashed gateway reports the agent\'s own last output, not just an exit code', () => {
+  const traceback = ['Traceback (most recent call last):', '  File "/opt/open-harness/managed_entry.py", line 12', 'ModuleNotFoundError: No module named \'hermes_cli\''];
+  const summary = lastWords(traceback);
+  assert.match(summary, /ModuleNotFoundError/);
+  assert.match(summary, /Last output:/);
+  // Blank lines are noise, and the tail must stay short enough to read in an error bubble.
+  assert.equal(lastWords([]), '');
+  assert.equal(lastWords(['', '   ']), '');
+  assert.ok(lastWords([`x${'y'.repeat(900)}`]).length < 460);
+  // Newest last: the final line is the one that explains the crash.
+  assert.ok(summary.endsWith("No module named 'hermes_cli'"));
 });
