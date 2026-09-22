@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { OnboardingStatus, ReadinessCheck } from '../lib/onboarding';
+import { stateSharing } from './hermes';
 
 export const HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || 'open-harness-hermes:2026.9.11';
 
@@ -38,7 +39,7 @@ function desktopCheck(): ReadinessCheck {
   return { id: 'desktop', label: 'Desktop control', state: 'unavailable', detail: 'Desktop control is not supported on this operating system.' };
 }
 
-export function onboardingStatus(credentialNames: string[] = []): OnboardingStatus {
+export function onboardingStatus(credentialNames: string[] = [], stateRoot = process.env.OPEN_HARNESS_STATE_DIR || '.open-harness'): OnboardingStatus {
   if (process.env.OPEN_HARNESS_MOCK === '1') return {
     platform,
     platformLabel: labels[platform],
@@ -70,13 +71,22 @@ export function onboardingStatus(credentialNames: string[] = []): OnboardingStat
         ? { id: 'agent-runtime', label: 'Agent runtime', state: 'ready', detail: 'A local Hermes installation is ready for direct computer access.' }
         : { id: 'agent-runtime', label: 'Agent runtime', state: 'missing', detail: 'Start or install Docker to set up the agent runtime.', helpUrl: installUrls[platform] };
 
+  // Only meaningful once the image exists: the probe runs a throwaway container from it.
+  const sharing = image ? stateSharing(stateRoot) : null;
+  const sharingCheck: ReadinessCheck | null = sharing && {
+    id: 'workspace-sharing', label: 'Agent data sharing',
+    state: sharing.ok ? 'ready' : 'action', detail: sharing.detail,
+  };
+
   return {
     platform,
     platformLabel: labels[platform],
-    executionReady: image || native,
-    recommendedAccess: image ? 'private' : 'direct',
+    // A container runtime that cannot read the profile directory cannot run an agent,
+    // so it must not count as ready just because the image is present.
+    executionReady: (image && (!sharing || sharing.ok)) || native,
+    recommendedAccess: image && (!sharing || sharing.ok) ? 'private' : 'direct',
     credentialMode: 'coordinator', credentialNames,
-    checks: [{ id: 'coordinator', label: 'Open Harness', state: 'ready', detail: 'The coordinator is running and your data folder is writable.' }, container, runtime, desktopCheck()],
+    checks: [{ id: 'coordinator', label: 'Open Harness', state: 'ready', detail: 'The coordinator is running and your data folder is writable.' }, container, runtime, ...(sharingCheck ? [sharingCheck] : []), desktopCheck()],
   };
 }
 

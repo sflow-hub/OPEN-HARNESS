@@ -2,9 +2,9 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
-import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { ComputerConfig } from '../lib/agent-profile';
 import { HERMES_IMAGE } from './readiness';
 
@@ -195,8 +195,42 @@ export function dockerStatusCached(): Promise<ReturnType<typeof dockerStatus>> {
   return statusRefresh!.then(() => cachedStatus!.value);
 }
 
+// Docker Desktop runs the engine in a VM and only forwards host paths that are on its
+// file-sharing list. A bind mount of any other path silently succeeds and presents an
+// EMPTY directory inside the container -- no error, no warning. Every agent profile
+// (config.yaml, SOUL.md and the .env holding the model credential) arrives that way, so
+// an unshared state directory means Hermes starts with no model and no key, and reports
+// the misleading "policy extension failed to load". Probe once per state root and say
+// the true cause instead. Reuses the pinned image so the check never pulls anything.
+export type SharingProbe = { ok: boolean; detail: string };
+let sharingCache: { root: string; value: SharingProbe } | null = null;
+export function stateSharing(stateRoot: string): SharingProbe {
+  if (process.env.OPEN_HARNESS_MOCK === "1") return { ok: true, detail: 'Deterministic test runtime shares state directly.' };
+  const root = resolve(stateRoot);
+  if (sharingCache?.root === root) return sharingCache.value;
+  let value: SharingProbe;
+  try {
+    const dir = join(root, '.mount-probe');
+    mkdirSync(dir, { recursive: true });
+    const token = randomUUID();
+    // 0o644 so the container user can read it whether or not it shares our uid.
+    writeFileSync(join(dir, 'canary'), token, { mode: 0o644 });
+    const result = spawnSync("docker", ["run", "--rm", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`,
+      "-v", `${dir}:/probe:ro`, HERMES_IMAGE, "cat", "/probe/canary"], { encoding: "utf8", timeout: 60_000 });
+    value = result.stdout.trim() === token
+      ? { ok: true, detail: 'Docker can read the Open Harness data folder.' }
+      : { ok: false, detail: `Docker cannot read the Open Harness data folder at ${root}, so agent containers would start with an empty profile and never receive your model credential. Add this folder to Docker Desktop → Settings → Resources → File sharing, or set OPEN_HARNESS_STATE_DIR to a folder inside your home directory.` };
+  } catch {
+    value = { ok: false, detail: `Open Harness could not verify that Docker can read its data folder at ${root}.` };
+  }
+  sharingCache = { root, value };
+  return value;
+}
+
 export function ensureContainer(agentId: string, stateRoot: string, computer?: ComputerConfig) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
+  const sharing = stateSharing(stateRoot);
+  if (!sharing.ok) throw new Error(sharing.detail);
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
   const selected = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;

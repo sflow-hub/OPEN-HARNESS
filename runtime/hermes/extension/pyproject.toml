@@ -6,6 +6,9 @@ name = "open-harness-policy"
 version = "1.0.0"
 requires-python = ">=3.12"
 [project.entry-points."hermes_agent.plugins"]
-open_harness_policy = "open_harness_policy:register"
+# Hermes imports the entry point as a MODULE and then calls getattr(module, "register").
+# Pointing this at ":register" resolves to the function, which has no .register attribute,
+# so the plugin loads but never registers and every managed run aborts at startup.
+open_harness_policy = "open_harness_policy"
 [tool.setuptools]
 py-modules = ["open_harness_policy"]

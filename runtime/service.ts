@@ -396,12 +396,12 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/v1/health") return json(res, 200, { ok: true, runtime: await dockerStatusCached(), activeRuns: store.activeCount(), queuedRuns: store.listRuns().filter(run => run.state === "queued").length, secrets: secrets.names(), secretStorage: secrets.backend });
     if (req.method === 'GET' && url.pathname === '/v1/support-bundle') return json(res, 200, {
       generatedAt: new Date().toISOString(), version: '0.3.0', hermes: { release: 'v2026.9.11', commit: '939e45c91d751fadd94dcd1b873ac3cb44846213' },
-      platform: { os: process.platform, arch: process.arch, node: process.version }, readiness: onboardingStatus(secrets.names()), machines: machines.list(),
+      platform: { os: process.platform, arch: process.arch, node: process.version }, readiness: onboardingStatus(secrets.names(), root), machines: machines.list(),
       agents: profiles.list().map(profile => ({ id: profile.id, revision: profile.revision, machineId: profile.computer.machineId, access: profile.computer.access, desktop: profile.computer.desktop })),
       recentRuns: store.listRuns(25).map(run => ({ id: run.id, agentId: run.agent_id, state: run.state, createdAt: run.created_at, updatedAt: run.updated_at, error: run.error })),
       credentials: credentials.rows().map(row => ({ ref: row.ref, label: row.label, provider: row.provider, present: credentials.present(row.ref), createdAt: row.created_at, updatedAt: row.updated_at, lastUsedAt: row.last_used_at })), secretStorage: secrets.backend, note: 'Secret values, prompts, messages, results, file contents, and model responses are excluded.',
     });
-    if (req.method === 'GET' && url.pathname === '/v1/onboarding/status') return json(res, 200, onboardingStatus(secrets.names()));
+    if (req.method === 'GET' && url.pathname === '/v1/onboarding/status') return json(res, 200, onboardingStatus(secrets.names(), root));
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action, secrets.names())); }
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/model-test') {
       const input = await body(req), model = validateModel(input.model);

@@ -1,7 +1,7 @@
 export type ReadinessState = 'ready' | 'action' | 'missing' | 'unavailable';
 
 export type ReadinessCheck = {
-  id: 'coordinator' | 'container-engine' | 'agent-runtime' | 'desktop';
+  id: 'coordinator' | 'container-engine' | 'workspace-sharing' | 'agent-runtime' | 'desktop';
   label: string;
   state: ReadinessState;
   detail: string;

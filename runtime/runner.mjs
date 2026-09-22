@@ -1,18 +1,18 @@
 import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);
 
 // runtime/runner.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync4, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync5, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
 import { homedir, hostname, platform as platform2, arch } from "node:os";
-import { join as join3, resolve as resolve3 } from "node:path";
+import { join as join4, resolve as resolve3 } from "node:path";
 import { spawn as spawn3, spawnSync as spawnSync4 } from "node:child_process";
 
 // runtime/hermes.ts
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
-import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 
 // runtime/readiness.ts
 var HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || "open-harness-hermes:2026.9.11";
@@ -196,8 +196,39 @@ var HermesGateway = class extends EventEmitter {
     this.emit("exit", Object.assign(new Error("Agent runtime stopped."), { interrupted: true }));
   }
 };
+var sharingCache = null;
+function stateSharing(stateRoot2) {
+  if (process.env.OPEN_HARNESS_MOCK === "1") return { ok: true, detail: "Deterministic test runtime shares state directly." };
+  const root = resolve(stateRoot2);
+  if (sharingCache?.root === root) return sharingCache.value;
+  let value;
+  try {
+    const dir = join(root, ".mount-probe");
+    mkdirSync(dir, { recursive: true });
+    const token = randomUUID();
+    writeFileSync(join(dir, "canary"), token, { mode: 420 });
+    const result = spawnSync("docker", [
+      "run",
+      "--rm",
+      "--user",
+      `${process.getuid?.() ?? 1e3}:${process.getgid?.() ?? 1e3}`,
+      "-v",
+      `${dir}:/probe:ro`,
+      HERMES_IMAGE,
+      "cat",
+      "/probe/canary"
+    ], { encoding: "utf8", timeout: 6e4 });
+    value = result.stdout.trim() === token ? { ok: true, detail: "Docker can read the Open Harness data folder." } : { ok: false, detail: `Docker cannot read the Open Harness data folder at ${root}, so agent containers would start with an empty profile and never receive your model credential. Add this folder to Docker Desktop \u2192 Settings \u2192 Resources \u2192 File sharing, or set OPEN_HARNESS_STATE_DIR to a folder inside your home directory.` };
+  } catch {
+    value = { ok: false, detail: `Open Harness could not verify that Docker can read its data folder at ${root}.` };
+  }
+  sharingCache = { root, value };
+  return value;
+}
 function ensureContainer(agentId, stateRoot2, computer) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
+  const sharing = stateSharing(stateRoot2);
+  if (!sharing.ok) throw new Error(sharing.detail);
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
   const selected = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
@@ -265,8 +296,8 @@ function ensureContainer(agentId, stateRoot2, computer) {
 
 // runtime/profile-runtime.ts
 import { spawn as spawn2, spawnSync as spawnSync2 } from "node:child_process";
-import { mkdirSync, writeFileSync, renameSync, chmodSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, renameSync, chmodSync } from "node:fs";
+import { join as join2 } from "node:path";
 var COORDINATION_TOOLS = [
   { id: "mcp_open_harness_task", name: "Task board", group: "other", description: "Read and update assigned board tasks.", available: true },
   { id: "mcp_open_harness_delegate_named_agent", name: "Hand off to another agent", group: "delegation", description: "Assign explicit task context to a named agent on a shared team.", available: true },
@@ -326,39 +357,41 @@ function runtimeProbe(container, input) {
 function nativeRuntimeProbe(profileHome, input) {
   const executable = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean).find((name) => spawnSync2(name, ["-c", "import hermes_cli, open_harness_policy"], { stdio: "ignore", timeout: 8e3 }).status === 0);
   if (!executable) throw new Error("Direct access needs the Hermes host runtime. Finish the direct-access setup on this computer.");
-  const result = spawnSync2(executable, [join(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(input) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: profileHome }, maxBuffer: 5e6, timeout: 25e3 });
+  const result = spawnSync2(executable, [join2(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(input) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: profileHome }, maxBuffer: 5e6, timeout: 25e3 });
   if (result.status || !result.stdout) throw new Error(result.stderr || "Direct computer access check failed.");
   const value = JSON.parse(result.stdout);
   if (value.error) throw new Error(String(value.error));
   return value;
 }
 function atomic(path, data) {
-  writeFileSync(`${path}.tmp`, data, { mode: 384 });
+  writeFileSync2(`${path}.tmp`, data, { mode: 384 });
   renameSync(`${path}.tmp`, path);
   chmodSync(path, 384);
 }
 function prepareProfile(root, profile, effective, secrets, token, runId, options = {}) {
-  const dir = join(root, "agents", profile.id), home = join(dir, "profile"), managed = join(dir, "managed");
-  for (const path of [home, managed, join(dir, "private")]) mkdirSync(path, { recursive: true });
+  const dir = join2(root, "agents", profile.id), home = join2(dir, "profile"), managed = join2(dir, "managed");
+  for (const path of [home, managed, join2(dir, "private")]) mkdirSync2(path, { recursive: true });
   const mcp = {};
   if (profile.allowedTools.some((id) => COORDINATION_TOOLS.some((t) => t.id === id))) mcp.open_harness = { command: "node", args: [options.coordinationCommand || "/opt/open-harness/coordination.mjs"], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}, ...options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {}, ...options.sitesToken ? { OPEN_HARNESS_SITES_TOKEN: options.sitesToken } : {} } };
   const env = {};
   const secretValues = secrets.environment();
+  const customEndpoint = ["local", "custom"].includes(effective.provider) && Boolean(effective.baseUrl);
   if (effective.credentialRef && secretValues[effective.credentialRef]) {
     env[effective.credentialRef] = secretValues[effective.credentialRef];
-    const providerEnv = { xai: "XAI_API_KEY", openrouter: "OPENROUTER_API_KEY", anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", local: "OPENAI_API_KEY", custom: "OPENAI_API_KEY" }[effective.provider];
+    const providerEnv = { xai: "XAI_API_KEY", openrouter: "OPENROUTER_API_KEY", anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY" }[effective.provider];
     if (providerEnv) env[providerEnv] = secretValues[effective.credentialRef];
   }
+  const providers = customEndpoint ? { custom: { name: "custom", enabled: true, base_url: effective.baseUrl, ...effective.credentialRef ? { key_env: effective.credentialRef } : {}, ...effective.model ? { default_model: effective.model } : {} } } : void 0;
   for (const c of profile.connectors.filter((c2) => c2.enabled)) {
     const connectorEnv = c.secretRef && secretValues[c.secretRef] ? { [c.secretRef]: secretValues[c.secretRef] } : {};
     Object.assign(env, connectorEnv);
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: "${" + c.secretRef + "}" } : {} };
   }
-  const config = { model: { default: effective.model, provider: effective.provider === "local" ? "custom" : effective.provider, ...effective.baseUrl ? { base_url: effective.baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "smart", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { entries: { open_harness_policy: { enabled: true } } }, mcp_servers: mcp };
-  atomic(join(home, "config.yaml"), JSON.stringify(config, null, 2));
-  atomic(join(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
-  atomic(join(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
-  atomic(join(managed, "policy.json"), JSON.stringify({ runId, revision: profile.revision, allowedTools: profile.allowedTools }));
+  const config = { model: { default: effective.model, provider: effective.provider === "local" ? "custom" : effective.provider, ...effective.baseUrl ? { base_url: effective.baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "smart", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ["open_harness_policy"] }, ...providers ? { providers } : {}, mcp_servers: mcp };
+  atomic(join2(home, "config.yaml"), JSON.stringify(config, null, 2));
+  atomic(join2(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
+  atomic(join2(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
+  atomic(join2(managed, "policy.json"), JSON.stringify({ runId, revision: profile.revision, allowedTools: profile.allowedTools }));
 }
 async function discoverModels(gateway) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { models: [{ id: "mock-atlas", provider: "mock", label: "Mock Atlas" }, { id: "mock-scout", provider: "mock", label: "Mock Scout" }] };
@@ -390,8 +423,8 @@ function normalizeModels(result) {
 
 // runtime/transfer-files.ts
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync2, lstatSync, mkdirSync as mkdirSync2, readdirSync, readFileSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname, join as join2, normalize, relative, resolve as resolve2 } from "node:path";
+import { existsSync as existsSync2, lstatSync, mkdirSync as mkdirSync3, readdirSync, readFileSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname, join as join3, normalize, relative, resolve as resolve2 } from "node:path";
 var allowedRoots = ["private", "profile/MEMORY.md", "profile/USER.md", "profile/skills"];
 function digest(data) {
   return createHash2("sha256").update(data).digest("hex");
@@ -404,7 +437,7 @@ function exportAgentFiles(stateRoot2, agentId) {
     const stat = lstatSync(path);
     if (stat.isSymbolicLink()) return;
     if (stat.isDirectory()) {
-      for (const name of readdirSync(path)) visit(join2(path, name));
+      for (const name of readdirSync(path)) visit(join3(path, name));
       return;
     }
     if (!stat.isFile()) return;
@@ -413,7 +446,7 @@ function exportAgentFiles(stateRoot2, agentId) {
     if (total > 2e7) throw new Error("Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.");
     files.push({ path: relative(agentRoot, path).replaceAll("\\", "/"), data: Buffer.from(data).toString("base64"), checksum: digest(data) });
   };
-  for (const path of allowedRoots) visit(join2(agentRoot, path));
+  for (const path of allowedRoots) visit(join3(agentRoot, path));
   files.sort((a, b) => a.path.localeCompare(b.path));
   return { files, checksum: digest(files.map((file) => `${file.path}:${file.checksum}`).join("\n")) };
 }
@@ -428,8 +461,8 @@ function importAgentFiles(stateRoot2, agentId, bundle) {
     const data = Buffer.from(file.data, "base64");
     total += data.length;
     if (total > 1e8 || digest(data) !== file.checksum) throw new Error("Transfer checksum validation failed.");
-    mkdirSync2(dirname(target), { recursive: true });
-    writeFileSync2(target, data, { mode: 384 });
+    mkdirSync3(dirname(target), { recursive: true });
+    writeFileSync3(target, data, { mode: 384 });
   }
   const checksum = digest([...bundle.files].sort((a, b) => a.path.localeCompare(b.path)).map((file) => `${file.path}:${file.checksum}`).join("\n"));
   if (checksum !== bundle.checksum) throw new Error("Transfer bundle checksum validation failed.");
@@ -437,7 +470,7 @@ function importAgentFiles(stateRoot2, agentId, bundle) {
 }
 
 // runtime/secrets.ts
-import { chmodSync as chmodSync2, existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname2 } from "node:path";
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
@@ -484,7 +517,7 @@ var SecretStore = class {
   constructor(path) {
     this.path = path;
     this.backend = "restricted local file";
-    mkdirSync3(dirname2(path), { recursive: true });
+    mkdirSync4(dirname2(path), { recursive: true });
     const vaulted = loadVault(path);
     try {
       this.values = vaulted?.value ? JSON.parse(vaulted.value) : existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : {};
@@ -533,7 +566,7 @@ var SecretStore = class {
       return;
     }
     this.backend = "restricted local file";
-    writeFileSync3(this.path, JSON.stringify(this.values, null, 2), { mode: 384 });
+    writeFileSync4(this.path, JSON.stringify(this.values, null, 2), { mode: 384 });
     chmodSync2(this.path, 384);
   }
 };
@@ -583,11 +616,11 @@ function validateComputerTarget(profile, capabilities2, requiredSecrets = [], ha
 // runtime/runner.ts
 var args = /* @__PURE__ */ new Map();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith("--")) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith("--") ? "" : process.argv[++i] || "");
-var stateRoot = resolve3(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join3(homedir(), ".open-harness-runner"));
-var credentialPath = join3(stateRoot, "connection.json");
-var spool = join3(stateRoot, "spool");
-mkdirSync4(spool, { recursive: true });
-var runnerSecrets = new SecretStore(join3(stateRoot, "secrets.json"));
+var stateRoot = resolve3(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join4(homedir(), ".open-harness-runner"));
+var credentialPath = join4(stateRoot, "connection.json");
+var spool = join4(stateRoot, "spool");
+mkdirSync5(spool, { recursive: true });
+var runnerSecrets = new SecretStore(join4(stateRoot, "secrets.json"));
 var pythons = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean);
 function exitCode(command2, args2, timeout) {
   return new Promise((resolve4) => {
@@ -627,7 +660,7 @@ async function pair() {
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || "Pairing failed.");
   const saved = { coordinator, machineId: value.machineId, token: value.token, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey, ...sitesToken ? { sitesToken } : {} };
-  writeFileSync4(credentialPath, JSON.stringify(saved, null, 2), { mode: 384 });
+  writeFileSync5(credentialPath, JSON.stringify(saved, null, 2), { mode: 384 });
   chmodSync3(credentialPath, 384);
   return saved;
 }
@@ -635,7 +668,7 @@ var credentials = args.has("pairing-code") ? await pair() : existsSync4(credenti
 if (!credentials.encryptionPrivateKey || !credentials.encryptionPublicKey) {
   const encryption = await generateRunnerKeyPair();
   credentials = { ...credentials, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey };
-  writeFileSync4(credentialPath, JSON.stringify(credentials, null, 2), { mode: 384 });
+  writeFileSync5(credentialPath, JSON.stringify(credentials, null, 2), { mode: 384 });
   chmodSync3(credentialPath, 384);
 }
 var savedTarget = new URL(credentials.coordinator);
@@ -662,15 +695,15 @@ async function request(path, init = {}, retry = false) {
 var active = /* @__PURE__ */ new Map();
 var admittedCommands = /* @__PURE__ */ new Set();
 async function deliver(record) {
-  const file = join3(spool, `${record.id}.json`);
-  if (!existsSync4(file)) writeFileSync4(file, JSON.stringify(record), { mode: 384 });
+  const file = join4(spool, `${record.id}.json`);
+  if (!existsSync4(file)) writeFileSync5(file, JSON.stringify(record), { mode: 384 });
   await request(record.path, { method: "POST", body: JSON.stringify(record.body) }, true);
   if (existsSync4(file)) unlinkSync2(file);
 }
 async function flushSpool() {
   for (const name of readdirSync2(spool).filter((name2) => name2.endsWith(".json"))) {
     try {
-      await deliver(JSON.parse(readFileSync3(join3(spool, name), "utf8")));
+      await deliver(JSON.parse(readFileSync3(join4(spool, name), "utf8")));
     } catch {
     }
   }
@@ -686,15 +719,15 @@ async function run(command2) {
   const payload = command2.payload;
   const profile = payload.snapshot, direct = profile.computer.access === "direct";
   try {
-    const agentRoot = join3(stateRoot, "agents", profile.id), shared = join3(stateRoot, "shared");
-    mkdirSync4(shared, { recursive: true });
+    const agentRoot = join4(stateRoot, "agents", profile.id), shared = join4(stateRoot, "shared");
+    mkdirSync5(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean);
     const availableSecrets = { ...runnerSecrets.environment(), ...process.env };
     const localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]]));
     const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...payload.secrets }) };
     const coordinatorForContainer = credentials.coordinator.replace("://localhost", "://host.docker.internal").replace("://127.0.0.1", "://host.docker.internal");
-    prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join3(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { controlUrl: coordinatorForContainer, sitesToken: credentials.sitesToken });
-    const gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join3(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join3(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
+    prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { controlUrl: coordinatorForContainer, sitesToken: credentials.sitesToken });
+    const gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join4(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join4(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
     gateway.on("event", (event) => void emit(command2, event));
     await gateway.start();
     const session = await gateway.request("session.create", { cwd: direct ? shared : "/workspace/shared", profile: "default" });
@@ -728,17 +761,17 @@ async function control(command2) {
       const imported = importAgentFiles(stateRoot, command2.agentId, bundle);
       if (profile?.computer.desktop !== "none" && profile) {
         const check = { action: "computer", desktop: profile.computer.desktop };
-        const result = profile.computer.desktop === "existing" ? nativeRuntimeProbe(join3(stateRoot, "agents", profile.id, "profile"), check) : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), check);
+        const result = profile.computer.desktop === "existing" ? nativeRuntimeProbe(join4(stateRoot, "agents", profile.id, "profile"), check) : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), check);
         if (!result.ok) throw new Error(String(result.message || "Desktop control is not ready on the destination computer."));
       }
       await finish(command2, { ...imported, validated: true });
       return;
     }
     if (command2.kind.startsWith("probe-")) {
-      const profile = command2.payload.profile, direct = profile.computer.access === "direct", shared = join3(stateRoot, "shared"), agentRoot = join3(stateRoot, "agents", profile.id);
-      mkdirSync4(shared, { recursive: true });
+      const profile = command2.payload.profile, direct = profile.computer.access === "direct", shared = join4(stateRoot, "shared"), agentRoot = join4(stateRoot, "agents", profile.id);
+      mkdirSync5(shared, { recursive: true });
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env }, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]])), secretSource = { environment: () => ({ ...localSecrets, ...command2.payload.secrets || {} }) };
-      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command2.payload.coordinationToken || "", `probe-${command2.id}`, direct ? { cwd: shared, coordinationCommand: join3(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { sitesToken: credentials.sitesToken });
+      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command2.payload.coordinationToken || "", `probe-${command2.id}`, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { sitesToken: credentials.sitesToken });
       if (command2.kind === "probe-runtime") {
         const probeInput = { ...command2.payload.input || {} };
         if (probeInput.action === "computer") probeInput.desktop = profile.computer.desktop;
@@ -747,16 +780,16 @@ async function control(command2) {
           for (const name of Object.keys(probeInput.env)) if (!probeInput.env[name] && localSecrets[name]) probeInput.env[name] = localSecrets[name];
         }
         if (direct) {
-          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
+          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join4(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
           if (result.status || !result.stdout) throw new Error(result.stderr || "Native runtime probe failed.");
           await finish(command2, JSON.parse(result.stdout));
         } else await finish(command2, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), probeInput));
         return;
       }
-      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join3(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join3(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
+      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join4(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join4(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
       if (command2.kind === "probe-tools") {
         const input = direct ? (() => {
-          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
+          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join4(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
           if (result.status || !result.stdout) throw new Error(result.stderr || "Tool discovery failed.");
           return JSON.parse(result.stdout);
         })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), { action: "catalog" });

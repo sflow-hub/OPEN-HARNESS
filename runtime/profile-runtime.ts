@@ -49,17 +49,30 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
   if (profile.allowedTools.some(id => COORDINATION_TOOLS.some(t => t.id === id))) mcp.open_harness = { command: 'node', args: [options.coordinationCommand || '/opt/open-harness/coordination.mjs'], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...(options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}), ...(options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {}), ...(options.sitesToken ? { OPEN_HARNESS_SITES_TOKEN: options.sitesToken } : {}) } };
   const env: Record<string, string> = {};
   const secretValues = secrets.environment();
+  // A custom or local endpoint is any OpenAI-compatible server: Ollama, LM Studio, vLLM,
+  // a gateway, or a hosted provider behind its own URL. Hermes deliberately refuses to send
+  // OPENAI_API_KEY to a host that is not OpenAI's (GHSA-76xc-57q6-vm5m), so aliasing the
+  // credential to that name silently sends "no-key-required" and the provider answers 401.
+  // The supported route is a providers: entry naming the env var to read.
+  const customEndpoint = ['local', 'custom'].includes(effective.provider) && Boolean(effective.baseUrl);
   if (effective.credentialRef && secretValues[effective.credentialRef]) {
     env[effective.credentialRef] = secretValues[effective.credentialRef];
-    const providerEnv = ({ xai: 'XAI_API_KEY', openrouter: 'OPENROUTER_API_KEY', anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', local: 'OPENAI_API_KEY', custom: 'OPENAI_API_KEY' } as Record<string, string>)[effective.provider];
+    const providerEnv = ({ xai: 'XAI_API_KEY', openrouter: 'OPENROUTER_API_KEY', anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY' } as Record<string, string>)[effective.provider];
     if (providerEnv) env[providerEnv] = secretValues[effective.credentialRef];
   }
+  // Only the env var NAME is written here; the value stays in the profile .env.
+  const providers = customEndpoint
+    ? { custom: { name: 'custom', enabled: true, base_url: effective.baseUrl, ...(effective.credentialRef ? { key_env: effective.credentialRef } : {}), ...(effective.model ? { default_model: effective.model } : {}) } }
+    : undefined;
   for (const c of profile.connectors.filter(c => c.enabled)) {
     const connectorEnv = c.secretRef && secretValues[c.secretRef] ? { [c.secretRef]: secretValues[c.secretRef] } : {};
     Object.assign(env, connectorEnv);
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: '${' + c.secretRef + '}' } : {} };
   }
-  const config = { model: { default: effective.model, provider: effective.provider === 'local' ? 'custom' : effective.provider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { entries: { open_harness_policy: { enabled: true } } }, mcp_servers: mcp };
+  const config = { model: { default: effective.model, provider: effective.provider === 'local' ? 'custom' : effective.provider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ['open_harness_policy'] }, ...(providers ? { providers } : {}), mcp_servers: mcp };
+  // plugins.enabled is an allow-LIST of plugin keys, and Hermes treats a missing or
+  // non-list value as "nothing enabled". Any other shape silently gates the managed
+  // policy extension off, managed_entry.py then aborts, and every run dies at startup.
   // JSON is a YAML subset; serialization prevents YAML injection from prompts, names, and endpoints.
   atomic(join(home, 'config.yaml'), JSON.stringify(config, null, 2));
   atomic(join(home, 'SOUL.md'), profile.prompt.enabled ? profile.prompt.text : '');
