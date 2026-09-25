@@ -9,7 +9,58 @@ import type { ComputerConfig } from '../lib/agent-profile';
 import { HERMES_IMAGE } from './readiness';
 
 type Pending = { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout };
-export type NativeGatewayOptions = { cwd: string; env: NodeJS.ProcessEnv; entry: string; python?: string };
+export type NativeGatewayOptions = { cwd: string; env: NodeJS.ProcessEnv; entry: string; python?: string; onSpawn?: (pid: number) => void };
+
+async function processCommand(command: string, args: string[], timeout = 5000) {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout, killSignal: 'SIGKILL' });
+    let output = '', error = '';
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { error += chunk; });
+    child.once('error', reject);
+    child.once('exit', code => code === 0 ? resolve(output) : reject(new Error(error.trim() || `${command} could not confirm process termination.`)));
+  });
+}
+export async function stopNativeTree(pid: number) {
+  if (process.platform === 'win32') {
+    await processCommand('taskkill', ['/PID', String(pid), '/T', '/F']);
+    return;
+  }
+  // Tools may start their own process groups. Remember descendants before TERM
+  // reparents them, and include the gateway's group even if its leader has exited.
+  const tracked = new Set<number>([pid]);
+  const live = async () => {
+    const rows = (await processCommand('ps', ['-A', '-o', 'pid=,ppid=,pgid=,stat='])).trim().split('\n').map(line => {
+      const [id, parent, group, state] = line.trim().split(/\s+/);
+      return { id: Number(id), parent: Number(parent), group: Number(group), state };
+    });
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const row of rows) if (!tracked.has(row.id) && (tracked.has(row.parent) || row.group === pid)) { tracked.add(row.id); changed = true; }
+    }
+    return rows.filter(row => tracked.has(row.id) && !row.state?.startsWith('Z')).map(row => row.id);
+  };
+  const signal = (ids: number[], value: NodeJS.Signals) => {
+    for (const id of [-pid, ...ids]) {
+      try { process.kill(id, value); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+    }
+  };
+  let remaining = await live();
+  for (const value of ['SIGTERM', 'SIGKILL'] as const) {
+    if (!remaining.length) return;
+    signal(remaining, value);
+    const deadline = Date.now() + 2000;
+    do {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      remaining = await live();
+      if (!remaining.length) return;
+      // Catch descendants created while their parent was handling termination.
+      if (value === 'SIGKILL') signal(remaining, value);
+    } while (Date.now() < deadline);
+  }
+  throw new Error('Could not confirm that the agent and its tool processes stopped.');
+}
 
 // Python tracebacks put the useful line last, so report the tail, newest last, and
 // keep it short enough to read inside an error bubble.
@@ -25,21 +76,37 @@ export class HermesGateway extends EventEmitter {
   private requestId = 0;
   private pending = new Map<string, Pending>();
   private mockApproval: ((decision: string) => void) | null = null;
+  private mockInput: ((answer: unknown) => void) | null = null;
+  private mockSessions = new Map<string, unknown[]>();
+  private nativePid: number | null = null;
+  private stopping: Promise<void> | null = null;
+  private stopped = false;
   // Hermes reports its failures on stderr and then dies. Without a copy, the exit
   // code is all that survives, and "exited with code 1" tells an operator nothing.
   private stderrTail: string[] = [];
   constructor(readonly container: string, readonly allowedTools: string[] | null = null, readonly native: NativeGatewayOptions | null = null) { super(); }
 
   async start() {
+    if (this.stopping) await this.stopping;
+    this.stopped = false;
     if (process.env.OPEN_HARNESS_MOCK === "1") {
       queueMicrotask(() => this.emit("event", { type: "gateway.ready", payload: { mock: true } }));
       return;
     }
     if (this.child && !this.child.killed) return;
-    this.child = this.native
+    const child = this.child = this.native
       ? spawn(this.native.python || process.env.HERMES_PYTHON || 'python3', [this.native.entry], { cwd: this.native.cwd, env: this.native.env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== 'win32' })
       : spawn("docker", ["exec", "-i", this.container, "python", "/opt/open-harness/managed_entry.py"], { stdio: ["pipe", "pipe", "pipe"] });
-    createInterface({ input: this.child.stdout }).on("line", line => {
+    if (this.native) this.nativePid = child.pid ?? null;
+    let exited = false;
+    const failed = (error: Error) => {
+      if (exited) return; exited = true;
+      for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
+      this.pending.clear(); if (this.child === child) this.child = null; this.emit('exit', error);
+    };
+    child.once('error', error => failed(new Error(`Could not start the Hermes ${this.native ? 'host' : 'container'} gateway: ${error.message}`)));
+    child.stdin.on('error', error => failed(Object.assign(new Error(`Hermes gateway input failed: ${error.message}`), { interrupted: true })));
+    createInterface({ input: child.stdout }).on("line", line => {
       try {
         const value = JSON.parse(line);
         if (value.id != null && this.pending.has(String(value.id))) {
@@ -52,26 +119,30 @@ export class HermesGateway extends EventEmitter {
       } catch { this.emit("log", { level: "warn", message: line.slice(0, 1000) }); }
     });
     this.stderrTail = [];
-    createInterface({ input: this.child.stderr }).on("line", line => {
+    createInterface({ input: child.stderr }).on("line", line => {
       const message = line.slice(0, 1000);
       this.stderrTail.push(message);
       if (this.stderrTail.length > 50) this.stderrTail.shift();
       this.emit("log", { level: "debug", message });
     });
-    this.child.once("exit", code => {
+    child.once("exit", code => {
       const error = Object.assign(new Error(`Hermes ${this.native ? 'host' : 'container'} gateway exited with code ${code ?? "unknown"}.${lastWords(this.stderrTail)} Inspect its saved work before retrying.`), { interrupted: true });
-      for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
-      this.pending.clear(); this.child = null; this.emit("exit", error);
+      failed(error);
     });
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Hermes gateway did not become ready.")), 30_000);
-      const ready = (event: any) => { if (event?.type === "gateway.ready") { clearTimeout(timer); this.off("event", ready); resolve(); } };
-      this.on("event", ready);
-      this.child!.once("exit", code => {
-        clearTimeout(timer);
-        reject(new Error(`Hermes ${this.native ? 'host' : 'container'} gateway exited during startup with code ${code ?? 'unknown'}.${lastWords(this.stderrTail)}`));
+    try {
+      if (this.nativePid) this.native?.onSpawn?.(this.nativePid);
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => { clearTimeout(timer); this.off('event', ready); this.off('exit', fail); };
+        const fail = (error: Error) => { cleanup(); reject(error); };
+        const ready = (event: any) => { if (event?.type === 'gateway.ready') { cleanup(); resolve(); } };
+        const timer = setTimeout(() => fail(new Error('Hermes gateway did not become ready.')), 30_000);
+        this.on('event', ready); this.once('exit', fail);
       });
-    });
+    } catch (error) {
+      try { await this.stop(); }
+      catch (cleanupError) { throw new Error(`${error instanceof Error ? error.message : error} Cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : cleanupError}`); }
+      throw error;
+    }
   }
 
   request(method: string, params: Record<string, unknown> = {}, timeout = 300_000): Promise<any> {
@@ -107,9 +178,10 @@ export class HermesGateway extends EventEmitter {
     });
   }
   private async mockRequest(method: string, params: Record<string, unknown>) {
-    if (method === "session.create") return { session_id: crypto.randomUUID() };
+    if (method === "session.create") { const sessionId = crypto.randomUUID(); this.mockSessions.set(sessionId, Array.isArray(params.messages) ? params.messages : []); return { session_id: sessionId }; }
     if (method === "prompt.submit") {
       const prompt = String(params.text || "");
+      if (prompt.includes('MOCK_HISTORY')) return { final_response: JSON.stringify(this.mockSessions.get(String(params.session_id)) || []) };
       if (prompt.includes("MOCK_TOOL:")) { const name = prompt.split("MOCK_TOOL:")[1].split(/\s/)[0]; if (!this.allowedTools?.includes(name)) throw new Error(`Tool ${name} is disabled in this agent profile.`); }
       const canUseTerminal = this.allowedTools === null || this.allowedTools.includes("terminal");
       if (canUseTerminal) this.emit("event", { type: "tool.start", payload: { id: "mock-tool", name: "terminal", preview: "python task.py" } });
@@ -119,29 +191,38 @@ export class HermesGateway extends EventEmitter {
         const decision = await new Promise<string>(resolve => { this.mockApproval = resolve; });
         if (decision !== "approve") throw new Error("Mock action was denied.");
       }
+      if (prompt.includes('MOCK_CLARIFY')) {
+        this.emit('event', { type: 'clarify.request', session_id: params.session_id, payload: { request_id: 'mock-clarify', question: 'What should I use?' } });
+        const answer = await new Promise<unknown>(resolve => { this.mockInput = resolve; });
+        return { final_response: `Hermes mock completed the task. Answer: ${Array.isArray(answer) ? answer.join(', ') : String(answer)}` };
+      }
       if (canUseTerminal) this.emit("event", { type: "tool.complete", payload: { id: "mock-tool", name: "terminal", result: "Created and executed task.py" } });
       this.emit("event", { type: "message.delta", payload: { text: "Hermes mock completed the task." } });
       return { final_response: "Hermes mock completed the task." };
     }
     if (method === "approval.respond") { this.mockApproval?.(String(params.decision)); this.mockApproval = null; return { ok: true }; }
+    if (method === 'clarify.respond') { this.mockInput?.(params.answer); this.mockInput = null; return { ok: true }; }
     if (["session.steer", "session.interrupt", "process.stop"].includes(method)) return { ok: true };
     return { ok: true };
   }
-  async stop() {
+  stop(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    return this.stopping ??= this.stopRuntime().finally(() => { this.stopping = null; });
+  }
+  private async stopRuntime() {
     // Killing the docker CLI alone leaves the Python process inside the container.
     // Stopping this agent's container also reaps detached tools and subagents;
     // mounted profile/workspace data persists for its next task.
     if (process.env.OPEN_HARNESS_MOCK !== "1" && !this.native) await new Promise<void>((resolve, reject) => {
-      const child = spawn("docker", ["stop", "--time", "2", this.container], { stdio: "ignore" });
+      const child = spawn("docker", ["stop", "--time", "2", this.container], { stdio: "ignore", timeout: 10_000, killSignal: 'SIGKILL' });
       child.once("error", () => reject(new Error("Could not stop the agent container. Check Docker.")));
       child.once("exit", code => code === 0 ? resolve() : reject(new Error("Docker could not confirm the agent container stopped.")));
     });
-    if (process.env.OPEN_HARNESS_MOCK !== '1' && this.native && this.child?.pid) {
-      if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(this.child.pid), '/T', '/F'], { stdio: 'ignore' });
-      else { try { process.kill(-this.child.pid, 'SIGTERM'); } catch { this.child.kill('SIGTERM'); } }
-    }
+    if (process.env.OPEN_HARNESS_MOCK !== '1' && this.native && this.nativePid) await stopNativeTree(this.nativePid);
     this.mockApproval?.("deny"); this.mockApproval = null;
+    this.mockInput?.(''); this.mockInput = null;
     this.child?.kill("SIGTERM"); this.child = null;
+    this.nativePid = null; this.stopped = true;
     this.emit("exit", Object.assign(new Error("Agent runtime stopped."), { interrupted: true }));
   }
 }

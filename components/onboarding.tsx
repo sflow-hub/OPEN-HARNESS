@@ -70,19 +70,28 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
     finally { setBusy(''); }
   }
 
+  // The key already saved for this provider, if any: the workspace default's own reference
+  // when it is for the same provider (a tested save gives the key a generated name), else
+  // the conventional environment name.
+  const savedKeyFor = (candidate: Provider) => candidate === model.provider && model.credentialRef ? model.credentialRef : keyFor(candidate);
   async function saveModel() {
     if (!modelId.trim()) { setMessage('Choose or enter a model.'); return; }
-    if (provider !== 'local' && !apiKey && !secretNames.includes(keyFor(provider))) { setMessage('Paste an API key, or choose a local model server.'); return; }
-    setBusy('model'); setMessage('Saving and testing the connection…');
-    const credentialRef = provider === 'local' ? '' : keyFor(provider);
+    if (provider !== 'local' && !apiKey && !secretNames.includes(savedKeyFor(provider))) { setMessage('Paste an API key, or choose a local model server.'); return; }
+    setBusy('model'); setMessage('Testing the connection…');
+    const credentialRef = provider === 'local' ? '' : savedKeyFor(provider);
     const selected: ModelChoice = { provider, model: modelId.trim(), baseUrl: provider === 'local' ? baseUrl.trim() : '', credentialRef };
     try {
-      if (apiKey && credentialRef) { await client.request('/v1/secrets', { method: 'POST', body: JSON.stringify({ name: credentialRef, value: apiKey, ...(status?.credentialMode === 'runner' ? { machineId: status.credentialMachineId } : {}) }) }); setSecretNames(current => [...new Set([...current, credentialRef])]); }
-      const test = await client.request<{ ok: boolean; message: string }>('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: selected }) });
-      if (!test.ok) { setModelReady(false); setMessage(`${test.message} Your previous workspace model is still active.`); return; }
-      const saved = await client.request<{ model: ModelChoice; revision: number }>('/v1/workspace/model', { method: 'PUT', body: JSON.stringify({ revision, model: selected }) });
-      onModelSaved(saved.model, saved.revision); setApiKey(''); setModelReady(test.ok); setMessage(test.message);
-      if (test.ok) setTimeout(() => setStep(3), 450);
+      // One request tests the pasted key against this model and saves both only when
+      // that passes. Saving the key first, as this used to, replaced a working credential
+      // with one that then failed its own test.
+      const test = await client.request<{ ok: boolean; message: string; model?: ModelChoice; revision?: number }>('/v1/onboarding/model-test', {
+        method: 'POST',
+        body: JSON.stringify({ model: selected, apiKey: apiKey || undefined, save: true, revision, ...(status?.credentialMode === 'runner' ? { machineId: status.credentialMachineId } : {}) }),
+      });
+      if (!test.ok || !test.model) { setModelReady(false); setMessage(`${test.message} Your previous workspace model is still active.`); return; }
+      if (test.model.credentialRef) setSecretNames(current => [...new Set([...current, test.model!.credentialRef])]);
+      onModelSaved(test.model, test.revision ?? revision); setApiKey(''); setModelReady(true); setMessage(test.message);
+      setTimeout(() => setStep(3), 450);
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not save the model connection.'); }
     finally { setBusy(''); }
   }
@@ -111,7 +120,7 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
         <p className="onboarding-lead">Use an API key from a model provider, or connect a compatible model server running on your network.</p>
         <label>Provider<select value={provider} onChange={event => { const next = event.target.value as Provider; setProvider(next); setModelId(PROVIDERS[next].model); setBaseUrl(''); setMessage(''); }}>{Object.entries(PROVIDERS).map(([id, value]) => <option key={id} value={id}>{value.label}</option>)}</select></label>
         <label>Model<input value={modelId} onChange={event => setModelId(event.target.value)} placeholder="Model ID" /></label>
-        {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="http://127.0.0.1:11434/v1" /><small>Enter the OpenAI-compatible API address shown by your model app.</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(keyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer" onClick={externalLink(providerHelp[provider])}>Get a key <ExternalLink size={11} /></a></small></label>}
+        {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="http://127.0.0.1:11434/v1" /><small>Enter the OpenAI-compatible API address shown by your model app.</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(savedKeyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer" onClick={externalLink(providerHelp[provider])}>Get a key <ExternalLink size={11} /></a></small></label>}
         {message && <p className={`onboarding-message ${modelReady ? 'success' : ''}`} role="status">{message}</p>}
         <div className="onboarding-actions"><button type="button" className="subtle-button" onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</button><button type="button" className="light-button" disabled={busy === 'model'} onClick={saveModel}>{busy === 'model' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Save and test</button></div>
       </div>}

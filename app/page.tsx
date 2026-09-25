@@ -39,15 +39,18 @@ import {
   type Agent,
   type Artifact,
   type Conversation,
+  type Message,
   type RunEvent,
 } from "../lib/types";
 import { PROVIDERS, type Provider } from "../lib/provider";
 import {
   ControlClient,
   PairingRequiredError,
+  isLiveRun,
   isRemoteOrigin,
   selfHostedHubUrl,
   type PersistentRun,
+  type RemoteConversation,
   type RuntimeStatus,
 } from "../lib/control-client";
 
@@ -68,13 +71,40 @@ const ONBOARDING_KEY = "open-harness.onboarding.v1";
 // blob, which would silently drop anything else stored alongside it.
 const NOTIFY_KEY = "open-harness.notify.v1";
 type View = "home" | "chat" | "files" | "routines" | "tasks";
-type ModelSettings = { provider: Provider; model: string; maxSteps?: number; baseUrl?: string };
+// credentialRef is the coordinator's name for the saved key. It used to be derivable from
+// the provider; a key saved through the tested save gets a generated name, so it has to
+// travel with the settings.
+type ModelSettings = { provider: Provider; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
 const providerCredential = (provider: string) => ({ xai: "XAI_API_KEY", openai: "OPENAI_API_KEY", openrouter: "OPENROUTER_API_KEY" } as Record<string, string>)[provider] || "";
+const modelChoice = (settings: ModelSettings): ModelChoice => ({ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: settings.credentialRef ?? providerCredential(settings.provider) });
+const modelSettings = (model: ModelChoice): ModelSettings => ({ provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl, credentialRef: model.credentialRef });
 const defaultSettings: ModelSettings = {
   provider: "xai",
   model: PROVIDERS.xai.model,
 };
 const uid = () => crypto.randomUUID();
+// A run's messages get ids derived from the run, so every path that learns about a run —
+// sending it, recovering it after a reload, opening it from the task board, another client
+// having started it — lands on the same two messages instead of a duplicate pair.
+const promptId = (run: Pick<PersistentRun, "id">) => `prompt:${run.id}`;
+const replyId = (run: Pick<PersistentRun, "id">) => `reply:${run.id}`;
+const isGuided = (run: Pick<PersistentRun, "id">) => run.id.startsWith("guided:");
+// A tool id as a person would say it. MCP tools arrive as `mcp__server__tool` from the
+// running gateway and as `mcp_server_tool` in saved grants; either way the prefix is noise.
+const toolLabel = (id: string) => id.replace(/^mcp_+/, "").replace(/_+/g, " ").trim() || id;
+// One line of text for a payload field that the mock sends as a string and the real Hermes
+// gateway as an object: a tool's context, its result, a question with options. An object
+// gets its most text-like field, or a compact dump short enough for an activity row.
+function describe(value: unknown, fallback: string): string {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "string") return value.length > 400 ? `${value.slice(0, 400)}…` : value;
+  if (typeof value !== "object") return String(value);
+  const record = value as Record<string, unknown>;
+  for (const key of ["output", "text", "content", "message", "summary", "preview", "command", "description", "question", "path", "error"]) {
+    if (typeof record[key] === "string" && record[key]) return describe(record[key], fallback);
+  }
+  try { return describe(JSON.stringify(value), fallback); } catch { return fallback; }
+}
 // Newest first: the file you care about is almost always the one just written.
 const byNewest = (a: Artifact, b: Artifact) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
 function formatInterval(minutes: number) {
@@ -190,12 +220,22 @@ export default function Home() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
-  const [running, setRunning] = useState(false);
-  const [persistentRun, setPersistentRun] = useState<PersistentRun | null>(null);
+  // Every run this client is following, keyed by run id, at its latest known state. Runs
+  // belong to conversations, not to the page: the coordinator executes two agents at once
+  // and queues a follow-up behind the run ahead of it, and a single "current run" slot sent
+  // steering and stops to whichever run happened to hold it — another agent's, after a
+  // switch — and had nowhere to put a queued follow-up's result.
+  const [liveRuns, setLiveRuns] = useState<Record<string, PersistentRun>>({});
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
-  // A queue, not a slot. Two agents can pause at once, and the second request used to
-  // overwrite the first — leaving a run blocked on an approval with no way to answer it.
-  const [approvals, setApprovals] = useState<Array<{ approvalId: string; detail: string; runId: string; agentName: string }>>([]);
+  // Requests answered from here but not yet gone from the coordinator's next snapshot, so
+  // the banner cannot be clicked twice, plus the one being sent right now. The coordinator
+  // is the authority: an entry is dropped as soon as a fresh snapshot of its run no longer
+  // lists the request, and after a short while regardless, because a remote runner can
+  // fail to take the answer and the coordinator then reopens the same request.
+  const [answered, setAnswered] = useState<Array<{ id: string; runId: string; at: number }>>([]);
+  const ANSWER_GRACE_MS = 20_000;
+  const [answering, setAnswering] = useState("");
+  const [inputDraft, setInputDraft] = useState<{ inputId: string; text: string; choices: string[] }>({ inputId: "", text: "", choices: [] });
   const [inputMode, setInputMode] = useState<"steer" | "followup">("steer");
   const [routines, setRoutines] = useState<Array<Record<string, unknown>>>([]);
   const [routineDraft, setRoutineDraft] = useState<{ id?: string; name: string; prompt: string; agentId: string; intervalMinutes: number } | null>(null);
@@ -223,7 +263,12 @@ export default function Home() {
   const [inspector, setInspector] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
   const controlRef = useRef(new ControlClient());
-  const runLock = useRef(false);
+  // Run ids with a follower loop, kept in sync so a run learned about twice — recovered on
+  // connect and then opened from the task board, say — gets one poller, not two.
+  const followed = useRef(new Set<string>());
+  // Conversations with a run creation in flight: Enter pressed twice before the coordinator
+  // answers must not create two runs.
+  const sending = useRef(new Set<string>());
   const bottomRef = useRef<HTMLDivElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
@@ -235,6 +280,25 @@ export default function Home() {
   );
   const file = workspace.files.find((f) => f.id === selectedFile);
   const connected = Boolean(runtime?.runtime.available);
+  // Read by code that runs after an await and needs the workspace as last rendered, not as
+  // it was when the closure was created.
+  const workspaceRef = useRef(workspace);
+  useEffect(() => { workspaceRef.current = workspace; }, [workspace]);
+  const live = Object.values(liveRuns);
+  const conversationRuns = conversation ? live.filter((run) => run.conversation_id === conversation.id) : [];
+  // What Steer and Stop act on in the open conversation: the run executing, else the first
+  // one queued. `running` is about this conversation only; other agents keep working.
+  const activeRun = conversationRuns.find((run) => run.state !== "queued") || conversationRuns[0] || null;
+  const running = Boolean(activeRun);
+  const anyRunning = live.length > 0;
+  const busyAgents = new Set(live.map((run) => run.agent_id));
+  // Everything any live run is waiting on, as the coordinator last reported it. Derived
+  // rather than accumulated from events, so a reload, a resume past the request event, or
+  // an answer given from another client all leave the banner telling the truth.
+  const nameOf = (id: string) => workspace.agents.find((item) => item.id === id)?.name || "Your agent";
+  const suppressed = (id: string) => answered.some((entry) => entry.id === id && Date.now() - entry.at < ANSWER_GRACE_MS);
+  const approvals = live.flatMap((run) => (run.pendingApprovals || []).filter((item) => !suppressed(item.approvalId)).map((item) => ({ ...item, runId: run.id, agentName: nameOf(run.agent_id) })));
+  const inputs = live.flatMap((run) => (run.pendingInputs || []).filter((item) => !suppressed(item.inputId)).map((item) => ({ ...item, runId: run.id, agentName: nameOf(run.agent_id) })));
 
   useEffect(() => {
     try {
@@ -248,7 +312,10 @@ export default function Home() {
           ...parsed,
           conversations: parsed.conversations.map((c) => ({
             ...c,
-            messages: c.messages.map((m) => ({
+            // A reply for a coordinator run is reconciled against the coordinator once
+            // connected, so its unfinished steps are left as they are; only the guided
+            // demonstration has nothing to reconcile against.
+            messages: c.messages.map((m) => m.runId ? m : ({
               ...m,
               activities: m.activities?.map((a) =>
                 a.status === "running"
@@ -308,6 +375,10 @@ export default function Home() {
     setPhone(isPhoneLayout());
     setApp(isApp);
     setPairs(mayPair);
+    // Below 1000px the workspace panel is a fixed overlay on the right (see globals.css),
+    // 270px wide over a 390px phone. Open by default, it sat on top of the composer's send
+    // button in every conversation until closed by hand. It stays a tap away.
+    if (typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 1000px)').matches) setInspector(false);
     // Every client resolves this before connecting, so a credential from a previous visit
     // always wins over asking for the control token.
     setDevice('unknown');
@@ -410,6 +481,128 @@ export default function Home() {
     return () => { cancelled = true; window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
   }, [pairs, device]);
 
+  // Puts a run the coordinator knows about into its conversation — creating the
+  // conversation, or just the run's two messages, when this client has not seen it — and
+  // follows it if it is still live. Safe to call for a run already shown: the message ids
+  // are derived from the run, so nothing is added twice.
+  function attachRun(run: PersistentRun, title = run.prompt.slice(0, 52)) {
+    const known = workspaceRef.current.conversations
+      .find((item) => item.id === run.conversation_id)?.messages
+      .find((message) => message.runId === run.id);
+    const mid = known?.id || replyId(run);
+    const reply = { id: mid, runId: run.id, role: "assistant" as const, content: run.result || run.error || "", error: Boolean(run.error), activities: [], settled: !isLiveRun(run) };
+    setWorkspace((current) => {
+      const existing = current.conversations.find((item) => item.id === run.conversation_id);
+      if (!existing) {
+        return {
+          ...current,
+          conversations: [
+            { id: run.conversation_id, agentId: run.agent_id, title, updatedAt: now(), messages: [{ id: promptId(run), role: "user", content: run.prompt }, reply] },
+            ...current.conversations,
+          ],
+        };
+      }
+      if (existing.messages.some((message) => message.runId === run.id)) return current;
+      return {
+        ...current,
+        conversations: current.conversations.map((item) => item.id !== existing.id ? item : {
+          ...item,
+          messages: [...item.messages, { id: promptId(run), role: "user", content: run.prompt }, reply],
+          updatedAt: now(),
+        }),
+      };
+    });
+    if (isLiveRun(run)) follow(run, run.conversation_id, mid, run.agent_id, known?.eventCursor || 0, Boolean(known?.content));
+  }
+  // A client with no history of its own — a phone that just paired, a browser whose storage
+  // was cleared — used to see the coordinator's agents and none of what they had done. The
+  // coordinator keeps every run's prompt and outcome, which is enough to rebuild each
+  // conversation this client is missing. Conversations it already has are merged instead:
+  // a run started from another client is added, and a reply this client stopped watching
+  // before the run finished is caught up from the coordinator's events.
+  function hydrateHistory(remembered: RemoteConversation[]) {
+    const known = workspaceRef.current;
+    const catchUp: Array<{ run: PersistentRun; mid: string; cursor: number; hasText: boolean }> = [];
+    const merged = new Map<string, Message[]>();
+    const added: Conversation[] = [];
+    for (const item of remembered) {
+      // Delegated work is shown inside the run that asked for it, not as a chat of its own.
+      const runs = item.runs.filter((run) => !run.parent_run_id);
+      if (!runs.length) continue;
+      const existing = known.conversations.find((conversation) => conversation.id === item.id);
+      if (!existing) {
+        // A conversation for an agent this workspace does not have would fail validation
+        // on the next load and take the whole saved workspace down with it.
+        if (!known.agents.some((agent) => agent.id === item.agentId)) continue;
+        added.push({
+          id: item.id,
+          agentId: item.agentId,
+          title: item.title || runs[0].prompt.slice(0, 52),
+          updatedAt: item.updatedAt || now(),
+          messages: runs.flatMap((run) => [
+            { id: promptId(run), role: "user" as const, content: run.prompt },
+            { id: replyId(run), runId: run.id, role: "assistant" as const, content: run.result || run.error || "", error: Boolean(run.error), activities: [], settled: !isLiveRun(run) },
+          ]),
+        });
+        continue;
+      }
+      let messages = existing.messages;
+      for (const run of runs) {
+        const reply = messages.find((message) => message.runId === run.id);
+        if (!reply) {
+          messages = [...messages, { id: promptId(run), role: "user", content: run.prompt }, { id: replyId(run), runId: run.id, role: "assistant", content: run.result || run.error || "", error: Boolean(run.error), activities: [], settled: !isLiveRun(run) }];
+        } else if (!isLiveRun(run) && !reply.settled) {
+          // Anything not marked final is caught up from where this client left off, partial
+          // text included: a page closed after the first streamed words looks complete
+          // and is not.
+          catchUp.push({ run, mid: reply.id, cursor: reply.eventCursor || 0, hasText: Boolean(reply.content) });
+        }
+      }
+      if (messages !== existing.messages) merged.set(item.id, messages);
+    }
+    if (added.length || merged.size) {
+      setWorkspace((current) => ({
+        ...current,
+        conversations: [
+          ...current.conversations.map((conversation) => merged.has(conversation.id) ? { ...conversation, messages: merged.get(conversation.id)! } : conversation),
+          ...added.filter((conversation) => !current.conversations.some((existing) => existing.id === conversation.id)),
+        // Newest first, like everything else in the sidebar, so a run another client made
+        // just now is not hidden below a dozen older chats.
+        ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
+      }));
+    }
+    for (const entry of catchUp) {
+      const cid = remembered.find((item) => item.runs.some((run) => run.id === entry.run.id))!.id;
+      void followRun(entry.run, cid, entry.mid, entry.run.agent_id, entry.cursor, entry.hasText, false).catch(() => {
+        // The coordinator no longer has this run's events; say so rather than spin forever.
+        updateConversation(cid, (current) => ({
+          ...current,
+          messages: current.messages.map((message) => message.id !== entry.mid ? message : {
+            ...message,
+            content: message.content || entry.run.result || entry.run.error || "This run's transcript is no longer available.",
+            error: message.error || Boolean(entry.run.error),
+            settled: true,
+            activities: message.activities?.map((activity) => activity.status === "running" ? { ...activity, status: "error", detail: "Interrupted when the page closed." } : activity),
+          }),
+        }));
+      });
+    }
+  }
+  // Starts the one poller a live run gets. The entry in liveRuns is what the rest of the
+  // page reads — which agent is busy, what Stop acts on, whether a message is still being
+  // written — and it disappears when the run reaches a final state.
+  function follow(run: PersistentRun, cid: string, mid: string, agentId: string, cursor = 0, hasText = false) {
+    if (followed.current.has(run.id)) return;
+    followed.current.add(run.id);
+    setLiveRuns((current) => ({ ...current, [run.id]: run }));
+    void followRun(run, cid, mid, agentId, cursor, hasText)
+      .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
+      .finally(() => {
+        followed.current.delete(run.id);
+        setLiveRuns((current) => { const next = { ...current }; delete next[run.id]; return next; });
+        if (!followed.current.size) setReconnecting(false);
+      });
+  }
   useEffect(() => {
     if (!ready) return;
     // Still looking for a stored credential; either answer changes where this goes.
@@ -447,94 +640,34 @@ export default function Home() {
             ? await client.request<{ model: ModelChoice; revision: number }>("/v1/workspace/model")
             : await client.request<{ model: ModelChoice; revision: number }>("/v1/workspace/model/import", {
                 method: "POST",
-                body: JSON.stringify({ model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: providerCredential(settings.provider) } }),
+                body: JSON.stringify({ model: modelChoice(settings) }),
               });
-          setSettings({ provider: defaults.model.provider as Provider, model: defaults.model.model, baseUrl: defaults.model.baseUrl });
+          setSettings(modelSettings(defaults.model));
           setWorkspaceModelRevision(defaults.revision);
           // First-run setup belongs on the computer that hosts the coordinator; the phone
           // has no Docker to check and no model runtime to install.
           if (!paired && localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
         }
-        const [{ routines: savedRoutines }, { runs }] = await Promise.all([
+        const [{ routines: savedRoutines }, { conversations: remembered }] = await Promise.all([
           client.request<{ routines: Array<Record<string, unknown>> }>(
             "/v1/routines",
           ),
-          client.request<{ runs: PersistentRun[] }>("/v1/runs"),
+          client.conversations(),
         ]);
         if (!cancelled) {
           setRoutines(savedRoutines);
-          const live = runs.find((run) =>
-            ["queued", "running", "waiting_approval", "waiting_input"].includes(
-              run.state,
-            ),
-          );
-          if (live) {
-            const existing = workspace.conversations.find(
-              (item) => item.id === live.conversation_id,
-            );
-            const existingMessage = existing?.messages.find(
-              (message) => message.runId === live.id,
-            );
-            const messageId = existingMessage?.id || uid();
-            if (!existing) {
-              setWorkspace((current) => ({
-                ...current,
-                conversations: [
-                  {
-                    id: live.conversation_id,
-                    agentId: live.agent_id,
-                    title: live.prompt.slice(0, 52),
-                    updatedAt: now(),
-                    messages: [
-                      { id: uid(), role: "user", content: live.prompt },
-                      {
-                        id: messageId,
-                        runId: live.id,
-                        role: "assistant",
-                        content: "",
-                        activities: [],
-                      },
-                    ],
-                  },
-                  ...current.conversations,
-                ],
-              }));
-            } else if (!existingMessage) {
-              updateConversation(existing.id, (current) => ({
-                ...current,
-                messages: [
-                  ...current.messages,
-                  {
-                    id: messageId,
-                    runId: live.id,
-                    role: "assistant",
-                    content: "",
-                    activities: [],
-                  },
-                ],
-              }));
-            }
-            setSelectedAgent(live.agent_id);
-            setConversationId(live.conversation_id);
+          hydrateHistory(remembered);
+          // Every live run, not just the first: two agents can be mid-task, and a follow-up
+          // queued behind one of them is a run of its own. The newest is the one opened.
+          const liveNow = remembered
+            .flatMap((item) => item.runs)
+            .filter((run) => !run.parent_run_id && isLiveRun(run))
+            .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+          for (const run of liveNow) attachRun(run);
+          if (liveNow[0]) {
+            setSelectedAgent(liveNow[0].agent_id);
+            setConversationId(liveNow[0].conversation_id);
             setView("chat");
-            setPersistentRun(live);
-            setRunning(true);
-            runLock.current = true;
-            void followRun(
-              live,
-              live.conversation_id,
-              messageId,
-              live.agent_id,
-              existingMessage?.eventCursor || 0,
-              Boolean(existingMessage?.content),
-            )
-              .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
-              .finally(() => {
-                runLock.current = false;
-                setRunning(false);
-                setPersistentRun(null);
-                setReconnecting(false);
-              });
           }
         }
       } catch (error) {
@@ -697,7 +830,7 @@ export default function Home() {
   const settingsDirty = settingsOpen && settingsSnapshot() !== settingsBaseline;
   const requestCloseSettings = () => { if (settingsDirty) setConfirmCloseSettings(true); else closeSettings(); };
   const escapeSettingsRef = useRef<() => void>(() => {});
-  escapeSettingsRef.current = () => { if (settingsOpen) requestCloseSettings(); };
+  useEffect(() => { escapeSettingsRef.current = () => { if (settingsOpen) requestCloseSettings(); }; });
 
   // Android's Back closes whatever is on top, the way it does in every other app. Scoped to
   // phone-shaped clients: on a desktop browser Back is a navigation control people expect to
@@ -707,6 +840,7 @@ export default function Home() {
   useBackGuard(phone && Boolean(docEditor) && !docBusy, () => setDocEditor(null));
   useBackGuard(phone && Boolean(routineDraft), () => setRoutineDraft(null));
   useBackGuard(phone && onboardingOpen, () => setOnboardingOpen(false));
+  useBackGuard(phone && view === "chat" && inspector, () => setInspector(false));
   // Routed through the same guard the close button uses, so Back asks before discarding an
   // unsaved model change or a pasted key rather than throwing it away.
   useBackGuard(phone && settingsOpen, () => requestCloseSettings());
@@ -726,7 +860,7 @@ export default function Home() {
       }
     };
     const beforeLeave = (e: BeforeUnloadEvent) => {
-      if (runLock.current) e.preventDefault();
+      if (followed.current.size) e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("beforeunload", beforeLeave);
@@ -791,40 +925,10 @@ export default function Home() {
     );
   }
   function openTaskRun(run: PersistentRun, title: string) {
-    const existing = workspace.conversations.find(item => item.id === run.conversation_id);
-    const existingReply = existing?.messages.find(message => message.runId === run.id);
-    const messageId = existingReply?.id || uid();
-    if (!existing) {
-      setWorkspace(current => ({
-        ...current,
-        conversations: [{
-          id: run.conversation_id,
-          agentId: run.agent_id,
-          title,
-          updatedAt: now(),
-          messages: [
-            { id: uid(), role: "user", content: run.prompt },
-            { id: messageId, runId: run.id, role: "assistant", content: run.result || run.error || "", error: Boolean(run.error), activities: [] },
-          ],
-        }, ...current.conversations],
-      }));
-    }
+    attachRun(run, title);
     setSelectedAgent(run.agent_id);
     setConversationId(run.conversation_id);
     setView("chat");
-    if (!runLock.current && ["queued", "running", "waiting_approval", "waiting_input"].includes(run.state)) {
-      runLock.current = true;
-      setRunning(true);
-      setPersistentRun(run);
-      void followRun(run, run.conversation_id, messageId, run.agent_id, existingReply?.eventCursor || 0, Boolean(existingReply?.content))
-        .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
-        .finally(() => {
-          runLock.current = false;
-          setRunning(false);
-          setPersistentRun(null);
-          setReconnecting(false);
-        });
-    }
   }
   function newAgent() {
     setEditingAgent({
@@ -924,6 +1028,9 @@ export default function Home() {
     }
     setWorkspace((current) => ({ ...current, files: loaded }));
   }
+  // The coordinator hands out events 500 at a time, so a page that is full may not be the
+  // last one even when the run has already finished.
+  const EVENT_PAGE = 500;
   async function followRun(
     run: PersistentRun,
     cid: string,
@@ -931,10 +1038,17 @@ export default function Home() {
     agentId: string,
     startCursor = 0,
     hasExistingText = false,
+    // false when catching a finished run up after the fact: the transcript is filled in,
+    // but the run is not shown as live and nobody is notified about it.
+    track = true,
   ) {
     let cursor = startCursor;
     let receivedStreamText = hasExistingText;
     let consecutiveFailures = 0;
+    // A reply that already has text but no cursor got that text from the stored result,
+    // not from this client's own stream. Playing the deltas into it from the start would
+    // say everything twice; the terminal reconciliation below is what it needs.
+    const replayText = !(startCursor === 0 && hasExistingText && !track);
     while (true) {
       // The run lives on the coordinator, not here. A dropped fetch — a sleeping
       // laptop, a coordinator restart, a blip — used to end this loop and leave the
@@ -952,16 +1066,22 @@ export default function Home() {
         await new Promise(resolve => setTimeout(resolve, Math.min(8000, 500 * 2 ** (consecutiveFailures - 1))));
         continue;
       }
-      setPersistentRun(snapshot.run);
+      if (track) {
+        setLiveRuns((current) => ({ ...current, [run.id]: snapshot.run }));
+        // Fresh word from the coordinator about this run: anything it no longer lists as
+        // pending was taken, so the optimistic suppression for it can go.
+        const stillPending = new Set([...(snapshot.run.pendingApprovals || []).map((item) => item.approvalId), ...(snapshot.run.pendingInputs || []).map((item) => item.inputId)]);
+        setAnswered((current) => current.some((entry) => entry.runId === run.id && !stillPending.has(entry.id)) ? current.filter((entry) => entry.runId !== run.id || stillPending.has(entry.id)) : current);
+      }
       for (const item of snapshot.events) {
         cursor = Math.max(cursor, item.seq);
         const payload = item.payload || {};
         if (item.type === "message.delta") {
           const text = String(payload.text || payload.delta || payload.content || "");
-          if (text) { receivedStreamText = true; handleEvent({ type: "text", text }, cid, mid, agentId); }
+          if (text && replayText) { receivedStreamText = true; handleEvent({ type: "text", text }, cid, mid, agentId); }
         } else if (item.type === "message.complete") {
           const text = String(payload.text || payload.content || "");
-          if (text && !receivedStreamText) {
+          if (text && !receivedStreamText && replayText) {
             receivedStreamText = true;
             handleEvent({ type: "text", text }, cid, mid, agentId);
           }
@@ -970,13 +1090,15 @@ export default function Home() {
           item.type === "tool.generating" ||
           item.type === "tool.progress"
         ) {
+          // The mock names these id/preview; the real gateway sends tool_id and a context
+          // that can be an object. Both have to land in the same activity row.
           handleEvent(
             {
               type: "activity",
               activity: {
-                id: String(payload.tool_call_id || payload.id || item.id),
+                id: String(payload.tool_call_id || payload.tool_id || payload.id || item.id),
                 name: String(payload.name || payload.tool || "Hermes tool"),
-                detail: String(payload.preview || payload.detail || "Running…"),
+                detail: describe(payload.preview ?? payload.context ?? payload.detail, "Running…"),
                 status: "running",
               },
             },
@@ -989,9 +1111,9 @@ export default function Home() {
             {
               type: "activity",
               activity: {
-                id: String(payload.tool_call_id || payload.id || item.id),
+                id: String(payload.tool_call_id || payload.tool_id || payload.id || item.id),
                 name: String(payload.name || payload.tool || "Hermes tool"),
-                detail: String(payload.result || payload.preview || "Complete"),
+                detail: describe(payload.result ?? payload.preview ?? payload.context, "Complete"),
                 status: payload.error ? "error" : "done",
               },
             },
@@ -1000,21 +1122,19 @@ export default function Home() {
             agentId,
           );
         } else if (item.type === "approval.request") {
-          const detail = String(
-            payload.command || payload.description || "Hermes requests approval.",
-          );
-          const approvalId = String(payload.approvalId);
-          setApprovals(current => current.some(item => item.approvalId === approvalId)
-            ? current
-            : [...current, { approvalId, detail, runId: run.id, agentName: agentNameFor(agentId) }]);
-          // An approval blocks the run and the agent's whole slot until it is answered,
-          // so this is the one the user most needs to hear about while looking elsewhere.
-          notifyDone(`${agentNameFor(agentId)} needs your approval`, detail);
+          // The banner itself comes from the run's pending list; this is only the nudge for
+          // someone looking elsewhere, because an unanswered approval holds the agent's slot.
+          notifyDone(`${agentNameFor(agentId)} needs your approval`, describe(payload.command ?? payload.description, "Hermes requests approval."));
+        } else if (item.type === "clarify.request" || item.type === "secret.request" || item.type === "sudo.request") {
+          notifyDone(`${agentNameFor(agentId)} has a question`, describe(payload.question ?? payload.prompt ?? payload.message, "Your agent needs an answer to continue."));
         } else if (item.type === "run.failed" || item.type === "run.interrupted") {
           const message = String(payload.error || "Run interrupted.");
           handleEvent({ type: "error", message }, cid, mid, agentId);
           notifyDone(`${agentNameFor(agentId)} stopped`, message);
-        } else if (item.type === "run.completed" && payload.result && !receivedStreamText) {
+        } else if (item.type === "run.cancelled") {
+          // A stop used to leave an empty reply behind, as if the agent had said nothing.
+          handleEvent({ type: "error", message: payload.stoppedWithParent ? "Stopped along with the task that delegated it." : "Stopped. Your completed work is saved." }, cid, mid, agentId);
+        } else if (item.type === "run.completed" && payload.result && !receivedStreamText && replayText) {
           receivedStreamText = true;
           handleEvent(
             { type: "text", text: String(payload.result) },
@@ -1032,11 +1152,33 @@ export default function Home() {
         }));
       }
       if (["completed", "failed", "interrupted", "cancelled"].includes(snapshot.run.state)) {
+        // A run that finished while nobody was watching can have more events than one
+        // page holds; stopping at the first page dropped its result. Drain the rest first.
+        if (snapshot.events.length >= EVENT_PAGE) continue;
+        // The stored outcome is authoritative for what the reply says. Streamed text that
+        // arrived is kept; a reply left empty, or a failure never written down, is filled
+        // in from the run itself.
+        const final = snapshot.run;
+        updateConversation(cid, current => ({
+          ...current,
+          messages: current.messages.map(message => {
+            if (message.id !== mid) return message;
+            // A completed run's stored result is what the agent actually answered, so it
+            // replaces whatever was streamed — partial text from a closed page, or text
+            // that arrived twice. A run that ended any other way keeps what was streamed
+            // and gets its error written under it if that never arrived.
+            const missingError = final.error && !message.content.includes(final.error);
+            const content = final.state === "completed" && final.result
+              ? final.result
+              : missingError
+                ? (message.content ? `${message.content}\n\n${final.error}` : final.error!)
+                : message.content || (final.state === "cancelled" ? "Stopped. Your completed work is saved." : final.state === "completed" ? "" : "Run interrupted.");
+            return { ...message, content, settled: true, error: message.error || Boolean(final.error) || final.state !== "completed", activities: message.activities?.map(activity => activity.status === "running" ? { ...activity, status: final.state === "completed" ? "done" : "error" } : activity) };
+          }),
+        }));
         await refreshRuntimeFiles().catch(() => {});
-        if (snapshot.run.state === "completed") notifyDone(`${agentNameFor(agentId)} finished`, "Your task is done. Open Harness to see the result.");
-        // Otherwise a resolved or abandoned request keeps its banner over a later run.
-        setApprovals(current => current.filter(item => item.runId !== snapshot.run.id));
-        return snapshot.run;
+        if (track && final.state === "completed") notifyDone(`${agentNameFor(agentId)} finished`, "Your task is done. Open Harness to see the result.");
+        return final;
       }
       // A hidden tab still has a live run, but nobody is reading it. task-manager.tsx
       // already backs off the same way; polling twice a second behind another window
@@ -1046,30 +1188,41 @@ export default function Home() {
     }
   }
   async function send(text = input, guided = false) {
-    if (!text.trim() || !ready) return;
-    if (running && !guided && persistentRun) {
+    const prompt = text.trim();
+    if (!prompt || !ready) return;
+    const cid = conversationId || uid();
+    if (sending.current.has(cid)) return;
+    const agentId = agent.id;
+    // Steering and follow-ups go to this conversation's own run — never to whatever some
+    // other agent is doing. A run that is only queued has nothing to steer yet.
+    if (activeRun && !guided) {
+      const steer = inputMode === "steer" && activeRun.state !== "queued" && !isGuided(activeRun);
+      sending.current.add(cid);
       try {
-        if (inputMode === "steer") {
-          await controlRef.current.request(`/v1/runs/${persistentRun.id}/steer`, {
+        if (steer) {
+          await controlRef.current.request(`/v1/runs/${activeRun.id}/steer`, {
             method: "POST",
-            body: JSON.stringify({ text: text.trim() }),
+            body: JSON.stringify({ text: prompt }),
           });
           setNotice("Guidance queued for the next tool boundary.");
         } else {
-          await controlRef.current.createRun({
-            agentId: agent.id,
-            conversationId: conversationId || undefined,
-            prompt: text.trim(),
-          });
+          const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt });
+          updateConversation(cid, (c) => ({
+            ...c,
+            messages: [...c.messages, { id: promptId(run), role: "user", content: prompt }, { id: replyId(run), runId: run.id, role: "assistant", content: "", activities: [] }],
+            updatedAt: now(),
+          }));
+          follow(run, cid, replyId(run), agentId);
           setNotice("Follow-up queued behind the current task.");
         }
         setInput("");
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "Could not send guidance.");
+      } finally {
+        sending.current.delete(cid);
       }
       return;
     }
-    if (runLock.current) return;
     if (!guided && !connected) {
       setNotice(
         runtime?.runtime.message ||
@@ -1077,50 +1230,48 @@ export default function Home() {
       );
       return;
     }
-    runLock.current = true;
-    setRunning(true);
+    sending.current.add(cid);
     setInput("");
-    const cid = conversationId || uid();
-    const mid = uid();
-    const agentId = agent.id;
-    const userMessage = {
-      id: uid(),
-      role: "user" as const,
-      content: text.trim(),
-    };
-    const messages = [...(conversation?.messages || []), userMessage];
+    const userMessage = { id: uid(), role: "user" as const, content: prompt };
     if (!conversationId) {
       setWorkspace((w) => ({
         ...w,
         conversations: [
-          {
-            id: cid,
-            agentId,
-            title: text.trim().slice(0, 52),
-            messages: [
-              ...messages,
-              { id: mid, role: "assistant", content: "", activities: [] },
-            ],
-            updatedAt: now(),
-          },
+          { id: cid, agentId, title: prompt.slice(0, 52), messages: [userMessage], updatedAt: now() },
           ...w.conversations,
         ],
       }));
       setConversationId(cid);
-    } else
-      updateConversation(cid, (c) => ({
-        ...c,
-        messages: [
-          ...messages,
-          { id: mid, role: "assistant", content: "", activities: [] },
-        ],
-        updatedAt: now(),
-      }));
+    } else {
+      updateConversation(cid, (c) => ({ ...c, messages: [...c.messages, userMessage], updatedAt: now() }));
+    }
+    if (!guided) {
+      try {
+        const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt });
+        // The reply appears once the coordinator has accepted the run, so its id can be
+        // derived from the run's and a reload finds the same message.
+        updateConversation(cid, (c) => ({ ...c, messages: [...c.messages, { id: replyId(run), runId: run.id, role: "assistant", content: "", activities: [] }] }));
+        follow(run, cid, replyId(run), agentId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Something went wrong.";
+        updateConversation(cid, (c) => ({ ...c, messages: [...c.messages, { id: uid(), role: "assistant", content: message, error: true, activities: [] }] }));
+      } finally {
+        sending.current.delete(cid);
+      }
+      return;
+    }
+    // The guided demonstration is scripted here rather than run by the coordinator. It is
+    // still a run as far as this conversation is concerned: it occupies the composer, can
+    // be stopped, and finishes.
+    const mid = uid();
+    const guidedRun: PersistentRun = { id: `guided:${mid}`, agent_id: agentId, conversation_id: cid, prompt, state: "running" };
+    updateConversation(cid, (c) => ({ ...c, messages: [...c.messages, { id: mid, role: "assistant", content: "", activities: [] }] }));
+    setLiveRuns((current) => ({ ...current, [guidedRun.id]: guidedRun }));
     const controller = new AbortController();
     abortRef.current = controller;
     const emit = (event: RunEvent) => handleEvent(event, cid, mid, agentId);
     try {
-      if (guided) {
+      {
         const wait = async () => {
           await new Promise((r) => setTimeout(r, 450));
           controller.signal.throwIfAborted();
@@ -1168,20 +1319,6 @@ export default function Home() {
           type: "text",
           text: "**Your first file is ready.** Open `first-handoff.md` in the workspace panel, or find it in **Files**.\n\nTo run your own task, connect a model in **Settings**. You can also edit my instructions with the settings button above.",
         });
-      } else {
-        const run = await controlRef.current.createRun({
-          agentId,
-          conversationId: cid,
-          prompt: text.trim(),
-        });
-        setPersistentRun(run);
-        updateConversation(cid, (c) => ({
-          ...c,
-          messages: c.messages.map((message) =>
-            message.id === mid ? { ...message, runId: run.id } : message,
-          ),
-        }));
-        await followRun(run, cid, mid, agentId);
       }
     } catch (error) {
       emit({
@@ -1193,12 +1330,71 @@ export default function Home() {
             : "Something went wrong.",
       });
     } finally {
-      runLock.current = false;
-      setRunning(false);
-      setPersistentRun(null);
+      sending.current.delete(cid);
+      setLiveRuns((current) => { const next = { ...current }; delete next[guidedRun.id]; return next; });
       abortRef.current = null;
     }
   }
+  // Stop acts on the open conversation's run; the guided demonstration is stopped here,
+  // everything else by the coordinator, which also stops anything it delegated.
+  const stopActiveRun = () => {
+    if (!activeRun) return;
+    if (isGuided(activeRun)) { abortRef.current?.abort(); return; }
+    void controlRef.current.request(`/v1/runs/${activeRun.id}/stop`, { method: "POST" })
+      .catch((error) => setNotice(error instanceof Error ? error.message : "Could not stop that run."));
+  };
+  // The open conversation's request first; anything another agent is waiting on still
+  // shows, because it is holding that agent's slot until it is answered.
+  const pendingApproval = approvals.find((item) => conversationRuns.some((run) => run.id === item.runId)) || approvals[0] || null;
+  const pendingInput = inputs.find((item) => conversationRuns.some((run) => run.id === item.runId)) || inputs[0] || null;
+  const resolveApproval = async (item: (typeof approvals)[number], decision: "approve" | "deny") => {
+    setAnswering(item.approvalId);
+    try {
+      await controlRef.current.request(`/v1/runs/${item.runId}/approval`, { method: "POST", body: JSON.stringify({ approvalId: item.approvalId, decision }) });
+      setAnswered((current) => [...current, { id: item.approvalId, runId: item.runId, at: Date.now() }]);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not send that decision.");
+    } finally {
+      setAnswering("");
+    }
+  };
+  // What the agent asked, and any choices it offered. The real gateway's payloads vary by
+  // request kind, so this reads the likely fields and falls back to something sayable.
+  const inputQuestion = (item: (typeof inputs)[number]) => {
+    const payload = item.payload || {};
+    if (item.type === "secret") return describe(payload.prompt ?? payload.description ?? payload.name, "The agent needs a credential to continue. It is sent to the run, not shown in the transcript.");
+    if (item.type === "sudo") return describe(payload.prompt ?? payload.reason ?? payload.command, "The agent needs your password to run a privileged command.");
+    return describe(payload.question ?? payload.prompt ?? payload.message, "Your agent needs an answer to continue.");
+  };
+  const inputChoices = (item: (typeof inputs)[number]): string[] => {
+    const raw = item.type === "clarify" ? item.payload?.options ?? item.payload?.choices : undefined;
+    return Array.isArray(raw) ? raw.map((choice) => typeof choice === "string" ? choice : describe((choice as Record<string, unknown>)?.label ?? (choice as Record<string, unknown>)?.value ?? choice, "")).filter(Boolean) : [];
+  };
+  const inputAllowsMany = (item: (typeof inputs)[number]) => Boolean(item.payload?.multiple ?? item.payload?.allow_multiple ?? item.payload?.multi_select);
+  const answerPendingInput = async (item: (typeof inputs)[number]) => {
+    const draft = inputDraft.inputId === item.inputId ? inputDraft : { inputId: item.inputId, text: "", choices: [] };
+    const text = draft.text.trim();
+    // Typed text wins over picked choices; several choices only go together as a list
+    // when the agent said more than one is fine.
+    const value: string | string[] = item.type !== "clarify" ? draft.text : text ? text : inputAllowsMany(item) ? draft.choices : draft.choices[0] || "";
+    if (!value.length) return;
+    setAnswering(item.inputId);
+    try {
+      await controlRef.current.answerInput(item.runId, item.inputId, value);
+      setAnswered((current) => [...current, { id: item.inputId, runId: item.runId, at: Date.now() }]);
+      setInputDraft({ inputId: "", text: "", choices: [] });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not send that answer.");
+    } finally {
+      setAnswering("");
+    }
+  };
+  // What to show under a reply that has no text yet, which depends on where its run is.
+  const pendingLabel = (run: PersistentRun) =>
+    run.state === "queued" ? "Queued behind the current task…"
+      : run.state === "waiting_approval" ? "Waiting for your approval…"
+        : run.state === "waiting_input" ? "Waiting for your answer…"
+          : reconnecting ? "Reconnecting — your agent is still working…" : "Working on it…";
   async function upload(files: FileList | null) {
     if (!files) return;
     const additions: Artifact[] = [];
@@ -1275,7 +1471,10 @@ export default function Home() {
           ...parsed,
           conversations: parsed.conversations.map((c) => ({
             ...c,
-            messages: c.messages.map((m) => ({
+            // A reply for a coordinator run is reconciled against the coordinator once
+            // connected, so its unfinished steps are left as they are; only the guided
+            // demonstration has nothing to reconcile against.
+            messages: c.messages.map((m) => m.runId ? m : ({
               ...m,
               activities: m.activities?.map((a) =>
                 a.status === "running"
@@ -1375,7 +1574,7 @@ export default function Home() {
           <span className="brand-mark">h</span> open harness{" "}
           <span className="version">/ 01</span>
         </button>
-        <button className="new-button" onClick={newAgent} disabled={running}>
+        <button className="new-button" onClick={newAgent} disabled={anyRunning}>
           <Plus size={15} /> New agent
         </button>
         <div className="search-box">
@@ -1431,15 +1630,14 @@ export default function Home() {
                 className={`agent-row ${view === "chat" && a.id === selectedAgent ? "selected" : ""}`}
                 key={a.id}
                 onClick={() => openAgent(a.id)}
-                disabled={running && a.id !== selectedAgent}
               >
                 <Avatar agent={a} />
                 <div>
                   <strong>{a.name}</strong>
                   <small>{a.role}</small>
                 </div>
-                {running && a.id === selectedAgent && (
-                  <LoaderCircle className="spin" size={12} />
+                {busyAgents.has(a.id) && (
+                  <LoaderCircle className="spin" size={12} aria-label={`${a.name} is working`} />
                 )}
               </button>
             ))}
@@ -1450,7 +1648,6 @@ export default function Home() {
               </div>
               {recent.map((c) => (
                 <button
-                  disabled={running}
                   className={`recent ${c.id === conversationId && view === "chat" ? "selected" : ""}`}
                   key={c.id}
                   onClick={() => {
@@ -1528,7 +1725,7 @@ export default function Home() {
                 Your agents{" "}
                 <span>{String(workspace.agents.length).padStart(2, "0")}</span>
               </h2>
-              <button onClick={newAgent} disabled={running}>
+              <button onClick={newAgent} disabled={anyRunning}>
                 <Plus size={13} /> Create agent
               </button>
             </div>
@@ -1538,7 +1735,6 @@ export default function Home() {
                 <button
                   className="agent-card"
                   onClick={() => openAgent(a.id)}
-                  disabled={running && a.id !== selectedAgent}
                 >
                   <Avatar agent={a} large />
                   <ArrowUpRight className="card-arrow" size={17} />
@@ -1550,7 +1746,7 @@ export default function Home() {
                   </p>
                   <div className="card-footer">
                     <span className="status-dot" />
-                    {running && a.id === selectedAgent
+                    {busyAgents.has(a.id)
                       ? "Working on your task"
                       : "Ready when you are"}
                     <span>→</span>
@@ -1657,7 +1853,13 @@ export default function Home() {
                     </button>
                   </div>
                 ) : (
-                  conversation.messages.map((m) => (
+                  conversation.messages.map((m) => {
+                    // The guided demonstration's reply carries no run id; it is live while
+                    // it is the newest message and its pseudo-run is still in the list.
+                    const messageRun = m.runId
+                      ? liveRuns[m.runId]
+                      : conversationRuns.find(isGuided) && m === conversation.messages[conversation.messages.length - 1] ? conversationRuns.find(isGuided) : undefined;
+                    return (
                     <article className={`message ${m.role}`} key={m.id}>
                       <div className="message-heading">
                         {m.role === "assistant" ? (
@@ -1690,13 +1892,7 @@ export default function Home() {
                       {m.activities && m.activities.length > 0 && (
                         <details
                           className="activity-list"
-                          open={
-                            running &&
-                            m ===
-                              conversation.messages[
-                                conversation.messages.length - 1
-                              ]
-                          }
+                          open={Boolean(messageRun)}
                         >
                           <summary>
                             <Cable size={12} />
@@ -1716,7 +1912,7 @@ export default function Home() {
                                 <Check size={12} />
                               )}
                               <div>
-                                <strong>{a.name.replaceAll("_", " ")}</strong>
+                                <strong>{toolLabel(a.name)}</strong>
                                 <p>{a.detail}</p>
                               </div>
                             </div>
@@ -1726,14 +1922,15 @@ export default function Home() {
                       <div className={m.error ? "message-error" : ""}>
                         <Markdown>{m.content}</Markdown>
                       </div>
-                      {!m.content && running && (
+                      {!m.content && messageRun && (
                         <div className="working">
                           <LoaderCircle size={13} className="spin" />
-                          {reconnecting ? "Reconnecting — your agent is still working…" : "Working on it…"}
+                          {pendingLabel(messageRun)}
                         </div>
                       )}
                     </article>
-                  ))
+                    );
+                  })
                 )}
                 <div ref={bottomRef} />
               </div>
@@ -1768,7 +1965,7 @@ export default function Home() {
                       type="button"
                       aria-label="Attach text files"
                       title="Attach text files"
-                      disabled={running}
+                      disabled={anyRunning}
                       onClick={() => uploadRef.current?.click()}
                     >
                       <Paperclip size={17} />
@@ -1784,11 +1981,14 @@ export default function Home() {
                         : "Start local runtime"}
                       <ChevronRight size={12} />
                     </button>
-                    {running ? (
+                    {activeRun ? (
                       <>
                         <button
                           className={`run-mode ${inputMode === "steer" ? "active" : ""}`}
                           type="button"
+                          // Nothing to steer until the coordinator has started the run.
+                          disabled={activeRun.state === "queued" || isGuided(activeRun)}
+                          title={activeRun.state === "queued" ? "This task has not started yet. Queue a follow-up instead." : undefined}
                           onClick={() => setInputMode("steer")}
                         >
                           Steer
@@ -1804,7 +2004,7 @@ export default function Home() {
                           className="send-button"
                           type="submit"
                           disabled={!input.trim()}
-                          aria-label={`Send ${inputMode}`}
+                          aria-label={`Send ${inputMode === "steer" && activeRun.state !== "queued" && !isGuided(activeRun) ? "steer" : "followup"}`}
                         >
                           <ArrowUp size={18} />
                         </button>
@@ -1812,13 +2012,7 @@ export default function Home() {
                           className="send-button stop"
                           type="button"
                           aria-label="Stop run"
-                          onClick={() => {
-                            if (persistentRun)
-                              void controlRef.current.request(
-                                `/v1/runs/${persistentRun.id}/stop`,
-                                { method: "POST" },
-                              );
-                          }}
+                          onClick={stopActiveRun}
                         >
                           <Square size={14} fill="currentColor" />
                         </button>
@@ -1852,35 +2046,74 @@ export default function Home() {
                     ? "This task continues if you close the browser. Send guidance or queue a follow-up."
                     : "Enter to send · Shift + Enter for a new line · Files are shared with all your agents"}
                 </div>
-                {approvals.length > 0 && (() => {
-                  const pending = approvals[0];
-                  const resolve = async (decision: "approve" | "deny") => {
-                    try {
-                      await controlRef.current.request(`/v1/runs/${pending.runId}/approval`, {
-                        method: "POST",
-                        body: JSON.stringify({ approvalId: pending.approvalId, decision }),
-                      });
-                    } catch (error) {
-                      setNotice(error instanceof Error ? error.message : "Could not send that decision.");
-                      return;
-                    }
-                    setApprovals(current => current.filter(item => item.approvalId !== pending.approvalId));
-                  };
-                  return (
-                    <div className="approval-banner" role="alert">
-                      <ShieldCheck size={18} />
-                      <div>
-                        <strong>
-                          {pending.agentName} needs approval
-                          {approvals.length > 1 && <span className="approval-count"> · {approvals.length - 1} more waiting</span>}
-                        </strong>
-                        <p>{pending.detail}</p>
-                      </div>
-                      <button className="subtle-button" onClick={() => void resolve("deny")}>Deny</button>
-                      <button className="light-button" onClick={() => void resolve("approve")}>Approve once</button>
+                {pendingApproval && (
+                  <div className="approval-banner" role="alert">
+                    <ShieldCheck size={18} />
+                    <div>
+                      <strong>
+                        {pendingApproval.agentName} needs approval
+                        {approvals.length > 1 && <span className="approval-count"> · {approvals.length - 1} more waiting</span>}
+                      </strong>
+                      <p>{pendingApproval.detail}</p>
                     </div>
-                  );
-                })()}
+                    <button className="subtle-button" disabled={answering === pendingApproval.approvalId} onClick={() => void resolveApproval(pendingApproval, "deny")}>Deny</button>
+                    <button className="light-button" disabled={answering === pendingApproval.approvalId} onClick={() => void resolveApproval(pendingApproval, "approve")}>Approve once</button>
+                  </div>
+                )}
+                {pendingInput && (
+                  <form
+                    className="approval-banner input-banner"
+                    aria-label={`${pendingInput.agentName} has a question`}
+                    onSubmit={(e) => { e.preventDefault(); void answerPendingInput(pendingInput); }}
+                  >
+                    <MessageSquare size={18} />
+                    <div role="alert">
+                      <strong>
+                        {pendingInput.type === "secret" ? `${pendingInput.agentName} needs a secret` : pendingInput.type === "sudo" ? `${pendingInput.agentName} needs your password` : `${pendingInput.agentName} has a question`}
+                        {inputs.length > 1 && <span className="approval-count"> · {inputs.length - 1} more waiting</span>}
+                      </strong>
+                      <p>{inputQuestion(pendingInput)}</p>
+                      {inputChoices(pendingInput).length > 0 && (
+                        <div className="input-choices" role="group" aria-label="Choices">
+                          {inputChoices(pendingInput).map((choice) => {
+                            const picked = inputDraft.inputId === pendingInput.inputId && inputDraft.choices.includes(choice);
+                            return (
+                              <button
+                                type="button"
+                                key={choice}
+                                className={`run-mode ${picked ? "active" : ""}`}
+                                aria-pressed={picked}
+                                onClick={() => setInputDraft((current) => {
+                                  const base = current.inputId === pendingInput.inputId ? current : { inputId: pendingInput.inputId, text: "", choices: [] };
+                                  const chosen = base.choices.includes(choice) ? base.choices.filter((item) => item !== choice) : inputAllowsMany(pendingInput) ? [...base.choices, choice] : [choice];
+                                  return { ...base, choices: chosen };
+                                })}
+                              >
+                                {choice}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      <input
+                        type={pendingInput.type === "clarify" ? "text" : "password"}
+                        autoComplete={pendingInput.type === "clarify" ? "off" : "new-password"}
+                        aria-label={pendingInput.type === "secret" ? "Secret value" : pendingInput.type === "sudo" ? "Password" : "Your answer"}
+                        placeholder={pendingInput.type === "clarify" ? (inputChoices(pendingInput).length ? "Or type your own answer" : "Type your answer") : "Not shown to the agent's transcript"}
+                        value={inputDraft.inputId === pendingInput.inputId ? inputDraft.text : ""}
+                        onChange={(e) => setInputDraft({ inputId: pendingInput.inputId, text: e.target.value, choices: inputDraft.inputId === pendingInput.inputId ? inputDraft.choices : [] })}
+                        maxLength={10000}
+                      />
+                    </div>
+                    <button
+                      className="light-button"
+                      type="submit"
+                      disabled={answering === pendingInput.inputId || !(inputDraft.inputId === pendingInput.inputId && (inputDraft.text.trim() || inputDraft.choices.length))}
+                    >
+                      {answering === pendingInput.inputId ? "Sending…" : "Send answer"}
+                    </button>
+                  </form>
+                )}
               </div>
             </section>
             {inspector && (
@@ -1928,7 +2161,7 @@ export default function Home() {
                 )}
                 <button
                   className="subtle-button"
-                  disabled={running}
+                  disabled={anyRunning}
                   onClick={() => uploadRef.current?.click()}
                 >
                   <Plus size={12} /> Add a file
@@ -2034,7 +2267,7 @@ export default function Home() {
               </div>
               <button
                 className="light-button"
-                disabled={running}
+                disabled={anyRunning}
                 onClick={() => uploadRef.current?.click()}
               >
                 <Plus size={14} /> Add files
@@ -2084,7 +2317,7 @@ export default function Home() {
                     </button>
                     <button
                       aria-label={`Delete ${f.name}`}
-                      disabled={running}
+                      disabled={anyRunning}
                       onClick={() => {
                         if (!confirm(`Delete ${f.name}?`)) return;
                         if (runtime)
@@ -2448,6 +2681,8 @@ export default function Home() {
                         provider === "local"
                           ? server.localModel
                           : PROVIDERS[provider].model,
+                      // The saved key belongs to the provider it was tested against.
+                      credentialRef: providerCredential(provider),
                     }));
                     setApiKey("");
                   }}
@@ -2545,7 +2780,7 @@ export default function Home() {
               {!pairs && (
                 <button
                   className="subtle-button"
-                  disabled={running}
+                  disabled={anyRunning}
                   onClick={() => importRef.current?.click()}
                 >
                   <FolderOpen size={14} /> Import backup
@@ -2560,25 +2795,21 @@ export default function Home() {
                 className="light-button"
                 onClick={async () => {
                   try {
-                    if (apiKey && runtime) {
-                      const name = providerCredential(settings.provider) || "MODEL_API_KEY";
-                      await controlRef.current.request("/v1/secrets", {
-                        method: "POST",
-                        body: JSON.stringify({ name, value: apiKey }),
-                      });
-                      setApiKey("");
-                    }
-                    const candidate = { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: providerCredential(settings.provider) };
-                    const test = await controlRef.current.request<{ ok: boolean; message: string }>('/v1/onboarding/model-test', {
-                      method: 'POST', body: JSON.stringify({ model: candidate }),
+                    // One request: the coordinator tests the pasted key against this model
+                    // and saves both only if that passes. Saving the key first, as this used
+                    // to, overwrote a working credential with one that then failed its test.
+                    const test = await controlRef.current.request<{ ok: boolean; message: string; model?: ModelChoice; revision?: number }>('/v1/onboarding/model-test', {
+                      method: 'POST', body: JSON.stringify({ model: modelChoice(settings), apiKey: apiKey || undefined, save: true, revision: workspaceModelRevision }),
                     });
-                    if (!test.ok) { setNotice(`${test.message} Your previous workspace model is still active.`); return; }
-                    const saved = await controlRef.current.request<{ revision: number; model: ModelChoice }>("/v1/workspace/model", {
-                      method: "PUT", body: JSON.stringify({ revision: workspaceModelRevision, model: candidate }),
-                    });
-                    setWorkspaceModelRevision(saved.revision);
+                    if (!test.ok || !test.model) { setNotice(`${test.message} Your previous workspace model is still active.`); return; }
+                    // The saved model, not the draft: a new key comes back under a generated
+                    // credential name that only the coordinator knows.
+                    const adopted = modelSettings(test.model);
+                    setSettings(adopted);
+                    setWorkspaceModelRevision(test.revision ?? workspaceModelRevision);
+                    setApiKey("");
                     closeSettings();
-                    setSettingsBaseline(JSON.stringify({ settings, apiKey: "" }));
+                    setSettingsBaseline(JSON.stringify({ settings: adopted, apiKey: "" }));
                     setNotice(test.message);
                   } catch (error) {
                     setNotice(
@@ -2595,10 +2826,11 @@ export default function Home() {
           </section>
         </div>
       )}
-      {onboardingOpen && runtime && <Onboarding client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: providerCredential(settings.provider) }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
-        setSettings({ provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl });
+      {onboardingOpen && runtime && <Onboarding client={controlRef.current} model={modelChoice(settings)} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
+        const adopted = modelSettings(model);
+        setSettings(adopted);
         setWorkspaceModelRevision(revision);
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify({ provider: model.provider, model: model.model, baseUrl: model.baseUrl }));
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(adopted));
       }} onComputerSettings={() => {
         localStorage.setItem(ONBOARDING_KEY, 'done');
         setOnboardingOpen(false);

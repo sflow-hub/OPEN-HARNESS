@@ -9,6 +9,10 @@
 //! this module needs is provided by Tauri plugins, which is why there is so little here.
 
 pub fn configure(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    // This lifecycle-only plugin has no JavaScript API. It resizes the native
+    // content view, so the existing web viewport listeners observe the real space.
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_ime_insets::init());
     builder
         // Requests are made from Rust rather than the webview, so the coordinator sees no
         // Origin header and the browser's CORS rules never enter into it.

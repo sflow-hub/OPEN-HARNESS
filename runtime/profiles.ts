@@ -20,10 +20,12 @@ export function validateProfile(value: AgentProfile): AgentProfile {
   if (!Number.isInteger(value.revision) || value.revision < 0 || typeof value.prompt.enabled !== 'boolean' || typeof value.model.inherit !== 'boolean') throw new ProfileError('Invalid profile revision or switches.');
   if (!Number.isInteger(value.tone) || value.tone < 0 || value.tone > 5) throw new ProfileError('Choose an avatar color.');
   if (value.allowedTools.length > 3000 || value.allowedTools.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_.:-]{1,200}$/.test(id))) throw new ProfileError('Invalid tool selection.');
-  const names = new Set<string>();
+  const names = new Set<string>(['open_harness']);
   const connectors = value.connectors.map(c => {
-    if (!c || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(c.name) || names.has(c.name) || c.name === 'open_harness') throw new ProfileError('Connections need unique names using letters, numbers, dashes, or underscores.');
-    names.add(c.name);
+    if (!c || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(c.name)) throw new ProfileError('Connections need unique names using letters, numbers, dashes, or underscores.');
+    const canonical = c.name.replace(/[^a-zA-Z0-9_]/g, '_');
+    if ([...names].some(name => name === canonical || name.startsWith(`${canonical}_`) || canonical.startsWith(`${name}_`))) throw new ProfileError('Connection names must remain distinct when dashes become underscores, and cannot share a tool-name prefix with another connection or open_harness.');
+    names.add(canonical);
     if (!Array.isArray(c.args) || c.args.length > 100 || c.args.some(a => typeof a !== 'string' || a.length > 4000) || typeof c.enabled !== 'boolean') throw new ProfileError('Invalid connection arguments.');
     if (c.secretRef && !/^[A-Z][A-Z0-9_]{1,79}$/.test(c.secretRef)) throw new ProfileError('Invalid connector secret reference.');
     return { id: short(c.id, 'Connection ID', 100, true), name: c.name, command: short(c.command, 'Executable', 300, true), args: c.args, secretRef: c.secretRef || '', enabled: c.enabled };

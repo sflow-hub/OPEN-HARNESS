@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes, timingSafeEqual } from 'node:crypto';
 import { hostname, platform, arch } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import type { AgentProfile, MachineInfo, MachineKind, MachinePlatform } from '../lib/agent-profile';
@@ -39,6 +39,18 @@ export function deviceCode(length = 12) {
   return code;
 }
 
+function runnerPublicKey(value: unknown) {
+  if (value === undefined || value === '') return null;
+  try {
+    if (typeof value !== 'string' || value.length > 16_000) throw new Error();
+    const jwk = JSON.parse(value);
+    if (jwk.kty !== 'RSA' || jwk.d || (jwk.alg && jwk.alg !== 'RSA-OAEP-256')) throw new Error();
+    const key = createPublicKey({ key: jwk, format: 'jwk' });
+    if ((key.asymmetricKeyDetails?.modulusLength || 0) < 2048) throw new Error();
+    return value;
+  } catch { throw new MachineError('The runner supplied an invalid encryption key.'); }
+}
+
 export class Machines {
   constructor(readonly db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS machines (
@@ -67,6 +79,7 @@ export class Machines {
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL, pending_profile_json TEXT
     );`);
     try { db.exec('ALTER TABLE agent_transfers ADD COLUMN pending_profile_json TEXT'); } catch {}
+    try { db.exec('ALTER TABLE machines ADD COLUMN encryption_public_key TEXT'); } catch {}
     // 'device' machines are companion phones. Existing rows predate phones, so they default
     // to 'runner' and retain computer-runner access.
     try { db.exec("ALTER TABLE machines ADD COLUMN kind TEXT NOT NULL DEFAULT 'runner'"); } catch {}
@@ -147,12 +160,14 @@ export class Machines {
       ? { ...DEVICE_CAPABILITIES, ...(supplied || {}), mobile: true, container: false, direct: false }
       : supplied || { container: true, direct: true, desktop: false, virtualDesktop: pairing.platform === 'linux' };
     const platform = String(input.platform || pairing.platform);
+    const encryptionPublicKey = runnerPublicKey(input.encryptionPublicKey);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare('UPDATE machine_pairings SET used_at=? WHERE id=? AND used_at IS NULL').run(stamp, pairing.id);
       this.db.prepare(`INSERT INTO machines(id,name,platform,arch,status,last_seen_at,local,reserved_agent_id,capabilities_json,credential_hash,revoked_at,created_at,updated_at,kind)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, String(input.name || pairing.name).slice(0, 80), platform, String(input.arch || 'unknown').slice(0, 40), 'online', stamp, 0, null, JSON.stringify(capabilities), hash(token), null, stamp, stamp, kind);
+      if (encryptionPublicKey) this.db.prepare('UPDATE machines SET encryption_public_key=? WHERE id=?').run(encryptionPublicKey, id);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return { machine: this.get(id), machineId: id, token };
@@ -165,7 +180,8 @@ export class Machines {
   }
   heartbeat(machineId: string, input: Record<string, unknown>) {
     if (!this.exists(machineId)) throw new MachineError('Computer not found or revoked.', 404);
-    const stamp = now();
+    const stamp = now(), encryptionPublicKey = runnerPublicKey(input.encryptionPublicKey);
+    if (encryptionPublicKey) this.db.prepare('UPDATE machines SET encryption_public_key=? WHERE id=?').run(encryptionPublicKey, machineId);
     this.db.prepare('UPDATE machines SET status=?,last_seen_at=?,capabilities_json=COALESCE(?,capabilities_json),updated_at=? WHERE id=?').run('online', stamp, input.capabilities ? JSON.stringify(input.capabilities) : null, stamp, machineId);
     return this.get(machineId);
   }

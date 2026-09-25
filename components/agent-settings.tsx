@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, CircleAlert, Cpu, FileText, LoaderCircle, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, UserRound, X, Cable, MonitorCog, Server, Folder, Copy, CircleStop } from 'lucide-react';
-import { ControlClient } from '../lib/control-client';
+import { ControlClient, isConflict } from '../lib/control-client';
 import { DEFAULT_MODEL, TOOL_GROUPS, draftProfile, type AgentProfile, type MachineInfo, type ModelCatalog, type ModelChoice, type ProfileResponse, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
 import { initialWorkspace, type Agent } from '../lib/types';
 import { useBackGuard } from '../lib/back-guard';
@@ -134,16 +134,21 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
     dialog?.addEventListener('keydown', handler); window.addEventListener('beforeunload', before);
     return () => { dialog?.removeEventListener('keydown', handler); window.removeEventListener('beforeunload', before); };
   });
+  // The coordinator refuses to probe an agent's runtime while that agent is working (409):
+  // the probe would compete with the run for the same container or process. That is not a
+  // broken inventory, so the last known list stays, everything stays editable, and the
+  // message says when to try again.
+  const busyText = (what: string) => `${what} can't be checked while this agent is running. Refresh once it finishes.`;
   async function refreshTools() {
     setCatalogBusy(true);
     try { setCatalog(await client.request<ToolCatalog>(`${base}/tools`)); }
-    catch (err) { setCatalog(old => ({ ...old, source: old.tools.length ? 'cached' : 'unavailable', error: errorText(err) })); }
+    catch (err) { setCatalog(old => ({ ...old, source: old.tools.length ? 'cached' : 'unavailable', error: isConflict(err) ? busyText('Tool availability') : errorText(err) })); }
     finally { setCatalogBusy(false); }
   }
   async function refreshModels() {
     setModelsBusy(true);
     try { setModels(await client.request<ModelCatalog>(`${base}/models`)); }
-    catch (err) { setModels({ models: [], error: errorText(err) }); }
+    catch (err) { setModels(old => ({ models: isConflict(err) ? old.models : [], error: isConflict(err) ? busyText('The model list') : errorText(err) })); }
     finally { setModelsBusy(false); }
   }
   function selectTab(next: Tab) {
@@ -218,7 +223,9 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
     edit({ allowedTools: on ? [...new Set([...draft.allowedTools, ...ids])] : draft.allowedTools.filter(id => !ids.includes(id)) });
   }
   const providers = [...new Set(['xai', 'openrouter', 'anthropic', 'openai', 'local', 'custom', draft.model.provider, ...models.models.map(m => m.provider)])];
-  const unknown: ToolInfo[] = draft.allowedTools.filter(id => !catalog.tools.some(t => t.id === id)).map(id => ({ id, name: id.replaceAll('_', ' '), group: 'other', description: 'Previously selected tool.', available: false, reason: 'Not found in the current tool catalog.' }));
+  // A selected tool the catalog does not list is only "missing" when a live inventory was
+  // actually taken; with no inventory at all it is simply unchecked.
+  const unknown: ToolInfo[] = draft.allowedTools.filter(id => !catalog.tools.some(t => t.id === id)).map(id => ({ id, name: id.replace(/^mcp_+/, '').replace(/_+/g, ' ').trim() || id, group: 'other', description: 'Previously selected tool.', available: false, reason: catalog.source === 'unavailable' ? 'Availability not checked yet.' : 'Not found in the current tool catalog.' }));
   const tools = [...catalog.tools, ...unknown];
   const selectedMachine = machines.find(item => item.id === draft.computer.machineId);
   const runnableMachines = machines.filter(item => !item.capabilities.mobile && item.kind !== 'device');

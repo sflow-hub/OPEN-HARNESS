@@ -11,9 +11,10 @@ import { exportAgentFiles, importAgentFiles } from './transfer-files';
 import { SecretStore } from './secrets';
 import { decryptRunnerSecret, generateRunnerKeyPair, type EncryptedRunnerSecret } from '../lib/runner-crypto';
 import { validateComputerTarget } from './computer-validation';
+import { testModelConnection } from './model-validation';
 
 type Credentials = { coordinator: string; machineId: string; token: string; sitesToken?: string; encryptionPublicKey: string; encryptionPrivateKey: string };
-type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'store-secret'; payload: any };
+type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'input' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'store-secret'; payload: any };
 const args = new Map<string,string>();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith('--')) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith('--') ? '' : process.argv[++i] || '');
 const stateRoot = resolve(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join(homedir(), '.open-harness-runner'));
@@ -66,8 +67,11 @@ async function request(path: string, init: RequestInit = {}, retry = false): Pro
   }
 }
 
-const active = new Map<string, { gateway: HermesGateway; sessionId: string; commandId: string }>();
+const active = new Map<string, { gateway: HermesGateway; sessionId: string | null; commandId: string; stopping: boolean; agentId: string }>();
 const admittedCommands = new Set<string>();
+const agentOperations = new Map<string, Promise<void>>();
+const blockedAgents = new Set<string>();
+const admittedRuns = new Map<string, { cancelled: boolean }>();
 type SpoolRecord = { id: string; path: string; body: unknown };
 async function deliver(record: SpoolRecord) { const file = join(spool, `${record.id}.json`); if (!existsSync(file)) writeFileSync(file, JSON.stringify(record), { mode: 0o600 }); await request(record.path, { method: 'POST', body: JSON.stringify(record.body) }, true); if (existsSync(file)) unlinkSync(file); }
 async function flushSpool() { for (const name of readdirSync(spool).filter(name => name.endsWith('.json'))) { try { await deliver(JSON.parse(readFileSync(join(spool, name), 'utf8'))); } catch {} } }
@@ -75,8 +79,9 @@ async function emit(command: RunnerCommand, event: any) { const eventId = crypto
 async function finish(command: RunnerCommand, result?: unknown, error?: unknown) { await deliver({ id: `complete-${command.id}`, path: `/v1/runner/commands/${command.id}/complete`, body: error ? { error: error instanceof Error ? error.message : String(error) } : { result } }); }
 
 async function run(command: RunnerCommand) {
-  const payload = command.payload as { runId: string; prompt: string; snapshot: AgentProfile & { effectiveModel: any }; secrets: Record<string,string>; coordinationToken: string };
+  const payload = command.payload as { runId: string; prompt: string; history?: Array<{ role: 'user' | 'assistant'; content: string }>; snapshot: AgentProfile & { effectiveModel: any }; secrets: Record<string,string>; coordinationToken: string };
   const profile = payload.snapshot, direct = profile.computer.access === 'direct';
+  let gateway: HermesGateway | undefined, result: unknown, failure: unknown;
   try {
     const agentRoot = join(stateRoot, 'agents', profile.id), shared = join(stateRoot, 'shared'); mkdirSync(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean);
@@ -85,15 +90,27 @@ async function run(command: RunnerCommand) {
     const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...payload.secrets }) };
     const coordinatorForContainer = credentials.coordinator.replace('://localhost', '://host.docker.internal').replace('://127.0.0.1', '://host.docker.internal');
     prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { controlUrl: coordinatorForContainer, sitesToken: credentials.sitesToken });
-    const gateway = direct
+    gateway = direct
       ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } })
       : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
+    const live = { gateway, sessionId: null as string | null, commandId: command.id, stopping: false, agentId: profile.id };
+    active.set(payload.runId, live);
     gateway.on('event', event => void emit(command, event)); await gateway.start();
-    const session = await gateway.request('session.create', { cwd: direct ? shared : '/workspace/shared', profile: 'default' });
+    if (live.stopping) throw new Error('Run stopped before its session started.');
+    const session = await gateway.request('session.create', { cwd: direct ? shared : '/workspace/shared', profile: 'default', messages: payload.history || [] });
     const sessionId = String(session?.session_id || session?.id || ''); if (!sessionId) throw new Error('Hermes did not return a session ID.');
-    active.set(payload.runId, { gateway, sessionId, commandId: command.id });
-    const result = await gateway.submitPrompt(sessionId, payload.prompt); active.delete(payload.runId); await finish(command, result);
-  } catch (error) { active.delete(payload.runId); await finish(command, undefined, error); }
+    live.sessionId = sessionId;
+    if (live.stopping) throw new Error('Run stopped before its prompt started.');
+    result = await gateway.submitPrompt(sessionId, payload.prompt);
+  } catch (error) { failure = error; }
+  try {
+    await gateway?.stop();
+    active.delete(payload.runId);
+  } catch (error) {
+    blockedAgents.add(profile.id);
+    failure = new Error(`Agent cleanup could not be confirmed. Further work is blocked until it is stopped: ${error instanceof Error ? error.message : error}`);
+  }
+  await finish(command, result, failure);
 }
 async function control(command: RunnerCommand) {
   try {
@@ -116,6 +133,11 @@ async function control(command: RunnerCommand) {
     if (command.kind.startsWith('probe-')) {
       const profile = command.payload.profile as AgentProfile & { effectiveModel: any }, direct = profile.computer.access === 'direct', shared = join(stateRoot, 'shared'), agentRoot = join(stateRoot, 'agents', profile.id); mkdirSync(shared, { recursive: true });
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env } as Record<string,string>, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter(name => availableSecrets[name]).map(name => [name, availableSecrets[name]])), secretSource = { environment: () => ({ ...localSecrets, ...(command.payload.secrets || {}) }) };
+      if (command.kind === 'probe-runtime' && command.payload.input?.action === 'model-test') {
+        const model = command.payload.input.model;
+        const apiKey = command.payload.encryptedApiKey ? await decryptRunnerSecret(credentials.encryptionPrivateKey, command.payload.encryptedApiKey) : availableSecrets[model.credentialRef] || '';
+        await finish(command, await testModelConnection(model, apiKey)); return;
+      }
       prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command.payload.coordinationToken || '', `probe-${command.id}`, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { sitesToken: credentials.sitesToken });
       if (command.kind === 'probe-runtime') {
         const probeInput = { ...(command.payload.input || {}) } as any;
@@ -128,15 +150,56 @@ async function control(command: RunnerCommand) {
       }
       const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
       if (command.kind === 'probe-tools') { const input = direct ? (() => { const result = spawnSync(process.env.HERMES_PYTHON || 'python3', [join(import.meta.dirname, 'hermes', 'inspect_runtime.py')], { input: '{"action":"catalog"}\n', encoding: 'utf8', env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile') }, maxBuffer: 5_000_000, timeout: 25_000 }); if (result.status || !result.stdout) throw new Error(result.stderr || 'Tool discovery failed.'); return JSON.parse(result.stdout); })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), { action: 'catalog' }); await finish(command, { source: 'runtime', tools: [...(input.tools || []).filter((tool: any) => tool.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }); return; }
-      await gateway.start(); try { await finish(command, await discoverModels(gateway)); } finally { await gateway.stop(); } return;
+      let result;
+      try { await gateway.start(); result = await discoverModels(gateway); } finally { await gateway.stop(); }
+      await finish(command, result); return;
     }
     const live = active.get(String(command.payload.runId));
+    if (!live && command.kind === 'stop') {
+      const waiting = admittedRuns.get(String(command.payload.runId));
+      if (waiting) { waiting.cancelled = true; await finish(command, { ok: true }); return; }
+    }
     if (!live) throw new Error('The requested run is no longer active on this runner.');
-    if (command.kind === 'stop') { await live.gateway.request('session.interrupt', { session_id: live.sessionId }, 5000).catch(() => {}); await live.gateway.stop(); }
-    if (command.kind === 'steer') await live.gateway.request('session.steer', { session_id: live.sessionId, text: String(command.payload.text || '') });
+    if (command.kind === 'stop') { live.stopping = true; if (live.sessionId) await live.gateway.request('session.interrupt', { session_id: live.sessionId }, 5000).catch(() => {}); await live.gateway.stop(); blockedAgents.delete(live.agentId); }
+    if (command.kind === 'steer') { if (!live.sessionId) throw new Error('The agent is still starting. Try again when its session is ready.'); await live.gateway.request('session.steer', { session_id: live.sessionId, text: String(command.payload.text || '') }); }
     if (command.kind === 'approval') await live.gateway.request('approval.respond', { request_id: command.payload.requestId, decision: command.payload.decision });
+    if (command.kind === 'input') {
+      const type = command.payload.type;
+      if (!['clarify', 'secret', 'sudo'].includes(type)) throw new Error('Unsupported input request type.');
+      if (type !== 'clarify' && !command.payload.encrypted) throw new Error('Sensitive input must be encrypted for this runner.');
+      const value = command.payload.encrypted ? await decryptRunnerSecret(credentials.encryptionPrivateKey, command.payload.encrypted) : command.payload.value;
+      const key = type === 'clarify' ? 'answer' : type === 'secret' ? 'value' : 'password';
+      try { await live.gateway.request(`${type}.respond`, { request_id: command.payload.requestId, [key]: value }); }
+      catch { throw new Error('The agent could not accept this input. Check whether its request is still pending.'); }
+    }
     await finish(command, { ok: true });
   } catch (error) { await finish(command, undefined, error); }
+}
+
+async function executeCommand(command: RunnerCommand) {
+  const usesProfile = command.kind === 'run' || command.kind.startsWith('probe-') || command.kind === 'import-agent' || command.kind === 'export-agent';
+  if (!usesProfile) return control(command);
+  const agentId = String(command.kind === 'run' ? command.payload.snapshot?.id : command.payload.profile?.id || command.agentId);
+  const previous = agentOperations.get(agentId);
+  if (blockedAgents.has(agentId) || (previous && command.kind !== 'run')) {
+    return finish(command, undefined, new Error(blockedAgents.has(agentId) ? 'The previous agent runtime could not be stopped. Stop it before checking settings or starting more work.' : 'This agent is busy. Wait for its current task or settings check to finish before checking or moving its profile.'));
+  }
+  const admission = { cancelled: false };
+  if (command.kind === 'run') admittedRuns.set(String(command.payload.runId), admission);
+  // Claim ownership before yielding, including gateway startup. A run queued behind
+  // a probe cannot share files/container with it, and probes never mutate live runs.
+  const operation = (async () => {
+    if (previous) await previous.catch(() => {});
+    if (admission.cancelled) return finish(command, undefined, new Error('Run stopped before its runtime started.'));
+    if (blockedAgents.has(agentId)) return finish(command, undefined, new Error('The previous agent runtime could not be stopped.'));
+    return command.kind === 'run' ? run(command) : control(command);
+  })();
+  agentOperations.set(agentId, operation);
+  try { await operation; }
+  finally {
+    if (agentOperations.get(agentId) === operation) agentOperations.delete(agentId);
+    if (command.kind === 'run') admittedRuns.delete(String(command.payload.runId));
+  }
 }
 
 console.log(`Open Harness runner ${credentials.machineId} connected to ${credentials.coordinator}`);
@@ -147,7 +210,7 @@ for (;;) {
   try {
     if (Date.now() - lastHeartbeat > 15_000) { void capabilities().catch(() => {}); await request('/v1/runner/heartbeat', { method: 'POST', body: JSON.stringify({ ...(known ? { capabilities: known } : {}), encryptionPublicKey: credentials.encryptionPublicKey, activeCommandIds: [...new Set([...admittedCommands, ...[...active.values()].map(item => item.commandId)])] }) }); lastHeartbeat = Date.now(); }
     const result = await request('/v1/runner/commands');
-    for (const command of result.commands as RunnerCommand[]) { if (admittedCommands.has(command.id)) continue; admittedCommands.add(command.id); void (command.kind === 'run' ? run(command) : control(command)).finally(() => admittedCommands.delete(command.id)); }
+    for (const command of result.commands as RunnerCommand[]) { if (admittedCommands.has(command.id)) continue; admittedCommands.add(command.id); void executeCommand(command).catch(error => console.error(error instanceof Error ? error.message : error)).finally(() => admittedCommands.delete(command.id)); }
   } catch (error) { console.error(error instanceof Error ? error.message : error); }
   await new Promise(resolve => setTimeout(resolve, 1000));
 }

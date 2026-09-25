@@ -22,8 +22,48 @@ pre-1.0, so breaking changes can still land in a minor version.
   can never resolve. It detects an existing tailnet and offers that address, and
   otherwise gives the commands for a tunnel or a reverse proxy. Also available
   as `GET /v1/reachability`.
+- Conversations follow every run the coordinator has for them: two agents can work at
+  the same time, each in its own chat, and a follow-up sent while an agent is busy is
+  queued behind its current task, shown in the transcript, and followed to its own
+  reply. (claude)
+- Questions from an agent — a clarification, a needed secret, a sudo password — are
+  asked in the conversation and answered there. The answer goes to the run and never
+  into the transcript. (claude)
+- A client with no history of its own, such as a phone that just paired or a browser
+  whose storage was cleared, rebuilds its conversations from the coordinator's runs,
+  and a conversation it already has is caught up with runs it missed. (claude)
 
 ### Fixed
+
+- Follow-up runs keep prior conversation text, and remote work remains attached after a coordinator restart. Pending approvals and input requests recover across client reloads; failed runner replies remain retryable. (codex)
+- Model setup validates draft credentials before committing a new reference, preserving the working configuration after failed tests or stale saves. (codex)
+- Pinned Hermes now loads the policy extension, exposes granted MCP task tools, and connects to the coordinator over native Unix sockets. Native probes use the selected runtime, container model URLs resolve host loopback addresses, and the browser binary installs in a location readable by the container's runtime user. (codex)
+- Hosted dispatch atomically enforces capacity and task ownership, snapshots profiles at start, and supports task stopping, routine editing/history, encrypted inputs, and conversation history. (codex)
+- Runtime stopping waits for tool process cleanup; native process identities survive coordinator restarts, and a second coordinator cannot interrupt the existing owner's work. File transfers reject traversal and symlink paths on Windows and Unix. (codex)
+- Android keyboard insets resize the native content area without cumulative padding. Desktop startup failure and quit clean up the coordinator sidecar. (codex)
+- Steering and Stop acted on whichever run the dashboard happened to be holding, so
+  after switching agents they could reach another agent's run. They now act on the open
+  conversation's run. (claude)
+- Reloading during a run lost its approval banner, because the client resumed past the
+  request event. Pending approvals and questions are read from the run itself, so they
+  survive a reload, clear when answered from another client, and come back if the
+  coordinator has to reopen one. (claude)
+- A run that finished while the page was closed left an empty reply behind for good. The
+  reply is caught up from the coordinator on the next open, reading every page of its
+  events rather than the first 500 and taking the stored outcome as final. (claude)
+- Saving a workspace model wrote the pasted key before testing it, so a failed test
+  destroyed the working key. The key is tested and saved in one request, and a failed
+  test leaves the previous model and key untouched. (claude)
+- Agent settings showed every saved tool as missing when the coordinator refused to
+  probe a running agent's runtime. The saved choices stay editable and the message says
+  to refresh once the agent finishes. (claude)
+- The task drawer's label field dropped a trailing comma on every keystroke, so a second
+  label could never be typed. (claude)
+- On screens narrower than 1000px the agent workspace panel opened on top of the
+  composer's send button in every conversation. It starts closed there, and Back closes
+  it on a phone. (claude)
+- Tool activity from the real Hermes gateway (`tool_id`, object `context` and `result`)
+  is shown the same way as the mock's, and MCP tool ids read as words. (claude)
 
 - Android: Back closed the app from any modal, destroying unsaved profile edits,
   because the static export gave the webview no history to go back to.
@@ -37,12 +77,6 @@ pre-1.0, so breaking changes can still land in a minor version.
   saying so.
 - The task board forced roughly 1300px of horizontal panning on a phone, and the
   only touch control for moving a task was about 21px.
-
-### Known issues
-
-- Android: the soft keyboard covers the chat composer. The shell never applies
-  the IME window insets to the webview, so the web layer is told nothing about
-  the keyboard; see ANDROID.md.
 
 - An Android companion app. It is the same dashboard shipped as static files in a
   Tauri 2 shell, paired to a coordinator over HTTPS with a typable 12-character code

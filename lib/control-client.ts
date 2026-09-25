@@ -20,7 +20,27 @@ export type PersistentRun = {
   error?: string | null;
   machine_id?: string | null;
   machine_connection?: "online" | "suspended" | "offline" | "revoked" | null;
+  // Present on every run the coordinator returns; optional so a run built client-side
+  // (the guided demonstration) does not have to invent them.
+  parent_run_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  // What the run is waiting on right now, straight from the coordinator's own records.
+  // Reading these off every run response, rather than reconstructing them from events,
+  // is what keeps a question visible across a reload or after another client answered it.
+  pendingApprovals?: PendingApproval[];
+  pendingInputs?: PendingInput[];
 };
+
+export type PendingApproval = { approvalId: string; detail: string; payload?: Record<string, any>; createdAt?: string };
+export type PendingInput = { inputId: string; type: "clarify" | "secret" | "sudo"; payload?: Record<string, any>; createdAt?: string };
+
+// A conversation as the coordinator remembers it: every run that carried its id, oldest
+// first, which is enough to rebuild the transcript on a client that never saw them.
+export type RemoteConversation = { id: string; agentId: string; title: string; updatedAt: string; runs: PersistentRun[] };
+
+export const LIVE_RUN_STATES: ReadonlyArray<PersistentRun["state"]> = ["queued", "running", "waiting_approval", "waiting_input"];
+export const isLiveRun = (run: Pick<PersistentRun, "state">) => LIVE_RUN_STATES.includes(run.state);
 
 const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "::1"];
 
@@ -52,6 +72,14 @@ export function selfHostedHubUrl() {
   if (typeof window === "undefined") return "";
   return base();
 }
+
+// A refusal from the coordinator, with the status kept so callers can tell "the agent is
+// running, so this probe is refused for now" (409) apart from "the service is gone".
+export class ControlError extends Error {
+  status: number;
+  constructor(message: string, status: number) { super(message); this.name = "ControlError"; this.status = status; }
+}
+export const isConflict = (error: unknown) => error instanceof ControlError && error.status === 409;
 
 // Thrown when the coordinator refuses to hand this client the control token. It is not an
 // outage: it means "pair instead", and the caller shows the pairing screen.
@@ -108,9 +136,14 @@ export class ControlClient {
   async request<T>(path: string, init: RequestInit = {}) {
     const response = await this.fetchImpl(`${this.endpoint()}${path}`, { ...init, headers: this.headers(init.headers) });
     const value = await response.json() as T & { error?: string };
-    if (!response.ok) throw new Error(value.error || `Control service returned HTTP ${response.status}.`);
+    if (!response.ok) throw new ControlError(value.error || `Control service returned HTTP ${response.status}.`, response.status);
     return value;
   }
   createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string }) { return this.request<PersistentRun>("/v1/runs", { method: "POST", body: JSON.stringify(input) }); }
   events(runId: string, after: number) { return this.request<{ events: Array<{ seq: number; id: string; type: string; payload: any }>; run: PersistentRun }>(`/v1/runs/${runId}/events?after=${after}`); }
+  conversations() { return this.request<{ conversations: RemoteConversation[] }>("/v1/conversations"); }
+  // A clarification takes a string, or several when the agent offered choices; a secret or a
+  // sudo password is always one string. The coordinator hands it to the run and keeps it out
+  // of the event log.
+  answerInput(runId: string, inputId: string, value: string | string[]) { return this.request<{ ok: boolean }>(`/v1/runs/${runId}/input`, { method: "POST", body: JSON.stringify({ inputId, value }) }); }
 }

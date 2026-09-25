@@ -87,7 +87,9 @@ and credential storage (`runtime/secrets.ts`, OS vaults, `.open-harness/secrets.
 
 ## Current focus
 
-The Android companion (pairing, run following, tasks, approvals, notifications) verified on
-the emulator but not yet on a physical device or against a real Hermes run; desktop CSP still
-needs a real `npm run desktop:dev` smoke test; real-runtime verification is the main gap
-before 1.0. [CHANGELOG.md](CHANGELOG.md) `[Unreleased]` is the accurate running summary.
+Core native Hermes runs, local-model inference, conversation recovery, and task MCP have
+real integration evidence. The packaged macOS dashboard renders with its HTTP CSP and
+cleans up sidecars on quit. Container acceptance still requires a Docker-capable host;
+Android keyboard behavior still needs a physical-device check. See
+[runtime/VERIFICATION.md](runtime/VERIFICATION.md) for exact checks and limits, and
+[CHANGELOG.md](CHANGELOG.md) `[Unreleased]` for the running change summary.

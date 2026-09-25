@@ -3399,6 +3399,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
  "tauri-plugin-http",
+ "tauri-plugin-ime-insets",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-shell",
@@ -5415,6 +5416,14 @@ dependencies = [
  "tokio",
  "url",
  "urlpattern",
+]
+
+[[package]]
+name = "tauri-plugin-ime-insets"
+version = "0.1.0"
+dependencies = [
+ "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]

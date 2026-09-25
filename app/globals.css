@@ -977,6 +977,39 @@ h1 span {
 .approval-banner .light-button {
   flex-shrink: 0;
 }
+/* A question from the agent needs an answer typed, not just a yes or no, so the middle
+   column stacks the question, any choices it offered, and the field. */
+.input-banner > div {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.input-banner input {
+  width: 100%;
+  padding: 8px 10px;
+  border-color: #675a3d;
+  background: #1c1a14;
+  color: #eee;
+  font-size: 12px;
+}
+.input-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.input-choices .run-mode {
+  font-size: 11px;
+  padding: 6px 10px;
+}
+@media (max-width: 900px) {
+  .approval-banner {
+    flex-wrap: wrap;
+    margin: 10px 12px 0;
+  }
+  .approval-banner > div {
+    flex-basis: 100%;
+  }
+}
 .composer-note {
   text-align: center;
   font-size: 9px;

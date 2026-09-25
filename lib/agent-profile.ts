@@ -70,6 +70,6 @@ export function profileAgent(profile: AgentProfile, memory: string[] = []): Agen
 export function runToolGrants(profile: AgentProfile): string[] {
   return profile.allowedTools.filter(id =>
     (profile.computer.desktop !== 'none' || id !== 'computer_use') &&
-    (!id.startsWith('mcp_') || id.startsWith('mcp_open_harness_') || profile.connectors.some(connector => connector.enabled && id.startsWith(`mcp_${connector.name}_`)))
+    (!id.startsWith('mcp_') || id.startsWith('mcp_open_harness_') || id.startsWith('mcp__open_harness__') || profile.connectors.some(connector => connector.enabled && (id.startsWith(`mcp_${connector.name}_`) || id.startsWith(`mcp__${connector.name.replace(/[^a-zA-Z0-9_]/g, '_')}__`))))
   );
 }

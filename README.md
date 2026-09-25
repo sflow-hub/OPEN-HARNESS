@@ -106,10 +106,19 @@ The dashboard token remains available only from the coordinator machine. Public 
 Each agent starts with a private container. **Selected folders** mounts only the named host folders and preserves their read-only or read-write setting. **Direct computer access** runs Hermes under the runner's OS account; install the pinned host runtime and policy extension before selecting it:
 
 ```bash
-python3 -m pip install "hermes-agent[all] @ git+https://github.com/NousResearch/hermes-agent.git@939e45c91d751fadd94dcd1b873ac3cb44846213"
-python3 -m pip install runtime/hermes/extension
-hermes computer-use install
+git clone https://github.com/NousResearch/hermes-agent.git ~/.local/share/open-harness-hermes
+git -C ~/.local/share/open-harness-hermes checkout 939e45c91d751fadd94dcd1b873ac3cb44846213
+python3.12 -m venv ~/.local/share/open-harness-hermes-venv
+~/.local/share/open-harness-hermes-venv/bin/python -m pip install -e "$HOME/.local/share/open-harness-hermes[all]"
+~/.local/share/open-harness-hermes-venv/bin/python -m pip install runtime/hermes/extension
+export HERMES_PYTHON="$HOME/.local/share/open-harness-hermes-venv/bin/python"
+# Required only for existing-desktop control:
+~/.local/share/open-harness-hermes-venv/bin/hermes computer-use install
 ```
+
+Hermes requires an editable source installation. Keep that checkout in place and set `HERMES_PYTHON` in the coordinator or runner service environment too. On Windows use the virtual environment’s `Scripts/python.exe`. Node 22.13+ must be on that process’s PATH for task coordination. For native-only development, use `npm run dev:fast`; for the coordinator alone set `OPEN_HARNESS_SKIP_DOCKER_START=1` before `npm run harness:serve`.
+
+Local OpenAI-compatible model servers can use an empty API key. For direct execution use their loopback URL, such as `http://127.0.0.1:11434/v1`. Container profiles translate loopback endpoints to `host.docker.internal`; the model server must listen on an interface reachable from Docker. Test the agent connection after choosing its computer.
 
 Existing desktop control also needs the interactive OS session and its platform permissions. macOS requires Accessibility and Screen Recording. Windows remote hosts require a logged-in desktop session. Linux requires X11 or Wayland with AT-SPI. Linux runners can instead give each isolated agent a private Xvfb/Openbox desktop.
 
@@ -119,7 +128,7 @@ Profiles are authoritative in SQLite. Each save creates a revision; active work 
 
 Tool choices compile into an explicit allowlist. **Disable all tools** leaves only the mandatory task-board coordination tool; newly discovered tools start disabled. The managed Hermes extension filters model-visible tools and rejects disallowed dispatch, including tools called from code and temporary subagents. Named handoffs use the recipient's profile. Terminal can still run programs that read files or access the network; switches do not add filesystem or network isolation.
 
-MCP connections use inline configuration and a real initialize/tools-list handshake inside the agent container. Cached inventories are labeled unavailable until rechecked. The model picker uses Hermes's catalog; custom model IDs remain editable if the runtime is unavailable. Saved credentials are references, and only selected secrets are placed in the next run's environment.
+MCP connections use inline configuration and a real initialize/tools-list handshake in the selected native or container runtime. Cached inventories are labeled unavailable until rechecked. The model picker uses Hermes's catalog; custom model IDs remain editable if the runtime is unavailable. Saved credentials are references, and only selected secrets are placed in the next run's environment.
 
 After changing the adapter or policy extension, rebuild with `npm run harness:setup`. Existing containers must use that new image and its read-only managed-policy mount before real-runtime verification.
 
@@ -177,7 +186,7 @@ npm run test:browser
 
 The browser suite starts an isolated mock control service and the production app, and tests desktop and mobile editors. To use an existing Chromium install, set `OPEN_HARNESS_TEST_CHROMIUM` to its executable path. Python 3 is used for the policy middleware tests.
 
-The deterministic suite sets `OPEN_HARNESS_MOCK=1` and uses no paid inference. Full acceptance additionally requires a running Docker daemon and model credentials configured in Settings. Verify real code repair, Chromium navigation and screenshots, cross-agent isolation, named handoffs, memory/skill reuse, background routines, steering, process-tree stopping, and approval behavior before relying on a new Hermes release or provider model.
+The deterministic service tests set `OPEN_HARNESS_MOCK=1` and use no paid inference. The opt-in `tests/real-hermes-smoke.mjs` exercises the pinned native Hermes runtime with a local fixture provider; see [runtime/VERIFICATION.md](runtime/VERIFICATION.md) for commands and the checks actually completed. Full acceptance additionally requires a running Docker daemon and model credentials configured in Settings. Verify real code repair, Chromium navigation and screenshots, cross-agent isolation, named handoffs, memory/skill reuse, background routines, steering, process-tree stopping, and approval behavior before relying on a new Hermes release or provider model.
 
 ## Troubleshooting
 

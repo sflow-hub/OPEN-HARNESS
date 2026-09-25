@@ -28,6 +28,10 @@ export type Message = {
   id: string;
   runId?: string;
   eventCursor?: number;
+  // True once the run behind this reply reached a final state and its outcome was written
+  // here. Until then a reply may be partial — the page can close mid-stream — and is
+  // caught up from the coordinator on the next connect.
+  settled?: boolean;
   role: "user" | "assistant";
   content: string;
   activities?: Activity[];

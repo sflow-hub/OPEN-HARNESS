@@ -103,3 +103,17 @@ test("provider errors are visible without leaking response bodies or credentials
     globalThis.fetch = originalFetch;
   }
 });
+
+
+test('legacy requests cannot spend server bootstrap credentials', async () => {
+  const previous = process.env.XAI_API_KEY;
+  process.env.XAI_API_KEY = 'server-only-key';
+  try {
+    const response = await POST(req({ ...payload, apiKey: undefined }));
+    assert.equal(response.status, 400);
+    assert.doesNotMatch(await response.text(), /server-only-key/);
+  } finally {
+    if (previous === undefined) delete process.env.XAI_API_KEY;
+    else process.env.XAI_API_KEY = previous;
+  }
+});

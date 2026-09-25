@@ -6,6 +6,6 @@ name = "open-harness-policy"
 version = "1.0.0"
 requires-python = ">=3.12"
 [project.entry-points."hermes_agent.plugins"]
-open_harness_policy = "open_harness_policy:register"
+open_harness_policy = "open_harness_policy"
 [tool.setuptools]
 py-modules = ["open_harness_policy"]

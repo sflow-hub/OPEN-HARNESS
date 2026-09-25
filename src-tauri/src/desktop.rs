@@ -74,10 +74,17 @@ fn stop_runtime(handle: &tauri::AppHandle) {
     let state = handle.state::<RuntimeProcesses>();
     let Ok(mut children) = state.0.lock() else { return };
     if children.is_empty() { return; }
-    for entry in children.iter_mut() {
-        if !entry.exited.load(Ordering::SeqCst) { let _ = entry.child.write(b"shutdown\n"); }
+    // Only the coordinator accepts the shutdown protocol. The dashboard is a
+    // stateless HTTP server; leaving it alive made every normal quit time out.
+    let mut coordinators = Vec::new();
+    for mut entry in children.drain(..) {
+        if entry.exited.load(Ordering::SeqCst) { continue; }
+        if entry.name == "coordinator" { let _ = entry.child.write(b"shutdown\n"); coordinators.push(entry); }
+        else { let _ = entry.child.kill(); }
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
+    *children = coordinators;
+    // The service's own cleanup deadline is 15 seconds.
+    let deadline = Instant::now() + Duration::from_secs(16);
     while Instant::now() < deadline && children.iter().any(|entry| !entry.exited.load(Ordering::SeqCst)) {
         thread::sleep(Duration::from_millis(100));
     }
@@ -97,6 +104,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(RuntimeProcesses(Mutex::new(Vec::new())))
         .setup(|app| {
+            let setup_result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let resource = app.path().resource_dir()?.join("resources").join("bundle");
             let data = app.path().app_data_dir()?; std::fs::create_dir_all(&data)?;
             let control_port = free_port().map_err(std::io::Error::other)?;
@@ -108,11 +116,12 @@ pub fn run() {
             service_env.insert("OPEN_HARNESS_STATE_DIR".into(), data.to_string_lossy().into_owned());
             service_env.insert("OPEN_HARNESS_STDIN_CONTROL".into(), "1".into());
             let service = spawn_node(app, "coordinator", &runtime_directory, &["service.mjs".into()], service_env).map_err(std::io::Error::other)?;
+            { let state = app.state::<RuntimeProcesses>(); state.0.lock().map_err(|_| std::io::Error::other("runtime lock failed"))?.push(service); }
             let mut web_env = HashMap::new(); web_env.insert("PORT".into(), app_port.to_string()); web_env.insert("HOST".into(), "127.0.0.1".into());
             let web = spawn_node(app, "dashboard", &app_directory, &["server.js".into()], web_env).map_err(std::io::Error::other)?;
-            { let state = app.state::<RuntimeProcesses>(); state.0.lock().map_err(|_| std::io::Error::other("runtime lock failed"))?.extend([service, web]); }
+            { let state = app.state::<RuntimeProcesses>(); state.0.lock().map_err(|_| std::io::Error::other("runtime lock failed"))?.push(web); }
             if !wait_for_port(control_port, Duration::from_secs(30)) || !wait_for_port(app_port, Duration::from_secs(30)) {
-                return Err(std::io::Error::other("Open Harness could not start. Open the tray menu and choose Quit, then launch it again.").into());
+                return Err(std::io::Error::other("Open Harness could not start its local services. Check the application logs and launch it again.").into());
             }
             let url = format!("http://127.0.0.1:{app_port}/?controlPort={control_port}").parse()?;
             // The dashboard is a remote-origin page, so it has no Tauri bridge to call.
@@ -154,6 +163,9 @@ pub fn run() {
                 });
             }
             Ok(())
+            })();
+            if setup_result.is_err() { stop_runtime(app.handle()); }
+            setup_result
         })
         .on_window_event(|window, event| if let WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); let _ = window.hide(); })
         .build(tauri::generate_context!())

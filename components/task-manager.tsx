@@ -95,6 +95,10 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
   // since; otherwise a backdrop click would throw away edits with no way to get them back.
   const [baseline, setBaseline] = useState("");
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // The labels field as typed. Parsing it into draft.labels on every keystroke and rendering
+  // the parsed list back threw away the trailing comma, so a second label could never be
+  // started; the text is kept and the list is derived from it.
+  const [labelText, setLabelText] = useState("");
   const [sort, setSort] = useState<{ key: keyof AgentTask; direction: 1 | -1 }>({ key: "position", direction: 1 });
   const [dragged, setDragged] = useState<string | null>(null);
   const [clock, setClock] = useState(Date.now);
@@ -161,13 +165,13 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
   const openTask = (task: AgentTask) => {
     setDetailId(task.id);
     const next: Draft = { id: task.id, boardId: task.boardId, stageId: task.stageId, title: task.title, description: task.description, ownerAgentId: task.ownerAgentId, collaboratorAgentIds: task.collaboratorAgentIds, priority: task.priority, labels: task.labels, dueAt: task.dueAt, position: task.position, archived: task.archived, revision: task.revision, checklist: task.checklist };
-    setDraft(next); setBaseline(JSON.stringify(next)); setConfirmDiscard(false);
+    setDraft(next); setLabelText(next.labels.join(", ")); setBaseline(JSON.stringify(next)); setConfirmDiscard(false);
   };
   const createTask = (stageId?: string) => {
     const target = board || snapshot.boards.find(item => !item.archived);
     if (!target) return;
     const next = emptyDraft(target); if (stageId) next.stageId = stageId;
-    setDetailId("new"); setDraft(next); setBaseline(JSON.stringify(next)); setConfirmDiscard(false);
+    setDetailId("new"); setDraft(next); setLabelText(""); setBaseline(JSON.stringify(next)); setConfirmDiscard(false);
   };
   const createBoard = async () => {
     const created = await request<TaskBoard>("/v1/boards", { method: "POST", body: JSON.stringify({ name: newBoardName }) });
@@ -310,7 +314,7 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
           <label className="full">Due date<input type="date" value={draft.dueAt?.slice(0, 10) || ""} onChange={event => setDraft(value => value && ({ ...value, dueAt: event.target.value ? new Date(`${event.target.value}T23:59:59`).toISOString() : null }))} /></label>
         </div>
         <div className="task-form-section"><label>Description</label><textarea rows={5} value={draft.description} onChange={event => setDraft(value => value && ({ ...value, description: event.target.value }))} placeholder="Give the agent the context and expected outcome." />{draft.description && <div className="task-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft.description}</ReactMarkdown></div>}</div>
-        <div className="task-form-section"><label><Tags size={14} /> Labels</label><input value={draft.labels.join(", ")} onChange={event => setDraft(value => value && ({ ...value, labels: event.target.value.split(",").map(item => item.trim()).filter(Boolean) }))} placeholder="research, launch, writing" /></div>
+        <div className="task-form-section"><label><Tags size={14} /> Labels</label><input value={labelText} onChange={event => { const text = event.target.value; setLabelText(text); setDraft(value => value && ({ ...value, labels: [...new Set(text.split(",").map(item => item.trim()).filter(Boolean))] })); }} onBlur={() => setLabelText(draft.labels.join(", "))} placeholder="research, launch, writing" /></div>
         <div className="task-form-section"><label><Users size={14} /> Collaborators</label><div className="collaborator-picker">{agents.map(agent => <button className={draft.collaboratorAgentIds.includes(agent.id) ? "selected" : ""} key={agent.id} onClick={() => setDraft(value => value && ({ ...value, collaboratorAgentIds: value.collaboratorAgentIds.includes(agent.id) ? value.collaboratorAgentIds.filter(id => id !== agent.id) : [...value.collaboratorAgentIds, agent.id] }))}><Avatar agent={agent} />{agent.name}{draft.collaboratorAgentIds.includes(agent.id) && <Check size={13} />}</button>)}</div></div>
         <div className="task-form-section"><div className="section-row"><label><CheckCircle2 size={14} /> Checklist</label><button onClick={() => setDraft(value => value && ({ ...value, checklist: [...value.checklist, { id: uuid(), text: "", done: false, position: value.checklist.length }] }))}><Plus size={13} /> Add item</button></div>{draft.checklist.map((item, index) => <div className="checklist-row" key={item.id}><input type="checkbox" checked={item.done} onChange={event => setDraft(value => value && ({ ...value, checklist: value.checklist.map((entry, itemIndex) => itemIndex === index ? { ...entry, done: event.target.checked } : entry) }))} /><input value={item.text} onChange={event => setDraft(value => value && ({ ...value, checklist: value.checklist.map((entry, itemIndex) => itemIndex === index ? { ...entry, text: event.target.value } : entry) }))} placeholder="Checklist item" /><button aria-label="Remove item" onClick={() => setDraft(value => value && ({ ...value, checklist: value.checklist.filter((_, itemIndex) => itemIndex !== index) }))}><Trash2 size={14} /></button></div>)}</div>
         {current && <><div className="task-form-section"><label><MessageSquare size={14} /> Comments</label><div className="comment-compose"><textarea value={comment} onChange={event => setComment(event.target.value)} rows={2} placeholder="Add a comment" /><button disabled={!comment.trim() || busy} onClick={async () => { const updated = await request<AgentTask>(`/v1/tasks/${current.id}/comments`, { method: "POST", body: JSON.stringify({ body: comment }) }); if (updated) setComment(""); }}>Comment</button></div>{current.comments.map(item => <div className="task-comment" key={item.id}><p>{item.body}</p><time>{item.author || 'you'} · {displayTime(item.createdAt)}</time></div>)}</div>

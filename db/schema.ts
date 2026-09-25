@@ -40,9 +40,13 @@ export const hostedRuntimeSchema = [
   `CREATE INDEX IF NOT EXISTS idx_hosted_run_events_run_seq ON run_events(run_id,seq)`,
   `CREATE TABLE IF NOT EXISTS runner_event_receipts (command_id TEXT NOT NULL, event_id TEXT NOT NULL, received_at TEXT NOT NULL, PRIMARY KEY(command_id,event_id))`,
   `CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, gateway_request_id TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT)`,
+  `CREATE TABLE IF NOT EXISTS hosted_run_inputs (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, gateway_request_id TEXT NOT NULL, type TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT)`,
+  `CREATE INDEX IF NOT EXISTS idx_hosted_run_inputs_pending ON hosted_run_inputs(run_id,state)`,
   `CREATE TABLE IF NOT EXISTS agent_transfers (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, source_machine_id TEXT NOT NULL, destination_machine_id TEXT NOT NULL, state TEXT NOT NULL, detail TEXT NOT NULL, export_command_id TEXT, import_command_id TEXT, checksum TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, pending_profile_json TEXT)`,
   `CREATE INDEX IF NOT EXISTS idx_hosted_agent_transfers_agent_state ON agent_transfers(agent_id,state,created_at)`,
   `CREATE TABLE IF NOT EXISTS transfer_chunks (transfer_id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(transfer_id,position))`,
   `CREATE TABLE IF NOT EXISTS hosted_routines (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL, interval_minutes INTEGER NOT NULL, timezone TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_hosted_routines_due ON hosted_routines(enabled,next_run_at)`,
+  `CREATE TABLE IF NOT EXISTS hosted_routine_runs (schedule_id TEXT NOT NULL, run_id TEXT NOT NULL PRIMARY KEY, scheduled_for TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_hosted_routine_runs_schedule ON hosted_routine_runs(schedule_id,scheduled_for)`,
 ];

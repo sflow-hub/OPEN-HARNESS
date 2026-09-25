@@ -31,7 +31,7 @@ export class Store {
   readonly db: DatabaseSync;
   runListener?: (run: RunRow) => void;
 
-  constructor(path: string) {
+  constructor(path: string, recover = true) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
@@ -60,6 +60,17 @@ export class Store {
         id TEXT PRIMARY KEY, run_id TEXT NOT NULL, gateway_request_id TEXT NOT NULL,
         payload_json TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS run_inputs (
+        id TEXT PRIMARY KEY, run_id TEXT NOT NULL, gateway_request_id TEXT NOT NULL,
+        type TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL, resolved_at TEXT, UNIQUE(run_id,gateway_request_id)
+      );
+      CREATE TABLE IF NOT EXISTS runtime_processes (
+        agent_id TEXT PRIMARY KEY, pid INTEGER NOT NULL, identity TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runtime_cleanup (
+        agent_id TEXT PRIMARY KEY, computer_json TEXT NOT NULL, error TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS schedules (
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL,
         interval_minutes INTEGER NOT NULL, timezone TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
@@ -80,7 +91,7 @@ export class Store {
       );
     `);
     const stamp = new Date().toISOString();
-    this.db.prepare("UPDATE runs SET state='interrupted', error=?, updated_at=? WHERE state IN ('running','waiting_approval','waiting_input')")
+    if (recover) this.db.prepare("UPDATE runs SET state='interrupted', error=?, updated_at=? WHERE state IN ('running','waiting_approval','waiting_input')")
       .run("The local runtime restarted. Completed actions were preserved; this run was not replayed.", stamp);
   }
 
@@ -99,6 +110,7 @@ export class Store {
 
   getRun(id: string) { return this.db.prepare("SELECT * FROM runs WHERE id=?").get(id) as RunRow | undefined; }
   listRuns(limit = 100) { return this.db.prepare("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?").all(limit) as unknown as RunRow[]; }
+  liveRuns() { return this.db.prepare("SELECT * FROM runs WHERE state IN ('running','waiting_approval','waiting_input') ORDER BY created_at").all() as RunRow[]; }
   queued(limit = 100) { return this.db.prepare("SELECT * FROM runs WHERE state='queued' ORDER BY created_at LIMIT ?").all(limit) as unknown as RunRow[]; }
   descendants(id: string) {
     return this.db.prepare(`WITH RECURSIVE children(id) AS (
@@ -115,7 +127,13 @@ export class Store {
     this.db.prepare(`UPDATE runs SET ${entries.map(([key]) => `${key}=?`).join(",")},updated_at=? WHERE id=?`)
       .run(...entries.map(([, value]) => value), new Date().toISOString(), id);
     const updated = this.getRun(id);
-    if (updated && patch.state) this.runListener?.(updated);
+    if (updated && patch.state) {
+      if (['completed', 'failed', 'cancelled', 'interrupted'].includes(patch.state)) {
+        this.db.prepare("UPDATE approvals SET state='expired',resolved_at=? WHERE run_id=? AND state IN ('pending','submitting','submitted')").run(new Date().toISOString(), id);
+        this.db.prepare("UPDATE run_inputs SET state='expired',resolved_at=? WHERE run_id=? AND state IN ('pending','submitting','submitted')").run(new Date().toISOString(), id);
+      }
+      this.runListener?.(updated);
+    }
   }
   appendEvent(runId: string, type: string, payload: unknown) {
     const id = crypto.randomUUID(), created = new Date().toISOString();
@@ -132,5 +150,14 @@ export class Store {
       .run(id, runId, gatewayId, JSON.stringify(payload), "pending", new Date().toISOString());
   }
   approval(id: string) { return this.db.prepare("SELECT * FROM approvals WHERE id=?").get(id) as Record<string, unknown> | undefined; }
+  pendingApprovals(runId: string) {
+    return (this.db.prepare("SELECT * FROM approvals WHERE run_id=? AND state='pending' ORDER BY created_at").all(runId) as Array<Record<string, unknown>>).map(row => {
+      const payload = JSON.parse(String(row.payload_json));
+      return { approvalId: String(row.id), detail: String(payload.command || payload.description || 'Hermes requests approval.'), payload, createdAt: String(row.created_at) };
+    });
+  }
+  pendingInputs(runId: string) {
+    return (this.db.prepare("SELECT * FROM run_inputs WHERE run_id=? AND state='pending' ORDER BY created_at").all(runId) as Array<Record<string, unknown>>).map(row => ({ inputId: String(row.id), type: String(row.type), payload: JSON.parse(String(row.payload_json)), createdAt: String(row.created_at) }));
+  }
   resolveApproval(id: string, state: string) { this.db.prepare("UPDATE approvals SET state=?,resolved_at=? WHERE id=?").run(state, new Date().toISOString(), id); }
 }

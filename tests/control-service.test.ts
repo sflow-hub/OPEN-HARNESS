@@ -20,7 +20,7 @@ async function waitReady() {
   throw new Error("Control service did not start.");
 }
 function start() {
-  child = spawn(process.execPath, ["--import", "tsx", "runtime/service.ts"], { cwd: join(import.meta.dirname, ".."), env: { ...process.env, OPEN_HARNESS_MOCK: "1", OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: stateDir, OPENAI_API_KEY: 'bootstrap-test-key' }, stdio: "pipe" });
+  child = spawn(process.execPath, ["--import", "tsx", "runtime/service.ts"], { cwd: join(import.meta.dirname, ".."), env: { ...process.env, OPEN_HARNESS_DISABLE_OS_VAULT: '1', OPEN_HARNESS_MOCK: "1", OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: stateDir, OPENAI_API_KEY: 'bootstrap-test-key' }, stdio: "pipe" });
   return waitReady();
 }
 async function request(path: string, init: RequestInit = {}) {
@@ -53,7 +53,7 @@ test("reports first-run readiness and serves no-checkout runner installers", asy
   const pairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ name: 'Easy server', platform: 'linux' }) });
   assert.match(pairing.command, /^curl -fsSL/);
   assert.match(pairing.command, /--pairing-code/);
-  const paired = spawnSync(process.execPath, ['runtime/runner.mjs', '--coordinator', base, '--pairing-code', pairing.code, '--once', '1'], { cwd: join(import.meta.dirname, '..'), encoding: 'utf8', env: { ...process.env, OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_RUNNER_STATE_DIR: join(stateDir, 'installed-runner') } });
+  const paired = spawnSync(process.execPath, ['runtime/runner.mjs', '--coordinator', base, '--pairing-code', pairing.code, '--once', '1'], { cwd: join(import.meta.dirname, '..'), encoding: 'utf8', env: { ...process.env, OPEN_HARNESS_DISABLE_OS_VAULT: '1', OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_RUNNER_STATE_DIR: join(stateDir, 'installed-runner') } });
   assert.equal(paired.status, 0, paired.stderr);
   assert.match(paired.stdout, /Paired machine-/);
 });

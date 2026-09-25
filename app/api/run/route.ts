@@ -75,7 +75,10 @@ export async function POST(request: Request) {
     );
   let modelFn;
   try {
-    modelFn = createModel({ provider, model, apiKey, env: process.env });
+    // This legacy, request-scoped demo has no coordinator credential. It must
+    // never spend the server operator's model key on an unauthenticated request.
+    // Real agent work uses the authenticated persistent control API.
+    modelFn = createModel({ provider, model, apiKey, env: {} });
   } catch (error) {
     return Response.json({ error: (error as Error).message }, { status: 400 });
   }

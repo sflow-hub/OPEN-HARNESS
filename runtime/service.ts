@@ -1,7 +1,8 @@
+import { processIdentity, recoverNativeProcess } from './process-identity';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdirSync, writeFileSync, readdirSync, readFileSync, statSync, unlinkSync, existsSync, rmSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { resolve, join, relative } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
 import { discoverTools, discoverModels, nativeRuntimeProbe, prepareProfile, runtimeProbe } from "./profile-runtime";
@@ -16,13 +17,22 @@ import { MachineError, Machines } from "./machines";
 import { exportAgentFiles, importAgentFiles, type TransferBundle } from './transfer-files';
 import { onboardingAction, onboardingStatus } from './readiness';
 import { reachability } from './reachability';
+import { safeWorkspacePath, resolveContainedPath } from './path-safety';
+import { conversationHistory } from './conversation-history';
+import { testModelConnection } from './model-validation';
+import { encryptRunnerSecret } from '../lib/runner-crypto';
+import { acquireCoordinatorLock } from './coordinator-lock';
 
 const root = resolve(process.env.OPEN_HARNESS_STATE_DIR || ".open-harness");
-mkdirSync(root, { recursive: true }); mkdirSync(join(root, "shared"), { recursive: true }); mkdirSync(join(root, "agents"), { recursive: true });
-const store = new Store(join(root, "state.db"));
+mkdirSync(root, { recursive: true });
+// Recovery may terminate orphaned runtimes, so ownership must precede every state import.
+const releaseOwnership = acquireCoordinatorLock(root);
+process.once('exit', releaseOwnership);
+mkdirSync(join(root, "shared"), { recursive: true }); mkdirSync(join(root, "agents"), { recursive: true });
+const store = new Store(join(root, "state.db"), false);
 const tasks = new TaskStore(store.db);
 store.runListener = run => tasks.syncRun(run);
-tasks.reconcile();
+
 const secrets = new SecretStore(join(root, "secrets.json"));
 const profiles = new Profiles(store.db);
 const machines = new Machines(store.db);
@@ -35,10 +45,19 @@ const active = new Map<string, { gateway: HermesGateway; sessionId: string }>();
 const remoteActive = new Map<string, { machineId: string; commandId: string }>();
 const remoteStopping = new Set<string>();
 const stoppingAgents = new Set<string>();
+const executingAgents = new Set<string>();
+const probingAgents = new Set<string>();
 const coordinationSockets = new Map<string, ReturnType<typeof coordinationSocket>>();
 let pumping = false;
+let recovering = true;
+let stoppingSweeps = 0;
+let shuttingDown = false;
+const cancelledRuns = new Set<string>();
+const blockedComputers = new Set<string>();
 const maxTaskQueue = Math.max(1, Number(process.env.MAX_TASK_QUEUE || 100));
 const maxTaskRuns = Math.max(1, Number(process.env.MAX_TASK_RUNS || 3));
+const terminalStates = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
+const activeStates = new Set(['running', 'waiting_approval', 'waiting_input']);
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": allowedOrigin(res.req.headers.origin), "Vary": "Origin", "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Open-Harness-Machine", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" });
@@ -47,15 +66,6 @@ function json(res: ServerResponse, status: number, body: unknown) {
 function raw(res: ServerResponse, status: number, contentType: string, value: string | Buffer) {
   res.writeHead(status, { 'Content-Type': contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
   res.end(value);
-}
-async function providerFailure(response: Response) {
-  try {
-    const value = await response.json() as { error?: string | { message?: string }; message?: string };
-    const detail = typeof value.error === 'string' ? value.error : value.error?.message || value.message;
-    if (detail) return String(detail).trim().slice(0, 500);
-  } catch { /* Some providers return an empty or non-JSON error response. */ }
-  const messages: Record<number,string> = { 401: 'The API key was rejected.', 402: 'The provider account needs credits.', 403: 'The provider denied access.', 404: 'The model server address was not found.', 429: 'The provider rate limit was reached. Try again shortly.' };
-  return messages[response.status] || `The provider returned HTTP ${response.status}.`;
 }
 // The Tauri mobile webview serves the dashboard from tauri://localhost. Its native HTTP
 // client sends no Origin at all, so this allowance is belt and braces for the cases where
@@ -99,7 +109,7 @@ function interruptRunForCommand(command: { payload?: unknown }, error: string) {
   event(run.id, 'run.interrupted', { error });
 }
 function profileResponse(profile: AgentProfile) {
-  const live = store.listRuns().find(run => run.agent_id === profile.id && ["running", "waiting_approval", "waiting_input"].includes(run.state));
+  const live = store.liveRuns().find(run => run.agent_id === profile.id && ["running", "waiting_approval", "waiting_input"].includes(run.state));
   const snapshot = live ? profiles.runSnapshot(live.id) : null;
   return { profile, effectiveModel: profiles.effective(profile), activeRevision: snapshot?.revision ?? null, pending: Boolean(snapshot && (snapshot.revision !== profile.revision || JSON.stringify(snapshot.effectiveModel) !== JSON.stringify(profiles.effective(profile)) || JSON.stringify(snapshot.computer) !== JSON.stringify(profile.computer))), secretNames: secrets.names(), machine: machines.get(profile.computer.machineId), transfer: machines.transferStatus(profile.id) };
 }
@@ -110,21 +120,114 @@ function selectedSecrets(profile: AgentProfile, effective: ReturnType<Profiles['
 }
 async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) { const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(machine.status === 'suspended' ? `${machine.name} is asleep. Open Open Harness on it, then check this setting again.` : `${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input, secrets: selectedSecrets(profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
 
+function priorHistory(run: RunRow) {
+  const earlier = store.db.prepare("SELECT * FROM runs WHERE conversation_id=? AND agent_id=? AND id<>? AND state IN ('completed','failed','interrupted','cancelled') ORDER BY created_at,rowid").all(run.conversation_id, run.agent_id, run.id) as RunRow[];
+  return conversationHistory(earlier);
+}
+async function watchRemote(run: RunRow, command: { machineId: string; id: string }) {
+  remoteActive.set(run.id, { machineId: command.machineId, commandId: command.id });
+  try {
+    for (;;) {
+      const current = store.getRun(run.id);
+      if (!current || terminalStates.has(current.state)) return;
+      const status = machines.command(command.id);
+      if (!status) throw new Error('The runner command disappeared before completion.');
+      if (['completed', 'failed'].includes(status.state)) {
+        const stopped = remoteStopping.has(run.id);
+        const state = stopped ? 'cancelled' : status.state === 'completed' ? 'completed' : status.result?.interrupted ? 'interrupted' : 'failed';
+        const answer = state === 'completed' ? String(status.result?.text || status.result?.final_response || status.result?.message || status.result?.result || '') : null;
+        const error = state === 'failed' || state === 'interrupted' ? String(status.result?.error || 'Remote runner failed.') : null;
+        store.setRun(run.id, { state, result: answer, error });
+        event(run.id, `run.${state}`, { ...(answer !== null ? { result: answer } : {}), ...(error ? { error } : {}), machineId: command.machineId });
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  } catch (error) {
+    if (!terminalStates.has(store.getRun(run.id)?.state || '')) {
+      const message = error instanceof Error ? error.message : 'Runner tracking failed.';
+      store.setRun(run.id, { state: 'interrupted', error: message }); event(run.id, 'run.interrupted', { error: message });
+    }
+  } finally { remoteActive.delete(run.id); remoteStopping.delete(run.id); void pump(); }
+}
 async function executeRemote(run: RunRow, snapshot: AgentProfile & { effectiveModel: ReturnType<Profiles['effective']> }) {
   const machine = machines.canAssign(snapshot.computer.machineId, run.agent_id);
   if (!reachable(machine)) throw new Error(`${machine.name} is offline. This task will remain queued until its runner reconnects.`);
-  const command = machines.enqueue(machine.id, run.agent_id, 'run', { runId: run.id, prompt: run.prompt, snapshot, secrets: selectedSecrets(snapshot, snapshot.effectiveModel), coordinationToken: agentToken(run.agent_id) });
-  remoteActive.set(run.id, { machineId: machine.id, commandId: command.id });
+  const command = machines.enqueue(machine.id, run.agent_id, 'run', { runId: run.id, prompt: run.prompt, history: priorHistory(run), snapshot, secrets: selectedSecrets(snapshot, snapshot.effectiveModel), coordinationToken: agentToken(run.agent_id) });
   event(run.id, 'runner.dispatched', { commandId: command.id, machineId: machine.id, machineName: machine.name });
-  try {
-    for (;;) {
-      await new Promise(resolve => setTimeout(resolve, 250));
-      const current = store.getRun(run.id); if (!current || current.state === 'cancelled') throw Object.assign(new Error('Run cancelled.'), { cancelled: true });
-      const status = machines.command(command.id); if (!status) throw new Error('The runner command disappeared before completion.');
-      if (status.state === 'completed') return status.result || {};
-      if (status.state === 'failed') throw new Error(String((status.result as { error?: string } | null)?.error || 'Remote runner failed.'));
+  await watchRemote(run, command);
+}
+
+function recoverRunResponses() {
+  for (const [table, kind, key] of [['run_inputs', 'input', 'inputId'], ['approvals', 'approval', 'approvalId']] as const) {
+    const pending = store.db.prepare(`SELECT id,run_id,state FROM ${table} WHERE state IN ('submitting','submitted')`).all() as Array<{ id: string; run_id: string; state: string }>;
+    for (const request of pending) {
+      const run = store.getRun(request.run_id);
+      const command = store.db.prepare(`SELECT state,payload_json FROM runner_commands WHERE kind=? AND json_extract(payload_json,'$.runId')=? AND json_extract(payload_json,'$.${key}')=? ORDER BY created_at DESC,rowid DESC LIMIT 1`).get(kind, request.run_id, request.id) as { state: string; payload_json: string } | undefined;
+      const active = Boolean(run && activeStates.has(run.state));
+      const state = !active ? 'expired' : !command || command.state === 'failed' ? 'pending' : command.state === 'completed' ? kind === 'input' ? 'answered' : String(JSON.parse(command.payload_json).decision) : 'submitted';
+      store.db.prepare(`UPDATE ${table} SET state=?,resolved_at=? WHERE id=?`).run(state, ['pending', 'submitted'].includes(state) ? null : new Date().toISOString(), request.id);
     }
-  } finally { remoteActive.delete(run.id); }
+  }
+  for (const run of store.liveRuns()) {
+    const approvalPending = store.db.prepare("SELECT 1 FROM approvals WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+    const inputPending = store.db.prepare("SELECT 1 FROM run_inputs WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+    if (approvalPending || inputPending || ['waiting_input', 'waiting_approval'].includes(run.state)) store.setRun(run.id, { state: approvalPending ? 'waiting_approval' : inputPending ? 'waiting_input' : 'running' });
+  }
+}
+
+function blockCleanup(agentId: string, computer: ComputerConfig, error: string) {
+  stoppingAgents.add(agentId); blockedComputers.add(computer.machineId);
+  store.db.prepare('INSERT OR REPLACE INTO runtime_cleanup(agent_id,computer_json,error) VALUES(?,?,?)').run(agentId, JSON.stringify(computer), error);
+}
+async function cleanPreviousRuntime(agentId: string, computer: ComputerConfig) {
+  if (process.env.OPEN_HARNESS_MOCK !== '1') {
+    if (computer.access === 'direct') {
+      const handle = store.db.prepare('SELECT pid,identity FROM runtime_processes WHERE agent_id=?').get(agentId) as { pid: number; identity: string } | undefined;
+      if (!handle) throw new Error('An older native run has no saved process identity. Its process tree must be stopped before this computer can resume work.');
+      await recoverNativeProcess(handle.pid, handle.identity);
+    } else await new HermesGateway(`open-harness-${validId(agentId)}`).stop();
+  }
+  store.db.prepare('DELETE FROM runtime_processes WHERE agent_id=?').run(agentId);
+  store.db.prepare('DELETE FROM runtime_cleanup WHERE agent_id=?').run(agentId);
+  stoppingAgents.delete(agentId);
+  const remaining = store.db.prepare('SELECT computer_json FROM runtime_cleanup').all() as { computer_json: string }[];
+  if (!remaining.some(row => JSON.parse(row.computer_json).machineId === computer.machineId)) blockedComputers.delete(computer.machineId);
+}
+async function recoverRuns() {
+  recoverRunResponses();
+  const cleaned = new Set<string>();
+  // Also recover probes and prior failed cleanup, including failures on a run that
+  // was already terminal when the coordinator restarted.
+  const leftovers = store.db.prepare('SELECT agent_id,computer_json FROM runtime_cleanup').all() as { agent_id: string; computer_json: string }[];
+  for (const row of store.db.prepare('SELECT agent_id FROM runtime_processes').all() as { agent_id: string }[]) {
+    const profile = profiles.get(row.agent_id);
+    if (profile && !leftovers.some(item => item.agent_id === row.agent_id)) leftovers.push({ agent_id: row.agent_id, computer_json: JSON.stringify({ ...profile.computer, machineId: 'local', access: 'direct' }) });
+  }
+  for (const row of leftovers) {
+    const computer = JSON.parse(row.computer_json) as ComputerConfig;
+    try { await cleanPreviousRuntime(row.agent_id, computer); cleaned.add(row.agent_id); }
+    catch (error) { blockCleanup(row.agent_id, computer, error instanceof Error ? error.message : String(error)); }
+  }
+  for (const run of store.liveRuns()) {
+    const command = store.db.prepare("SELECT id,machine_id FROM runner_commands WHERE kind='run' AND agent_id=? AND json_extract(payload_json,'$.runId')=? ORDER BY created_at DESC LIMIT 1").get(run.agent_id, run.id) as { id: string; machine_id: string } | undefined;
+    if (command) {
+      if (store.db.prepare("SELECT 1 FROM runner_commands WHERE kind='stop' AND json_extract(payload_json,'$.runId')=? AND state IN ('queued','leased','completed') LIMIT 1").get(run.id)) remoteStopping.add(run.id);
+      void watchRemote(run, { id: command.id, machineId: command.machine_id });
+    } else {
+      let error = 'The local runtime restarted. Completed actions were preserved; this run was not replayed.';
+      const computer = (profiles.runSnapshot(run.id) || profiles.get(run.agent_id))?.computer;
+      try {
+        if (!cleaned.has(run.agent_id) && computer) await cleanPreviousRuntime(run.agent_id, computer);
+      } catch (cleanupError) {
+        error += ` Cleanup could not be confirmed: ${cleanupError instanceof Error ? cleanupError.message : cleanupError}`;
+        if (computer) blockCleanup(run.agent_id, computer, error);
+      }
+      store.setRun(run.id, { state: 'interrupted', error }); event(run.id, 'run.interrupted', { error });
+    }
+  }
+  tasks.reconcile();
+  recovering = false;
 }
 
 async function waitRunnerCommand(commandId: string) {
@@ -157,7 +260,7 @@ async function performTransfer(transfer: { id: string; agentId: string; sourceMa
 }
 function ensureProfileDirs(id: string) { validId(id); for (const folder of ['profile', 'private', 'managed']) mkdirSync(join(root, 'agents', id, folder), { recursive: true }); }
 function internalAllowed(agentId: string | null, tool: string, runId?: string) {
-  const run = runId ? store.getRun(runId) : store.listRuns().find(r => r.agent_id === agentId && ['running','waiting_approval','waiting_input'].includes(r.state));
+  const run = runId ? store.getRun(runId) : store.liveRuns().find(r => r.agent_id === agentId && ['running','waiting_approval','waiting_input'].includes(r.state));
   return Boolean(run && run.agent_id === agentId && ['running','waiting_approval','waiting_input'].includes(run.state) && profiles.runSnapshot(run.id)?.allowedTools.includes(tool));
 }
 
@@ -166,7 +269,7 @@ async function gatewayFor(agentId: string, allowedTools: string[] | null = null,
   if (gateway) return gateway;
   if (computer?.access === 'direct') {
     const agentRoot = join(root, 'agents', agentId), profileRoot = join(agentRoot, 'profile');
-    gateway = new HermesGateway(`native-${agentId}`, allowedTools, { cwd: join(root, 'shared'), entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: profileRoot, HERMES_TUI: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } });
+    gateway = new HermesGateway(`native-${agentId}`, allowedTools, { cwd: join(root, 'shared'), entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: profileRoot, HERMES_TUI: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') }, onSpawn: pid => { const identity = processIdentity(pid); if (!identity) throw new Error('Native runtime exited before its identity could be saved.'); store.db.prepare('INSERT OR REPLACE INTO runtime_processes(agent_id,pid,identity) VALUES(?,?,?)').run(agentId, pid, identity); } });
   } else {
     gateway = new HermesGateway(ensureContainer(agentId, root, computer), allowedTools);
   }
@@ -176,24 +279,40 @@ async function gatewayFor(agentId: string, allowedTools: string[] | null = null,
 }
 
 function mapHermesEvent(run: RunRow, value: any) {
-  const type = String(value?.type || value?.event || "runtime.event");
+  const type = String(value?.type || value?.event || 'runtime.event');
   const payload = value?.payload ?? value?.data ?? value;
-  if (type === "approval.request") {
+  const current = store.getRun(run.id);
+  // Buffered runner events can arrive after their completion receipt. Preserve the
+  // transcript, but never turn terminal work back into a waiting run.
+  if (!current || terminalStates.has(current.state)) { event(run.id, type, payload); return; }
+  if (type === 'approval.request') {
+    const requestId = String(payload?.request_id || payload?.id || '');
+    const duplicate = store.db.prepare('SELECT id FROM approvals WHERE run_id=? AND gateway_request_id=?').get(run.id, requestId);
+    if (duplicate) return;
     const approvalId = crypto.randomUUID();
-    store.createApproval(approvalId, run.id, String(payload?.request_id || payload?.id || ""), payload);
-    store.setRun(run.id, { state: "waiting_approval" });
-    event(run.id, "approval.request", { ...payload, approvalId });
-  } else if (type === "clarify.request" || type === "secret.request" || type === "sudo.request") {
-    store.setRun(run.id, { state: "waiting_input" }); event(run.id, type, payload);
+    store.createApproval(approvalId, run.id, requestId, payload);
+    store.setRun(run.id, { state: 'waiting_approval' });
+    event(run.id, type, { ...payload, approvalId });
+  } else if (['clarify.request', 'secret.request', 'sudo.request'].includes(type)) {
+    const inputId = crypto.randomUUID(), requestId = String(payload?.request_id || payload?.id || '');
+    const inserted = store.db.prepare('INSERT OR IGNORE INTO run_inputs(id,run_id,gateway_request_id,type,payload_json,created_at) VALUES(?,?,?,?,?,?)').run(inputId, run.id, requestId, type.split('.')[0], JSON.stringify(payload), new Date().toISOString());
+    if (!inserted.changes) return;
+    store.setRun(run.id, { state: 'waiting_input' }); event(run.id, type, { ...payload, inputId });
   } else {
+    if (['clarify.expire', 'secret.expire', 'sudo.expire'].includes(type)) {
+      store.db.prepare("UPDATE run_inputs SET state='expired',resolved_at=? WHERE run_id=? AND gateway_request_id=? AND state IN ('pending','submitting','submitted')").run(new Date().toISOString(), run.id, String(payload?.request_id || payload?.id || ''));
+      if (!store.pendingInputs(run.id).length) store.setRun(run.id, { state: store.pendingApprovals(run.id).length ? 'waiting_approval' : 'running' });
+    }
     if (type === 'message.delta') tasks.appendOutput(run.id, String(payload?.text || ''));
     event(run.id, type, payload);
   }
 }
 
 async function execute(run: RunRow) {
+  executingAgents.add(run.agent_id);
   store.setRun(run.id, { state: "running" });
   let subscribed: { gateway: HermesGateway; listener: (value: any) => void } | null = null;
+  let outcome: { state: 'completed' | 'failed' | 'interrupted' | 'cancelled'; result?: string; error?: string } | undefined;
   try {
     const profile = profiles.get(run.agent_id);
     if (!profile) throw new Error("Agent profile not found. Open Agent settings and save this agent.");
@@ -202,51 +321,72 @@ async function execute(run: RunRow) {
     event(run.id, "run.started", { runId: run.id, agentId: run.agent_id, machineId: assigned.id, machineName: assigned.name });
     event(run.id, "profile.applied", { revision: snapshot.revision, model: snapshot.effectiveModel, allowedTools: snapshot.allowedTools, computer: snapshot.computer });
     if (assigned.id !== 'local') {
-      const result = await executeRemote(run, snapshot);
-      const current = store.getRun(run.id); if (current?.state === 'cancelled') return;
-      const answer = String(result?.text || result?.final_response || result?.message || result?.result || '');
-      store.setRun(run.id, { state: 'completed', result: answer }); event(run.id, 'run.completed', { result: answer, machineId: assigned.id });
+      await executeRemote(run, snapshot);
       return;
     }
     const priorGateway = gateways.get(run.agent_id);
     if (priorGateway) { await priorGateway.stop(); gateways.delete(run.agent_id); }
-    if (!coordinationSockets.has(run.agent_id)) coordinationSockets.set(run.agent_id, coordinationSocket(join(root, 'agents', run.agent_id, 'managed'), run.agent_id, (req, res) => { server.emit('request', req, res); }));
-    await coordinationSockets.get(run.agent_id);
-    if (store.getRun(run.id)?.state === 'cancelled') return;
     const native = snapshot.computer.access === 'direct';
-    prepareProfile(root, snapshot, snapshot.effectiveModel, secrets, agentToken(run.agent_id), run.id, native ? { cwd: join(root, 'shared'), coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlSocket: join(root, 'agents', run.agent_id, 'managed', 'coord.sock') } : {});
+    const useSocket = process.platform === 'linux' || (native && process.platform !== 'win32');
+    let controlSocket: string | undefined;
+    if (useSocket) {
+      if (!coordinationSockets.has(run.agent_id)) coordinationSockets.set(run.agent_id, coordinationSocket(join(root, 'agents', run.agent_id, 'managed'), run.agent_id, (req, res) => { server.emit('request', req, res); }));
+      const socket = await coordinationSockets.get(run.agent_id)!;
+      controlSocket = native ? socket.socketPath : undefined;
+    }
+    if (cancelledRuns.has(run.id) || store.getRun(run.id)?.state === 'cancelled') return;
+    prepareProfile(root, snapshot, snapshot.effectiveModel, secrets, agentToken(run.agent_id), run.id, {
+      ...(native ? { cwd: join(root, 'shared'), coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs') } : {}),
+      ...(useSocket ? { ...(controlSocket ? { controlSocket } : {}) } : { controlUrl: `http://${native ? '127.0.0.1' : 'host.docker.internal'}:${port}` }),
+    });
     const gateway = await gatewayFor(run.agent_id, snapshot.allowedTools, snapshot.computer);
     const listener = (value: any) => mapHermesEvent(run, value); gateway.on("event", listener); subscribed = { gateway, listener };
-    const session = run.session_id ? { session_id: run.session_id } : await gateway.request("session.create", { cwd: native ? join(root, 'shared') : "/workspace/shared", profile: "default" });
-    if (store.getRun(run.id)?.state === "cancelled") return;
+    const session = run.session_id ? { session_id: run.session_id } : await gateway.request("session.create", { cwd: native ? join(root, 'shared') : "/workspace/shared", profile: "default", messages: priorHistory(run) });
+    if (cancelledRuns.has(run.id) || store.getRun(run.id)?.state === "cancelled") return;
     const sessionId = String(session?.session_id || session?.id || run.session_id || "");
     if (!sessionId) throw new Error("Hermes did not return a session ID.");
     store.setRun(run.id, { session_id: sessionId }); active.set(run.id, { gateway, sessionId });
     const result = await gateway.submitPrompt(sessionId, run.prompt);
-    active.delete(run.id);
     const current = store.getRun(run.id);
-    if (current?.state === "cancelled") return;
+    if (cancelledRuns.has(run.id) || current?.state === "cancelled") return;
     const answer = String(result?.text || result?.final_response || result?.message || "");
-    store.setRun(run.id, { state: "completed", result: answer }); event(run.id, "run.completed", { result: answer });
+    outcome = { state: 'completed', result: answer };
   } catch (error) {
-    active.delete(run.id); const message = error instanceof Error ? error.message : "Hermes execution failed.";
-    const state = store.getRun(run.id)?.state === "cancelled" || remoteStopping.has(run.id) ? "cancelled" : (error as { interrupted?: boolean })?.interrupted ? "interrupted" : "failed";
+    if (terminalStates.has(store.getRun(run.id)?.state || '')) return;
+    const message = error instanceof Error ? error.message : "Hermes execution failed.";
+    const state = cancelledRuns.has(run.id) || store.getRun(run.id)?.state === "cancelled" || remoteStopping.has(run.id) ? "cancelled" : (error as { interrupted?: boolean })?.interrupted ? "interrupted" : "failed";
     remoteStopping.delete(run.id);
-    store.setRun(run.id, { state, error: message }); event(run.id, `run.${state}`, { error: message });
-  } finally { if (subscribed) subscribed.gateway.off("event", subscribed.listener); void pump(); }
+    outcome = { state, error: message };
+  } finally {
+    if (subscribed) {
+      subscribed.gateway.off("event", subscribed.listener);
+      try { await subscribed.gateway.stop(); gateways.delete(run.agent_id); store.db.prepare('DELETE FROM runtime_processes WHERE agent_id=?').run(run.agent_id); }
+      catch (error) {
+        const computer = (profiles.runSnapshot(run.id) || profiles.get(run.agent_id))?.computer;
+        const message = `Runtime cleanup could not be confirmed: ${error instanceof Error ? error.message : error}`;
+        if (computer) blockCleanup(run.agent_id, computer, message);
+        outcome = { state: 'interrupted', error: message };
+      }
+    }
+    active.delete(run.id);
+    if (cancelledRuns.has(run.id) && outcome?.state !== 'interrupted') outcome = { state: 'cancelled' };
+    if (outcome) { store.setRun(run.id, outcome); event(run.id, `run.${outcome.state}`, outcome); }
+    cancelledRuns.delete(run.id); executingAgents.delete(run.agent_id); void pump();
+  }
 }
 
 async function pump() {
-  if (pumping) return; pumping = true;
+  if (pumping || recovering || shuttingDown || stoppingSweeps) return; pumping = true;
   try {
     while (store.activeCount() < 4) {
       const next = store.queued().find(candidate =>
-        !store.agentBusy(candidate.agent_id) && !stoppingAgents.has(candidate.agent_id) && !machines.transferring(candidate.agent_id) &&
+        !store.agentBusy(candidate.agent_id) && !executingAgents.has(candidate.agent_id) && !probingAgents.has(candidate.agent_id) && !stoppingAgents.has(candidate.agent_id) && !machines.transferring(candidate.agent_id) &&
         (!tasks.isTaskRun(candidate.id) || tasks.activeRunCount() < maxTaskRuns) &&
         (candidate.depth > 0 || store.activeTopLevelCount() < 2) && (() => {
           const profile = profiles.get(candidate.agent_id); if (!profile) return true;
+          if (blockedComputers.has(profile.computer.machineId)) return false;
           try { if (!reachable(machines.canAssign(profile.computer.machineId, candidate.agent_id))) return false; } catch { return false; }
-          const occupants = store.listRuns().filter(run => ['running','waiting_approval','waiting_input'].includes(run.state)).map(run => profiles.runSnapshot(run.id) || profiles.get(run.agent_id)).filter((other): other is AgentProfile => Boolean(other && other.computer.machineId === profile.computer.machineId));
+          const occupants = store.liveRuns().map(run => profiles.runSnapshot(run.id) || profiles.get(run.agent_id)).filter((other): other is AgentProfile => Boolean(other && other.computer.machineId === profile.computer.machineId));
           if (occupants.length >= profile.computer.resources.concurrency) return false;
           return profile.computer.desktop !== 'existing' || occupants.every(other => other.computer.desktop !== 'existing');
         })());
@@ -257,6 +397,8 @@ async function pump() {
 }
 
 async function stopRunTree(runId: string) {
+  stoppingSweeps++;
+  try {
   const ids = [runId, ...store.descendants(runId).map(item => item.id)];
   let stopped = 0;
   for (const id of ids) {
@@ -270,7 +412,7 @@ async function stopRunTree(runId: string) {
       event(id, 'stop.pending', { machineId: remote.machineId, message: 'Stop requested. Waiting for the runner to confirm.' });
       stoppingAgents.delete(run.agent_id); stopped++; continue;
     }
-    store.setRun(id, { state: "cancelled" });
+    cancelledRuns.add(id);
     try {
       const gateway = live?.gateway || (run.state === 'queued' ? undefined : gateways.get(run.agent_id));
       if (live) await live.gateway.request("session.interrupt", { session_id: live.sessionId }, 5000).catch(() => {});
@@ -279,14 +421,16 @@ async function stopRunTree(runId: string) {
       const message = error instanceof Error ? error.message : "Runtime stop could not be confirmed.";
       store.setRun(id, { state: "interrupted", error: message });
       event(id, "run.interrupted", { error: message });
-      // Keep this agent out of admission until the service restarts and Docker is checked.
+      const computer = (profiles.runSnapshot(id) || profiles.get(run.agent_id))?.computer;
+      if (computer) blockCleanup(run.agent_id, computer, message);
       throw error;
     }
+    store.setRun(id, { state: "cancelled" });
     stoppingAgents.delete(run.agent_id);
     event(id, "run.cancelled", { stoppedWithParent: id !== runId }); stopped++;
   }
-  void pump();
   return stopped;
+  } finally { stoppingSweeps--; void pump(); }
 }
 
 async function waitForRun(id: string, timeoutMs = 30 * 60 * 1000) {
@@ -315,10 +459,10 @@ function createRun(input: { agentId: string; conversationId?: string; prompt: st
   const run: RunRow = { id: crypto.randomUUID(), agent_id: input.agentId, conversation_id: input.conversationId || crypto.randomUUID(), prompt: input.prompt.trim(), state: "queued", session_id: null, parent_run_id: input.parentRunId || null, depth, created_at: stamp, updated_at: stamp, result: null, error: null };
   store.createRun(run); event(run.id, "run.queued", { position: store.listRuns().filter(item => item.state === "queued").length }); if (!input.deferStart) void pump(); return run;
 }
-function runResponse(run: RunRow) { const profile = profiles.runSnapshot(run.id) || profiles.get(run.agent_id); const machineId = profile?.computer.machineId || null; let machineConnection: string | null = null; if (machineId) { try { machineConnection = machines.get(machineId).status; } catch { machineConnection = 'revoked'; } } return { ...run, machine_id: machineId, machine_connection: machineConnection }; }
+function runResponse(run: RunRow) { const profile = profiles.runSnapshot(run.id) || profiles.get(run.agent_id); const machineId = profile?.computer.machineId || null; let machineConnection: string | null = null; if (machineId) { try { machineConnection = machines.get(machineId).status; } catch { machineConnection = 'revoked'; } } return { ...run, machine_id: machineId, machine_connection: machineConnection, pendingApprovals: store.pendingApprovals(run.id), pendingInputs: store.pendingInputs(run.id) }; }
 
 function listFiles(dir: string) {
-  if (!dir.startsWith(root)) throw new Error("Invalid workspace path.");
+  safeWorkspacePath(root, relative(root, dir));
   mkdirSync(dir, { recursive: true });
   return readdirSync(dir, { withFileTypes: true }).filter(entry => entry.isFile()).slice(0, 200).map(entry => {
     const path = join(dir, entry.name), stat = statSync(path); return { name: entry.name, size: stat.size, updatedAt: stat.mtime.toISOString(), mimeType: mimeType(entry.name), encoding: isText(entry.name) ? "utf8" : "base64" };
@@ -329,14 +473,28 @@ function mimeType(name: string) {
   const ext = name.toLowerCase().split(".").pop();
   return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml", pdf: "application/pdf", json: "application/json", csv: "text/csv", md: "text/markdown", html: "text/html" } as Record<string, string>)[ext || ""] || (isText(name) ? "text/plain" : "application/octet-stream");
 }
-function workspaceDir(url: URL) { const scope = url.searchParams.get("scope") || "shared", agentId = url.searchParams.get("agentId") || ""; return { scope, dir: scope === "private" ? join(root, "agents", agentId.replace(/[^a-zA-Z0-9_.-]/g, "-"), "private") : join(root, "shared") }; }
-function safeFile(dir: string, name: string) { if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(name) || name.includes("..")) throw new Error("Invalid filename."); const target = join(dir, name); if (!target.startsWith(dir + "/")) throw new Error("Invalid path."); return target; }
+function workspaceDir(url: URL) {
+  const scope = url.searchParams.get('scope') || 'shared', agentId = url.searchParams.get('agentId') || '';
+  if (!['shared', 'private'].includes(scope)) throw new ProfileError('Invalid workspace scope.');
+  if (scope === 'private') validId(agentId);
+  return { scope, dir: safeWorkspacePath(root, scope === 'private' ? `agents/${agentId}/private` : 'shared') };
+}
+function safeFile(dir: string, name: string) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(name) || name.includes('..')) throw new Error('Invalid filename.');
+  return safeWorkspacePath(root, relative(root, resolveContainedPath(dir, name)));
+}
 
 const server = createServer(async (req, res) => {
+  if (recovering) return json(res, 503, { error: 'The coordinator is recovering its previous work. Retry shortly.' });
   const origin = req.headers.origin;
   if (origin && !LOCAL_ORIGIN.test(origin)) return json(res, 403, { error: "Open Harness accepts local browser clients only." });
   if (req.method === "OPTIONS") { res.writeHead(204, { "Access-Control-Allow-Origin": allowedOrigin(origin), "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Open-Harness-Machine", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" }); return res.end(); }
   const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
+  let probingAgent: string | null = null;
+  function reserveProbe(id: string) {
+    if (store.agentBusy(id) || executingAgents.has(id) || probingAgents.has(id) || stoppingAgents.has(id)) throw new ProfileError('This agent is busy. Wait for its current run or connection check to finish.', 409);
+    probingAgents.add(id); probingAgent = id;
+  }
   try {
     if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); if (!loopbackHost(req.headers.host)) return json(res, 403, { error: 'Dashboard bootstrap requires a loopback address. Open Open Harness at http://localhost:3000.' }); return json(res, 200, { token: secrets.token, runtime: await dockerStatusCached(), version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } }); }
     // Phones never receive the master token. They already hold a revocable per-device
@@ -373,7 +531,27 @@ const server = createServer(async (req, res) => {
     const runnerCommand = url.pathname.match(/^\/v1\/runner\/commands\/([^/]+)\/(events|complete)$/);
     if (runner && runnerCommand && req.method === 'POST') {
       const input = await body(req), commandId = runnerCommand[1];
-      if (runnerCommand[2] === 'complete') { const command = machines.command(commandId); machines.finish(runner, commandId, input.result || { error: input.error }, Boolean(input.error)); if (command?.agentId) void pump(); return json(res, 200, { ok: true }); }
+      if (runnerCommand[2] === 'complete') {
+        const command = machines.command(commandId), receipt = machines.finish(runner, commandId, input.result || { error: input.error }, Boolean(input.error));
+        if (!receipt.duplicate && command && ['input', 'approval'].includes(command.kind)) {
+          const row = store.db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(command.id) as { payload_json: string };
+          const payload = JSON.parse(row.payload_json) as { runId?: string; inputId?: string; approvalId?: string; type?: string; decision?: string };
+          const run = store.getRun(String(payload.runId || ''));
+          if (run && run.agent_id === command.agentId) {
+            const table = command.kind === 'input' ? 'run_inputs' : 'approvals', requestId = command.kind === 'input' ? payload.inputId : payload.approvalId;
+            const isActive = activeStates.has(run.state), failed = Boolean(input.error);
+            const state = !isActive ? 'expired' : failed ? 'pending' : command.kind === 'input' ? 'answered' : String(payload.decision);
+            const changed = store.db.prepare(`UPDATE ${table} SET state=?,resolved_at=? WHERE id=? AND run_id=? AND state='submitted'`).run(state, isActive && failed ? null : new Date().toISOString(), String(requestId || ''), run.id);
+            if (changed.changes && isActive) {
+              const approvalPending = store.db.prepare("SELECT 1 FROM approvals WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+              const inputPending = store.db.prepare("SELECT 1 FROM run_inputs WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+              store.setRun(run.id, { state: approvalPending ? 'waiting_approval' : inputPending ? 'waiting_input' : 'running' });
+              event(run.id, failed ? `${command.kind}.delivery_failed` : `${command.kind}.resolved`, command.kind === 'input' ? { inputId: requestId, type: payload.type, ...(failed ? { error: 'The runner could not deliver this response. Try again.' } : {}) } : { approvalId: requestId, decision: payload.decision, ...(failed ? { error: 'The runner could not deliver this decision. Try again.' } : {}) });
+            }
+          }
+        }
+        if (command?.agentId) void pump(); return json(res, 200, { ok: true });
+      }
       const eventId = String(input.eventId || ''); if (!eventId) return json(res, 400, { error: 'Event ID is required.' });
       const claimedRunId = String(input.runId || '');
       if (machines.receiveEvent(runner, commandId, eventId, claimedRunId)) { const run = store.getRun(claimedRunId); if (run) mapHermesEvent(run, input.event); }
@@ -398,29 +576,18 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action)); }
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/model-test') {
       const input = await body(req), model = validateModel(input.model);
-      if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, {
-        ok: false,
-        message: 'Mock mode is active, so no model provider was contacted. Restart with npm run dev or npm run dev:fast to test this API key and run real tasks.',
-      });
-      if (model.credentialRef && !secrets.has(model.credentialRef)) return json(res, 200, { ok: false, message: 'Save your API key first.' });
-      const endpoints: Record<string,string> = { xai: 'https://api.x.ai/v1', openrouter: 'https://openrouter.ai/api/v1', openai: 'https://api.openai.com/v1' };
-      const baseUrl = (model.baseUrl || endpoints[model.provider] || '').replace(/\/$/, '');
-      if (!baseUrl) return json(res, 200, { ok: false, message: 'Enter the address of your model server.' });
-      const key = model.credentialRef ? secrets.environment()[model.credentialRef] : '';
-      try {
-        const headers = { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) };
-        const catalogResponse = await fetch(`${baseUrl}/models`, { headers, signal: AbortSignal.timeout(15_000), redirect: 'error' });
-        if (!catalogResponse.ok) return json(res, 200, { ok: false, message: await providerFailure(catalogResponse) });
-        const catalog = await catalogResponse.json().catch(() => null) as { data?: Array<{ id?: string }> } | null;
-        const modelIds = Array.isArray(catalog?.data) ? catalog.data.map(item => String(item.id || '')).filter(Boolean) : [];
-        if (modelIds.length && !modelIds.includes(model.model)) return json(res, 200, { ok: false, message: `The provider connection works, but model ${model.model} is not available to this API key.` });
-        const completion = await fetch(`${baseUrl}/chat/completions`, {
-          method: 'POST', headers, signal: AbortSignal.timeout(30_000), redirect: 'error',
-          body: JSON.stringify({ model: model.model, messages: [{ role: 'user', content: 'Reply with OK.' }], max_tokens: 1, stream: false }),
-        });
-        if (!completion.ok) return json(res, 200, { ok: false, message: await providerFailure(completion) });
-        return json(res, 200, { ok: true, message: 'Provider authenticated and the selected model accepted a live test request.' });
-      } catch (error) { return json(res, 200, { ok: false, message: error instanceof Error ? error.message : 'Could not reach the model provider.' }); }
+      if (input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > 100_000)) throw new ProfileError('Invalid API key.');
+      const revision = Number(input.revision ?? profiles.defaults().revision);
+      if (input.save && revision !== profiles.defaults().revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409);
+      const key = input.apiKey === undefined || input.apiKey === '' ? secrets.environment()[model.credentialRef] || '' : input.apiKey;
+      const tested = await testModelConnection(model, key);
+      if (!tested.ok || !input.save) return json(res, 200, tested);
+      // Recheck after inference. Never replace a credential that another agent or
+      // the previously working model still references.
+      if (revision !== profiles.defaults().revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409);
+      const savedModel = { ...model };
+      if (input.apiKey) { savedModel.credentialRef = `MODEL_${crypto.randomUUID().replaceAll('-', '').toUpperCase()}`; secrets.set(savedModel.credentialRef, input.apiKey); }
+      return json(res, 200, { ...tested, ...profiles.setDefaults(savedModel, revision) });
     }
     if (url.pathname === '/v1/machines') {
       if (req.method === 'GET') return json(res, 200, { machines: machines.list() });
@@ -451,6 +618,7 @@ const server = createServer(async (req, res) => {
         const profile = input.agentId ? profiles.get(String(input.agentId)) || undefined : undefined, checked = machines.test(machineId, profile);
         if (!checked.ok || !profile || process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, checked);
         try {
+          if (machineId === 'local') reserveProbe(profile.id);
           ensureProfileDirs(profile.id);
           const check = { action: 'computer', desktop: profile.computer.desktop };
           const result = machineId === 'local' ? profile.computer.access === 'direct' ? nativeRuntimeProbe(join(root, 'agents', profile.id, 'profile'), check) : await runtimeProbe(ensureContainer(profile.id, root, profile.computer), check) : await runnerProbe(profile, 'probe-runtime', check);
@@ -509,6 +677,7 @@ const server = createServer(async (req, res) => {
       }
       if (!profile) return json(res, 404, { error: 'Agent profile not found.' });
       if (action === 'profile' && req.method === 'GET') return json(res, 200, profileResponse(profile));
+      if (action !== 'profile' && profile.computer.machineId === 'local') reserveProbe(id);
       if (action === 'tools' && req.method === 'GET') {
         ensureProfileDirs(id);
         const catalog = profile.computer.machineId === 'local' ? await discoverTools(id, root, profile) : await runnerProbe(profile, 'probe-tools') as ToolCatalog;
@@ -541,7 +710,7 @@ const server = createServer(async (req, res) => {
         const baseUrl = model.baseUrl || endpoints[model.provider];
         if (!baseUrl) return json(res, 200, { ok: false, message: 'This provider does not expose a compatible model-list endpoint. Model authentication will be checked by Hermes at task start.' });
         ensureProfileDirs(id);
-        try { return json(res, 200, profile.computer.machineId === 'local' ? await runtimeProbe(ensureContainer(id, root, profile.computer), { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' }) : await runnerProbe(profile, 'probe-runtime', { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' })); }
+        try { const check = { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' }; return json(res, 200, profile.computer.machineId === 'local' ? profile.computer.access === 'direct' ? nativeRuntimeProbe(join(root, 'agents', id, 'profile'), check) : await runtimeProbe(ensureContainer(id, root, profile.computer), check) : await runnerProbe(profile, 'probe-runtime', check)); }
         catch (error) { return json(res, 200, { ok: false, message: error instanceof Error ? error.message : 'Connection failed.' }); }
       }
       if (action === 'connector-check' && req.method === 'POST') {
@@ -552,7 +721,7 @@ const server = createServer(async (req, res) => {
         if (tested.secretRef && !secrets.has(tested.secretRef)) return json(res, 200, { status: 'missing_credentials', error: `Add secret ${tested.secretRef}.`, tools: [] });
         try {
           ensureProfileDirs(id);
-          const result = process.env.OPEN_HARNESS_MOCK === '1' ? { status: 'connected', tools: [{ name: 'lookup', description: 'Mock connected tool' }] } : profile.computer.machineId === 'local' ? await runtimeProbe(ensureContainer(id, root, profile.computer), { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} }) : await runnerProbe(profile, 'probe-runtime', { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} });
+          const result = process.env.OPEN_HARNESS_MOCK === '1' ? { status: 'connected', tools: [{ name: 'lookup', description: 'Mock connected tool' }] } : profile.computer.machineId === 'local' ? profile.computer.access === 'direct' ? nativeRuntimeProbe(join(root, 'agents', id, 'profile'), { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} }) : await runtimeProbe(ensureContainer(id, root, profile.computer), { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} }) : await runnerProbe(profile, 'probe-runtime', { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} });
           const tools = (result.tools as Array<{ name: string; description: string }>).map(t => ({ id: `mcp_${tested.name}_${t.name}`, name: t.name, description: t.description, group: 'mcp', available: true }));
           const prior = store.db.prepare('SELECT json FROM tool_catalogs WHERE agent_id=?').get(id) as { json: string } | undefined;
           const catalog: ToolCatalog = prior ? JSON.parse(prior.json) : { source: 'runtime', tools: [] };
@@ -629,17 +798,96 @@ const server = createServer(async (req, res) => {
       if (action === "runs" && req.method === "GET") return json(res, 200, { runs: tasks.getTask(taskId).runs });
     }
     if (req.method === "POST" && url.pathname === "/v1/runs") return json(res, 202, runResponse(createRun(await body(req))));
-    if (req.method === "GET" && url.pathname === "/v1/runs") return json(res, 200, { runs: store.listRuns().map(runResponse) });
-    const runMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)(?:\/(events|steer|stop|approval))?$/);
+    if (req.method === 'GET' && url.pathname === '/v1/runs') return json(res, 200, { runs: store.listRuns(1000).map(runResponse) });
+    if (req.method === 'GET' && url.pathname === '/v1/conversations') {
+      const agentId = url.searchParams.get('agentId');
+      const rows = (agentId ? store.db.prepare('SELECT * FROM runs WHERE agent_id=? ORDER BY created_at,rowid').all(agentId) : store.db.prepare('SELECT * FROM runs ORDER BY created_at,rowid').all()) as RunRow[];
+      const conversations = new Map<string, { id: string; agentId: string; title: string; updatedAt: string; runs: ReturnType<typeof runResponse>[] }>();
+      for (const run of rows) {
+        const key = `${run.agent_id}:${run.conversation_id}`;
+        const conversation = conversations.get(key) || { id: run.conversation_id, agentId: run.agent_id, title: run.prompt.slice(0, 52), updatedAt: run.updated_at, runs: [] };
+        conversation.runs.push(runResponse(run)); conversation.updatedAt = run.updated_at > conversation.updatedAt ? run.updated_at : conversation.updatedAt; conversations.set(key, conversation);
+      }
+      return json(res, 200, { conversations: [...conversations.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) });
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/runs/stop-all') { let stopped = 0; for (const run of store.db.prepare("SELECT * FROM runs WHERE parent_run_id IS NULL AND state IN ('queued','running','waiting_approval','waiting_input')").all() as RunRow[]) stopped += await stopRunTree(run.id); return json(res, 200, { stopped }); }
+    const runMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)(?:\/(events|steer|stop|approval|input))?$/);
     if (runMatch) {
       const run = store.getRun(runMatch[1]); if (!run) return json(res, 404, { error: "Run not found." }); const action = runMatch[2];
       if (!action && req.method === "GET") return json(res, 200, runResponse(run));
       if (action === "events" && req.method === "GET") return json(res, 200, { events: store.events(run.id, Number(url.searchParams.get("after") || 0)), run: runResponse(store.getRun(run.id)!) });
       if (action === "steer" && req.method === "POST") { const input = await body(req), live = active.get(run.id), remote = remoteActive.get(run.id); if (!live && !remote) return json(res, 409, { error: "Run is not active." }); if (live) await live.gateway.request("session.steer", { session_id: live.sessionId, text: String(input.text || "") }); else machines.enqueue(remote!.machineId, run.agent_id, 'steer', { runId: run.id, commandId: remote!.commandId, text: String(input.text || '') }); event(run.id, "run.steered", { text: input.text }); return json(res, 200, { ok: true }); }
       if (action === "stop" && req.method === "POST") return json(res, 200, { ok: true, stopped: await stopRunTree(run.id) });
-      if (action === "approval" && req.method === "POST") { const input = await body(req), approval = store.approval(String(input.approvalId)); if (!approval || approval.run_id !== run.id) return json(res, 404, { error: "Approval not found." }); const live = active.get(run.id), remote = remoteActive.get(run.id); if (!live && !remote) return json(res, 409, { error: "Run is not active." }); const decision = input.decision === "approve" ? "approve" : "deny"; if (live) await live.gateway.request("approval.respond", { request_id: approval.gateway_request_id, decision }); else machines.enqueue(remote!.machineId, run.agent_id, 'approval', { runId: run.id, commandId: remote!.commandId, requestId: approval.gateway_request_id, decision }); store.resolveApproval(String(input.approvalId), decision); store.setRun(run.id, { state: "running" }); event(run.id, "approval.resolved", { approvalId: input.approvalId, decision }); return json(res, 200, { ok: true }); }
+      if (action === 'approval' && req.method === 'POST') {
+        const input = await body(req), approval = store.approval(String(input.approvalId));
+        if (!approval || approval.run_id !== run.id) return json(res, 404, { error: 'Approval not found.' });
+        if (approval.state !== 'pending' || !activeStates.has(run.state)) return json(res, 409, { error: 'This approval is no longer pending.' });
+        const live = active.get(run.id), remote = remoteActive.get(run.id);
+        if (!live && !remote) return json(res, 409, { error: 'Run is not active.' });
+        if (!['approve', 'deny'].includes(input.decision)) throw new ProfileError('Choose approve or deny.');
+        const decision = input.decision, approvalId = String(approval.id);
+        const claimed = store.db.prepare("UPDATE approvals SET state='submitting' WHERE id=? AND run_id=? AND state='pending'").run(approvalId, run.id);
+        if (!claimed.changes) return json(res, 409, { error: 'This approval is already being answered.' });
+        try {
+          if (live) {
+            await live.gateway.request('approval.respond', { request_id: approval.gateway_request_id, decision });
+            store.db.prepare("UPDATE approvals SET state=?,resolved_at=? WHERE id=? AND state='submitting'").run(decision, new Date().toISOString(), approvalId);
+            event(run.id, 'approval.resolved', { approvalId, decision });
+          } else {
+            machines.enqueue(remote!.machineId, run.agent_id, 'approval', { runId: run.id, commandId: remote!.commandId, requestId: approval.gateway_request_id, approvalId, decision });
+            store.db.prepare("UPDATE approvals SET state='submitted' WHERE id=? AND state='submitting'").run(approvalId);
+          }
+        } catch (error) {
+          store.db.prepare("UPDATE approvals SET state=? WHERE id=? AND state='submitting'").run(activeStates.has(store.getRun(run.id)?.state || '') ? 'pending' : 'expired', approvalId);
+          throw error;
+        }
+        if (!terminalStates.has(store.getRun(run.id)?.state || '')) {
+          const approvalPending = store.db.prepare("SELECT 1 FROM approvals WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+          const inputPending = store.db.prepare("SELECT 1 FROM run_inputs WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+          store.setRun(run.id, { state: approvalPending ? 'waiting_approval' : inputPending ? 'waiting_input' : 'running' });
+        }
+        return json(res, 200, { ok: true, pending: Boolean(remote) });
+      }
+      if (action === 'input' && req.method === 'POST') {
+        const input = await body(req), pending = store.db.prepare('SELECT * FROM run_inputs WHERE id=? AND run_id=?').get(String(input.inputId), run.id) as { id: string; gateway_request_id: string; type: string; state: string } | undefined;
+        if (!pending) return json(res, 404, { error: 'Input request not found.' });
+        if (pending.state !== 'pending' || !activeStates.has(run.state)) return json(res, 409, { error: 'This input is no longer pending.' });
+        const value = input.value;
+        if ((typeof value !== 'string' && !(pending.type === 'clarify' && Array.isArray(value) && value.every(item => typeof item === 'string'))) || JSON.stringify(value).length > 20_000) throw new ProfileError('Enter a valid response.');
+        const live = active.get(run.id), remote = remoteActive.get(run.id);
+        if (!live && !remote) return json(res, 409, { error: 'Run is not active.' });
+        const claimed = store.db.prepare("UPDATE run_inputs SET state='submitting' WHERE id=? AND run_id=? AND state='pending'").run(pending.id, run.id);
+        if (!claimed.changes) return json(res, 409, { error: 'This input is already being answered.' });
+        try {
+          const fields: Record<string, string> = { clarify: 'answer', secret: 'value', sudo: 'password' };
+          if (live) {
+            await live.gateway.request(`${pending.type}.respond`, { request_id: pending.gateway_request_id, [fields[pending.type]]: value });
+            store.db.prepare("UPDATE run_inputs SET state='answered',resolved_at=? WHERE id=? AND state='submitting'").run(new Date().toISOString(), pending.id);
+            event(run.id, 'input.resolved', { inputId: pending.id, type: pending.type });
+          } else {
+            let response: Record<string, unknown> = { value };
+            if (pending.type !== 'clarify') {
+              const key = store.db.prepare('SELECT encryption_public_key FROM machines WHERE id=?').get(remote!.machineId) as { encryption_public_key?: string };
+              if (!key?.encryption_public_key) throw new MachineError('Reconnect this runner before sending a private response.', 409);
+              response = { encrypted: await encryptRunnerSecret(key.encryption_public_key, String(value)) };
+            }
+            if (!activeStates.has(store.getRun(run.id)?.state || '') || !store.db.prepare("SELECT 1 FROM run_inputs WHERE id=? AND state='submitting'").get(pending.id)) throw new ProfileError('This run or input request finished before the response could be sent.', 409);
+            machines.enqueue(remote!.machineId, run.agent_id, 'input', { runId: run.id, commandId: remote!.commandId, requestId: pending.gateway_request_id, inputId: pending.id, type: pending.type, ...response });
+            store.db.prepare("UPDATE run_inputs SET state='submitted' WHERE id=? AND state='submitting'").run(pending.id);
+          }
+        } catch (error) {
+          store.db.prepare("UPDATE run_inputs SET state=? WHERE id=? AND state='submitting'").run(activeStates.has(store.getRun(run.id)?.state || '') ? 'pending' : 'expired', pending.id);
+          if (pending.type !== 'clarify' && !(error instanceof ProfileError || error instanceof MachineError)) throw new ProfileError('The agent could not accept this private response. Check whether its request is still pending.');
+          throw error;
+        }
+        if (!terminalStates.has(store.getRun(run.id)?.state || '')) {
+          const approvalPending = store.db.prepare("SELECT 1 FROM approvals WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+          const inputPending = store.db.prepare("SELECT 1 FROM run_inputs WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+          store.setRun(run.id, { state: approvalPending ? 'waiting_approval' : inputPending ? 'waiting_input' : 'running' });
+        }
+        return json(res, 200, { ok: true, pending: Boolean(remote) });
+      }
     }
-    if (req.method === "POST" && url.pathname === "/v1/runs/stop-all") { let stopped = 0; for (const run of store.listRuns().filter(item => !item.parent_run_id && ["queued","running","waiting_approval","waiting_input"].includes(item.state))) stopped += await stopRunTree(run.id); return json(res, 200, { stopped }); }
     if (req.method === "POST" && url.pathname === "/v1/secrets") { const input = await body(req); secrets.set(String(input.name), String(input.value)); return json(res, 200, { ok: true, name: input.name }); }
     if (/^\/v1\/agents\/[^/]+\/connectors/.test(url.pathname)) return json(res, 410, { error: 'Connection settings moved into Agent settings. Reload the app.' });
     if (url.pathname === "/v1/files") { const { scope, dir } = workspaceDir(url); mkdirSync(dir, { recursive: true }); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = safeFile(dir, name); if (!existsSync(target)) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readFileSync(target, encoding), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(dir), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = safeFile(dir, String(input.name || "")); writeFileSync(target, content, { encoding, mode: 0o600 }); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = safeFile(dir, String(url.searchParams.get("name") || "")); if (existsSync(target)) unlinkSync(target); return json(res, 200, { ok: true }); } }
@@ -685,13 +933,15 @@ const server = createServer(async (req, res) => {
       if (req.method === "POST" && routineMatch[2] === "run") { const stamp = new Date().toISOString(), run = createRun({ agentId: routine.agent_id, prompt: routine.prompt }); store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, stamp); store.db.prepare("UPDATE schedules SET last_run_at=?,updated_at=? WHERE id=?").run(stamp, stamp, routine.id); return json(res, 202, run); }
       if (req.method === "POST" && routineMatch[2] === "toggle") { store.db.prepare("UPDATE schedules SET enabled=?,updated_at=? WHERE id=?").run(routine.enabled ? 0 : 1, new Date().toISOString(), routine.id); return json(res, 200, { enabled: !routine.enabled }); }
     }
-    if (req.method === "POST" && url.pathname === "/internal/handoff") { const input = await body(req); const parent = store.listRuns().find(run => run.agent_id === internalAgent && ["running","waiting_approval","waiting_input"].includes(run.state)); if (!parent) return json(res, 409, { error: "The delegating agent has no active run." }); if (!internalAllowed(internalAgent, "mcp_open_harness_delegate_named_agent", String(req.headers["x-open-harness-run"] || parent.id))) return json(res, 403, { error: "Delegation is disabled for this run." }); const child = createRun({ agentId: input.agentId, prompt: input.prompt, parentRunId: parent.id }); event(parent.id, "handoff.created", { childRunId: child.id, targetAgentId: input.agentId, prompt: input.prompt }); const result = await waitForRun(child.id); event(parent.id, "handoff.completed", { childRunId: child.id, targetAgentId: input.agentId, state: result.state }); return json(res, 200, { runId: result.id, state: result.state, result: result.result, error: result.error }); }
+    if (req.method === "POST" && url.pathname === "/internal/handoff") { const input = await body(req); const parent = store.liveRuns().find(run => run.agent_id === internalAgent && ["running","waiting_approval","waiting_input"].includes(run.state)); if (!parent) return json(res, 409, { error: "The delegating agent has no active run." }); if (!internalAllowed(internalAgent, "mcp_open_harness_delegate_named_agent", String(req.headers["x-open-harness-run"] || parent.id))) return json(res, 403, { error: "Delegation is disabled for this run." }); const child = createRun({ agentId: input.agentId, prompt: input.prompt, parentRunId: parent.id }); event(parent.id, "handoff.created", { childRunId: child.id, targetAgentId: input.agentId, prompt: input.prompt }); const result = await waitForRun(child.id); event(parent.id, "handoff.completed", { childRunId: child.id, targetAgentId: input.agentId, state: result.state }); return json(res, 200, { runId: result.id, state: result.state, result: result.result, error: result.error }); }
     if (req.method === "POST" && url.pathname === "/internal/task") {
       const input = await body(req), runId = String(req.headers['x-open-harness-run'] || '');
       if (!internalAllowed(internalAgent, 'mcp_open_harness_task', runId)) return json(res, 403, { error: 'Task board access is disabled for this run.' });
-      const profile = profiles.get(internalAgent!); if (!profile) return json(res, 403, { error: 'Agent profile not found.' });
+      const scopedRunId = runId || store.liveRuns().find(run => run.agent_id === internalAgent)?.id || '';
+      const profile = profiles.runSnapshot(scopedRunId); if (!profile) return json(res, 403, { error: 'Run profile not found.' });
       const action = String(input.action || ''), taskId = String(input.taskId || ''), patch = (input.input || {}) as Record<string, unknown>;
       const mayTouch = (task: ReturnType<typeof tasks.getTask>) => task.ownerAgentId === null || task.ownerAgentId === internalAgent || profile.board.assignOthers;
+      if (['create', 'update', 'move'].includes(action) && patch.ownerAgentId && patch.ownerAgentId !== internalAgent && !profile.board.assignOthers) return json(res, 403, { error: 'Assigning another agent requires Board: assign others.' });
       if (action === 'list') return json(res, 200, { boards: tasks.listBoards(), tasks: tasks.listTasks().filter(task => task.ownerAgentId === null || task.ownerAgentId === internalAgent || profile.board.assignOthers) });
       if (action === 'columns') return json(res, 200, { boards: tasks.listBoards() });
       if (action === 'create') return json(res, 201, tasks.createTask({ ...patch, boardId: patch.boardId || input.boardId, ownerAgentId: patch.ownerAgentId === undefined ? internalAgent : patch.ownerAgentId }));
@@ -710,6 +960,13 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/internal/schedule") { if (!internalAllowed(internalAgent, "mcp_open_harness_create_open_harness_routine", String(req.headers["x-open-harness-run"] || ""))) return json(res, 403, { error: "Scheduling is disabled for this run." }); const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)), next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, internalAgent, input.name, input.prompt, minutes, input.timezone || "UTC", 1, next, stamp.toISOString(), stamp.toISOString()); return json(res, 201, { id, nextRunAt: next }); }
     return json(res, 404, { error: "Not found." });
   } catch (error) { return json(res, error instanceof ProfileError || error instanceof TaskError || error instanceof MachineError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
+  finally {
+    if (probingAgent) {
+      const gateway = gateways.get(probingAgent);
+      if (gateway) { try { await gateway.stop(); gateways.delete(probingAgent); store.db.prepare('DELETE FROM runtime_processes WHERE agent_id=?').run(probingAgent); } catch (error) { const computer = profiles.get(probingAgent)?.computer; if (computer) blockCleanup(probingAgent, computer, error instanceof Error ? error.message : String(error)); } }
+      probingAgents.delete(probingAgent); void pump();
+    }
+  }
 });
 
 // createRun throws for an agent that no longer exists, for a full queue, and for depth
@@ -766,7 +1023,11 @@ server.on("error", error => {
   else console.error(`The coordinator could not listen on ${bind}:${port}: ${error.message}`);
   process.exit(1);
 });
-server.listen(port, bind, () => console.log(`Open Harness coordinator listening on http://${bind}:${port}`));
+// Reserve the address before recovery too, including when an older coordinator has no state lock.
+await new Promise<void>(resolve => server.listen(port, bind, resolve));
+await recoverRuns();
+console.log(`Open Harness coordinator listening on http://${bind}:${port}`);
+void pump();
 // Without these the coordinator exits silently when anything throws outside a request —
 // a timer callback, a detached promise — leaving no record of why the service stopped.
 // In-flight runs are marked interrupted on the next start, so exiting is safe; being
@@ -778,7 +1039,6 @@ process.on("uncaughtException", error => { console.error(`The coordinator stoppe
 // hold their CPU/memory reservations forever. SIGINT (Ctrl-C on `npm run harness:serve`)
 // has to clean up exactly like SIGTERM does; stopping gateways in parallel and under a
 // deadline keeps that cleanup from itself hanging on a wedged daemon.
-let shuttingDown = false;
 async function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;

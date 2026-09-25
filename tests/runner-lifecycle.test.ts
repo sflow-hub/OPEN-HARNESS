@@ -1,0 +1,131 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { DEFAULT_COMPUTER, DEFAULT_MODEL } from '../lib/agent-profile';
+import { encryptRunnerSecret, generateRunnerKeyPair } from '../lib/runner-crypto';
+import { assertProcessStopped } from './helpers/process-state';
+
+type Command = { id: string; agentId: string; kind: string; payload: Record<string, unknown> };
+type Delivery = { result?: { final_response?: string; text?: string; ok?: boolean }; error?: string };
+const pause = () => new Promise(resolve => setTimeout(resolve, 25));
+async function until<T>(get: () => T | undefined, label: string) {
+  const deadline = Date.now() + 12_000;
+  while (Date.now() < deadline) { const value = get(); if (value !== undefined) return value; await pause(); }
+  throw new Error(`Timed out waiting for ${label}.`);
+}
+
+test('runner cleans gateways, protects active profiles, seeds history, and decrypts input without persisting it', { skip: process.platform === 'win32' }, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'open-harness-runner-lifecycle-'));
+  const log = join(dir, 'gateway.jsonl'), executable = join(dir, 'fake-python');
+  const completions = new Map<string, Delivery>(), events: Array<{ runId: string; event: { type: string } }> = [];
+  const batches: Command[][] = [];
+  let runnerOutput = '';
+  let testedKey = false;
+  const server = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const body = raw ? JSON.parse(raw) : {};
+    if (req.url === '/models' || req.url === '/chat/completions') {
+      testedKey = req.headers.authorization === 'Bearer candidate-provider-key';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(req.url === '/models' ? { data: [{ id: 'test-model' }] } : { choices: [{ message: { content: 'OK' } }] })); return;
+    }
+    const complete = req.url?.match(/\/commands\/([^/]+)\/complete$/);
+    if (complete) completions.set(complete[1], body);
+    if (req.url?.endsWith('/events')) events.push(body);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(req.method === 'GET' ? { commands: batches.shift() || [] } : { ok: true }));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address() as { port: number }, encryption = await generateRunnerKeyPair();
+  writeFileSync(join(dir, 'connection.json'), JSON.stringify({ coordinator: `http://127.0.0.1:${address.port}`, machineId: 'test-runner', token: 'test-token', encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey }), { mode: 0o600 });
+  writeFileSync(executable, `#!${process.execPath}
+const fs = require('node:fs');
+if (process.argv.includes('-c')) process.exit(0);
+const log = value => fs.appendFileSync(process.env.FAKE_GATEWAY_LOG, JSON.stringify(value) + '\\n');
+const send = value => console.log(JSON.stringify(value));
+log({type:'started',pid:process.pid});
+setTimeout(() => send({method:'event',params:{type:'gateway.ready'}}), 300);
+require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+ const {id, method, params} = JSON.parse(line);
+ if (method === 'session.create') { log({type:'history',messages:params.messages}); send({id,result:{session_id:'test-session'}}); }
+ else if (method === 'prompt.submit') {
+   if (params.text === 'FAIL') send({id,error:{message:'Expected provider failure'}});
+   else if (params.text === 'HOLD') { send({id,result:{status:'streaming'}}); send({method:'event',params:{type:'secret.request',session_id:'test-session',payload:{request_id:'secret-1'}}}); }
+   else send({id,result:{final_response:'Completed fake task'}});
+ } else if (method === 'secret.respond') {
+   log({type:'input',accepted:params.value === process.env.EXPECTED_SECRET});
+   send({id,result:{ok:true}});
+   send({method:'event',params:{type:'message.complete',session_id:'test-session',payload:{status:'complete',text:'Accepted input'}}});
+ } else send({id,result:{ok:true}});
+});
+setInterval(() => {}, 1000);
+`, { mode: 0o700 });
+  const runner = spawn(process.execPath, ['--import', 'tsx', 'runtime/runner.ts'], { cwd: join(import.meta.dirname, '..'), env: { ...process.env, OPEN_HARNESS_MOCK: '0', OPEN_HARNESS_RUNNER_STATE_DIR: dir, HERMES_PYTHON: executable, FAKE_GATEWAY_LOG: log, EXPECTED_SECRET: 'never-persist-this-password' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  runner.stdout.on('data', chunk => { runnerOutput += chunk; }); runner.stderr.on('data', chunk => { runnerOutput += chunk; });
+  const records = () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) as Array<{ type: string; pid?: number; messages?: unknown; accepted?: boolean }> : [];
+  t.after(async () => {
+    runner.kill('SIGTERM');
+    if (runner.exitCode === null && runner.signalCode === null) await new Promise(resolve => runner.once('exit', resolve));
+    for (const row of records()) if (row.pid) { try { process.kill(row.pid, 'SIGKILL'); } catch {} }
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(dir, { recursive: true, force: true });
+  });
+  await until(() => runnerOutput.includes('connected to') ? true : undefined, `runner startup: ${runnerOutput}`);
+  const profile = { id: 'atlas', name: 'Atlas', role: 'Assistant', description: '', tone: 0, revision: 1, prompt: { enabled: true, text: 'Help.' }, model: { ...DEFAULT_MODEL, inherit: true }, effectiveModel: DEFAULT_MODEL, allowedTools: [], connectors: [], board: { assignOthers: false, dispatch: false }, computer: { ...DEFAULT_COMPUTER, access: 'direct' } };
+  const run = (id: string, prompt: string, extra: Record<string, unknown> = {}): Command => ({ id, agentId: 'atlas', kind: 'run', payload: { runId: id, prompt, snapshot: profile, secrets: {}, coordinationToken: '', ...extra } });
+  const completion = (id: string) => until(() => completions.get(id), `completion of ${id}; ${runnerOutput}`);
+
+  const history = [{ role: 'user', content: 'The project color is blue.' }, { role: 'assistant', content: 'Remembered.' }];
+  batches.push([run('success', 'SUCCESS', { history })]);
+  assert.equal((await completion('success')).result?.final_response, 'Completed fake task');
+  assert.deepEqual(records().find(row => row.type === 'history')?.messages, history);
+  assertProcessStopped(records().find(row => row.type === 'started')!.pid!);
+
+  batches.push([run('failure', 'FAIL')]);
+  assert.match((await completion('failure')).error || '', /Expected provider failure/);
+  const failedPid = records().filter(row => row.type === 'started').at(-1)!.pid!;
+  assertProcessStopped(failedPid);
+
+  const probe: Command = { id: 'probe-during-start', agentId: 'atlas', kind: 'probe-models', payload: { profile: { ...profile, revision: 99 } } };
+  batches.push([run('holding', 'HOLD'), probe]);
+  assert.match((await completion(probe.id)).error || '', /busy/);
+  await until(() => events.some(item => item.runId === 'holding' && item.event.type === 'secret.request') ? true : undefined, 'live input request');
+  assert.equal(JSON.parse(readFileSync(join(dir, 'agents/atlas/managed/policy.json'), 'utf8')).runId, 'holding');
+  const heldPid = records().filter(row => row.type === 'started').at(-1)!.pid!;
+  process.kill(heldPid, 0);
+  batches.push([{ id: 'answer', agentId: 'atlas', kind: 'input', payload: { runId: 'holding', type: 'secret', requestId: 'secret-1', encrypted: await encryptRunnerSecret(encryption.publicKey, 'never-persist-this-password') } }]);
+  assert.equal((await completion('answer')).result?.ok, true);
+  assert.equal((await completion('holding')).result?.text, 'Accepted input');
+  assert.equal(records().find(row => row.type === 'input')?.accepted, true);
+  assertProcessStopped(heldPid);
+  for (const name of readdirSync(join(dir, 'spool'))) assert.ok(!readFileSync(join(dir, 'spool', name), 'utf8').includes('never-persist-this-password'));
+  assert.ok(!JSON.stringify([...completions.values(), ...events]).includes('never-persist-this-password'));
+
+  batches.push([{ id: 'model-test', agentId: 'atlas', kind: 'probe-runtime', payload: {
+    profile, input: { action: 'model-test', model: { ...DEFAULT_MODEL, provider: 'custom', model: 'test-model', baseUrl: `http://127.0.0.1:${address.port}` } },
+    encryptedApiKey: await encryptRunnerSecret(encryption.publicKey, 'candidate-provider-key'),
+  } }]);
+  assert.equal((await completion('model-test')).result?.ok, true);
+  assert.equal(testedKey, true);
+  assert.equal(JSON.parse(readFileSync(join(dir, 'agents/atlas/managed/policy.json'), 'utf8')).runId, 'holding');
+  assert.ok(!readFileSync(join(dir, 'agents/atlas/profile/.env'), 'utf8').includes('candidate-provider-key'));
+  assert.ok(!JSON.stringify([...completions.values(), ...events]).includes('candidate-provider-key'));
+
+  const processesBeforeQueuedStop = records().filter(row => row.type === 'started').length;
+  batches.push([
+    { id: 'probe-before-run', agentId: 'atlas', kind: 'probe-runtime', payload: { profile, input: { action: 'model-test', model: { ...DEFAULT_MODEL, provider: 'custom', model: 'test-model', baseUrl: `http://127.0.0.1:${address.port}` } } } },
+    run('stop-queued', 'HOLD'),
+    { id: 'stop-queued-command', agentId: 'atlas', kind: 'stop', payload: { runId: 'stop-queued' } },
+  ]);
+  assert.equal((await completion('stop-queued-command')).result?.ok, true);
+  assert.match((await completion('stop-queued')).error || '', /stopped before/);
+  assert.equal(records().filter(row => row.type === 'started').length, processesBeforeQueuedStop);
+
+  batches.push([run('stop-starting', 'HOLD'), { id: 'stop', agentId: 'atlas', kind: 'stop', payload: { runId: 'stop-starting' } }]);
+  assert.equal((await completion('stop')).result?.ok, true);
+  assert.match((await completion('stop-starting')).error || '', /stopped|exited/);
+});

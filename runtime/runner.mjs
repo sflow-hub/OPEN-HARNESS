@@ -3,7 +3,7 @@ import { createRequire as __openHarnessCreateRequire } from 'node:module'; const
 // runtime/runner.ts
 import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync4, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
 import { homedir, hostname, platform as platform2, arch } from "node:os";
-import { join as join3, resolve as resolve3 } from "node:path";
+import { join as join3, resolve as resolve2 } from "node:path";
 import { spawn as spawn3, spawnSync as spawnSync4 } from "node:child_process";
 
 // runtime/hermes.ts
@@ -19,6 +19,63 @@ var HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || "open-harness-hermes
 var platform = ["linux", "darwin", "win32"].includes(process.platform) ? process.platform : "unknown";
 
 // runtime/hermes.ts
+async function processCommand(command2, args2, timeout = 5e3) {
+  return new Promise((resolve3, reject) => {
+    const child = spawn(command2, args2, { stdio: ["ignore", "pipe", "pipe"], timeout, killSignal: "SIGKILL" });
+    let output = "", error = "";
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      error += chunk;
+    });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve3(output) : reject(new Error(error.trim() || `${command2} could not confirm process termination.`)));
+  });
+}
+async function stopNativeTree(pid) {
+  if (process.platform === "win32") {
+    await processCommand("taskkill", ["/PID", String(pid), "/T", "/F"]);
+    return;
+  }
+  const tracked = /* @__PURE__ */ new Set([pid]);
+  const live = async () => {
+    const rows = (await processCommand("ps", ["-A", "-o", "pid=,ppid=,pgid=,stat="])).trim().split("\n").map((line) => {
+      const [id, parent, group, state] = line.trim().split(/\s+/);
+      return { id: Number(id), parent: Number(parent), group: Number(group), state };
+    });
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (const row of rows) if (!tracked.has(row.id) && (tracked.has(row.parent) || row.group === pid)) {
+        tracked.add(row.id);
+        changed = true;
+      }
+    }
+    return rows.filter((row) => tracked.has(row.id) && !row.state?.startsWith("Z")).map((row) => row.id);
+  };
+  const signal = (ids, value) => {
+    for (const id of [-pid, ...ids]) {
+      try {
+        process.kill(id, value);
+      } catch (error) {
+        if (error.code !== "ESRCH") throw error;
+      }
+    }
+  };
+  let remaining = await live();
+  for (const value of ["SIGTERM", "SIGKILL"]) {
+    if (!remaining.length) return;
+    signal(remaining, value);
+    const deadline = Date.now() + 2e3;
+    do {
+      await new Promise((resolve3) => setTimeout(resolve3, 50));
+      remaining = await live();
+      if (!remaining.length) return;
+      if (value === "SIGKILL") signal(remaining, value);
+    } while (Date.now() < deadline);
+  }
+  throw new Error("Could not confirm that the agent and its tool processes stopped.");
+}
 function lastWords(stderrTail, keep = 3, limit = 400) {
   const lines = stderrTail.filter((line) => line.trim()).slice(-keep);
   if (!lines.length) return "";
@@ -35,18 +92,40 @@ var HermesGateway = class extends EventEmitter {
     this.requestId = 0;
     this.pending = /* @__PURE__ */ new Map();
     this.mockApproval = null;
+    this.mockInput = null;
+    this.mockSessions = /* @__PURE__ */ new Map();
+    this.nativePid = null;
+    this.stopping = null;
+    this.stopped = false;
     // Hermes reports its failures on stderr and then dies. Without a copy, the exit
     // code is all that survives, and "exited with code 1" tells an operator nothing.
     this.stderrTail = [];
   }
   async start() {
+    if (this.stopping) await this.stopping;
+    this.stopped = false;
     if (process.env.OPEN_HARNESS_MOCK === "1") {
       queueMicrotask(() => this.emit("event", { type: "gateway.ready", payload: { mock: true } }));
       return;
     }
     if (this.child && !this.child.killed) return;
-    this.child = this.native ? spawn(this.native.python || process.env.HERMES_PYTHON || "python3", [this.native.entry], { cwd: this.native.cwd, env: this.native.env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32" }) : spawn("docker", ["exec", "-i", this.container, "python", "/opt/open-harness/managed_entry.py"], { stdio: ["pipe", "pipe", "pipe"] });
-    createInterface({ input: this.child.stdout }).on("line", (line) => {
+    const child = this.child = this.native ? spawn(this.native.python || process.env.HERMES_PYTHON || "python3", [this.native.entry], { cwd: this.native.cwd, env: this.native.env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32" }) : spawn("docker", ["exec", "-i", this.container, "python", "/opt/open-harness/managed_entry.py"], { stdio: ["pipe", "pipe", "pipe"] });
+    if (this.native) this.nativePid = child.pid ?? null;
+    let exited = false;
+    const failed = (error) => {
+      if (exited) return;
+      exited = true;
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(error);
+      }
+      this.pending.clear();
+      if (this.child === child) this.child = null;
+      this.emit("exit", error);
+    };
+    child.once("error", (error) => failed(new Error(`Could not start the Hermes ${this.native ? "host" : "container"} gateway: ${error.message}`)));
+    child.stdin.on("error", (error) => failed(Object.assign(new Error(`Hermes gateway input failed: ${error.message}`), { interrupted: true })));
+    createInterface({ input: child.stdout }).on("line", (line) => {
       try {
         const value = JSON.parse(line);
         if (value.id != null && this.pending.has(String(value.id))) {
@@ -64,53 +143,62 @@ var HermesGateway = class extends EventEmitter {
       }
     });
     this.stderrTail = [];
-    createInterface({ input: this.child.stderr }).on("line", (line) => {
+    createInterface({ input: child.stderr }).on("line", (line) => {
       const message = line.slice(0, 1e3);
       this.stderrTail.push(message);
       if (this.stderrTail.length > 50) this.stderrTail.shift();
       this.emit("log", { level: "debug", message });
     });
-    this.child.once("exit", (code) => {
+    child.once("exit", (code) => {
       const error = Object.assign(new Error(`Hermes ${this.native ? "host" : "container"} gateway exited with code ${code ?? "unknown"}.${lastWords(this.stderrTail)} Inspect its saved work before retrying.`), { interrupted: true });
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(error);
-      }
-      this.pending.clear();
-      this.child = null;
-      this.emit("exit", error);
+      failed(error);
     });
-    await new Promise((resolve4, reject) => {
-      const timer = setTimeout(() => reject(new Error("Hermes gateway did not become ready.")), 3e4);
-      const ready = (event) => {
-        if (event?.type === "gateway.ready") {
+    try {
+      if (this.nativePid) this.native?.onSpawn?.(this.nativePid);
+      await new Promise((resolve3, reject) => {
+        const cleanup = () => {
           clearTimeout(timer);
           this.off("event", ready);
-          resolve4();
-        }
-      };
-      this.on("event", ready);
-      this.child.once("exit", (code) => {
-        clearTimeout(timer);
-        reject(new Error(`Hermes ${this.native ? "host" : "container"} gateway exited during startup with code ${code ?? "unknown"}.${lastWords(this.stderrTail)}`));
+          this.off("exit", fail);
+        };
+        const fail = (error) => {
+          cleanup();
+          reject(error);
+        };
+        const ready = (event) => {
+          if (event?.type === "gateway.ready") {
+            cleanup();
+            resolve3();
+          }
+        };
+        const timer = setTimeout(() => fail(new Error("Hermes gateway did not become ready.")), 3e4);
+        this.on("event", ready);
+        this.once("exit", fail);
       });
-    });
+    } catch (error) {
+      try {
+        await this.stop();
+      } catch (cleanupError) {
+        throw new Error(`${error instanceof Error ? error.message : error} Cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : cleanupError}`);
+      }
+      throw error;
+    }
   }
   request(method, params = {}, timeout = 3e5) {
     if (process.env.OPEN_HARNESS_MOCK === "1") return this.mockRequest(method, params);
     if (!this.child) return Promise.reject(new Error("Hermes gateway is not running."));
     const id = String(++this.requestId);
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve3, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out.`));
       }, timeout);
-      this.pending.set(id, { resolve: resolve4, reject, timer });
+      this.pending.set(id, { resolve: resolve3, reject, timer });
       this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     });
   }
   submitPrompt(sessionId, text, timeout = 24 * 60 * 60 * 1e3) {
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve3, reject) => {
       const cleanup = () => {
         clearTimeout(timer);
         this.off("event", onEvent);
@@ -128,7 +216,7 @@ var HermesGateway = class extends EventEmitter {
           if (payload.status === "error" || payload.status === "interrupted") onExit(Object.assign(new Error(payload.error || payload.text || "Hermes execution was interrupted."), { interrupted: payload.status === "interrupted" }));
           else {
             cleanup();
-            resolve4(payload);
+            resolve3(payload);
           }
         }
       };
@@ -138,28 +226,40 @@ var HermesGateway = class extends EventEmitter {
       this.request("prompt.submit", { session_id: sessionId, text }, timeout).then((result) => {
         if (result?.status !== "streaming") {
           cleanup();
-          resolve4(result);
+          resolve3(result);
         }
       }, onExit);
     });
   }
   async mockRequest(method, params) {
-    if (method === "session.create") return { session_id: crypto.randomUUID() };
+    if (method === "session.create") {
+      const sessionId = crypto.randomUUID();
+      this.mockSessions.set(sessionId, Array.isArray(params.messages) ? params.messages : []);
+      return { session_id: sessionId };
+    }
     if (method === "prompt.submit") {
       const prompt = String(params.text || "");
+      if (prompt.includes("MOCK_HISTORY")) return { final_response: JSON.stringify(this.mockSessions.get(String(params.session_id)) || []) };
       if (prompt.includes("MOCK_TOOL:")) {
         const name = prompt.split("MOCK_TOOL:")[1].split(/\s/)[0];
         if (!this.allowedTools?.includes(name)) throw new Error(`Tool ${name} is disabled in this agent profile.`);
       }
       const canUseTerminal = this.allowedTools === null || this.allowedTools.includes("terminal");
       if (canUseTerminal) this.emit("event", { type: "tool.start", payload: { id: "mock-tool", name: "terminal", preview: "python task.py" } });
-      if (prompt.includes("MOCK_SLOW")) await new Promise((resolve4) => setTimeout(resolve4, 800));
+      if (prompt.includes("MOCK_SLOW")) await new Promise((resolve3) => setTimeout(resolve3, 800));
       if (prompt.includes("MOCK_APPROVAL")) {
         this.emit("event", { type: "approval.request", payload: { request_id: "mock-approval", command: "publish mock result" } });
-        const decision = await new Promise((resolve4) => {
-          this.mockApproval = resolve4;
+        const decision = await new Promise((resolve3) => {
+          this.mockApproval = resolve3;
         });
         if (decision !== "approve") throw new Error("Mock action was denied.");
+      }
+      if (prompt.includes("MOCK_CLARIFY")) {
+        this.emit("event", { type: "clarify.request", session_id: params.session_id, payload: { request_id: "mock-clarify", question: "What should I use?" } });
+        const answer = await new Promise((resolve3) => {
+          this.mockInput = resolve3;
+        });
+        return { final_response: `Hermes mock completed the task. Answer: ${Array.isArray(answer) ? answer.join(", ") : String(answer)}` };
       }
       if (canUseTerminal) this.emit("event", { type: "tool.complete", payload: { id: "mock-tool", name: "terminal", result: "Created and executed task.py" } });
       this.emit("event", { type: "message.delta", payload: { text: "Hermes mock completed the task." } });
@@ -170,29 +270,35 @@ var HermesGateway = class extends EventEmitter {
       this.mockApproval = null;
       return { ok: true };
     }
+    if (method === "clarify.respond") {
+      this.mockInput?.(params.answer);
+      this.mockInput = null;
+      return { ok: true };
+    }
     if (["session.steer", "session.interrupt", "process.stop"].includes(method)) return { ok: true };
     return { ok: true };
   }
-  async stop() {
-    if (process.env.OPEN_HARNESS_MOCK !== "1" && !this.native) await new Promise((resolve4, reject) => {
-      const child = spawn("docker", ["stop", "--time", "2", this.container], { stdio: "ignore" });
-      child.once("error", () => reject(new Error("Could not stop the agent container. Check Docker.")));
-      child.once("exit", (code) => code === 0 ? resolve4() : reject(new Error("Docker could not confirm the agent container stopped.")));
+  stop() {
+    if (this.stopped) return Promise.resolve();
+    return this.stopping ??= this.stopRuntime().finally(() => {
+      this.stopping = null;
     });
-    if (process.env.OPEN_HARNESS_MOCK !== "1" && this.native && this.child?.pid) {
-      if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(this.child.pid), "/T", "/F"], { stdio: "ignore" });
-      else {
-        try {
-          process.kill(-this.child.pid, "SIGTERM");
-        } catch {
-          this.child.kill("SIGTERM");
-        }
-      }
-    }
+  }
+  async stopRuntime() {
+    if (process.env.OPEN_HARNESS_MOCK !== "1" && !this.native) await new Promise((resolve3, reject) => {
+      const child = spawn("docker", ["stop", "--time", "2", this.container], { stdio: "ignore", timeout: 1e4, killSignal: "SIGKILL" });
+      child.once("error", () => reject(new Error("Could not stop the agent container. Check Docker.")));
+      child.once("exit", (code) => code === 0 ? resolve3() : reject(new Error("Docker could not confirm the agent container stopped.")));
+    });
+    if (process.env.OPEN_HARNESS_MOCK !== "1" && this.native && this.nativePid) await stopNativeTree(this.nativePid);
     this.mockApproval?.("deny");
     this.mockApproval = null;
+    this.mockInput?.("");
+    this.mockInput = null;
     this.child?.kill("SIGTERM");
     this.child = null;
+    this.nativePid = null;
+    this.stopped = true;
     this.emit("exit", Object.assign(new Error("Agent runtime stopped."), { interrupted: true }));
   }
 };
@@ -293,8 +399,13 @@ function groupTool(tool) {
   const group = { file: "files", terminal: "terminal", process: "terminal", code_execution: "code", execute_code: "code", web: "web", browser: "browser", computer_use: "desktop", memory: "memory", skills: "skills", session_search: "recall", delegation: "delegation", delegate: "delegation", cronjob: "scheduling" }[tool.group] || (tool.id.startsWith("mcp_") ? "mcp" : tool.group);
   return { ...tool, group };
 }
+function containerBaseUrl(value) {
+  const url = new URL(value);
+  if (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) url.hostname = "host.docker.internal";
+  return url.toString().replace(/\/$/, "");
+}
 function runtimeProbe(container, input) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = spawn2("docker", ["exec", "-i", container, "python", "/opt/open-harness/inspect_runtime.py"], { stdio: ["pipe", "pipe", "pipe"] });
     let output = "";
     const timer = setTimeout(() => {
@@ -315,12 +426,13 @@ function runtimeProbe(container, input) {
       try {
         const value = JSON.parse(output.trim());
         if (code || value.error) reject(new Error(value.error || "Runtime check failed."));
-        else resolve4(value);
+        else resolve3(value);
       } catch {
         reject(new Error("Runtime check returned an invalid response. Rebuild the Hermes image."));
       }
     });
-    child.stdin.end(JSON.stringify(input) + "\n");
+    const probe = input;
+    child.stdin.end(JSON.stringify(probe.action === "connection" && probe.baseUrl ? { ...probe, baseUrl: containerBaseUrl(probe.baseUrl) } : input) + "\n");
   });
 }
 function nativeRuntimeProbe(profileHome, input) {
@@ -332,14 +444,14 @@ function nativeRuntimeProbe(profileHome, input) {
   if (value.error) throw new Error(String(value.error));
   return value;
 }
-function atomic(path, data) {
-  writeFileSync(`${path}.tmp`, data, { mode: 384 });
-  renameSync(`${path}.tmp`, path);
-  chmodSync(path, 384);
+function atomic(path2, data) {
+  writeFileSync(`${path2}.tmp`, data, { mode: 384 });
+  renameSync(`${path2}.tmp`, path2);
+  chmodSync(path2, 384);
 }
 function prepareProfile(root, profile, effective, secrets, token, runId, options = {}) {
   const dir = join(root, "agents", profile.id), home = join(dir, "profile"), managed = join(dir, "managed");
-  for (const path of [home, managed, join(dir, "private")]) mkdirSync(path, { recursive: true });
+  for (const path2 of [home, managed, join(dir, "private")]) mkdirSync(path2, { recursive: true });
   const mcp = {};
   if (profile.allowedTools.some((id) => COORDINATION_TOOLS.some((t) => t.id === id))) mcp.open_harness = { command: "node", args: [options.coordinationCommand || "/opt/open-harness/coordination.mjs"], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}, ...options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {}, ...options.sitesToken ? { OPEN_HARNESS_SITES_TOKEN: options.sitesToken } : {} } };
   const env = {};
@@ -354,7 +466,7 @@ function prepareProfile(root, profile, effective, secrets, token, runId, options
     Object.assign(env, connectorEnv);
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: "${" + c.secretRef + "}" } : {} };
   }
-  const config = { model: { default: effective.model, provider: effective.provider === "local" ? "custom" : effective.provider, ...effective.baseUrl ? { base_url: effective.baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "smart", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ["open_harness_policy"] }, mcp_servers: mcp };
+  const config = { model: { default: effective.model, provider: effective.provider === "local" ? "custom" : effective.provider, ...effective.baseUrl ? { base_url: profile.computer.access === "direct" ? effective.baseUrl : containerBaseUrl(effective.baseUrl) } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "smart", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, tools: { tool_search: { enabled: "off" } }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ["open_harness_policy"] }, mcp_servers: mcp };
   atomic(join(home, "config.yaml"), JSON.stringify(config, null, 2));
   atomic(join(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
   atomic(join(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
@@ -390,49 +502,91 @@ function normalizeModels(result) {
 
 // runtime/transfer-files.ts
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync2, lstatSync, mkdirSync as mkdirSync2, readdirSync, readFileSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname, join as join2, normalize, relative, resolve as resolve2 } from "node:path";
+import { existsSync as existsSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync2, readdirSync, readFileSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname, join as join2, relative } from "node:path";
+
+// runtime/path-safety.ts
+import { lstatSync } from "node:fs";
+import path from "node:path";
+function resolveContainedPath(root, name, paths = path) {
+  if (!name || name.includes("\0") || name.includes(":") || path.posix.isAbsolute(name) || path.win32.isAbsolute(name)) throw new Error("Invalid workspace path.");
+  const parts = name.replaceAll("\\", "/").split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) throw new Error("Invalid workspace path.");
+  if (parts.some((part) => /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(part))) throw new Error("Invalid portable workspace path.");
+  const target = paths.resolve(root, parts.join(paths.sep));
+  const relative2 = paths.relative(paths.resolve(root), target);
+  if (!relative2 || relative2 === ".." || relative2.startsWith(`..${paths.sep}`) || paths.isAbsolute(relative2)) throw new Error("Path escaped the workspace.");
+  return target;
+}
+function safeWorkspacePath(root, name) {
+  const target = resolveContainedPath(root, name);
+  const parts = path.relative(path.resolve(root), target).split(path.sep);
+  let current = path.resolve(root);
+  for (let index = 0; index < parts.length; index += 1) {
+    current = path.join(current, parts[index]);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch (error) {
+      if (error.code === "ENOENT") break;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) throw new Error("Workspace paths cannot contain symbolic links.");
+    if (index < parts.length - 1 && !stat.isDirectory()) throw new Error("Workspace parent is not a directory.");
+  }
+  return target;
+}
+
+// runtime/transfer-files.ts
 var allowedRoots = ["private", "profile/MEMORY.md", "profile/USER.md", "profile/skills"];
 function digest(data) {
   return createHash2("sha256").update(data).digest("hex");
 }
 function exportAgentFiles(stateRoot2, agentId) {
-  const agentRoot = resolve2(stateRoot2, "agents", agentId), files = [];
+  const agentRoot = safeWorkspacePath(stateRoot2, `agents/${agentId}`), files = [];
   let total = 0;
-  const visit = (path) => {
-    if (!existsSync2(path)) return;
-    const stat = lstatSync(path);
+  const visit = (path2) => {
+    if (!existsSync2(path2)) return;
+    const stat = lstatSync2(path2);
     if (stat.isSymbolicLink()) return;
+    safeWorkspacePath(stateRoot2, relative(stateRoot2, path2));
     if (stat.isDirectory()) {
-      for (const name of readdirSync(path)) visit(join2(path, name));
+      for (const name of readdirSync(path2)) visit(join2(path2, name));
       return;
     }
     if (!stat.isFile()) return;
-    const data = readFileSync(path);
+    const data = readFileSync(path2);
     total += data.length;
     if (total > 2e7) throw new Error("Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.");
-    files.push({ path: relative(agentRoot, path).replaceAll("\\", "/"), data: Buffer.from(data).toString("base64"), checksum: digest(data) });
+    files.push({ path: relative(agentRoot, path2).replaceAll("\\", "/"), data: Buffer.from(data).toString("base64"), checksum: digest(data) });
   };
-  for (const path of allowedRoots) visit(join2(agentRoot, path));
+  for (const path2 of allowedRoots) visit(join2(agentRoot, path2));
   files.sort((a, b) => a.path.localeCompare(b.path));
   return { files, checksum: digest(files.map((file) => `${file.path}:${file.checksum}`).join("\n")) };
 }
 function importAgentFiles(stateRoot2, agentId, bundle) {
-  const agentRoot = resolve2(stateRoot2, "agents", agentId);
+  safeWorkspacePath(stateRoot2, `agents/${agentId}`);
   let total = 0;
-  for (const file of bundle.files) {
-    const clean = normalize(file.path).replaceAll("\\", "/");
-    if (clean.startsWith("../") || !allowedRoots.some((root) => clean === root || clean.startsWith(root + "/"))) throw new Error("Transfer contains an invalid managed path.");
-    const target = resolve2(agentRoot, clean);
-    if (!target.startsWith(agentRoot + "/") && target !== agentRoot) throw new Error("Transfer path escaped the agent workspace.");
+  const seen = /* @__PURE__ */ new Set();
+  const files = bundle.files.map((file) => {
+    const clean = file.path.replaceAll("\\", "/");
+    if (!(clean.startsWith("private/") || clean === "profile/MEMORY.md" || clean === "profile/USER.md" || clean.startsWith("profile/skills/"))) throw new Error("Transfer contains an invalid managed path.");
+    const name = `agents/${agentId}/${clean}`, target = safeWorkspacePath(stateRoot2, name);
+    const key = process.platform === "win32" ? target.toLowerCase() : target;
+    if (seen.has(key)) throw new Error("Transfer contains duplicate managed paths.");
+    seen.add(key);
     const data = Buffer.from(file.data, "base64");
     total += data.length;
     if (total > 1e8 || digest(data) !== file.checksum) throw new Error("Transfer checksum validation failed.");
-    mkdirSync2(dirname(target), { recursive: true });
-    writeFileSync2(target, data, { mode: 384 });
-  }
+    return { name, target, data };
+  });
   const checksum = digest([...bundle.files].sort((a, b) => a.path.localeCompare(b.path)).map((file) => `${file.path}:${file.checksum}`).join("\n"));
   if (checksum !== bundle.checksum) throw new Error("Transfer bundle checksum validation failed.");
+  for (const file of files) {
+    safeWorkspacePath(stateRoot2, file.name);
+    mkdirSync2(dirname(file.target), { recursive: true });
+    writeFileSync2(safeWorkspacePath(stateRoot2, file.name), file.data, { mode: 384 });
+  }
   return { checksum, files: bundle.files.length };
 }
 
@@ -446,34 +600,34 @@ var bootstrapNames = ["XAI_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "MO
 function command(name, args2, input) {
   return spawnSync3(name, args2, { input, encoding: "utf8", timeout: 8e3, windowsHide: true, maxBuffer: 2e6 });
 }
-var account = (path) => `open-harness-${createHash3("sha256").update(path).digest("hex").slice(0, 16)}`;
-function loadVault(path) {
+var account = (path2) => `open-harness-${createHash3("sha256").update(path2).digest("hex").slice(0, 16)}`;
+function loadVault(path2) {
   if (process.env.OPEN_HARNESS_DISABLE_OS_VAULT === "1") return null;
   try {
     if (process.platform === "darwin") {
-      const result = command("security", ["find-generic-password", "-s", service, "-a", account(path), "-w"]);
+      const result = command("security", ["find-generic-password", "-s", service, "-a", account(path2), "-w"]);
       return result.status === 0 ? { value: result.stdout.trim(), backend: "macOS Keychain" } : null;
     }
     if (process.platform === "linux" && process.env.DBUS_SESSION_BUS_ADDRESS) {
-      const result = command("secret-tool", ["lookup", "application", service, "workspace", account(path)]);
+      const result = command("secret-tool", ["lookup", "application", service, "workspace", account(path2)]);
       return result.status === 0 && result.stdout.trim() ? { value: result.stdout.trim(), backend: "system password vault" } : null;
     }
     if (process.platform === "win32") {
       const script = "$p=$args[0];if(Test-Path -LiteralPath $p){$b=[IO.File]::ReadAllBytes($p);$d=[Security.Cryptography.ProtectedData]::Unprotect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($d))}";
-      const result = command("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, `${process.env.APPDATA || dirname2(process.execPath)}\\Open Harness\\${account(path)}.dpapi`]);
+      const result = command("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, `${process.env.APPDATA || dirname2(process.execPath)}\\Open Harness\\${account(path2)}.dpapi`]);
       return result.status === 0 && result.stdout ? { value: result.stdout, backend: "Windows account vault" } : null;
     }
   } catch {
   }
   return null;
 }
-function saveVault(path, value) {
+function saveVault(path2, value) {
   if (process.env.OPEN_HARNESS_DISABLE_OS_VAULT === "1") return null;
   try {
-    if (process.platform === "darwin") return command("security", ["add-generic-password", "-U", "-s", service, "-a", account(path), "-w", value]).status === 0 ? "macOS Keychain" : null;
-    if (process.platform === "linux" && process.env.DBUS_SESSION_BUS_ADDRESS) return command("secret-tool", ["store", "--label=Open Harness credentials", "application", service, "workspace", account(path)], value).status === 0 ? "system password vault" : null;
+    if (process.platform === "darwin") return command("security", ["add-generic-password", "-U", "-s", service, "-a", account(path2), "-w", value]).status === 0 ? "macOS Keychain" : null;
+    if (process.platform === "linux" && process.env.DBUS_SESSION_BUS_ADDRESS) return command("secret-tool", ["store", "--label=Open Harness credentials", "application", service, "workspace", account(path2)], value).status === 0 ? "system password vault" : null;
     if (process.platform === "win32") {
-      const target = `${process.env.APPDATA || dirname2(process.execPath)}\\Open Harness\\${account(path)}.dpapi`;
+      const target = `${process.env.APPDATA || dirname2(process.execPath)}\\Open Harness\\${account(path2)}.dpapi`;
       const script = "$p=$args[0];$v=[Console]::In.ReadToEnd();$d=Split-Path -Parent $p;New-Item -ItemType Directory -Force -Path $d|Out-Null;$b=[Text.Encoding]::UTF8.GetBytes($v);$e=[Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[IO.File]::WriteAllBytes($p,$e)";
       return command("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, target], value).status === 0 ? "Windows account vault" : null;
     }
@@ -482,13 +636,13 @@ function saveVault(path, value) {
   return null;
 }
 var SecretStore = class {
-  constructor(path) {
-    this.path = path;
+  constructor(path2) {
+    this.path = path2;
     this.backend = "restricted local file";
-    mkdirSync3(dirname2(path), { recursive: true });
-    const vaulted = loadVault(path);
+    mkdirSync3(dirname2(path2), { recursive: true });
+    const vaulted = loadVault(path2);
     try {
-      this.values = vaulted?.value ? JSON.parse(vaulted.value) : existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : {};
+      this.values = vaulted?.value ? JSON.parse(vaulted.value) : existsSync3(path2) ? JSON.parse(readFileSync2(path2, "utf8")) : {};
     } catch {
       this.values = {};
     }
@@ -506,7 +660,7 @@ var SecretStore = class {
       }
     }
     if (changed) this.save();
-    if (existsSync3(path)) chmodSync2(path, 384);
+    if (existsSync3(path2)) chmodSync2(path2, 384);
   }
   get token() {
     return this.values.controlToken;
@@ -582,22 +736,68 @@ function validateComputerTarget(profile, capabilities2, requiredSecrets = [], ha
   return { ok: true };
 }
 
+// runtime/model-validation.ts
+var endpoints = {
+  xai: "https://api.x.ai/v1",
+  openrouter: "https://openrouter.ai/api/v1",
+  openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com/v1"
+};
+async function failure(response, key) {
+  const fallback = { 401: "The API key was rejected.", 402: "The provider account needs credits.", 403: "The provider denied access.", 404: "The model server address was not found.", 429: "The provider rate limit was reached. Try again shortly." };
+  try {
+    const body = await response.json();
+    const detail = typeof body.error === "string" ? body.error : body.error?.message || body.message;
+    if (detail) return (key ? String(detail).replaceAll(key, "[redacted]") : String(detail)).trim().slice(0, 500);
+  } catch {
+  }
+  return fallback[response.status] || `The provider returned HTTP ${response.status}.`;
+}
+async function testModelConnection(model, apiKey) {
+  if (process.env.OPEN_HARNESS_MOCK === "1") return { ok: false, message: "Mock mode is active, so no model provider was contacted. Restart with npm run dev or npm run dev:fast to test this API key and run real tasks." };
+  const base = (model.baseUrl || endpoints[model.provider] || "").replace(/\/$/, "");
+  if (!base) return { ok: false, message: "Enter the address of your model server." };
+  if (!apiKey && !["local", "custom"].includes(model.provider)) return { ok: false, message: "Enter an API key for this provider." };
+  const anthropic = model.provider === "anthropic";
+  const headers2 = { "Content-Type": "application/json", ...anthropic ? { "anthropic-version": "2023-06-01", "x-api-key": apiKey } : apiKey ? { Authorization: `Bearer ${apiKey}` } : {} };
+  try {
+    const catalog = await fetch(`${base}/models`, { headers: headers2, signal: AbortSignal.timeout(15e3), redirect: "error" });
+    if (!catalog.ok) return { ok: false, message: await failure(catalog, apiKey) };
+    const rows = await catalog.json();
+    if (!Array.isArray(rows.data) || !rows.data.some((row) => row.id === model.model)) return { ok: false, message: `The provider connection works, but model ${model.model} is not available to this API key.` };
+    const completion = await fetch(`${base}/${anthropic ? "messages" : "chat/completions"}`, {
+      method: "POST",
+      headers: headers2,
+      signal: AbortSignal.timeout(3e4),
+      redirect: "error",
+      body: JSON.stringify({ model: model.model, messages: [{ role: "user", content: "Reply with OK." }], ...model.provider === "openai" ? { max_completion_tokens: 16 } : { max_tokens: 16 }, stream: false })
+    });
+    if (!completion.ok) return { ok: false, message: await failure(completion, apiKey) };
+    const result = await completion.json();
+    if (!(anthropic ? Array.isArray(result.content) : Array.isArray(result.choices) && result.choices.length)) return { ok: false, message: "The model server returned an invalid completion response." };
+    return { ok: true, message: "Provider authenticated and the selected model accepted a live test request." };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not reach the model provider.";
+    return { ok: false, message: apiKey ? message.replaceAll(apiKey, "[redacted]") : message };
+  }
+}
+
 // runtime/runner.ts
 var args = /* @__PURE__ */ new Map();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith("--")) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith("--") ? "" : process.argv[++i] || "");
-var stateRoot = resolve3(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join3(homedir(), ".open-harness-runner"));
+var stateRoot = resolve2(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join3(homedir(), ".open-harness-runner"));
 var credentialPath = join3(stateRoot, "connection.json");
 var spool = join3(stateRoot, "spool");
 mkdirSync4(spool, { recursive: true });
 var runnerSecrets = new SecretStore(join3(stateRoot, "secrets.json"));
 var pythons = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean);
 function exitCode(command2, args2, timeout) {
-  return new Promise((resolve4) => {
+  return new Promise((resolve3) => {
     let done = false;
     const settle = (code) => {
       if (!done) {
         done = true;
-        resolve4(code);
+        resolve3(code);
       }
     };
     const child = spawn3(command2, args2, { stdio: "ignore", timeout, killSignal: "SIGKILL" });
@@ -648,21 +848,24 @@ if (args.has("once")) {
   process.exit(0);
 }
 var headers = { Authorization: `Bearer ${credentials.token}`, "X-Open-Harness-Machine": credentials.machineId, "Content-Type": "application/json", ...credentials.sitesToken ? { "OAI-Sites-Authorization": `Bearer ${credentials.sitesToken}` } : {} };
-async function request(path, init = {}, retry = false) {
+async function request(path2, init = {}, retry = false) {
   for (; ; ) {
     try {
-      const response = await fetch(credentials.coordinator + path, { ...init, headers: { ...headers, ...init.headers } });
+      const response = await fetch(credentials.coordinator + path2, { ...init, headers: { ...headers, ...init.headers } });
       const value = await response.json();
       if (!response.ok) throw new Error(value.error || `Coordinator returned HTTP ${response.status}.`);
       return value;
     } catch (error) {
       if (!retry) throw error;
-      await new Promise((resolve4) => setTimeout(resolve4, 2e3));
+      await new Promise((resolve3) => setTimeout(resolve3, 2e3));
     }
   }
 }
 var active = /* @__PURE__ */ new Map();
 var admittedCommands = /* @__PURE__ */ new Set();
+var agentOperations = /* @__PURE__ */ new Map();
+var blockedAgents = /* @__PURE__ */ new Set();
+var admittedRuns = /* @__PURE__ */ new Map();
 async function deliver(record) {
   const file = join3(spool, `${record.id}.json`);
   if (!existsSync4(file)) writeFileSync4(file, JSON.stringify(record), { mode: 384 });
@@ -687,6 +890,7 @@ async function finish(command2, result, error) {
 async function run(command2) {
   const payload = command2.payload;
   const profile = payload.snapshot, direct = profile.computer.access === "direct";
+  let gateway, result, failure2;
   try {
     const agentRoot = join3(stateRoot, "agents", profile.id), shared = join3(stateRoot, "shared");
     mkdirSync4(shared, { recursive: true });
@@ -696,20 +900,29 @@ async function run(command2) {
     const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...payload.secrets }) };
     const coordinatorForContainer = credentials.coordinator.replace("://localhost", "://host.docker.internal").replace("://127.0.0.1", "://host.docker.internal");
     prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join3(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { controlUrl: coordinatorForContainer, sitesToken: credentials.sitesToken });
-    const gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join3(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join3(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
+    gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join3(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join3(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
+    const live = { gateway, sessionId: null, commandId: command2.id, stopping: false, agentId: profile.id };
+    active.set(payload.runId, live);
     gateway.on("event", (event) => void emit(command2, event));
     await gateway.start();
-    const session = await gateway.request("session.create", { cwd: direct ? shared : "/workspace/shared", profile: "default" });
+    if (live.stopping) throw new Error("Run stopped before its session started.");
+    const session = await gateway.request("session.create", { cwd: direct ? shared : "/workspace/shared", profile: "default", messages: payload.history || [] });
     const sessionId = String(session?.session_id || session?.id || "");
     if (!sessionId) throw new Error("Hermes did not return a session ID.");
-    active.set(payload.runId, { gateway, sessionId, commandId: command2.id });
-    const result = await gateway.submitPrompt(sessionId, payload.prompt);
-    active.delete(payload.runId);
-    await finish(command2, result);
+    live.sessionId = sessionId;
+    if (live.stopping) throw new Error("Run stopped before its prompt started.");
+    result = await gateway.submitPrompt(sessionId, payload.prompt);
   } catch (error) {
-    active.delete(payload.runId);
-    await finish(command2, void 0, error);
+    failure2 = error;
   }
+  try {
+    await gateway?.stop();
+    active.delete(payload.runId);
+  } catch (error) {
+    blockedAgents.add(profile.id);
+    failure2 = new Error(`Agent cleanup could not be confirmed. Further work is blocked until it is stopped: ${error instanceof Error ? error.message : error}`);
+  }
+  await finish(command2, result, failure2);
 }
 async function control(command2) {
   try {
@@ -740,6 +953,12 @@ async function control(command2) {
       const profile = command2.payload.profile, direct = profile.computer.access === "direct", shared = join3(stateRoot, "shared"), agentRoot = join3(stateRoot, "agents", profile.id);
       mkdirSync4(shared, { recursive: true });
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env }, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]])), secretSource = { environment: () => ({ ...localSecrets, ...command2.payload.secrets || {} }) };
+      if (command2.kind === "probe-runtime" && command2.payload.input?.action === "model-test") {
+        const model = command2.payload.input.model;
+        const apiKey = command2.payload.encryptedApiKey ? await decryptRunnerSecret(credentials.encryptionPrivateKey, command2.payload.encryptedApiKey) : availableSecrets[model.credentialRef] || "";
+        await finish(command2, await testModelConnection(model, apiKey));
+        return;
+      }
       prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command2.payload.coordinationToken || "", `probe-${command2.id}`, direct ? { cwd: shared, coordinationCommand: join3(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { sitesToken: credentials.sitesToken });
       if (command2.kind === "probe-runtime") {
         const probeInput = { ...command2.payload.input || {} };
@@ -749,42 +968,94 @@ async function control(command2) {
           for (const name of Object.keys(probeInput.env)) if (!probeInput.env[name] && localSecrets[name]) probeInput.env[name] = localSecrets[name];
         }
         if (direct) {
-          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
-          if (result.status || !result.stdout) throw new Error(result.stderr || "Native runtime probe failed.");
-          await finish(command2, JSON.parse(result.stdout));
+          const result2 = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
+          if (result2.status || !result2.stdout) throw new Error(result2.stderr || "Native runtime probe failed.");
+          await finish(command2, JSON.parse(result2.stdout));
         } else await finish(command2, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), probeInput));
         return;
       }
       const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join3(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join3(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
       if (command2.kind === "probe-tools") {
         const input = direct ? (() => {
-          const result = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
-          if (result.status || !result.stdout) throw new Error(result.stderr || "Tool discovery failed.");
-          return JSON.parse(result.stdout);
+          const result2 = spawnSync4(process.env.HERMES_PYTHON || "python3", [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join3(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
+          if (result2.status || !result2.stdout) throw new Error(result2.stderr || "Tool discovery failed.");
+          return JSON.parse(result2.stdout);
         })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), { action: "catalog" });
         await finish(command2, { source: "runtime", tools: [...(input.tools || []).filter((tool) => tool.group !== "cronjob").map(groupTool), ...COORDINATION_TOOLS] });
         return;
       }
-      await gateway.start();
+      let result;
       try {
-        await finish(command2, await discoverModels(gateway));
+        await gateway.start();
+        result = await discoverModels(gateway);
       } finally {
         await gateway.stop();
       }
+      await finish(command2, result);
       return;
     }
     const live = active.get(String(command2.payload.runId));
+    if (!live && command2.kind === "stop") {
+      const waiting = admittedRuns.get(String(command2.payload.runId));
+      if (waiting) {
+        waiting.cancelled = true;
+        await finish(command2, { ok: true });
+        return;
+      }
+    }
     if (!live) throw new Error("The requested run is no longer active on this runner.");
     if (command2.kind === "stop") {
-      await live.gateway.request("session.interrupt", { session_id: live.sessionId }, 5e3).catch(() => {
+      live.stopping = true;
+      if (live.sessionId) await live.gateway.request("session.interrupt", { session_id: live.sessionId }, 5e3).catch(() => {
       });
       await live.gateway.stop();
+      blockedAgents.delete(live.agentId);
     }
-    if (command2.kind === "steer") await live.gateway.request("session.steer", { session_id: live.sessionId, text: String(command2.payload.text || "") });
+    if (command2.kind === "steer") {
+      if (!live.sessionId) throw new Error("The agent is still starting. Try again when its session is ready.");
+      await live.gateway.request("session.steer", { session_id: live.sessionId, text: String(command2.payload.text || "") });
+    }
     if (command2.kind === "approval") await live.gateway.request("approval.respond", { request_id: command2.payload.requestId, decision: command2.payload.decision });
+    if (command2.kind === "input") {
+      const type = command2.payload.type;
+      if (!["clarify", "secret", "sudo"].includes(type)) throw new Error("Unsupported input request type.");
+      if (type !== "clarify" && !command2.payload.encrypted) throw new Error("Sensitive input must be encrypted for this runner.");
+      const value = command2.payload.encrypted ? await decryptRunnerSecret(credentials.encryptionPrivateKey, command2.payload.encrypted) : command2.payload.value;
+      const key = type === "clarify" ? "answer" : type === "secret" ? "value" : "password";
+      try {
+        await live.gateway.request(`${type}.respond`, { request_id: command2.payload.requestId, [key]: value });
+      } catch {
+        throw new Error("The agent could not accept this input. Check whether its request is still pending.");
+      }
+    }
     await finish(command2, { ok: true });
   } catch (error) {
     await finish(command2, void 0, error);
+  }
+}
+async function executeCommand(command2) {
+  const usesProfile = command2.kind === "run" || command2.kind.startsWith("probe-") || command2.kind === "import-agent" || command2.kind === "export-agent";
+  if (!usesProfile) return control(command2);
+  const agentId = String(command2.kind === "run" ? command2.payload.snapshot?.id : command2.payload.profile?.id || command2.agentId);
+  const previous = agentOperations.get(agentId);
+  if (blockedAgents.has(agentId) || previous && command2.kind !== "run") {
+    return finish(command2, void 0, new Error(blockedAgents.has(agentId) ? "The previous agent runtime could not be stopped. Stop it before checking settings or starting more work." : "This agent is busy. Wait for its current task or settings check to finish before checking or moving its profile."));
+  }
+  const admission = { cancelled: false };
+  if (command2.kind === "run") admittedRuns.set(String(command2.payload.runId), admission);
+  const operation = (async () => {
+    if (previous) await previous.catch(() => {
+    });
+    if (admission.cancelled) return finish(command2, void 0, new Error("Run stopped before its runtime started."));
+    if (blockedAgents.has(agentId)) return finish(command2, void 0, new Error("The previous agent runtime could not be stopped."));
+    return command2.kind === "run" ? run(command2) : control(command2);
+  })();
+  agentOperations.set(agentId, operation);
+  try {
+    await operation;
+  } finally {
+    if (agentOperations.get(agentId) === operation) agentOperations.delete(agentId);
+    if (command2.kind === "run") admittedRuns.delete(String(command2.payload.runId));
   }
 }
 console.log(`Open Harness runner ${credentials.machineId} connected to ${credentials.coordinator}`);
@@ -804,10 +1075,10 @@ for (; ; ) {
     for (const command2 of result.commands) {
       if (admittedCommands.has(command2.id)) continue;
       admittedCommands.add(command2.id);
-      void (command2.kind === "run" ? run(command2) : control(command2)).finally(() => admittedCommands.delete(command2.id));
+      void executeCommand(command2).catch((error) => console.error(error instanceof Error ? error.message : error)).finally(() => admittedCommands.delete(command2.id));
     }
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
   }
-  await new Promise((resolve4) => setTimeout(resolve4, 1e3));
+  await new Promise((resolve3) => setTimeout(resolve3, 1e3));
 }

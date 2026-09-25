@@ -17,6 +17,11 @@ export function groupTool(tool: ToolInfo): ToolInfo {
   const group = ({ file: 'files', terminal: 'terminal', process: 'terminal', code_execution: 'code', execute_code: 'code', web: 'web', browser: 'browser', computer_use: 'desktop', memory: 'memory', skills: 'skills', session_search: 'recall', delegation: 'delegation', delegate: 'delegation', cronjob: 'scheduling' } as Record<string, string>)[tool.group] || (tool.id.startsWith('mcp_') ? 'mcp' : tool.group);
   return { ...tool, group };
 }
+export function containerBaseUrl(value: string) {
+  const url = new URL(value);
+  if (['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) url.hostname = 'host.docker.internal';
+  return url.toString().replace(/\/$/, '');
+}
 export function runtimeProbe(container: string, input: object): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const child = spawn('docker', ['exec', '-i', container, 'python', '/opt/open-harness/inspect_runtime.py'], { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -24,7 +29,8 @@ export function runtimeProbe(container: string, input: object): Promise<Record<s
     child.stdout.on('data', part => { output += part; if (output.length > 5_000_000) child.kill(); }); child.stderr.resume();
     child.on('error', () => { clearTimeout(timer); reject(new Error('Docker could not start the runtime check.')); });
     child.on('close', code => { clearTimeout(timer); try { const value = JSON.parse(output.trim()); if (code || value.error) reject(new Error(value.error || 'Runtime check failed.')); else resolve(value); } catch { reject(new Error('Runtime check returned an invalid response. Rebuild the Hermes image.')); } });
-    child.stdin.end(JSON.stringify(input) + '\n');
+    const probe = input as { action?: string; baseUrl?: string };
+    child.stdin.end(JSON.stringify(probe.action === 'connection' && probe.baseUrl ? { ...probe, baseUrl: containerBaseUrl(probe.baseUrl) } : input) + '\n');
   });
 }
 export function nativeRuntimeProbe(profileHome: string, input: object): Record<string, unknown> {
@@ -36,8 +42,9 @@ export function nativeRuntimeProbe(profileHome: string, input: object): Record<s
 }
 export async function discoverTools(agentId: string, root: string, profile?: AgentProfile): Promise<ToolCatalog> {
   if (process.env.OPEN_HARNESS_MOCK === '1') return { source: 'mock', tools: [...mockTools, ...COORDINATION_TOOLS] };
-  const status = await dockerStatusCached(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
-  try { const result = await runtimeProbe(ensureContainer(agentId, root, profile?.computer), { action: 'catalog' }); return { source: 'runtime', tools: [...(result.tools as ToolInfo[]).filter(t => t.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }; }
+  const direct = profile?.computer.access === 'direct';
+  const status = direct ? { available: true, message: '' } : await dockerStatusCached(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
+  try { const result = direct ? nativeRuntimeProbe(join(root, 'agents', agentId, 'profile'), { action: 'catalog' }) : await runtimeProbe(ensureContainer(agentId, root, profile?.computer), { action: 'catalog' }); return { source: 'runtime', tools: [...(result.tools as ToolInfo[]).filter(t => t.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }; }
   catch (error) { return { source: 'unavailable', tools: [], error: error instanceof Error ? error.message : 'Tool inventory is unavailable.' }; }
 }
 function atomic(path: string, data: string) { writeFileSync(`${path}.tmp`, data, { mode: 0o600 }); renameSync(`${path}.tmp`, path); chmodSync(path, 0o600); }
@@ -59,7 +66,7 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
     Object.assign(env, connectorEnv);
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: '${' + c.secretRef + '}' } : {} };
   }
-  const config = { model: { default: effective.model, provider: effective.provider === 'local' ? 'custom' : effective.provider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ['open_harness_policy'] }, mcp_servers: mcp };
+  const config = { model: { default: effective.model, provider: effective.provider === 'local' ? 'custom' : effective.provider, ...(effective.baseUrl ? { base_url: profile.computer.access === 'direct' ? effective.baseUrl : containerBaseUrl(effective.baseUrl) } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, tools: { tool_search: { enabled: 'off' } }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ['open_harness_policy'] }, mcp_servers: mcp };
   // JSON is a YAML subset; serialization prevents YAML injection from prompts, names, and endpoints.
   atomic(join(home, 'config.yaml'), JSON.stringify(config, null, 2));
   atomic(join(home, 'SOUL.md'), profile.prompt.enabled ? profile.prompt.text : '');

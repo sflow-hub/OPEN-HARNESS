@@ -46,6 +46,9 @@ tauri-plugin-opener = "2"
 tauri-plugin-barcode-scanner = "2"
 tauri-plugin-deep-link = "2"
 
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-ime-insets = { path = "plugins/ime-insets" }
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

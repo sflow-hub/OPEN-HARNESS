@@ -10,7 +10,7 @@ import type { PersistentRun } from '../lib/control-client';
 const port = 14318, base = `http://127.0.0.1:${port}`, state = mkdtempSync(join(tmpdir(), 'harness-profiles-'));
 let child: ChildProcess, token = '';
 async function start() {
-  child = spawn(process.execPath, ['--import', 'tsx', 'runtime/service.ts'], { cwd: join(import.meta.dirname, '..'), env: { ...process.env, OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: state }, stdio: 'pipe' });
+  child = spawn(process.execPath, ['--import', 'tsx', 'runtime/service.ts'], { cwd: join(import.meta.dirname, '..'), env: { ...process.env, OPEN_HARNESS_DISABLE_OS_VAULT: '1', OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: state }, stdio: 'pipe' });
   for (let i = 0; i < 80; i++) { try { const r = await fetch(`${base}/v1/bootstrap`); if (r.ok) { token = (await r.json() as { token: string }).token; return; } } catch {} await new Promise(r => setTimeout(r, 50)); }
   throw new Error('Service did not start.');
 }
