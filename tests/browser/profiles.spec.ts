@@ -170,9 +170,10 @@ test('group switches and Disable all tools preserve only the required task tool'
   const panel = page.getByRole('dialog', { name: 'Agent settings' });
   await expect(panel.getByText('Loading saved profile…')).toBeHidden();
   await panel.getByRole('tab', { name: 'Tools & connections' }).click();
+  // A new agent starts able to work, so Files is already on and Browser is not.
+  await expect(panel.getByRole('checkbox', { name: 'Enable Files', exact: true })).toBeChecked();
+  await expect(panel.getByRole('checkbox', { name: 'Enable Browser', exact: true })).not.toBeChecked();
   await panel.getByRole('checkbox', { name: 'Enable Browser', exact: true }).check();
-  await panel.getByRole('checkbox', { name: 'Enable Browser', exact: true }).uncheck();
-  await panel.getByRole('checkbox', { name: 'Enable Files', exact: true }).check();
   await panel.getByRole('button', { name: 'Save changes' }).click();
   await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
   await panel.getByRole('button', { name: 'Disable all tools' }).click();
