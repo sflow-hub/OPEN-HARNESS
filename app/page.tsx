@@ -209,7 +209,15 @@ export default function Home() {
   const anyRunning = Object.keys(activeRuns).length > 0;
   const agentRunning = (id: string) => Boolean(activeRuns[id]);
   function startRun(agentId: string, run: PersistentRun) {
-    setActiveRuns(current => ({ ...current, [agentId]: run }));
+    // followRun calls this on every poll, twice a second. Storing a fresh object each time
+    // re-rendered the whole workspace on a timer whether or not anything had changed, which
+    // replaced DOM nodes under the pointer and made a parked run feel like a stuck page.
+    // Returning the same state tells React there is nothing to do.
+    setActiveRuns(current => {
+      const existing = current[agentId];
+      if (existing && existing.id === run.id && existing.state === run.state && existing.result === run.result && existing.error === run.error && existing.machine_connection === run.machine_connection) return current;
+      return { ...current, [agentId]: run };
+    });
   }
   function endRun(agentId: string) {
     setActiveRuns(current => { if (!(agentId in current)) return current; const next = { ...current }; delete next[agentId]; return next; });
@@ -2163,6 +2171,7 @@ export default function Home() {
               <label>
                 Model
                 <input
+                  aria-label="Workspace model"
                   value={settings.model}
                   onChange={(e) =>
                     setSettings((s) => ({ ...s, model: e.target.value }))

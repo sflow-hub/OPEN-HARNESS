@@ -212,9 +212,11 @@ test('reopening a task run streams the work into the conversation it belongs to'
 test('a second agent stays available while the first one is working', async ({ page, request }, testInfo) => {
   const mobile = testInfo.project.name === 'mobile';
   const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  const headers = { Authorization: `Bearer ${token}` };
   // MOCK_APPROVAL parks the run until someone answers, so it is reliably still active below.
-  const created = await request.post(control + '/v1/runs', { headers: { Authorization: `Bearer ${token}` }, data: { agentId: 'atlas', prompt: 'MOCK_APPROVAL hold this agent busy' } });
+  const created = await request.post(control + '/v1/runs', { headers, data: { agentId: 'atlas', prompt: 'MOCK_APPROVAL hold this agent busy' } });
   expect(created.ok()).toBeTruthy();
+  const held = await created.json();
   await page.reload();
   if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
 
@@ -233,4 +235,10 @@ test('a second agent stays available while the first one is working', async ({ p
   await expect(atlasRow.locator('.spin')).toHaveCount(1);
   if (!mobile) await expect(atlasRow.locator('.spin')).toBeVisible();
   await expect(atlasRow).not.toHaveClass(/selected/);
+
+  // This test is the only one that deliberately parks a run, and every spec here shares one
+  // coordinator, so it clears it rather than leaving the next file to inherit a busy agent.
+  await request.post(control + `/v1/runs/${held.id}/stop`, { headers });
+  await expect.poll(async () => (await (await request.get(control + `/v1/runs/${held.id}`, { headers })).json()).state)
+    .toMatch(/completed|failed|cancelled|interrupted/);
 });
