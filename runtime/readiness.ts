@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { HERMES_IMAGE_TAG } from '../lib/hermes-pin';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { OnboardingStatus, ReadinessCheck } from '../lib/onboarding';
 import { stateSharing } from './hermes';
 
-export const HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || 'open-harness-hermes:2026.9.11';
+export const HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`;
 
 // Every layer of the managed-run handshake -- the policy extension, managed_entry.py,
 // inspect_runtime.py, the config shape -- ships inside the image, so an image built before

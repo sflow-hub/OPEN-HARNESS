@@ -16,7 +16,13 @@ import { isAbsolute, join, resolve } from "node:path";
 
 // runtime/readiness.ts
 import { spawn, spawnSync } from "node:child_process";
-var HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || "open-harness-hermes:2026.9.11";
+
+// lib/hermes-pin.ts
+var HERMES_RELEASE = "v2026.9.11";
+var HERMES_IMAGE_TAG = HERMES_RELEASE.replace(/^v/, "");
+
+// runtime/readiness.ts
+var HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`;
 var RUNTIME_CONTRACT = 2;
 var RUNTIME_LABEL = "dev.openharness.runtime";
 function classifyContract(result) {

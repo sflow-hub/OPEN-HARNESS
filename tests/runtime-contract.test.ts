@@ -3,6 +3,7 @@
 // and the container signature that decides whether an existing container still matches.
 // Plus the state-directory choice that setup makes, which must be pure to be testable.
 import test from 'node:test';
+import { HERMES_COMMIT, HERMES_IMAGE_TAG, HERMES_RELEASE } from '../lib/hermes-pin';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -68,4 +69,17 @@ test('withEnvValue appends, fills an empty assignment, and never overrides a set
   assert.equal(withEnvValue('OPEN_HARNESS_STATE_DIR=/keep\n', 'OPEN_HARNESS_STATE_DIR', '/a'), null);
   assert.equal(withEnvValue('OPEN_HARNESS_STATE_DIR="/keep"\n', 'OPEN_HARNESS_STATE_DIR', '/a'), null);
   assert.equal(withEnvValue('# OPEN_HARNESS_STATE_DIR=\n', 'OPEN_HARNESS_STATE_DIR', '/a'), '# OPEN_HARNESS_STATE_DIR=\nOPEN_HARNESS_STATE_DIR="/a"\n', 'a commented line is not an assignment');
+});
+
+test('the pinned Hermes build agrees across the constants, the Dockerfile and the release workflow', () => {
+  const root = join(import.meta.dirname, '..');
+  const dockerfile = readFileSync(join(root, 'runtime', 'hermes', 'Dockerfile'), 'utf8');
+  // The Dockerfile cannot import the constants, so drift is caught here instead.
+  assert.match(dockerfile, new RegExp(`^ARG HERMES_COMMIT=${HERMES_COMMIT}$`, 'm'));
+  const release = readFileSync(join(root, '.github', 'workflows', 'release.yml'), 'utf8');
+  for (const line of release.split('\n').filter(item => item.includes('open-harness-hermes:'))) {
+    const tags = [...line.matchAll(/open-harness-hermes:([\w.-]+)/g)].map(match => match[1]);
+    for (const tag of tags) assert.ok([HERMES_IMAGE_TAG, 'release-candidate'].includes(tag) || tag.startsWith('${{'), `unexpected image tag ${tag} in release.yml`);
+  }
+  assert.equal(HERMES_IMAGE_TAG, HERMES_RELEASE.replace(/^v/, ''));
 });

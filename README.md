@@ -1,6 +1,6 @@
 # Open Harness powered by Hermes
 
-> **Public beta:** `v0.4.0-beta.1` targets one trusted self-hosted operator. Advanced features are experimental. Model-provider requests can incur charges, and Open Harness sends no product telemetry.
+> **Public beta:** `v0.4.0-beta.1` targets one trusted operator running Open Harness on Linux and using it from a browser on the same machine, from source or through Docker Compose. Desktop installers, macOS, and Windows are not part of this beta; see [ROADMAP.md](ROADMAP.md). Model-provider requests can incur charges, and Open Harness sends no product telemetry.
 
 Open Harness is an MIT-licensed, local named-agent workspace inspired by Grok Bot. Each named agent runs as a persistent Hermes worker behind a loopback-only Node.js control service. The browser is a client: closing it does not cancel active work.
 
@@ -11,7 +11,7 @@ This is independent software and is not affiliated with xAI or Nous Research.
 - Node.js 22.13+ control service with SQLite state and replayable events
 - Hermes `v2026.9.11`, pinned to commit `939e45c91d751fadd94dcd1b873ac3cb44846213`
 - One managed Docker container per isolated agent, or direct execution under a paired runner's OS account
-- Outbound-only runners for Linux, macOS, and Windows computers, VPSs, and user-owned servers
+- Outbound-only runners for paired Linux computers, VPSs, and user-owned servers
 - A shared project directory mounted into every agent container
 - Two concurrent top-level runs and four total executions, including delegated subagents
 - Durable routines, approvals, memories, skills, sessions, handoffs, and crash recovery
@@ -20,17 +20,23 @@ This is independent software and is not affiliated with xAI or Nous Research.
 
 The host home directory, Docker socket, and other agents' private directories are not mounted. Containers provide the filesystem boundary; Hermes execution guards still apply inside it.
 
-## Install for everyday use
+## Install
 
-Open the repository’s **Releases** page and download the installer for your computer:
+Open Harness runs on Linux with Docker, and you use it from a browser on the same machine. Either install below works; the first-run guide then checks the machine, starts Docker when it can, prepares the pinned Hermes runtime, connects a model, and creates the first private workspace. It gives a direct installation link and a plain-language explanation for anything it cannot do itself.
 
-- Windows: the `.exe` installer
-- macOS: the `.dmg` for Apple silicon or Intel
-- Linux: the `.AppImage`, `.deb`, or `.rpm`
+### Run from source
 
-Install [Docker Desktop](https://docs.docker.com/get-started/get-docker/) if you want private agent workspaces. Then open Open Harness. The first-run guide checks the computer, starts Docker when possible, prepares the pinned Hermes runtime, connects a model, and creates the first private workspace. It gives a direct installation link and a plain-language explanation when it cannot complete a step itself.
+```bash
+git clone https://github.com/sflow-hub/OPEN-HARNESS.git
+cd OPEN-HARNESS
+npm ci
+npm run harness:setup
+npm run dev
+```
 
-The desktop app includes Node, the dashboard, coordinator, and runner. Users do not need Git, npm, a source checkout, or terminal commands. Closing the window keeps active work running in the tray. Signed release builds check for signed updates at startup.
+Open `http://localhost:3000`. `npm run dev` starts Docker if it is installed, the persistent control service, and the dashboard. Closing the browser does not stop active work; stopping the control service does.
+
+`npm run harness:setup` builds the pinned agent runtime image on first use, which takes a while and needs several gigabytes of disk. Set `OPEN_HARNESS_HERMES_IMAGE` to use an image you already have instead.
 
 ### Self-host with Docker Compose
 
@@ -53,14 +59,16 @@ Contributors need Node.js 22.13+ and Docker:
 
 ```bash
 npm ci
-npm run harness:doctor
-npm run harness:setup
-npm run dev
+npm run harness:doctor     # Node version, port, Docker, pinned image, desktop capability
+npm run harness:setup      # build or rebuild the pinned agent runtime image
+npm run dev                # Docker, the control service, and the dashboard
+npm run docker:start       # start Docker on its own, if it is not running
+npm run runner:bundle      # regenerate runtime/runner.mjs after editing runtime/runner.ts
 ```
 
 Open `http://localhost:3000`. Development mode starts the UI and persistent control service. Run `npm run harness:doctor` whenever runtime health is unclear. Set `OPEN_HARNESS_SKIP_DOCKER_START=1` only when another process manages the Docker daemon.
 
-For automatic startup:
+For automatic startup (Linux, through a systemd user service):
 
 ```bash
 npm run harness:install-service
@@ -213,10 +221,10 @@ agent, two you started yourself, and four counting anything agents delegate. A r
 paused on an unanswered approval still holds its slot — answer or stop it from the
 conversation it belongs to.
 
-**I want to use the app without terminal commands.** Install the desktop build from
-Releases. It bundles Node, starts the dashboard and coordinator itself, and guides you
-through Docker, the agent runtime, and model connection in the app. Deterministic mock
-adapters are reserved for the automated test suite and are not a user launch mode.
+**I want to use the app without terminal commands.** Not in this beta. Desktop installers
+build from source but are unsigned and untested, so they are not published; the supported
+install is source or Docker Compose on Linux. Deterministic mock adapters are reserved for
+the automated test suite and are not a user launch mode.
 
 **Containers keep coming back after you quit.** Agent containers run with
 `--restart unless-stopped`. Quit from the tray item or stop the coordinator with
