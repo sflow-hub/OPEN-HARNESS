@@ -61,15 +61,17 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
 
   // The model field used to be a bare text box: the operator saved a key and then had to
   // already know an exact model ID, and for OpenRouter it started empty with nothing to go on.
-  // The provider's own list needs only the saved key, so offer it as soon as one exists.
+  // A newly pasted key can discover models before it is saved to the coordinator.
   // This fetch sets no state of its own, so the effect below can call it without updating
   // state synchronously while rendering.
   async function fetchModels(forProvider: Provider, endpoint: string) {
     const ref = keyFor(forProvider);
-    if (forProvider === 'local' ? !endpoint.trim() : !secretNames.includes(ref)) return { models: [] as string[], error: '' };
+    if (forProvider === 'local' ? !endpoint.trim() : !secretNames.includes(ref) && (!apiKey || status?.credentialMode === 'runner')) return { models: [] as string[], error: '' };
     const query = new URLSearchParams({ provider: forProvider, credentialRef: forProvider === 'local' ? '' : ref, baseUrl: forProvider === 'local' ? endpoint.trim() : '' });
     try {
-      const result = await client.request<{ models: string[]; error?: string }>(`/v1/models?${query}`);
+      const result = apiKey && forProvider !== 'local' && status?.credentialMode !== 'runner'
+        ? await client.request<{ models: string[]; error?: string }>('/v1/models', { method: 'POST', body: JSON.stringify({ provider: forProvider, value: apiKey }) })
+        : await client.request<{ models: string[]; error?: string }>(`/v1/models?${query}`);
       return { models: result.models || [], error: result.error || '' };
     } catch (error) { return { models: [] as string[], error: error instanceof Error ? error.message : 'Could not list models.' }; }
   }
@@ -81,10 +83,10 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
   useEffect(() => {
     if (step !== 2) return;
     let cancelled = false;
-    void fetchModels(provider, baseUrl).then(result => { if (!cancelled) { setModelOptions(result.models); setModelsNote(result.error); } });
-    return () => { cancelled = true; };
+    const timer = setTimeout(() => { void fetchModels(provider, baseUrl).then(result => { if (!cancelled) { setModelOptions(result.models); setModelsNote(result.error); } }); }, 350);
+    return () => { cancelled = true; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, provider, secretNames.join(',')]);
+  }, [step, provider, baseUrl, apiKey, status?.credentialMode, secretNames.join(',')]);
 
   async function action(value: NonNullable<ReadinessCheck['action']>) {
     setBusy(value); setMessage(value === 'prepare-runtime' ? 'Preparing the agent runtime. Keep Open Harness open; the first setup can take several minutes.' : 'Starting Docker…');
@@ -101,6 +103,7 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
     const selected: ModelChoice = { provider, model: modelId.trim(), baseUrl: provider === 'local' ? baseUrl.trim() : '', credentialRef };
     try {
       if (apiKey && credentialRef) { await client.request('/v1/secrets', { method: 'POST', body: JSON.stringify({ name: credentialRef, value: apiKey, ...(status?.credentialMode === 'runner' ? { machineId: status.credentialMachineId } : {}) }) }); setSecretNames(current => [...new Set([...current, credentialRef])]); }
+      if (credentialRef && status?.credentialMode !== 'runner') await client.request(`/v1/credentials/${encodeURIComponent(credentialRef)}`, { method: 'PUT', body: JSON.stringify({ provider, model: selected.model, baseUrl: selected.baseUrl }) });
       const saved = await client.request<{ model: ModelChoice; revision: number }>('/v1/workspace/model', { method: 'PUT', body: JSON.stringify({ revision, model: selected }) });
       const test = await client.request<{ ok: boolean; message: string; models?: string[] }>('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: saved.model }) });
       if (test.models?.length) { setModelOptions(test.models); setModelsNote(''); }
@@ -139,12 +142,12 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
 
       {step === 2 && <div className="onboarding-step">
         <p className="onboarding-lead">Use an API key from a model provider, or connect a compatible model server running on your network.</p>
-        <label>Provider<select value={provider} onChange={event => { const next = event.target.value as Provider; setProvider(next); setModelId(PROVIDERS[next].model); setBaseUrl(''); setMessage(''); }}>{Object.entries(PROVIDERS).map(([id, value]) => <option key={id} value={id}>{value.label}</option>)}</select></label>
-        <label>Model<input value={modelId} onChange={event => setModelId(event.target.value)} list="onboarding-model-options" aria-autocomplete="list" placeholder={modelOptions.length ? 'Choose a model, or type any model ID' : 'Model ID'} />
+        <label>Provider<select value={provider} onChange={event => { const next = event.target.value as Provider; setProvider(next); setApiKey(''); setModelOptions([]); setModelId(PROVIDERS[next].model); setBaseUrl(''); setMessage(''); }}>{Object.entries(PROVIDERS).map(([id, value]) => <option key={id} value={id}>{value.label}</option>)}</select></label>
+        <label>Model<input aria-label="Model" value={modelId} onChange={event => setModelId(event.target.value)} list="onboarding-model-options" aria-autocomplete="list" placeholder={modelOptions.length ? 'Choose a model, or type any model ID' : 'Model ID'} />
           <datalist id="onboarding-model-options">{modelOptions.map(id => <option key={id} value={id} />)}</datalist>
-          <small>{modelsBusy ? 'Loading the available models…' : modelOptions.length ? `${modelOptions.length} models available. Click the field to choose one, or type any exact ID.` : modelsNote || (provider === 'local' ? 'Enter your server address to list its models.' : 'Save your provider credential to list the models it can use.')}</small>
+          <small>{modelsBusy ? 'Loading the available models…' : modelOptions.length ? `${modelOptions.length} models available. Click the field to choose one, or type any exact ID.` : modelsNote || (provider === 'local' ? 'Enter your server address to list its models.' : 'Paste your API key to list the models it can use.')}</small>
         </label>
-        {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} onBlur={() => void loadModels('local', baseUrl)} placeholder="http://127.0.0.1:11434/v1" /><small>Enter the OpenAI-compatible API address shown by your model app.</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(keyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a></small></label>}
+        {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} onBlur={() => void loadModels('local', baseUrl)} placeholder="http://127.0.0.1:11434/v1" /><small>Enter the OpenAI-compatible API address shown by your model app.</small></label> : <label>API key<input aria-label="API key" type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(keyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a></small></label>}
         {message && <p className={`onboarding-message ${modelReady ? 'success' : ''}`} role="status">{message}</p>}
         <div className="onboarding-actions"><button type="button" className="subtle-button" onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</button><button type="button" className="light-button" disabled={busy === 'model'} onClick={saveModel}>{busy === 'model' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Save and test</button></div>
       </div>}

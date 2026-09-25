@@ -8,8 +8,9 @@ import { discoverTools, discoverModels, nativeRuntimeProbe, prepareProfile, runt
 import { HANDOFF_TOOL, profileAgent, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
 import { SchemaTooNewError, Store, type RunRow } from "./db";
 import { SecretStore, SecretsUnavailableError } from "./secrets";
+import { PROVIDER_ENDPOINTS, providerModelList } from "./provider-models";
 import { Credentials, CredentialError } from "./credentials";
-import type { CredentialRecord, CredentialUsage, CredentialUse } from "../lib/credentials";
+import { modelForCredential, type CredentialRecord, type CredentialUsage, type CredentialUse } from "../lib/credentials";
 import { validateComputerTarget } from './computer-validation';
 import { hermesApprovalDecision, HermesGateway, dockerStatusCached, ensureContainer, stopManagedContainers } from "./hermes";
 import { coordinationSocket } from "./coordination-socket";
@@ -139,7 +140,7 @@ function credentialUses(ref: string): CredentialUsage {
   return { uses, agentCount: new Set(uses.filter(use => "agentId" in use).map(use => (use as { agentId: string }).agentId)).size, activeRuns };
 }
 function credentialRecord(row: ReturnType<Credentials["row"]>): CredentialRecord {
-  return { ref: row.ref, label: row.label, provider: row.provider, fingerprint: row.fingerprint, length: row.length, present: credentials.present(row.ref), createdAt: row.created_at, updatedAt: row.updated_at, lastUsedAt: row.last_used_at, usage: credentialUses(row.ref) };
+  return { ref: row.ref, label: row.label, provider: row.provider, model: row.model, baseUrl: row.base_url, fingerprint: row.fingerprint, length: row.length, present: credentials.present(row.ref), createdAt: row.created_at, updatedAt: row.updated_at, lastUsedAt: row.last_used_at, usage: credentialUses(row.ref) };
 }
 function credentialRecords() { return credentials.rows().map(credentialRecord); }
 // Points every reference at a different credential so one can be deleted without
@@ -147,14 +148,16 @@ function credentialRecords() { return credentials.rows().map(credentialRecord); 
 // sees a matching revision -- but it still bumps, which 409s any stale open editor.
 function reassignCredential(from: string, to: string) {
   const updated: string[] = [];
-  const defaults = profiles.defaults();
-  if (defaults.model.credentialRef === from) { profiles.setDefaults({ ...defaults.model, credentialRef: to }, defaults.revision); updated.push("workspace"); }
-  for (const profile of profiles.list()) {
-    const model = !profile.model.inherit && profile.model.credentialRef === from ? { ...profile.model, credentialRef: to } : profile.model;
+  const defaults = profiles.defaults(), target = credentialRecord(credentials.row(to));
+  const nextDefault = defaults.model.credentialRef === from ? validateModel(modelForCredential(defaults.model, target)) : null;
+  // Validate every model before moving any references, including cross-provider moves.
+  const changes = profiles.list().flatMap(profile => {
+    const model = !profile.model.inherit && profile.model.credentialRef === from ? { ...validateModel(modelForCredential(profile.model, target)), inherit: false } : profile.model;
     const connectors = profile.connectors.map(c => c.secretRef === from ? { ...c, secretRef: to } : c);
-    if (model === profile.model && connectors.every((c, i) => c === profile.connectors[i])) continue;
-    profiles.save({ ...profile, model, connectors }); updated.push(profile.id);
-  }
+    return model === profile.model && connectors.every((c, i) => c === profile.connectors[i]) ? [] : [{ ...profile, model, connectors }];
+  });
+  if (nextDefault) { profiles.setDefaults(nextDefault, defaults.revision); updated.push("workspace"); }
+  for (const profile of changes) { profiles.save(profile); updated.push(profile.id); }
   return updated;
 }
 function selectedSecrets(profile: AgentProfile, effective: ReturnType<Profiles['effective']>) {
@@ -380,26 +383,6 @@ async function waitForRun(id: string, timeoutMs = 30 * 60 * 1000) {
   throw new Error("Delegated run is still active after 30 minutes. Its run ID remains available in Open Harness.");
 }
 
-// Picking a model was a bare text box in every first-run and workspace screen: the operator
-// saved a key and then had to already know an exact model ID, and for OpenRouter the field
-// started empty. The provider's own /models endpoint is already fetched to validate the key,
-// and its body was thrown away. One helper, so the list is available wherever a model is chosen
-// without starting a container the way the per-agent catalogue has to.
-export const PROVIDER_ENDPOINTS: Record<string, string> = { xai: 'https://api.x.ai/v1', openrouter: 'https://openrouter.ai/api/v1', openai: 'https://api.openai.com/v1' };
-async function providerModelList(baseUrl: string, key: string) {
-  const response = await fetch(`${baseUrl}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(15_000), redirect: 'error' });
-  if (!response.ok) return { ok: false, status: response.status, models: [] as string[] };
-  let models: string[] = [];
-  try {
-    const payload = await response.json() as { data?: unknown; models?: unknown };
-    const entries = Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : [];
-    models = [...new Set(entries.map(entry => {
-      const row = entry as { id?: unknown; name?: unknown };
-      return String(row?.id ?? row?.name ?? '').trim();
-    }).filter(Boolean))].sort().slice(0, 500);
-  } catch { /* a provider that answers 200 with something else still proves the key works */ }
-  return { ok: true, status: response.status, models };
-}
 const PROVIDER_STATUS: Record<number, string> = { 401: 'The API key was rejected.', 403: 'The provider denied access.', 404: 'The model server address was not found.', 429: 'The provider rate limit was reached. Try again shortly.' };
 
 function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number; deferStart?: boolean }) {
@@ -505,7 +488,7 @@ const server = createServer(async (req, res) => {
       if (!baseUrl) return json(res, 200, { ok: false, message: 'Enter the address of your model server.', models: [] });
       const key = model.credentialRef ? secrets.environment()[model.credentialRef] : '';
       try {
-        const result = await providerModelList(baseUrl, key);
+        const result = await providerModelList(baseUrl, key, model.provider);
         // The models the key can actually reach come back with the test, so the operator picks
         // from a list instead of typing an ID they had to find somewhere else.
         if (result.ok) return json(res, 200, { ok: true, message: result.models.length ? `Model connection is ready. ${result.models.length} models available.` : 'Model connection is ready.', models: result.models });
@@ -515,14 +498,18 @@ const server = createServer(async (req, res) => {
     // The models a saved credential can reach, for every screen that chooses one. Unlike the
     // per-agent catalogue this needs no container, so it answers in under a second and works
     // before any agent has ever run.
-    if (req.method === 'GET' && url.pathname === '/v1/models') {
-      const provider = url.searchParams.get('provider') || '', ref = url.searchParams.get('credentialRef') || '';
-      const baseUrl = (url.searchParams.get('baseUrl') || PROVIDER_ENDPOINTS[provider] || '').replace(/\/$/, '');
+    if (['GET', 'POST'].includes(req.method || '') && url.pathname === '/v1/models') {
+      // Unsaved keys only travel in a POST body and are never persisted by discovery.
+      const input = req.method === 'POST' ? await body(req) : { provider: url.searchParams.get('provider'), credentialRef: url.searchParams.get('credentialRef'), baseUrl: url.searchParams.get('baseUrl'), value: undefined };
+      const choice = validateModel({ provider: input.provider || 'custom', model: 'catalog', credentialRef: input.credentialRef || '', baseUrl: input.baseUrl || '' });
+      const provider = choice.provider, ref = choice.credentialRef;
+      if (input.value !== undefined && (typeof input.value !== 'string' || input.value.length > 10000)) throw new CredentialError('Invalid credential value.');
+      const baseUrl = (choice.baseUrl || PROVIDER_ENDPOINTS[provider] || '').replace(/\/$/, '');
       if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { models: ['mock-atlas', 'mock-scout'] });
       if (!baseUrl) return json(res, 200, { models: [], error: 'This provider has no model-list address. Enter a model ID, or set the endpoint under Advanced.' });
-      if (ref && !secrets.has(ref)) return json(res, 200, { models: [], error: `Save the ${ref} credential first.` });
+      if (!input.value && ref && !secrets.has(ref)) return json(res, 200, { models: [], error: `Save the ${ref} credential first.` });
       try {
-        const result = await providerModelList(baseUrl, ref ? secrets.environment()[ref] || '' : '');
+        const result = await providerModelList(baseUrl, input.value || (ref ? secrets.environment()[ref] || '' : ''), provider);
         return json(res, 200, result.ok ? { models: result.models } : { models: [], error: PROVIDER_STATUS[result.status] || `The provider returned HTTP ${result.status}.` });
       } catch (error) { return json(res, 200, { models: [], error: error instanceof Error ? error.message : 'Could not reach the model provider.' }); }
     }
@@ -608,10 +595,14 @@ const server = createServer(async (req, res) => {
       if (!profile) return json(res, 404, { error: 'Agent profile not found.' });
       if (action === 'credential' && req.method === 'PUT') {
         const input = await body(req);
+        if (input.revision !== undefined && input.revision !== profile.revision) throw new ProfileError(`Profile changed elsewhere (current revision ${profile.revision}). Reload before saving.`, 409);
         if (input.inherit) return json(res, 200, profileResponse(profiles.save({ ...profile, model: { ...profile.model, inherit: true } })));
         const ref = String(input.ref || '');
         if (ref && !credentials.has(ref)) throw new CredentialError('That credential no longer exists.', 404);
-        return json(res, 200, profileResponse(profiles.save({ ...profile, model: { ...profiles.effective(profile), inherit: false, credentialRef: ref } })));
+        const current = profiles.effective(profile);
+        const selected = ref ? modelForCredential(current, credentialRecord(credentials.row(ref))) : { ...current, credentialRef: '' };
+        const model = validateModel({ ...selected, ...(input.provider !== undefined ? { provider: input.provider } : {}), ...(input.model !== undefined ? { model: input.model } : {}), ...(input.baseUrl !== undefined ? { baseUrl: input.baseUrl } : {}) });
+        return json(res, 200, profileResponse(profiles.save({ ...profile, model: { ...model, inherit: false } })));
       }
       if (action === 'profile' && req.method === 'GET') return json(res, 200, profileResponse(profile));
       if (action === 'tools' && req.method === 'GET') {
@@ -644,6 +635,11 @@ const server = createServer(async (req, res) => {
         if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { ok: true, message: 'Deterministic test connection is ready.' });
         const baseUrl = model.baseUrl || PROVIDER_ENDPOINTS[model.provider];
         if (!baseUrl) return json(res, 200, { ok: false, message: 'This provider does not expose a compatible model-list endpoint. Model authentication will be checked by Hermes at task start.' });
+        // The container's legacy probe only supports bearer authentication.
+        if (model.provider === 'anthropic') {
+          try { const result = await providerModelList(baseUrl.replace(/\/$/, ''), secrets.environment()[model.credentialRef] || '', model.provider); return json(res, 200, { ok: result.ok, message: result.ok ? 'Provider accepted the credential. Model inference is checked when a task starts.' : PROVIDER_STATUS[result.status] || `The provider returned HTTP ${result.status}.` }); }
+          catch { return json(res, 200, { ok: false, message: 'Could not reach the model provider.' }); }
+        }
         ensureProfileDirs(id);
         try { return json(res, 200, profile.computer.machineId === 'local' ? await runtimeProbe(ensureContainer(id, root, profile.computer), { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' }) : await runnerProbe(profile, 'probe-runtime', { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' })); }
         catch (error) { return json(res, 200, { ok: false, message: error instanceof Error ? error.message : 'Connection failed.' }); }

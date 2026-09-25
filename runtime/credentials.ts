@@ -1,10 +1,11 @@
 import { createHmac } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { SecretStore } from './secrets';
+import { validateModel } from './profiles';
 import { CREDENTIAL_LABEL_MAX, CREDENTIAL_REF, CREDENTIAL_REF_LEGACY, labelFromRef, refFromLabel, WELL_KNOWN, type CredentialDraft } from '../lib/credentials';
 
 export class CredentialError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
-export type CredentialRow = { ref: string; label: string; provider: string; fingerprint: string; length: number; created_at: string; updated_at: string; last_used_at: string | null };
+export type CredentialRow = { ref: string; label: string; provider: string; model: string; base_url: string; fingerprint: string; length: number; created_at: string; updated_at: string; last_used_at: string | null };
 
 const VALUE_MAX = 10000;
 
@@ -16,6 +17,9 @@ export class Credentials {
     db.exec(`CREATE TABLE IF NOT EXISTS credentials(ref TEXT PRIMARY KEY, label TEXT NOT NULL, provider TEXT NOT NULL DEFAULT '', fingerprint TEXT NOT NULL DEFAULT '', length INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT);
       CREATE UNIQUE INDEX IF NOT EXISTS credentials_label ON credentials(label COLLATE NOCASE);
       CREATE INDEX IF NOT EXISTS credentials_provider ON credentials(provider);`);
+    const columns = new Set((db.prepare('PRAGMA table_info(credentials)').all() as { name: string }[]).map(column => column.name));
+    if (!columns.has('model')) db.exec("ALTER TABLE credentials ADD COLUMN model TEXT NOT NULL DEFAULT ''");
+    if (!columns.has('base_url')) db.exec("ALTER TABLE credentials ADD COLUMN base_url TEXT NOT NULL DEFAULT ''");
     this.adopt();
   }
   get backend() { return this.secrets.backend; }
@@ -32,7 +36,7 @@ export class Credentials {
     for (const ref of this.secrets.names()) {
       if (known.has(ref) || !CREDENTIAL_REF_LEGACY.test(ref)) continue;
       const meta = WELL_KNOWN[ref], value = values[ref] || '';
-      this.db.prepare('INSERT OR IGNORE INTO credentials VALUES(?,?,?,?,?,?,?,NULL)')
+      this.db.prepare('INSERT OR IGNORE INTO credentials(ref,label,provider,fingerprint,length,created_at,updated_at,last_used_at) VALUES(?,?,?,?,?,?,?,NULL)')
         .run(ref, this.freeLabel(meta?.label || labelFromRef(ref)), meta?.provider || '', this.fingerprint(value), value.length, stamp, stamp);
     }
   }
@@ -75,22 +79,26 @@ export class Credentials {
 
   create(draft: CredentialDraft): CredentialRow {
     const value = this.checkValue(draft.value), provider = this.checkProvider(draft.provider ?? WELL_KNOWN[String(draft.ref ?? '')]?.provider);
+    const model = draft.model ?? '';
+    const connection = validateModel({ provider: provider || 'custom', model: model === '' ? 'unspecified' : model, baseUrl: draft.baseUrl ?? '', credentialRef: '' });
     const label = this.checkLabel(draft.label || labelFromRef(String(draft.ref ?? '')));
     const ref = draft.ref ? String(draft.ref) : refFromLabel(label, candidate => this.has(candidate) || this.secrets.has(candidate));
     if (!CREDENTIAL_REF.test(ref)) throw new CredentialError('Credential references use uppercase letters, digits, and underscores, and are at most 64 characters.');
     if (this.has(ref)) throw new CredentialError('A credential with that reference already exists.', 409);
     const stamp = new Date().toISOString();
     this.secrets.set(ref, value);
-    try { this.db.prepare('INSERT INTO credentials VALUES(?,?,?,?,?,?,?,NULL)').run(ref, label, provider, this.fingerprint(value), value.length, stamp, stamp); }
+    try { this.db.prepare('INSERT INTO credentials(ref,label,provider,fingerprint,length,created_at,updated_at,model,base_url) VALUES(?,?,?,?,?,?,?,?,?)').run(ref, label, provider, this.fingerprint(value), value.length, stamp, stamp, draft.model ? connection.model.trim() : '', connection.baseUrl); }
     catch (error) { this.secrets.delete(ref); throw error; }
     return this.row(ref);
   }
   // The ref never moves, so every agent and connector referencing it keeps working.
-  relabel(ref: string, patch: { label?: unknown; provider?: unknown }): CredentialRow {
+  relabel(ref: string, patch: CredentialDraft): CredentialRow {
     const current = this.row(ref);
     const label = patch.label === undefined ? current.label : this.checkLabel(patch.label, ref);
     const provider = patch.provider === undefined ? current.provider : this.checkProvider(patch.provider);
-    this.db.prepare('UPDATE credentials SET label=?,provider=?,updated_at=? WHERE ref=?').run(label, provider, new Date().toISOString(), ref);
+    const model = patch.model ?? current.model, baseUrl = patch.baseUrl ?? current.base_url;
+    validateModel({ provider: provider || 'custom', model: model === '' ? 'unspecified' : model, baseUrl, credentialRef: '' });
+    this.db.prepare('UPDATE credentials SET label=?,provider=?,model=?,base_url=?,updated_at=? WHERE ref=?').run(label, provider, model.trim(), baseUrl, new Date().toISOString(), ref);
     return this.row(ref);
   }
   rotate(ref: string, input: unknown): CredentialRow {

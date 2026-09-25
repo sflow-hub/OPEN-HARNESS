@@ -185,3 +185,76 @@ test('references are derived from labels and stay within every validator', async
   await save({ ...scout, model: { inherit: false, provider: 'mock', model: 'm', credentialRef: created.ref, baseUrl: '' } });
   assert.equal((await profile('scout')).model.credentialRef, created.ref);
 });
+
+test('credential model defaults persist, while agents independently choose any credential and model', async () => {
+  const credential = await request<CredentialRecord>('/v1/credentials', 'POST', { label: 'Router models', provider: 'openrouter', model: 'vendor/default', baseUrl: 'https://router.example/v1', value: 'router-test-secret' });
+  assert.equal(credential.model, 'vendor/default');
+  assert.equal(credential.baseUrl, 'https://router.example/v1');
+  const atlasBefore = await profile('atlas');
+  const selected = await request<ProfileResponse>('/v1/agents/atlas/credential', 'PUT', { ref: credential.ref, revision: atlasBefore.revision });
+  assert.deepEqual(selected.effectiveModel, { provider: 'openrouter', model: 'vendor/default', baseUrl: credential.baseUrl, credentialRef: credential.ref });
+  const scoutBefore = await profile('scout');
+  const scout = await request<ProfileResponse>('/v1/agents/scout/credential', 'PUT', { ref: credential.ref, model: 'vendor/other', revision: scoutBefore.revision });
+  assert.equal(scout.effectiveModel.model, 'vendor/other');
+  assert.equal((await profile('atlas')).model.model, 'vendor/default');
+  const conflict = await raw('/v1/agents/scout/credential', 'PUT', { ref: credential.ref, model: 'stale', revision: scoutBefore.revision });
+  assert.equal(conflict.status, 409);
+  await request(`/v1/credentials/${credential.ref}`, 'PUT', { model: 'vendor/new-default' });
+  assert.equal((await profile('atlas')).model.model, 'vendor/default', 'metadata edits must not rewrite existing agent choices');
+  assert.equal((await profile('scout')).model.model, 'vendor/other');
+  await stop(); await start();
+  assert.equal((await request<CredentialRecord>(`/v1/credentials/${credential.ref}`)).model, 'vendor/new-default');
+  assert.equal((await profile('scout')).model.model, 'vendor/other');
+});
+
+test('cross-provider switches require a model instead of reusing an incompatible model or endpoint', async () => {
+  const credential = await request<CredentialRecord>('/v1/credentials', 'POST', { label: 'OpenAI switch', provider: 'openai', value: 'openai-switch-value' });
+  const before = await profile('atlas');
+  assert.equal((await raw('/v1/agents/atlas/credential', 'PUT', { ref: credential.ref })).status, 400);
+  assert.deepEqual(await profile('atlas'), before);
+  const selected = await request<ProfileResponse>('/v1/agents/atlas/credential', 'PUT', { ref: credential.ref, model: 'chosen-model' });
+  assert.equal(selected.effectiveModel.provider, 'openai');
+  assert.equal(selected.effectiveModel.baseUrl, '', 'an old provider endpoint must not follow the key');
+  assert.equal(selected.effectiveModel.model, 'chosen-model');
+});
+
+test('invalid connection metadata cannot persist a key or mutate its metadata', async () => {
+  for (const patch of [{ model: 'x'.repeat(201) }, { baseUrl: 'https://user:password@example.com/v1' }, { baseUrl: 'file:///tmp/model' }]) {
+    assert.equal((await raw('/v1/credentials', 'POST', { label: 'Invalid model key', value: 'must-not-save', ...patch })).status, 400);
+    assert.ok(!(await list()).credentials.some(item => item.ref === 'INVALID_MODEL_KEY'));
+    assert.ok(!secretsFile().includes('must-not-save'));
+    const before = await request<CredentialRecord>('/v1/credentials/ROUTER_MODELS');
+    assert.equal((await raw('/v1/credentials/ROUTER_MODELS', 'PUT', patch)).status, 400);
+    assert.deepEqual(await request('/v1/credentials/ROUTER_MODELS'), before);
+  }
+});
+
+test('model discovery with an unsaved key does not store or return the key', async () => {
+  const before = await list();
+  const result = await request<{ models: string[] }>('/v1/models', 'POST', { provider: 'openai', value: 'discovery-only-secret' });
+  assert.ok(result.models.length);
+  assert.ok(!JSON.stringify(result).includes('discovery-only-secret'));
+  assert.deepEqual(await list(), before);
+  assert.ok(!secretsFile().includes('discovery-only-secret'));
+  assert.equal((await raw('/v1/models', 'POST', { provider: 'openai', baseUrl: 'https://example.com?key=secret', value: 'discovery-only-secret' })).status, 400);
+});
+
+test('running work keeps its model and key; queued work snapshots the new pair', async () => {
+  await request('/v1/agents/atlas/credential', 'PUT', { ref: 'OPENAI_SWITCH', provider: 'mock', model: 'before-model', baseUrl: '' });
+  const first = await request<PersistentRun>('/v1/runs', 'POST', { agentId: 'atlas', prompt: 'MOCK_SLOW' });
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while ((await request<PersistentRun>(`/v1/runs/${first.id}`)).state !== 'running') {
+    assert.ok(Date.now() < deadline, 'first run must start');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const next = await request<PersistentRun>('/v1/runs', 'POST', { agentId: 'atlas', prompt: 'queued' });
+  const changed = await request<ProfileResponse>('/v1/agents/atlas/credential', 'PUT', { ref: 'ROUTER_MODELS', provider: 'mock', model: 'after-model', baseUrl: '' });
+  assert.equal(changed.pending, true);
+  assert.ok(agentEnv('atlas').includes('openai-switch-value'));
+  assert.ok(!agentEnv('atlas').includes('router-test-secret'));
+  assert.equal((await waitRun(first.id)).state, 'completed');
+  assert.equal((await waitRun(next.id)).state, 'completed');
+  assert.ok(agentEnv('atlas').includes('router-test-secret'));
+  const config = readFileSync(join(state, 'agents', 'atlas', 'profile', 'config.yaml'), 'utf8');
+  assert.ok(config.includes('after-model'));
+});

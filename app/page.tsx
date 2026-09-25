@@ -55,7 +55,8 @@ import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import TeamManager, { TeamBadge } from "../components/team-manager";
 import CredentialManager, { CredentialSwitcher } from "../components/credential-manager";
-import { fitsProvider, type CredentialRecord } from "../lib/credentials";
+import ModelPicker from "../components/model-picker";
+import { CREDENTIAL_PROVIDERS, modelForCredential, providerLabel, type CredentialRecord } from "../lib/credentials";
 import { profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
 import type { Team } from "../lib/team";
 import { APP_VERSION } from "../lib/version";
@@ -70,7 +71,7 @@ const MIGRATED_KEY = "open-harness.migrated.v1";
 // blob, which would silently drop anything else stored alongside it.
 const NOTIFY_KEY = "open-harness.notify.v1";
 type View = "home" | "teams" | "chat" | "files" | "routines" | "tasks";
-type ModelSettings = { provider: Provider; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
+type ModelSettings = { provider: string; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
 const defaultSettings: ModelSettings = {
   provider: "xai",
   model: PROVIDERS.xai.model,
@@ -140,9 +141,6 @@ export default function Home() {
   const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
   const [credentialsOpen, setCredentialsOpen] = useState(false);
   const [workspaceModelRevision, setWorkspaceModelRevision] = useState(0);
-  // Workspace settings asked for an exact "Model ID" with no way to see what was available.
-  const [workspaceModels, setWorkspaceModels] = useState<string[]>([]);
-  const [workspaceModelsNote, setWorkspaceModelsNote] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [advancedFeatures, setAdvancedFeatures] = useState(false);
   // Snapshot of the settings when the dialog opened, so dismissing it can tell an
@@ -497,19 +495,6 @@ export default function Home() {
   // Dismissing this dialog used to drop an unsaved model change or a pasted API key
   // with no warning, which is the worst version of it: the key is gone from the form
   // and was never sent anywhere.
-  // Load the provider's model list whenever Workspace settings is open, so the field offers
-  // real choices instead of demanding an exact ID from memory.
-  useEffect(() => {
-    if (!settingsOpen) return;
-    let cancelled = false;
-    const query = new URLSearchParams({ provider: settings.provider, credentialRef: settings.credentialRef || '', baseUrl: settings.baseUrl || '' });
-    controlRef.current
-      .request<{ models: string[]; error?: string }>(`/v1/models?${query}`)
-      .then(result => { if (!cancelled) { setWorkspaceModels(result.models || []); setWorkspaceModelsNote(result.error || ''); } })
-      .catch(error => { if (!cancelled) { setWorkspaceModels([]); setWorkspaceModelsNote(error instanceof Error ? error.message : 'Could not list models.'); } });
-    return () => { cancelled = true; };
-  }, [settingsOpen, settings.provider, settings.credentialRef, settings.baseUrl]);
-
   const settingsDirty = settingsOpen && settingsSnapshot() !== settingsBaseline;
   const requestCloseSettings = () => { if (settingsDirty) setConfirmCloseSettings(true); else closeSettings(); };
   const escapeSettingsRef = useRef<() => void>(() => {});
@@ -2147,59 +2132,23 @@ export default function Home() {
                 <select
                   value={settings.provider}
                   onChange={(e) => {
-                    const provider = e.target.value as Provider;
-                    setSettings((s) => ({
-                      ...s,
-                      provider,
-                      model:
-                        provider === "local"
-                          ? ""
-                          : PROVIDERS[provider].model,
-                      credentialRef: credentials.some((item) => item.ref === s.credentialRef && fitsProvider(item, provider))
-                        ? s.credentialRef
-                        : credentials.find((item) => item.provider === provider)?.ref || "",
-                    }));
+                    const provider = e.target.value;
+                    const credential = credentials.find(item => item.provider === provider);
+                    setSettings(current => ({ ...current, provider, model: credential?.model || PROVIDERS[provider as Provider]?.model || '', baseUrl: credential?.baseUrl || '', credentialRef: credential?.ref || '' }));
                   }}
                 >
-                  {Object.entries(PROVIDERS).map(([id, p]) => (
-                    <option value={id} key={id}>
-                      {p.label}
-                    </option>
-                  ))}
+                  {[...new Set([...CREDENTIAL_PROVIDERS.map(item => item.id).filter(Boolean), settings.provider])].map(id => <option value={id} key={id}>{providerLabel(id)}</option>)}
                 </select>
               </label>
-              <label>
-                Model
-                <input
-                  aria-label="Workspace model"
-                  value={settings.model}
-                  onChange={(e) =>
-                    setSettings((s) => ({ ...s, model: e.target.value }))
-                  }
-                  list="workspace-model-options"
-                  aria-autocomplete="list"
-                  placeholder={workspaceModels.length ? "Choose a model, or type any model ID" : "Enter the exact model ID from your provider"}
-                  maxLength={200}
-                />
-                <datalist id="workspace-model-options">
-                  {workspaceModels.map((id) => (
-                    <option key={id} value={id} />
-                  ))}
-                </datalist>
-                <small>
-                  {workspaceModels.length
-                    ? `${workspaceModels.length} models available. Click the field to choose one, or type any exact ID.`
-                    : workspaceModelsNote || "Save a credential for this provider to list the models it can use."}
-                </small>
-              </label>
+              <ModelPicker client={controlRef.current} provider={settings.provider} credentialRef={settings.credentialRef} baseUrl={settings.baseUrl} value={settings.model} label="Workspace model" onChange={model => setSettings(current => ({ ...current, model }))} />
               <label>
                 Credential
                 <select
                   value={settings.credentialRef || ""}
-                  onChange={(e) => { if (e.target.value === "__manage") { setCredentialsOpen(true); return; } setSettings((current) => ({ ...current, credentialRef: e.target.value })); }}
+                  onChange={(e) => { if (e.target.value === "__manage") { setCredentialsOpen(true); return; } const ref = e.target.value; const credential = credentials.find(item => item.ref === ref); setSettings(current => ({ ...current, ...(credential ? modelForCredential({ ...current, baseUrl: current.baseUrl || '', credentialRef: current.credentialRef || '' }, credential) : { credentialRef: ref }) })); }}
                 >
                   <option value="">No credential</option>
-                  {credentials.filter((item) => fitsProvider(item, settings.provider)).map((item) => (
+                  {credentials.map((item) => (
                     <option value={item.ref} key={item.ref}>{item.label}{item.present ? "" : " — missing"}</option>
                   ))}
                   {settings.credentialRef && !credentials.some((item) => item.ref === settings.credentialRef) && (
@@ -2209,7 +2158,7 @@ export default function Home() {
                 </select>
                 <small>Agents using “Use workspace default” run on this credential.</small>
               </label>
-              {settings.provider === "local" && <label>Model API base URL<input value={settings.baseUrl || ""} onChange={e => setSettings(current => ({ ...current, baseUrl: e.target.value }))} placeholder="http://host.docker.internal:11434/v1" /><small>Use an address reachable from the agent container.</small></label>}
+              <details open={Boolean(settings.baseUrl) || ["local", "custom"].includes(settings.provider)}><summary>Advanced endpoint</summary><label>Model API base URL<input value={settings.baseUrl || ""} onChange={e => setSettings(current => ({ ...current, baseUrl: e.target.value }))} placeholder="http://host.docker.internal:11434/v1" /><small>Use an address reachable from the agent container.</small></label></details>
               <p className="muted small">Only agents using “Use workspace default” follow these changes. Agents with their own model keep it.</p>
             </fieldset>
             <div className="settings-divider" />
@@ -2339,7 +2288,7 @@ export default function Home() {
         localStorage.setItem(ONBOARDING_KEY, 'done');
         setOnboardingOpen(false);
       }} />}
-      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
+      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} credentialCatalog={credentials} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
       {file && (
         <div className="modal-backdrop" onClick={() => setSelectedFile(null)}>
           <section

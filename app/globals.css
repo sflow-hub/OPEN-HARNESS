@@ -2168,3 +2168,13 @@ h1 span {
   .teams-content { padding: 34px 18px 70px; }.teams-heading { align-items: flex-start; flex-direction: column; }.teams-heading .light-button { width: 100%; justify-content: center; }
   .team-member-list { grid-template-columns: 1fr; }.team-members-head { align-items: stretch; flex-direction: column; }.team-members-head .search-box { width: 100%; }
 }
+
+.model-picker { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.model-picker small { font-size: 11px; color: #8c9a80; }
+.credential-menu { width: 330px; max-width: calc(100vw - 32px); max-height: min(720px, 75dvh); overflow-y: auto; }
+.credential-menu > strong { padding: 8px 10px; font-size: 13px; }
+.credential-menu fieldset { border: 0; padding: 8px; margin: 0; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.credential-menu label { display: flex; flex-direction: column; gap: 5px; font-size: 11px; }
+.credential-menu input, .credential-menu select { width: 100%; min-width: 0; padding: 8px; border: 1px solid #394034; border-radius: 6px; background: #111610; color: #d3e5bd; }
+.credential-menu summary { font-size: 11px; cursor: pointer; }
+.credential-menu button:disabled { opacity: .5; cursor: default; }

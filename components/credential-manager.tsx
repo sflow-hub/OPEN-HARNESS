@@ -3,11 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, CircleAlert, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import type { ControlClient } from "../lib/control-client";
-import { CREDENTIAL_LABEL_MAX, CREDENTIAL_PROVIDERS, describeCredential, providerLabel, summarizeUsage, type CredentialList, type CredentialRecord, type CredentialUsage } from "../lib/credentials";
+import { CREDENTIAL_LABEL_MAX, CREDENTIAL_PROVIDERS, modelForCredential, describeCredential, providerLabel, summarizeUsage, type CredentialList, type CredentialRecord, type CredentialUsage } from "../lib/credentials";
 
-type Draft = { mode: "create" | "rotate" | "rename"; ref?: string; label: string; provider: string; value: string };
+import type { AgentProfile, ModelChoice, ProfileResponse } from "../lib/agent-profile";
+import ModelPicker from "./model-picker";
+
+type Draft = { mode: "create" | "rotate" | "rename"; ref?: string; label: string; provider: string; value: string; model: string; baseUrl: string };
 type Pending = { ref: string; label: string; usage: CredentialUsage };
-const emptyDraft = (provider = ""): Draft => ({ mode: "create", label: "", provider, value: "" });
+const emptyDraft = (provider = ""): Draft => ({ mode: "create", label: "", provider, value: "", model: "", baseUrl: "" });
 
 function relative(stamp: string | null) {
   if (!stamp) return "Never used";
@@ -42,9 +45,9 @@ export default function CredentialManager({ client, onClose, onChanged, provider
     if (!draft) return;
     setBusy(true); setError("");
     try {
-      if (draft.mode === "create") await client.request("/v1/credentials", { method: "POST", body: JSON.stringify({ label: draft.label, provider: draft.provider, value: draft.value }) });
+      if (draft.mode === "create") await client.request("/v1/credentials", { method: "POST", body: JSON.stringify({ label: draft.label, provider: draft.provider, model: draft.model, baseUrl: draft.baseUrl, value: draft.value }) });
       else if (draft.mode === "rotate") await client.request(`/v1/credentials/${encodeURIComponent(draft.ref!)}/value`, { method: "POST", body: JSON.stringify({ value: draft.value }) });
-      else await client.request(`/v1/credentials/${encodeURIComponent(draft.ref!)}`, { method: "PUT", body: JSON.stringify({ label: draft.label, provider: draft.provider }) });
+      else await client.request(`/v1/credentials/${encodeURIComponent(draft.ref!)}`, { method: "PUT", body: JSON.stringify({ label: draft.label, provider: draft.provider, model: draft.model, baseUrl: draft.baseUrl }) });
       await refresh(); setDraft(null);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this credential."); }
     finally { setBusy(false); }
@@ -65,15 +68,20 @@ export default function CredentialManager({ client, onClose, onChanged, provider
 
   const others = items.filter(item => item.ref !== pending?.ref);
   const fields = draft && <div className="profile-advanced credential-draft">
-    <strong>{draft.mode === "create" ? "Add a credential" : draft.mode === "rotate" ? `Replace the value for ${draft.label}` : `Rename ${draft.label}`}</strong>
+    <strong>{draft.mode === "create" ? "Add a credential" : draft.mode === "rotate" ? `Replace the value for ${draft.label}` : `Edit ${draft.label}`}</strong>
     {draft.mode !== "rotate" && <div className="profile-two-columns">
       <label>Name<input autoFocus maxLength={CREDENTIAL_LABEL_MAX} value={draft.label} onChange={event => setDraft(value => value && ({ ...value, label: event.target.value }))} placeholder="Work xAI key" autoComplete="off" /></label>
-      <label>Provider<select value={draft.provider} onChange={event => setDraft(value => value && ({ ...value, provider: event.target.value }))}>{CREDENTIAL_PROVIDERS.map(option => <option value={option.id} key={option.id || "any"}>{option.label}</option>)}</select></label>
+      <label>Provider<select aria-label="Provider" value={draft.provider} onChange={event => setDraft(value => value && ({ ...value, provider: event.target.value, model: "", baseUrl: "" }))}>{CREDENTIAL_PROVIDERS.map(option => <option value={option.id} key={option.id || "any"}>{option.label}</option>)}</select></label>
     </div>}
     {draft.mode !== "rename" && <label>Value<input type="password" autoFocus={draft.mode === "rotate"} value={draft.value} onChange={event => setDraft(value => value && ({ ...value, value: event.target.value }))} placeholder="Paste the key — it is never shown again" autoComplete="new-password" /></label>}
+    {draft.mode !== "rotate" && <>
+      <label>Model API base URL<input type="url" value={draft.baseUrl} onChange={event => setDraft(value => value && ({ ...value, baseUrl: event.target.value }))} placeholder="Optional custom endpoint, including /v1" /></label>
+      <ModelPicker client={client} provider={draft.provider} credentialRef={draft.ref} apiKey={draft.value} baseUrl={draft.baseUrl} value={draft.model} label="Default model" onChange={model => setDraft(value => value && ({ ...value, model }))} />
+      <p className="profile-help">Optional starting model when an agent selects this credential. Each agent can choose a different model. Editing this default leaves existing agent choices in place.</p>
+    </>}
     <div className="profile-actions">
       <button className="subtle-button" disabled={busy} onClick={() => setDraft(null)}>Cancel</button>
-      <button className="light-button" disabled={busy || (draft.mode !== "rotate" && !draft.label.trim()) || (draft.mode !== "rename" && !draft.value.trim())} onClick={() => void save()}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {draft.mode === "create" ? "Save credential" : draft.mode === "rotate" ? "Replace value" : "Save name"}</button>
+      <button className="light-button" disabled={busy || (draft.mode !== "rotate" && !draft.label.trim()) || (draft.mode !== "rename" && !draft.value.trim())} onClick={() => void save()}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {draft.mode === "create" ? "Save credential" : draft.mode === "rotate" ? "Replace value" : "Save changes"}</button>
     </div>
   </div>;
 
@@ -94,6 +102,8 @@ export default function CredentialManager({ client, onClose, onChanged, provider
               <div className="credential-meta">
                 <span className="credential-ref">{item.ref}</span>
                 <span>{providerLabel(item.provider)}</span>
+                {item.model && <span>{item.model}</span>}
+                {item.baseUrl && <span>{item.baseUrl}</span>}
                 {describeCredential(item) && <span>{describeCredential(item)}</span>}
                 <span>{relative(item.lastUsedAt)}</span>
               </div>
@@ -101,8 +111,8 @@ export default function CredentialManager({ client, onClose, onChanged, provider
               <span className={`credential-usage ${item.usage.agentCount || item.usage.uses.length ? "" : "idle"}`}>{summarizeUsage(item.usage)}</span>
             </div>
             <div className="credential-actions">
-              <button className="subtle-button" disabled={busy} onClick={() => { setError(""); setDraft({ mode: "rotate", ref: item.ref, label: item.label, provider: item.provider, value: "" }); }}><RefreshCw size={13} /> Replace</button>
-              <button className="subtle-button" disabled={busy} onClick={() => { setError(""); setDraft({ mode: "rename", ref: item.ref, label: item.label, provider: item.provider, value: "" }); }}><Pencil size={13} /> Rename</button>
+              <button className="subtle-button" disabled={busy} onClick={() => { setError(""); setDraft({ mode: "rotate", ref: item.ref, label: item.label, provider: item.provider, model: item.model, baseUrl: item.baseUrl, value: "" }); }}><RefreshCw size={13} /> Replace</button>
+              <button className="subtle-button" disabled={busy} onClick={() => { setError(""); setDraft({ mode: "rename", ref: item.ref, label: item.label, provider: item.provider, model: item.model, baseUrl: item.baseUrl, value: "" }); }}><Pencil size={13} /> Edit</button>
               <button className="profile-icon-button danger-text" disabled={busy} aria-label={`Delete ${item.label}`} title={`Delete ${item.label}`} onClick={() => void remove(item.ref)}><Trash2 size={14} /></button>
             </div>
           </article>)}</div>}
@@ -132,11 +142,9 @@ export default function CredentialManager({ client, onClose, onChanged, provider
   </div>;
 }
 
-// The quick switch. Lives on the agent card and the conversation header so a credential
-// can be changed without opening the profile editor. One PUT; it applies to the next task,
-// exactly like every other profile edit.
-export function CredentialSwitcher({ agent, credentials, workspaceRef, client, onManage, onSaved, running = false }: {
-  agent: { id: string; name: string; profile?: { model: { inherit: boolean; credentialRef: string; provider: string } } };
+// Both the card and conversation header edit the same persisted agent model.
+export function CredentialSwitcher({ agent, credentials, client, onManage, onSaved, running = false }: {
+  agent: { id: string; name: string; profile?: AgentProfile };
   credentials: CredentialRecord[];
   workspaceRef: string;
   client: ControlClient;
@@ -147,45 +155,58 @@ export function CredentialSwitcher({ agent, credentials, workspaceRef, client, o
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [selection, setSelection] = useState<ModelChoice | null>(null);
+  const [revision, setRevision] = useState(0);
+  const [loaded, setLoaded] = useState(false);
   const model = agent.profile?.model;
   const byRef = (ref: string) => credentials.find(item => item.ref === ref);
-  const workspaceLabel = byRef(workspaceRef)?.label || (workspaceRef ? `${workspaceRef} — missing` : "None");
-  const current = !model || model.inherit ? `Workspace default` : byRef(model.credentialRef)?.label || (model.credentialRef ? `${model.credentialRef} — missing` : "No credential");
-  // '' provider credentials fit anywhere, which is what connector and custom-endpoint keys need.
-  const options = credentials.filter(item => !item.provider || !model?.provider || item.provider === model.provider);
-
+  const current = !model || model.inherit ? "Workspace default" : `${byRef(model.credentialRef)?.label || (model.credentialRef ? `${model.credentialRef} — missing` : "No credential")} · ${model.model}`;
   const wrap = useRef<HTMLSpanElement>(null);
   useEffect(() => {
     if (!open) return;
+    let cancelled = false;
+    void client.request<ProfileResponse>(`/v1/agents/${encodeURIComponent(agent.id)}/profile`).then(value => {
+      if (!cancelled) { setSelection(value.effectiveModel); setRevision(value.profile.revision); setLoaded(true); }
+    }, () => { if (!cancelled) setError("Could not load this agent’s model. Close and reopen to try again."); });
     const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
     const onDown = (event: MouseEvent) => { if (!wrap.current?.contains(event.target as Node)) setOpen(false); };
     window.addEventListener("keydown", onKey);
     document.addEventListener("mousedown", onDown);
-    return () => { window.removeEventListener("keydown", onKey); document.removeEventListener("mousedown", onDown); };
-  }, [open]);
+    return () => { cancelled = true; window.removeEventListener("keydown", onKey); document.removeEventListener("mousedown", onDown); };
+  }, [open, client, agent.id]);
 
-  const choose = async (body: { ref?: string; inherit?: boolean }) => {
+  const choose = async (inherit = false) => {
+    if (!selection || !loaded) return;
     setBusy(true); setError("");
-    try { const saved = await client.request<{ profile: unknown }>(`/v1/agents/${encodeURIComponent(agent.id)}/credential`, { method: "PUT", body: JSON.stringify(body) }); onSaved(saved.profile); setOpen(false); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not switch this credential."); }
+    try {
+      const body = inherit ? { inherit: true, revision } : { ...selection, ref: selection.credentialRef, revision };
+      const saved = await client.request<ProfileResponse>(`/v1/agents/${encodeURIComponent(agent.id)}/credential`, { method: "PUT", body: JSON.stringify(body) });
+      onSaved(saved.profile); setOpen(false);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not switch this model and credential."); }
     finally { setBusy(false); }
   };
 
   return <span className="credential-switch" ref={wrap}>
-    <button type="button" className="credential-chip" aria-haspopup="menu" aria-expanded={open} disabled={busy} aria-label={`Credential for ${agent.name}`} title={`Credential for ${agent.name}`} onClick={() => setOpen(value => !value)}>
+    <button type="button" className="credential-chip" aria-haspopup="dialog" aria-expanded={open} disabled={busy} aria-label={`Credential for ${agent.name}`} title={`Model and credential for ${agent.name}`} onClick={() => { setLoaded(false); setError(""); setSelection(null); setOpen(value => !value); }}>
       {busy ? <LoaderCircle className="spin" size={12} /> : <KeyRound size={12} />}<span>{current}</span>
     </button>
-    {open && <div className="credential-menu" role="menu">
-        {error && <p role="alert">{error}</p>}
-        <button role="menuitem" onClick={() => void choose({ inherit: true })}><span>Workspace default<small>{workspaceLabel}</small></span>{model?.inherit && <Check size={14} />}</button>
-        <hr />
-        {options.length ? options.map(item => <button role="menuitem" key={item.ref} onClick={() => void choose({ ref: item.ref })}>
-          <span>{item.label}<small>{item.present ? describeCredential(item) || item.ref : "Value missing"}</small></span>
-          {!model?.inherit && model?.credentialRef === item.ref && <Check size={14} />}
-        </button>) : <p>No saved credential fits this agent&rsquo;s provider yet.</p>}
-        <hr />
-        {running && <p>{agent.name} is working now. A switch applies to its next task.</p>}
-        <button role="menuitem" onClick={() => { setOpen(false); onManage(); }}><span>Manage credentials…</span></button>
+    {open && <div className="credential-menu" role="dialog" aria-label={`Model and credential for ${agent.name}`}>
+      <strong>Model and credential</strong>
+      {error && <p role="alert">{error}</p>}
+      {!loaded && !error && <p>Loading current model…</p>}
+      {loaded && selection && <fieldset disabled={busy}>
+        <label>Saved credential<select value={selection.credentialRef} onChange={event => {
+          const credential = byRef(event.target.value);
+          setSelection(credential ? modelForCredential(selection, credential) : { ...selection, credentialRef: '' });
+        }}><option value="">None / local endpoint</option>{credentials.map(item => <option key={item.ref} value={item.ref}>{item.label}{item.present ? '' : ' — missing'}</option>)}{selection.credentialRef && !byRef(selection.credentialRef) && <option value={selection.credentialRef}>{selection.credentialRef} — missing</option>}</select></label>
+        <label>Provider<select aria-label="Provider" value={selection.provider} onChange={event => setSelection({ ...selection, provider: event.target.value, model: '', baseUrl: '' })}>{[...new Set([...CREDENTIAL_PROVIDERS.map(item => item.id).filter(Boolean), selection.provider])].map(provider => <option key={provider} value={provider}>{providerLabel(provider)}</option>)}</select></label>
+        <ModelPicker client={client} {...selection} value={selection.model} onChange={model => setSelection({ ...selection, model })} />
+        <details open={Boolean(selection.baseUrl) || ['local', 'custom'].includes(selection.provider)}><summary>Advanced endpoint</summary><label>Model API base URL<input type="url" value={selection.baseUrl} onChange={event => setSelection({ ...selection, baseUrl: event.target.value })} /></label></details>
+        <button type="button" className="light-button" disabled={!selection.model.trim() || Boolean(selection.credentialRef && !byRef(selection.credentialRef)?.present)} onClick={() => void choose()}>Apply model and credential</button>
+        <button type="button" onClick={() => void choose(true)}>Use workspace default</button>
+      </fieldset>}
+      <p>{running ? `${agent.name} is working now. Changes apply to its next task.` : 'Each agent can use any saved credential and choose its own model.'}</p>
+      <button type="button" disabled={busy} onClick={() => { setOpen(false); onManage(); }}>Manage credentials…</button>
     </div>}
   </span>;
 }
