@@ -114,8 +114,8 @@ pre-1.0, so breaking changes can still land in a minor version.
   workspace is now what **Advanced features** turns off. Routines are no longer part
   of that switch, because the coordinator runs them either way and hiding the view
   left scheduled work with nothing in the app to reach it.
-- CI builds and tests on Linux only. macOS and Windows are deferred with known
-  causes recorded in `ROADMAP.md`.
+- `npm test` now has a per-test timeout, and both CI jobs have a job timeout, so a
+  hang fails in minutes instead of consuming the six-hour runner limit.
 - The pinned Hermes release and commit live in one module, with a test that fails if
   the Dockerfile or release workflow drifts from it.
 

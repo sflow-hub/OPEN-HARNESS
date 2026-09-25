@@ -30,7 +30,8 @@ Docker Compose. These are understood but deliberately not part of the beta:
   Windows, so the agent coordination socket needs a named pipe or the HTTP control path;
   Docker Desktop does not forward a Unix socket through a bind mount, so container agents on
   either platform cannot reach the coordinator that way; and the test harness reaches for the
-  real Keychain on macOS. `.github/workflows/ci.yml` builds Linux only until these are fixed.
+  real Keychain on macOS. `.github/workflows/ci.yml` still builds all three so the breakage
+  stays visible, but only the Linux job is a gate on the beta.
 - **Desktop installers and signed updates.** No code-signing, notarization, or updater keys
   exist. `desktop-release.yml` is `workflow_dispatch`-only and unverified.
 - **A hosted multi-operator service.** The Cloudflare/D1 surface was removed in `0.4.0`: its
