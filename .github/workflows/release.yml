@@ -1,130 +1,124 @@
-name: Desktop release
+name: Self-hosted beta release
 
 on:
-  workflow_dispatch:
   push:
-    tags: ['v*']
+    tags: ['v*-beta.*']
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
-  desktop:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            artifact: open-harness-linux-x64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            artifact: open-harness-macos-x64
-          - os: macos-14
-            target: aarch64-apple-darwin
-            artifact: open-harness-macos-arm64
-          - os: windows-2025
-            target: x86_64-pc-windows-msvc
-            artifact: open-harness-windows-x64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: Install Linux desktop libraries
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
-      - run: npm ci
-      - run: node desktop/fetch-node.mjs ${{ matrix.target }}
-      - name: Import Windows code-signing certificate
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          if (-not $env:WINDOWS_CERTIFICATE) { throw 'WINDOWS_CERTIFICATE is required for a signed Windows release.' }
-          $bytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
-          $path = Join-Path $env:RUNNER_TEMP 'open-harness-signing.pfx'
-          [IO.File]::WriteAllBytes($path, $bytes)
-          $secure = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $secure
-          "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - run: node desktop/configure-release.mjs
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          OPEN_HARNESS_UPDATE_PUBKEY: ${{ secrets.OPEN_HARNESS_UPDATE_PUBKEY }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ env.WINDOWS_CERTIFICATE_THUMBPRINT }}
-      - run: npm run desktop:build -- --target ${{ matrix.target }}
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ env.WINDOWS_CERTIFICATE_THUMBPRINT }}
-          OPEN_HARNESS_UPDATE_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
-          OPEN_HARNESS_UPDATE_PUBKEY: ${{ secrets.OPEN_HARNESS_UPDATE_PUBKEY }}
-      - name: Stage uniquely named release files
-        run: node desktop/stage-release.mjs src-tauri/target/${{ matrix.target }}/release/bundle release-stage ${{ matrix.artifact }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: release-stage/*
-          if-no-files-found: error
-
-  hermes-image:
+  verify:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        if: startsWith(github.ref, 'refs/tags/')
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: Require the tag to point at main
+        run: test "$GITHUB_SHA" = "$(git rev-parse origin/main)"
+      - name: Require the tag to match the application version
+        run: test "$GITHUB_REF_NAME" = "v$(node -p \"require('./package.json').version\")"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+      - run: docker compose config --quiet
+      - name: Scan the source tree for secrets
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          exit-code: '1'
+      - name: Build coordinator image
+        run: docker build -f Dockerfile.coordinator -t open-harness-coordinator:release-candidate .
+      - name: Scan coordinator image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: open-harness-coordinator:release-candidate
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+      - name: Smoke test fresh Compose stack
+        run: |
+          cleanup() { docker compose down -v; }
+          trap cleanup EXIT
+          docker compose up -d --build
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3000/api/health >/dev/null; then break; fi
+            if [ "$attempt" = 60 ]; then docker compose logs open-harness; exit 1; fi
+            sleep 2
+          done
+          test "$(curl -sS -o /tmp/remote-bootstrap.json -w '%{http_code}' -H 'Host: agents.example.com' http://127.0.0.1:3000/api/local/v1/bootstrap)" = 403
+
+  hermes-image:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: runtime/hermes/Dockerfile
-          push: ${{ startsWith(github.ref, 'refs/tags/') }}
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/open-harness-hermes:2026.9.11
-            ghcr.io/${{ github.repository_owner }}/open-harness-hermes:${{ github.ref_name }}
+          load: true
+          tags: open-harness-hermes:release-candidate
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Scan Hermes image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: open-harness-hermes:release-candidate
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish scanned Hermes image
+        run: |
+          docker tag open-harness-hermes:release-candidate ghcr.io/${{ github.repository_owner }}/open-harness-hermes:${{ github.ref_name }}
+          docker tag open-harness-hermes:release-candidate ghcr.io/${{ github.repository_owner }}/open-harness-hermes:2026.9.11
+          docker push ghcr.io/${{ github.repository_owner }}/open-harness-hermes:${{ github.ref_name }}
+          docker push ghcr.io/${{ github.repository_owner }}/open-harness-hermes:2026.9.11
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [desktop, hermes-image]
+    needs: [verify, hermes-image]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
         with:
-          path: release-assets
-          merge-multiple: true
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run release:package -- release-assets
       - name: Create checksums
         working-directory: release-assets
-        run: find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
-      - name: Create signed update manifest
-        run: node desktop/create-update-manifest.mjs release-assets
-      - name: Publish GitHub release
+        run: sha256sum open-harness-self-hosted-*.tar.gz > SHA256SUMS.txt
+      - name: Publish prerelease
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: find release-assets -type f -print0 | xargs -0 gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes --title "Open Harness ${GITHUB_REF_NAME}"
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --prerelease --generate-notes --title "Open Harness ${GITHUB_REF_NAME}"

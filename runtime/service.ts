@@ -18,6 +18,7 @@ import { TeamError, TeamStore } from "./teams";
 import { MachineError, Machines } from "./machines";
 import { exportAgentFiles, importAgentFiles, type TransferBundle } from './transfer-files';
 import { onboardingAction, onboardingStatus } from './readiness';
+import { APP_VERSION } from '../lib/version';
 
 const root = resolve(process.env.OPEN_HARNESS_STATE_DIR || ".open-harness");
 mkdirSync(root, { recursive: true }); mkdirSync(join(root, "shared"), { recursive: true }); mkdirSync(join(root, "agents"), { recursive: true });
@@ -364,7 +365,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") { res.writeHead(204, { "Access-Control-Allow-Origin": allowedOrigin(origin), "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" }); return res.end(); }
   const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
   try {
-    if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); if (!loopbackHost(req.headers.host)) return json(res, 403, { error: 'Dashboard bootstrap requires a loopback address. Open Open Harness at http://localhost:3000.' }); return json(res, 200, { token: secrets.token, mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } }); }
+    if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); if (!loopbackHost(req.headers.host)) return json(res, 403, { error: 'Dashboard bootstrap requires a loopback address. Open Open Harness at http://localhost:3000.' }); return json(res, 200, { token: secrets.token, mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: APP_VERSION, hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } }); }
     if (req.method === 'GET' && (url.pathname === '/v1/install/runner.sh' || url.pathname === '/v1/install/runner.ps1')) {
       const name = url.pathname.endsWith('.ps1') ? 'install-runner.ps1' : 'install-runner.sh';
       return raw(res, 200, name.endsWith('.ps1') ? 'text/plain; charset=utf-8' : 'text/x-shellscript; charset=utf-8', readFileSync(join(import.meta.dirname, 'installers', name)));
@@ -395,7 +396,7 @@ const server = createServer(async (req, res) => {
     if (!authenticated(req) && !internalAgent) return json(res, 401, { error: "Invalid local control token." });
     if (req.method === "GET" && url.pathname === "/v1/health") return json(res, 200, { ok: true, runtime: await dockerStatusCached(), activeRuns: store.activeCount(), queuedRuns: store.listRuns().filter(run => run.state === "queued").length, secrets: secrets.names(), secretStorage: secrets.backend });
     if (req.method === 'GET' && url.pathname === '/v1/support-bundle') return json(res, 200, {
-      generatedAt: new Date().toISOString(), version: '0.3.0', hermes: { release: 'v2026.9.11', commit: '939e45c91d751fadd94dcd1b873ac3cb44846213' },
+      generatedAt: new Date().toISOString(), version: APP_VERSION, hermes: { release: 'v2026.9.11', commit: '939e45c91d751fadd94dcd1b873ac3cb44846213' },
       platform: { os: process.platform, arch: process.arch, node: process.version }, readiness: onboardingStatus(secrets.names(), root), machines: machines.list(),
       agents: profiles.list().map(profile => ({ id: profile.id, revision: profile.revision, machineId: profile.computer.machineId, access: profile.computer.access, desktop: profile.computer.desktop })),
       recentRuns: store.listRuns(25).map(run => ({ id: run.id, agentId: run.agent_id, state: run.state, createdAt: run.created_at, updatedAt: run.updated_at, error: run.error })),

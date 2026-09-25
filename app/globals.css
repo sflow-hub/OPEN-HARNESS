@@ -1518,6 +1518,20 @@ h1 span {
   background: var(--line);
   margin: 26px 0 23px;
 }
+.settings-feature-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+}
+.settings-feature-toggle input {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  accent-color: var(--accent);
+}
+.settings-feature-toggle span { flex: 1; }
+.settings-feature-toggle strong { display: block; color: var(--text); font-size: 12px; font-weight: 520; }
 .modal-footer {
   display: flex;
   align-items: center;

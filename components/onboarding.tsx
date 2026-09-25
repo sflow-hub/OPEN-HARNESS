@@ -13,6 +13,7 @@ type Props = {
   revision: number;
   onModelSaved: (model: ModelChoice, revision: number) => void;
   onComputerSettings: () => void;
+  onDismiss: () => void;
   onFinished: () => void;
 };
 
@@ -28,7 +29,9 @@ function CheckRow({ check, busy, onAction }: { check: ReadinessCheck; busy: bool
   </div>;
 }
 
-export default function Onboarding({ client, model, revision, onModelSaved, onComputerSettings, onFinished }: Props) {
+const selfHosted = process.env.NEXT_PUBLIC_OPEN_HARNESS_SELF_HOSTED === '1';
+
+export default function Onboarding({ client, model, revision, onModelSaved, onComputerSettings, onDismiss, onFinished }: Props) {
   const [step, setStep] = useState(0);
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
   const [busy, setBusy] = useState('');
@@ -70,29 +73,36 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
       if (apiKey && credentialRef) { await client.request('/v1/secrets', { method: 'POST', body: JSON.stringify({ name: credentialRef, value: apiKey, ...(status?.credentialMode === 'runner' ? { machineId: status.credentialMachineId } : {}) }) }); setSecretNames(current => [...new Set([...current, credentialRef])]); }
       const saved = await client.request<{ model: ModelChoice; revision: number }>('/v1/workspace/model', { method: 'PUT', body: JSON.stringify({ revision, model: selected }) });
       const test = await client.request<{ ok: boolean; message: string }>('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: saved.model }) });
-      onModelSaved(saved.model, saved.revision); setApiKey(''); setModelReady(test.ok); setMessage(test.message);
-      if (test.ok) setTimeout(() => setStep(3), 450);
+      onModelSaved(saved.model, saved.revision); setApiKey(''); setModelReady(test.ok);
+      if (test.ok && status?.executionReady) {
+        setMessage(test.message);
+        setTimeout(() => setStep(3), 450);
+      } else if (test.ok) {
+        setMessage('Model connection is ready. Finish preparing the server before setup can complete.');
+      } else {
+        setMessage(test.message);
+      }
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not save the model connection.'); }
     finally { setBusy(''); }
   }
 
   return <div className="modal-backdrop onboarding-backdrop">
     <section className="onboarding" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
-      <header><div><div className="eyebrow">FIRST-RUN SETUP</div><h2 id="onboarding-title">{['Welcome to Open Harness', 'Check this computer', 'Connect your model', 'You’re ready'][step]}</h2></div><button type="button" aria-label="Set up later" onClick={onFinished}><X size={19} /></button></header>
+      <header><div><div className="eyebrow">FIRST-RUN SETUP</div><h2 id="onboarding-title">{['Welcome to Open Harness', selfHosted ? 'Check this server' : 'Check this computer', 'Connect your model', 'You’re ready'][step]}</h2></div><button type="button" aria-label="Set up later" onClick={onDismiss}><X size={19} /></button></header>
       <div className="onboarding-progress" aria-label={`Step ${step + 1} of 4`}>{[0,1,2,3].map(item => <span className={item <= step ? 'active' : ''} key={item} />)}</div>
 
       {step === 0 && <div className="onboarding-step">
-        <div className="onboarding-hero"><span><Sparkles size={26} /></span><h3>Your agents can keep working on a computer you control.</h3><p>Open Harness stores its data here. You can add a server or another computer whenever you want.</p></div>
-        <button type="button" className="onboarding-choice" onClick={() => setStep(1)}><MonitorCog size={23} /><span><strong>Use this computer</strong><small>Recommended for your first agent. We’ll check everything for you.</small></span><ArrowRight size={18} /></button>
-        <button type="button" className="onboarding-choice" onClick={onComputerSettings}><Server size={23} /><span><strong>Connect another computer</strong><small>Pair a VPS, home server, Mac, Windows PC, or Linux machine.</small></span><ArrowRight size={18} /></button>
+        <div className="onboarding-hero"><span><Sparkles size={26} /></span><h3>Your agents can keep working on {selfHosted ? 'this server' : 'a computer you control'}.</h3><p>Open Harness stores its data here. Tasks continue when you close the browser.</p></div>
+        <button type="button" className="onboarding-choice" onClick={() => setStep(1)}><MonitorCog size={23} /><span><strong>{selfHosted ? 'Use this server' : 'Use this computer'}</strong><small>Recommended for your first agent. We’ll check everything for you.</small></span><ArrowRight size={18} /></button>
+        {!selfHosted && <button type="button" className="onboarding-choice" onClick={onComputerSettings}><Server size={23} /><span><strong>Connect another computer</strong><small>Pair a VPS, home server, Mac, Windows PC, or Linux machine.</small></span><ArrowRight size={18} /></button>}
       </div>}
 
       {step === 1 && <div className="onboarding-step">
-        <p className="onboarding-lead">These checks stay on your computer. Open Harness will tell you what it can fix and give you a direct link for anything you need to install.</p>
+        <p className="onboarding-lead">These checks stay on {selfHosted ? 'your server' : 'your computer'}. Open Harness will tell you what it can fix and give you a direct link for anything you need to install.</p>
         <div className="onboarding-checks">{status?.checks.map(check => <CheckRow key={check.id} check={check} busy={Boolean(busy)} onAction={action} />)}</div>
         {!status && !message && <p className="onboarding-working"><LoaderCircle className="spin" size={17} /> Checking this computer…</p>}
         {message && <p className="onboarding-message" role="status">{message}</p>}
-        <div className="onboarding-actions"><button type="button" className="subtle-button" disabled={Boolean(busy)} onClick={refresh}>Check again</button><button type="button" className="light-button" disabled={!status?.executionReady || Boolean(busy)} onClick={() => { setMessage(''); setStep(2); }}>Continue <ArrowRight size={14} /></button></div>
+        <div className="onboarding-actions"><button type="button" className="subtle-button" disabled={Boolean(busy)} onClick={refresh}>Check again</button><button type="button" className="light-button" disabled={!status?.executionReady || Boolean(busy)} onClick={() => { setMessage(''); setStep(modelReady ? 3 : 2); }}>{modelReady ? 'Finish setup' : 'Continue'} <ArrowRight size={14} /></button></div>
         {status && !status.executionReady && <button type="button" className="onboarding-skip" onClick={() => setStep(2)}>Connect my model while I finish this later</button>}
       </div>}
 
@@ -106,7 +116,7 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
       </div>}
 
       {step === 3 && <div className="onboarding-step onboarding-done">
-        <span><Check size={34} /></span><h3>Open Harness is set up.</h3><p>Your first agent uses a private workspace on this computer. You can change its computer, access, desktop, and limits from Agent settings at any time.</p>
+        <span><Check size={34} /></span><h3>Open Harness is set up.</h3><p>Your first agent uses a private workspace on {selfHosted ? 'this server' : 'this computer'}. Advanced execution options remain available from Workspace settings.</p>
         <button type="button" className="light-button" onClick={onFinished}>Start using Open Harness <ArrowRight size={15} /></button>
         <button type="button" className="subtle-button" onClick={onComputerSettings}>Review computer settings</button>
       </div>}

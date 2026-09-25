@@ -1,6 +1,6 @@
 [package]
 name = "open-harness-desktop"
-version = "0.3.0"
+version = "0.4.0-beta.1"
 description = "The no-terminal desktop installer for Open Harness"
 edition = "2021"
 license = "MIT"

@@ -1,6 +1,6 @@
 {
   "name": "open-harness",
-  "version": "0.3.0",
+  "version": "0.4.0-beta.1",
   "private": true,
   "license": "MIT",
   "repository": {
@@ -42,7 +42,8 @@
     "runner:bundle": "node desktop/build-runner.mjs",
     "desktop:prepare": "node desktop/prepare-runtime.mjs",
     "desktop:dev": "npm run desktop:prepare && tauri dev",
-    "desktop:build": "npm run desktop:prepare && tauri build"
+    "desktop:build": "npm run desktop:prepare && tauri build",
+    "release:package": "node scripts/package-self-hosted.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.45.0",

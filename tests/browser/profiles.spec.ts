@@ -11,7 +11,7 @@ async function seed(request: APIRequestContext) {
     await request.put(control + `/v1/agents/${agent.id}/profile`, { headers, data: { ...draftProfile(agent), revision: profile.revision } });
   }
 }
-test.beforeEach(async ({ request, page }) => { await seed(request); await page.addInitScript(() => localStorage.setItem('open-harness.onboarding.v1', 'done')); await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`); await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible(); });
+test.beforeEach(async ({ request, page }) => { await seed(request); await page.addInitScript(() => { localStorage.setItem('open-harness.onboarding.v1', 'done'); localStorage.setItem('open-harness.advanced.v1', 'on'); }); await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`); await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible(); });
 
 test('never presents deterministic test output as a real agent reply', async ({ page }) => {
   await page.getByRole('button', { name: 'Meet Atlas' }).click();

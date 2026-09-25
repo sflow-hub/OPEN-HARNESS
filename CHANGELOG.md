@@ -6,6 +6,20 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ## [Unreleased]
 
+## [0.4.0-beta.1] — 2026-09-24
+
+### Added
+
+- Added a focused self-hosted interface that keeps experimental teams, boards,
+  routines, remote computers, direct access, and MCP configuration behind an
+  Advanced features preference.
+- Added a coordinator-aware health endpoint, first-run retry coverage, and a
+  self-hosting operations guide covering authenticated HTTPS access, updates,
+  diagnostics, backup, restore, and rollback.
+- Added a gated self-hosted beta release workflow with production dependency
+  auditing, browser coverage, clean Compose smoke testing, image vulnerability
+  scans, source packaging, and checksums.
+
 ### Security
 
 - Closed a DNS-rebinding hole that could expose the dashboard bootstrap token
@@ -38,8 +52,12 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 - Hardened the self-hosted `compose.yaml`: the `open-harness` service now
   drops all Linux capabilities, disables privilege escalation, and has its
-  own healthcheck instead of relying on "the process started."
+  own dashboard-to-coordinator healthcheck instead of relying on "the process started."
 - Defined a real desktop Content-Security-Policy (previously disabled).
+- First-run setup now requires runtime readiness and a successful model test;
+  dismissing setup no longer records a false completion.
+- Signed desktop builds are now a separate manual release-candidate workflow
+  and cannot block the self-hosted beta.
 
 ## [0.3.0] — 2026-09-12
 

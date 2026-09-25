@@ -27,6 +27,7 @@ services:
       DOCKER_HOST: tcp://docker:2375
       OPEN_HARNESS_STATE_DIR: /data
       OPEN_HARNESS_PUBLIC_URL: ${OPEN_HARNESS_PUBLIC_URL:-http://localhost:3000/api/local}
+      OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD: ${OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD:-0}
     volumes:
       - harness-data:/data
     ports:
@@ -36,11 +37,12 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
       interval: 5s
       timeout: 5s
       retries: 20
       start_period: 15s
+    stop_grace_period: 25s
     restart: unless-stopped
 
 volumes:

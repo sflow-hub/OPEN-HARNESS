@@ -1,5 +1,23 @@
 # Runtime verification
 
+## Public beta release-candidate implementation pass — September 24, 2026
+
+Implemented and verified without paid inference:
+
+- The production dashboard now exposes `/api/health`, which returns only coordinator reachability. Compose uses it for the service healthcheck, passes the remote-dashboard trust switch explicitly, and gives the coordinator up to 25 seconds for cleanup during shutdown.
+- Remote bootstrap remains denied by default and is allowed only when `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1`; both paths have route coverage.
+- First-run setup no longer records completion when dismissed, when runtime preparation is incomplete, or after a failed model test. Failed connection tests preserve the saved revision and can be retried.
+- Teams, boards, routines, remote computers, direct access, and MCP configuration are hidden behind a local Advanced features preference that defaults off. Existing data and APIs are unchanged.
+- Browser hydration no longer describes a persistent run as interrupted merely because its tab was closed; the coordinator remains authoritative and replay supplies the current state after reconnect.
+- Pending approvals are rebuilt from durable run events after reconnect, including when the saved event cursor has already passed the approval request. The mobile workspace panel now starts closed so it cannot cover task and approval controls.
+- Self-hosting documentation now covers authenticated HTTPS proxying with streaming, health checks, updates, diagnostics, and stopped-stack backup and restore.
+- Every reported version is `0.4.0-beta.1`. Self-hosted release publication is separate from signed desktop packaging, rejects tags that do not match the reviewed `main` commit and package version, and depends on tests, browser coverage, a fresh Compose health smoke test, coordinator/Hermes builds, and high/critical image scans.
+- The source-release builder archives the reviewed Git tree with the lockfile, Compose files, runtime Dockerfile, and operations documentation; it rejects local state, environment files, dependencies, and build/test output. The publishing job adds SHA-256 checksums.
+
+Checks: 97 Node tests, 46 Playwright desktop/mobile tests, TypeScript, ESLint, the production Vinext build, Cargo manifest/lock metadata, workflow YAML parsing, `git diff --check`, and `docker compose config` passed. Browser coverage includes incomplete setup, failed model retry, advanced-feature visibility, agent creation, task submission, pending-approval reconnect, and exact file download. `npm audit --omit=dev` reported 0 known vulnerabilities across 126 production dependencies.
+
+Live release acceptance remains blocked on this machine: its selected Docker Desktop socket does not exist, the system Docker socket is not accessible, and `.env` has no configured model credential. Therefore the full coordinator/Hermes builds and Trivy scans, fresh Compose smoke test, authenticated proxy test, real-provider `launch-smoke.md` workflow, process-tree termination, upgrade/restore comparison, and 24-hour soak are not claimed as passed. The release tag and GitHub Release must not be created until those gates and the repository-rule checklist in `docs/BETA_RELEASE.md` are complete.
+
 ## Real-runtime pass — September 21, 2026
 
 First execution against the real, non-mocked runtime (`mode: live`), on Linux with

@@ -6,6 +6,7 @@ import type { Agent } from '../../../../lib/types';
 import { normalizeTeamInput, type Team, type TeamInput } from '../../../../lib/team';
 import { encryptRunnerSecret } from '../../../../lib/runner-crypto';
 import { validateProfile } from '../../../../runtime/profiles';
+import { APP_VERSION } from '../../../../lib/version';
 import runnerInstallSh from '../../../../runtime/installers/install-runner.sh?raw';
 import runnerInstallPs1 from '../../../../runtime/installers/install-runner.ps1?raw';
 import runnerBundle from '../../../../runtime/runner.mjs?raw';
@@ -692,7 +693,7 @@ async function handler(request: Request, context: RouteContext) {
     const runnerFacing = pathname === '/v1/runner/pair' || pathname.startsWith('/v1/runner/') || pathname.startsWith('/internal/') || pathname.startsWith('/v1/install/');
     if (!runnerFacing && !request.headers.get('oai-authenticated-user-id')) throw new HttpError(401, 'Sign in to manage this workspace.');
 
-    if (pathname === "/v1/bootstrap" && request.method === "GET") return json({ token: "hosted-site", mode: "live", runtime: { available: true, version: 'runner', message: "Connect a computer to run agents from this hosted dashboard." }, version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } });
+    if (pathname === "/v1/bootstrap" && request.method === "GET") return json({ token: "hosted-site", mode: "live", runtime: { available: true, version: 'runner', message: "Connect a computer to run agents from this hosted dashboard." }, version: APP_VERSION, hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } });
     if ((pathname === '/internal/handoff' || pathname === '/internal/schedule') && request.method === 'POST') {
       const scoped = await internalRun(db, request); if (!scoped) throw new HttpError(401, 'Invalid or expired run credential.');
       const tool = pathname === '/internal/handoff' ? 'mcp_open_harness_delegate_named_agent' : 'mcp_open_harness_create_open_harness_routine';
@@ -855,7 +856,7 @@ async function handler(request: Request, context: RouteContext) {
     }
     if (pathname === "/v1/migrate" && request.method === "POST") return json({ migrated: false, reason: "hosted" });
     if (pathname === '/v1/health' && request.method === 'GET') return json({ ok: true, runtime: { available: true, message: 'Hosted coordinator is ready.' }, activeRuns: Number((await db.prepare("SELECT COUNT(*) AS count FROM runs WHERE state IN ('running','waiting_approval')").first<Row>())?.count || 0), queuedRuns: Number((await db.prepare("SELECT COUNT(*) AS count FROM runs WHERE state='queued'").first<Row>())?.count || 0), secrets: (await db.prepare('SELECT DISTINCT name FROM machine_secrets ORDER BY name').all<Row>()).results.map(row => String(row.name)), secretStorage: 'selected runner OS vault' });
-    if (pathname === '/v1/support-bundle' && request.method === 'GET') return json({ generatedAt: stamp(), version: '0.3.0', platform: { os: 'hosted', arch: 'managed' }, machines: await machineList(db), recentRuns: (await db.prepare('SELECT id,agent_id,state,machine_id,created_at,updated_at,error FROM runs ORDER BY created_at DESC LIMIT 25').all<Row>()).results, note: 'Secret values, prompts, messages, results, and file contents are excluded.' });
+    if (pathname === '/v1/support-bundle' && request.method === 'GET') return json({ generatedAt: stamp(), version: APP_VERSION, platform: { os: 'hosted', arch: 'managed' }, machines: await machineList(db), recentRuns: (await db.prepare('SELECT id,agent_id,state,machine_id,created_at,updated_at,error FROM runs ORDER BY created_at DESC LIMIT 25').all<Row>()).results, note: 'Secret values, prompts, messages, results, and file contents are excluded.' });
     if (pathname === '/v1/onboarding/status' && request.method === 'GET') {
       const connected = await machineList(db), online = connected.filter(machine => machine.status === 'online'), credentialMachineId = online[0]?.id;
       const privateReady = online.some(machine => machine.capabilities.container), directReady = online.some(machine => machine.capabilities.direct), desktopReady = online.some(machine => machine.capabilities.desktop);

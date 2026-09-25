@@ -58,11 +58,13 @@ import CredentialManager, { CredentialSwitcher } from "../components/credential-
 import { fitsProvider, type CredentialRecord } from "../lib/credentials";
 import { profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
 import type { Team } from "../lib/team";
+import { APP_VERSION } from "../lib/version";
 
 const STORAGE_KEY = "open-harness.workspace.v2";
 const LEGACY_STORAGE_KEY = "open-harness.workspace.v1";
 const SETTINGS_KEY = "open-harness.settings.v1";
 const ONBOARDING_KEY = "open-harness.onboarding.v1";
+const ADVANCED_KEY = "open-harness.advanced.v1";
 // Kept apart from SETTINGS_KEY on purpose: the onboarding save rewrites that whole
 // blob, which would silently drop anything else stored alongside it.
 const NOTIFY_KEY = "open-harness.notify.v1";
@@ -145,6 +147,7 @@ export default function Home() {
     localModel: "",
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [advancedFeatures, setAdvancedFeatures] = useState(false);
   // Snapshot of the settings when the dialog opened, so dismissing it can tell an
   // untouched dialog from one holding an unsaved model change or a freshly pasted key.
   const [settingsBaseline, setSettingsBaseline] = useState("");
@@ -206,35 +209,25 @@ export default function Home() {
   const connected = Boolean(runtime?.runtime.available && !testMode);
 
   useEffect(() => {
+    const narrow = window.matchMedia("(max-width: 1000px)");
+    const matchLayout = () => setInspector(!narrow.matches);
+    const layoutTimer = window.setTimeout(matchLayout, 0);
+    narrow.addEventListener("change", matchLayout);
     try {
       const saved = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
       // Hydrate browser-only persistence after the server-rendered first frame.
       if (saved) {
         const parsed = normalizeWorkspace(JSON.parse(saved));
         if (!parsed) throw new Error();
+        // The coordinator owns active work. Preserve the last rendered activity until
+        // reconnect replays authoritative events instead of implying that closing the
+        // browser interrupted the task.
         // eslint-disable-next-line react-hooks/set-state-in-effect
-        setWorkspace({
-          ...parsed,
-          conversations: parsed.conversations.map((c) => ({
-            ...c,
-            messages: c.messages.map((m) => ({
-              ...m,
-              activities: m.activities?.map((a) =>
-                a.status === "running"
-                  ? {
-                      ...a,
-                      status: "error" as const,
-                      detail:
-                        "Interrupted when the page closed. Send a follow-up to continue.",
-                    }
-                  : a,
-              ),
-            })),
-          })),
-        });
+        setWorkspace(parsed);
         setSelectedAgent(parsed.agents[0].id);
       }
       if (localStorage.getItem(NOTIFY_KEY) === "on" && typeof Notification !== "undefined" && Notification.permission === "granted") setNotifyWhenDone(true);
+      setAdvancedFeatures(localStorage.getItem(ADVANCED_KEY) === "on");
       const prefs = localStorage.getItem(SETTINGS_KEY);
       if (prefs) {
         const p = JSON.parse(prefs);
@@ -255,6 +248,10 @@ export default function Home() {
           "Could not reach the model server. You can still explore your workspace.",
         ),
       );
+    return () => {
+      window.clearTimeout(layoutTimer);
+      narrow.removeEventListener("change", matchLayout);
+    };
   }, []);
   useEffect(() => {
     if (!ready) return;
@@ -731,6 +728,29 @@ export default function Home() {
     let cursor = startCursor;
     let receivedStreamText = hasExistingText;
     let consecutiveFailures = 0;
+    // The event cursor is persisted with the conversation, while approval banners are
+    // intentionally transient UI state. Rebuild a still-pending approval before
+    // resuming after that cursor so a browser reload cannot hide the blocked run.
+    if (run.state === "waiting_approval" && startCursor > 0) {
+      try {
+        const replay = await controlRef.current.events(run.id, 0);
+        const pending = [...replay.events].reverse().find(item => item.type === "approval.request");
+        if (pending) {
+          const payload = pending.payload || {};
+          const approvalId = String(payload.approvalId || "");
+          if (approvalId) setApprovals(current => current.some(item => item.approvalId === approvalId)
+            ? current
+            : [...current, {
+                approvalId,
+                detail: String(payload.command || payload.description || "Hermes requests approval."),
+                runId: run.id,
+                agentName: agentNameFor(agentId),
+              }]);
+        }
+      } catch {
+        // The normal retry loop below owns connectivity errors and will keep trying.
+      }
+    }
     while (true) {
       // The run lives on the coordinator, not here. A dropped fetch — a sleeping
       // laptop, a coordinator restart, a blip — used to end this loop and leave the
@@ -1113,7 +1133,7 @@ export default function Home() {
         ),
     )
     .slice(0, 12);
-  const visibleAgents = workspace.agents.filter(candidate => agentTeamFilter === "all"
+  const visibleAgents = workspace.agents.filter(candidate => !advancedFeatures || agentTeamFilter === "all"
     || (agentTeamFilter === "unassigned" ? !workspace.teams.some(team => team.memberAgentIds.includes(candidate.id)) : workspace.teams.find(team => team.id === agentTeamFilter)?.memberAgentIds.includes(candidate.id)));
 
   return (
@@ -1160,7 +1180,7 @@ export default function Home() {
         >
           <Bot size={16} /> Agents <span>{workspace.agents.length}</span>
         </button>
-        <button
+        {advancedFeatures && <button
           className={`nav-item ${view === "teams" ? "active" : ""}`}
           onClick={() => {
             setView("teams");
@@ -1168,7 +1188,7 @@ export default function Home() {
           }}
         >
           <Users size={16} /> Teams <span>{workspace.teams.length}</span>
-        </button>
+        </button>}
         <button
           className={`nav-item ${view === "files" ? "active" : ""}`}
           onClick={() => {
@@ -1179,7 +1199,7 @@ export default function Home() {
           <FolderOpen size={16} /> Files{" "}
           <span>{workspace.files.length || ""}</span>
         </button>
-        <button
+        {advancedFeatures && <button
           className={`nav-item ${view === "routines" ? "active" : ""}`}
           onClick={() => {
             setView("routines");
@@ -1187,7 +1207,7 @@ export default function Home() {
           }}
         >
           <CalendarClock size={16} /> Routines <span>{routines.length || ""}</span>
-        </button>
+        </button>}
         <div className="nav-label">YOUR AGENTS</div>
         <div className="sidebar-scroll">
           {workspace.agents
@@ -1275,14 +1295,14 @@ export default function Home() {
                       : agent.name}
             </span>
           </span>
-          <nav className="top-tabs" aria-label="Main workspace">
+          {advancedFeatures && <nav className="top-tabs" aria-label="Main workspace">
             <button className={view !== "tasks" ? "active" : ""} onClick={() => { if (view === "tasks") setView(lastWorkspaceView.current); }}>Workspace</button>
             <button className={view === "tasks" ? "active" : ""} onClick={() => { if (view !== "tasks") lastWorkspaceView.current = view; setView("tasks"); }}>Tasks</button>
-          </nav>
+          </nav>}
           <span className="badge">Open source · Yours to shape</span>
         </header>
-        {view === "tasks" && <TaskManager agents={workspace.agents} teams={[...workspace.teams, ...retiredTeams]} client={controlRef.current} onOpenRun={openTaskRun} />}
-        {view === "teams" && <TeamManager agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onChanged={teams => { setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) })); setRetiredTeams(teams.filter(team => Boolean(team.retiredAt))); }} />}
+        {advancedFeatures && view === "tasks" && <TaskManager agents={workspace.agents} teams={[...workspace.teams, ...retiredTeams]} client={controlRef.current} onOpenRun={openTaskRun} />}
+        {advancedFeatures && view === "teams" && <TeamManager agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onChanged={teams => { setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) })); setRetiredTeams(teams.filter(team => Boolean(team.retiredAt))); }} />}
         {view === "home" && (
           <section className="home-content">
             <div className="eyebrow">YOUR PERSONAL AGENT WORKSPACE</div>
@@ -1305,11 +1325,11 @@ export default function Home() {
                 <Plus size={13} /> Create agent
               </button>
             </div>
-            <div className="agent-team-filters" aria-label="Filter agents by team">
+            {advancedFeatures && <div className="agent-team-filters" aria-label="Filter agents by team">
               <button className={agentTeamFilter === "all" ? "active" : ""} onClick={() => setAgentTeamFilter("all")}>All</button>
               {workspace.teams.map(team => <button className={agentTeamFilter === team.id ? "active" : ""} onClick={() => setAgentTeamFilter(team.id)} key={team.id}>{team.name}</button>)}
               <button className={agentTeamFilter === "unassigned" ? "active" : ""} onClick={() => setAgentTeamFilter("unassigned")}>Unassigned</button>
-            </div>
+            </div>}
             <div className="agent-grid">
               {visibleAgents.map((a) => (
                 <div className="agent-card-shell" key={a.id}>
@@ -1322,7 +1342,7 @@ export default function Home() {
                   <ArrowUpRight className="card-arrow" size={17} />
                   <h3>{a.name}</h3>
                   <div className="role">{a.role}</div>
-                  <div className="agent-team-badges">{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).slice(0, 2).map(team => <TeamBadge team={team} key={team.id} />)}{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).length > 2 && <small>+{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).length - 2}</small>}{!workspace.teams.some(team => team.memberAgentIds.includes(a.id)) && <span className="team-badge unassigned">Unassigned</span>}</div>
+                  {advancedFeatures && <div className="agent-team-badges">{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).slice(0, 2).map(team => <TeamBadge team={team} key={team.id} />)}{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).length > 2 && <small>+{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).length - 2}</small>}{!workspace.teams.some(team => team.memberAgentIds.includes(a.id)) && <span className="team-badge unassigned">Unassigned</span>}</div>}
                   <p>
                     {a.description ||
                       "Your custom agent. Give it a task and make it your own."}
@@ -1430,14 +1450,14 @@ export default function Home() {
                         </button>
                       ))}
                     </div>
-                    <button
+                    {advancedFeatures && <button
                       className="guided-button"
                       disabled={running}
                       onClick={() => send("Show me how a handoff works", true)}
                     >
                       <Play size={12} /> Try a guided run{" "}
                       <span>No API key needed</span>
-                    </button>
+                    </button>}
                   </div>
                 ) : (
                   conversation.messages.map((m) => (
@@ -2253,6 +2273,23 @@ export default function Home() {
               <p className="muted small">Only agents using “Use workspace default” follow these changes. Agents with their own model keep it.</p>
             </fieldset>
             <div className="settings-divider" />
+            <label className="settings-feature-toggle">
+              <input
+                type="checkbox"
+                checked={advancedFeatures}
+                onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setAdvancedFeatures(enabled);
+                  if (!enabled) {
+                    setAgentTeamFilter("all");
+                    if (["teams", "routines", "tasks"].includes(view)) setView("home");
+                  }
+                  localStorage.setItem(ADVANCED_KEY, enabled ? "on" : "off");
+                }}
+              />
+              <span><strong>Advanced features</strong><small>Show teams, task boards, routines, remote computers, direct computer access, and MCP connections. These features are experimental in the self-hosted MVP.</small></span>
+            </label>
+            <div className="settings-divider" />
             <h3>Your data stays with you</h3>
             <p className="muted small">
               Hermes state, skills, schedules, run events, and working files are
@@ -2308,7 +2345,7 @@ export default function Home() {
             </div>
             <div className="modal-footer">
               <span className="muted small">
-                MIT licensed · Open Harness v{runtime?.version || '0.3.0'} · Hermes {runtime?.hermes.release}
+                MIT licensed · Open Harness v{runtime?.version || APP_VERSION} · Hermes {runtime?.hermes.release}
               </span>
               <button
                 className="light-button"
@@ -2351,15 +2388,18 @@ export default function Home() {
         void controlRef.current.request<{ credentials: CredentialRecord[] }>("/v1/credentials").then(saved => setCredentials(saved.credentials)).catch(() => {});
         localStorage.setItem(SETTINGS_KEY, JSON.stringify({ provider: model.provider, model: model.model, baseUrl: model.baseUrl }));
       }} onComputerSettings={() => {
-        localStorage.setItem(ONBOARDING_KEY, 'done');
+        setAdvancedFeatures(true);
+        localStorage.setItem(ADVANCED_KEY, 'on');
         setOnboardingOpen(false);
         setEditingAgentTab('computer');
         setEditingAgent(agent);
+      }} onDismiss={() => {
+        setOnboardingOpen(false);
       }} onFinished={() => {
         localStorage.setItem(ONBOARDING_KEY, 'done');
         setOnboardingOpen(false);
       }} />}
-      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} agent={editingAgent} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
+      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
       {file && (
         <div className="modal-backdrop" onClick={() => setSelectedFile(null)}>
           <section

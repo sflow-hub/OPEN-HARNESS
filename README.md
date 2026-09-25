@@ -1,5 +1,7 @@
 # Open Harness powered by Hermes
 
+> **Public beta:** `v0.4.0-beta.1` targets one trusted self-hosted operator. Advanced features are experimental. Model-provider requests can incur charges, and Open Harness sends no product telemetry.
+
 Open Harness is an MIT-licensed, local named-agent workspace inspired by Grok Bot. Each named agent runs as a persistent Hermes worker behind a loopback-only Node.js control service. The browser is a client: closing it does not cancel active work.
 
 This is independent software and is not affiliated with xAI or Nous Research.
@@ -38,7 +40,12 @@ Download and unzip the source release, install Docker, then run this command fro
 docker compose up -d
 ```
 
-Open `http://localhost:3000`. Compose starts the dashboard, coordinator, a private Docker engine for agent containers, and persistent data volumes. No host Node or Python installation is required. By default the dashboard listens only on this computer. To expose it, put it behind an authenticated HTTPS reverse proxy, set `OPEN_HARNESS_LISTEN_ADDRESS=0.0.0.0`, and set `OPEN_HARNESS_PUBLIC_URL=https://agents.example.com/api/local`.
+Open `http://localhost:3000`. Compose starts the dashboard, coordinator, a private Docker engine for agent containers, and persistent data volumes. No host Node or Python installation is required. By default the dashboard listens only on this computer. For remote access, keep it on loopback behind an authenticated HTTPS reverse proxy, set `OPEN_HARNESS_PUBLIC_URL=https://agents.example.com/api/local`, and explicitly set `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` only after proxy authentication works.
+
+The default interface focuses on agents, conversations, files, credentials, and runtime status. Turn on **Workspace settings → Advanced features** to show teams, task boards, routines, remote computers, direct computer access, and MCP connections. These advanced paths remain experimental for the self-hosted MVP.
+
+See [Self-hosting operations](docs/SELF_HOSTING.md) for a complete authenticated reverse-proxy example, health checks, updates, diagnostics, and stopped-stack backup and restore.
+Release candidates must also pass the [self-hosted beta checklist](docs/BETA_RELEASE.md).
 
 ### Develop from source
 
