@@ -62,6 +62,32 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ### Fixed
 
+- Task boards, named handoffs and agent-created routines now work on a container
+  agent. They never had. Four things each broke them on their own: Hermes registers
+  an MCP tool as `mcp__<server>__<tool>` while Open Harness granted
+  `mcp_open_harness_task`, and the managed policy matches the granted name exactly,
+  so it stripped all three from every request and the agent was told they did not
+  exist; the agent image bakes a copy of `coordination.mjs` that predates the task
+  tool; Hermes defers MCP tools behind `tool_search` bridges that a profile does not
+  grant either, so they were reachable by neither route; and `coordination.mjs`
+  called `http.request` with an options object where node expects the response
+  listener, so every call over the unix socket failed outright. The same name
+  mismatch had silently removed every tool from a user's own MCP connection.
+- A container agent can reach its coordinator on Docker Desktop. A unix socket in a
+  bind mount is visible inside the container and refuses every connection, because
+  the mount is passed through a VM — recorded as a macOS and Windows blocker, but
+  true of Linux with Docker Desktop too, which is the supported install. The socket
+  is still tried first, with the host URL behind it, as a paired runner already did.
+- Approving a paused run no longer denies it. Hermes reads the decision from
+  `choice` and accepts `once`, `session`, `always` or `deny`; Open Harness sent
+  `decision: "approve"`, so every approval arrived as a refusal and the agent was
+  told the operator had blocked the command it had just been allowed to run.
+- Flagged commands are gated at all. Hermes offers an approval channel only when it
+  can see one, and Open Harness announced none, so it found no interactive, gateway
+  or unattended context and approved everything: the dashboard's approval UI and the
+  configured `unattended_mode: deny` did nothing, and an agent could run `chmod 777`
+  or `curl | sh` in a bind-mounted host folder with nobody asked.
+
 - A new agent can actually do work. It was granted only the task tool, so the first thing
   anyone asked it to do — read a file, write one, run a command — it truthfully refused.
   New agents now start with files, terminal, code execution, memory, session recall,

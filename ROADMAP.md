@@ -15,9 +15,9 @@ maturity and what's outstanding before a 1.0, not a scheduled feature list.
 
 ## Before 1.0
 
-- **Self-hosted MVP live acceptance.** A real file-writing task against a paid provider, filesystem isolation, process-tree stopping, restart recovery and container reaping passed on 2026-09-25 (`runtime/VERIFICATION.md`). Still outstanding before calling the build MVP-ready: a clean Compose install from a packaged source release, a backup and restore cycle, an approval round trip, and a named-agent handoff.
+- **Self-hosted MVP live acceptance.** Against a paid provider on 2026-09-25: a real file-writing task, filesystem isolation, process-tree stopping, restart recovery, container reaping, a named-agent handoff, a task-board tool call, a scheduled routine, and an approval round trip in both directions (`runtime/VERIFICATION.md`). Still outstanding before calling the build MVP-ready: a clean Compose install from a packaged source release, and a backup and restore cycle.
 
-- **Real-runtime verification.** The automated suite still runs against an explicitly mocked Hermes runtime (`OPEN_HARNESS_MOCK=1`). Real-runtime passes on 2026-09-21/22 covered credential storage, profile preparation, plugin loading, gateway startup, authenticated round trips to an OpenAI-compatible endpoint (directly and as a proxy for a first-party provider), stale-image detection via the image's runtime label, and the state-directory choice; they fixed six defects the mocked suite could not see. Filesystem isolation, process-tree termination, paid-provider inference, real MCP servers, and Direct Computer Access remain unverified. Tracked in `runtime/VERIFICATION.md`.
+- **Real-runtime verification.** The automated suite still runs against an explicitly mocked Hermes runtime (`OPEN_HARNESS_MOCK=1`). Real-runtime passes on 2026-09-21/22 covered credential storage, profile preparation, plugin loading, gateway startup, authenticated round trips to an OpenAI-compatible endpoint (directly and as a proxy for a first-party provider), stale-image detection via the image's runtime label, and the state-directory choice; they fixed six defects the mocked suite could not see. Two further passes on 2026-09-25 covered paid-provider inference, filesystem isolation, process-tree termination, crash recovery, and the whole coordination surface -- handoffs, task boards, routines and approvals -- and found eight more defects of the same kind, including four that each made every coordination tool silently absent. Real third-party MCP servers and Direct Computer Access remain unverified. Tracked in `runtime/VERIFICATION.md`.
 - **Desktop CSP validation.** A Content-Security-Policy was recently defined for the Tauri webview; it needs a real `npm run desktop:dev` smoke test to confirm it doesn't break the dashboard before it ships in a signed release.
 - **Release secret provisioning.** Signed desktop builds require code-signing and notarization secrets to be present in GitHub Actions; unverified from a source checkout.
 
@@ -34,6 +34,11 @@ Docker Compose. These are understood but deliberately not part of the beta:
   stays visible, but only the Linux job is a gate on the beta.
 - **Desktop installers and signed updates.** No code-signing, notarization, or updater keys
   exist. `desktop-release.yml` is `workflow_dispatch`-only and unverified.
+- **Approvals decided by a guardian model.** `approvals.mode` is `smart`, so Hermes asks an
+  auxiliary model whether a flagged command is safe instead of asking the operator, on the
+  operator's own key. On a live check it approved `chmod 777` against a bind-mounted host folder
+  without asking. `manual` gates only commands Hermes has already flagged and is what the
+  dashboard's approval UI is for; the choice is open.
 - **A hosted multi-operator service.** The Cloudflare/D1 surface was removed in `0.4.0`: its
   authentication was a single spoofable header with no per-user scoping, and it shipped inside
   the local build. Open Harness's trust model (see [SECURITY.md](SECURITY.md)) assumes one

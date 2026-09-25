@@ -18,6 +18,89 @@ Checks: 97 Node tests, 46 Playwright desktop/mobile tests, TypeScript, ESLint, t
 
 Live release acceptance remains blocked on this machine: its selected Docker Desktop socket does not exist, the system Docker socket is not accessible, and `.env` has no configured model credential. Therefore the full coordinator/Hermes builds and Trivy scans, fresh Compose smoke test, authenticated proxy test, real-provider `launch-smoke.md` workflow, process-tree termination, upgrade/restore comparison, and 24-hour soak are not claimed as passed. The release tag and GitHub Release must not be created until those gates and the repository-rule checklist in `docs/BETA_RELEASE.md` are complete.
 
+## Fourth real-runtime pass — September 25, 2026
+
+Named handoffs, task boards, scheduled routines and the approval round trip, against the same
+paid provider as the third pass (OpenRouter, `meta-llama/llama-3.3-70b-instruct`), on Linux with
+Docker Desktop 29.5.3 and the pinned image `open-harness-hermes:2026.9.11`. Two container agents
+on a shared team, in a state directory holding one credential, on port 4401. Inference spend for
+the pass: $0.034.
+
+**Every coordination tool was unreachable, for four separate reasons at once.** Each one alone was
+enough to make the whole feature silently absent, and the mocked suite could not see any of them.
+
+1. **Tool names.** Hermes registers an MCP tool as `mcp__<server>__<tool>`; Open Harness granted
+   `mcp_open_harness_task`. The managed policy extension matches a granted name against the
+   registry name exactly, so it stripped every coordination tool from every request. The agent was
+   told the tools did not exist. The same mismatch removed all tools from any user MCP connection.
+2. **A stale copy in the image.** The image bakes its own `coordination.mjs`, and the pinned one
+   predates the `task` tool: the container advertised two tools where the checkout has three, so
+   task boards could not work even once the names matched. The checkout's copy is now placed in
+   the agent's managed directory, which the container already mounts read-only.
+3. **Tool Search.** Hermes defers MCP tools out of the model-facing array and offers
+   `tool_search`/`tool_describe`/`tool_call` bridges instead. Those bridges are not tools an Open
+   Harness profile grants, so the policy stripped them too, leaving the deferred tools reachable by
+   neither route. Deferral is now off for managed agents; a profile grant is already a short
+   explicit allow-list.
+4. **`http.request(options, options, callback)`.** `coordination.mjs` passed an options object
+   where node expects the response listener, so every call over the unix socket — the route every
+   local container agent uses — failed with "The listener argument must be of type function". The
+   existing socket test drove the socket with node's own client, and the existing coordination test
+   drove `coordination.mjs` over a URL; nothing drove `coordination.mjs` over a socket.
+
+**And the socket cannot work on this setup at all.** Docker Desktop passes bind mounts through a
+VM: `coord.sock` is visible inside the container and refuses every connection (`ECONNREFUSED`,
+mount type `fakeowner`), while connecting from the host succeeds. ROADMAP recorded this as a
+macOS/Windows blocker; it applies just as much to Linux with Docker Desktop, which is the install
+this project documents as supported. The socket is still tried first — it needs no open port and
+cannot be reached from off the machine — with `http://host.docker.internal:<port>` behind it, the
+same fallback a paired runner already used for its own containers. Docker Desktop's host proxy
+reaches the coordinator on loopback, so nothing had to be exposed: `--add-host
+host.docker.internal:host-gateway` was already set, and the container still needs the run's token.
+
+Verified after those fixes:
+
+- **Named handoff.** Alpha called `mcp__open_harness__delegate_named_agent` with Beta's id; the
+  coordinator recorded `handoff.created`, created a child run for Beta in its own container, and
+  recorded `handoff.completed` with its state. Beta wrote `handoff.md` to the shared workspace with
+  exactly the requested contents, and the parent received the child's result.
+- **Task board.** With a task assigned to Beta in the app, Beta called `mcp__open_harness__task`
+  with `action: "list"` and replied with the task's exact title.
+- **Scheduled routine.** A one-minute routine created in the app fired on the scheduler's next
+  tick, its run completed with the requested output, `last_run_at` was recorded and `next_run_at`
+  advanced by exactly one interval.
+
+**The approval round trip was broken in two further ways, and is now verified in both
+directions.** Hermes offers an approval channel only when it can see one: with neither
+`HERMES_GATEWAY_SESSION` nor a bound session platform, `tools/approval_context.py` finds no
+interactive context, no gateway context and no unattended context either, and approves every
+flagged command outright. So the dashboard's approval UI and the configured
+`approvals.unattended_mode: deny` did nothing on a real run, and a container agent ran `chmod 777`
+against a bind-mounted host file with nobody asked. The managed gateway now announces itself.
+Second, Hermes reads the decision from `choice` and accepts `once`/`session`/`always`/`deny`;
+Open Harness sent `decision: "approve"`, so Hermes read every approval as a refusal — the operator
+pressed Approve and the agent was told the user had blocked the command. The deterministic runtime
+accepted `"approve"` too, which is exactly why this survived. Evidence, with a real before and
+after: a run paused in `waiting_approval` carrying the real command and its
+`world/other-writable permissions` finding; approving took the file from 644 to 777 and the agent
+reported it "was approved by the user"; denying left it at 644 and stopped the command. The gate
+was forced to `manual` for that pair of runs only, and `smart` is unchanged in the shipped code.
+
+**One finding left for a decision, not fixed here.** With the shipped `approvals.mode: 'smart'`,
+Hermes hands each flagged command to an auxiliary "guardian" model rather than to the operator. On
+this machine it approved `chmod 777` on a bind-mounted host file silently, and it spends the
+operator's own key to make that judgement. `manual` — which gates only commands Hermes has already
+flagged, and is what the dashboard's approval UI exists for — is a one-word change in
+`runtime/profile-runtime.ts`. Worth deciding before the beta.
+
+Also confirmed incidentally: `POST /v1/onboarding/status` correctly refused a state directory that
+Docker cannot read (the probe named the real cause and pointed at the fix), and all five readiness
+checks passed once the directory moved under `$HOME`.
+
+Still not exercised live: real third-party MCP servers, Direct Computer Access, native subagent
+restrictions, a from-scratch build of `runtime/hermes/Dockerfile`, a Compose install from a
+packaged source release, and a backup and restore cycle.
+
 ## Third real-runtime pass — September 25, 2026
 
 First end-to-end pass against a **paid provider**, on Linux with Docker Desktop 29.5.3,
@@ -139,12 +222,12 @@ coordinator in `mode: live` unless noted.
 
 ## Still pending
 
-Superseded in part by the September 25 pass above, which covered paid-provider inference,
-filesystem isolation and process-tree termination. Still not exercised against a real
-runtime: real MCP servers, Direct Computer Access, native subagent restrictions, a full
-from-scratch build of the reordered Dockerfile, an approval round trip, and the broader
-code-repair, browsing, durable skill-use, named-agent teamwork and scheduled-run
-scenarios.
+Superseded by the two September 25 passes above, which covered paid-provider inference,
+filesystem isolation, process-tree termination, crash recovery, named-agent teamwork, task
+boards, scheduled runs and approvals. Still not exercised against a real runtime: real
+third-party MCP servers, Direct Computer Access, native subagent restrictions, a full
+from-scratch build of the reordered Dockerfile, and the broader code-repair, browsing and
+durable skill-use scenarios.
 
 The deterministic control and browser suites still run under `OPEN_HARNESS_MOCK=1` and
 do not by themselves establish live acceptance.
