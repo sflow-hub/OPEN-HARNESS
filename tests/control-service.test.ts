@@ -413,3 +413,33 @@ test("keeps at least one project", async () => {
   for (const board of boards.slice(1)) await request(`/v1/boards/${board.id}`, { method: "PUT", body: JSON.stringify({ revision: board.revision, archived: true }) });
   await assert.rejects(request(`/v1/boards/${survivor.id}`, { method: "DELETE" }), /another project/);
 });
+
+// The coordination schema nests an action's fields under `input`, and nothing else said so: a
+// model that put stageId alongside `action` got "Stage is required." with no hint, and one that
+// sent `input` as a JSON string would have had it spread into one key per character.
+test("the task tool accepts its fields nested, alongside the action, or as a JSON string", async () => {
+  const board = (await request("/v1/boards")).boards[0];
+  const review = board.stages.find((stage: any) => stage.category === "review");
+  // The route needs a live run whose snapshot grants the tool, so park one on an approval.
+  const held = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_APPROVAL hold the run open" }) });
+  const parked = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < parked && (await request(`/v1/runs/${held.id}`)).state !== "waiting_approval") await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal((await request(`/v1/runs/${held.id}`)).state, "waiting_approval");
+  const scoped = createHmac("sha256", token).update("agent:atlas").digest("hex");
+  async function move(body: object) {
+    const created = await request("/v1/tasks", { method: "POST", body: JSON.stringify({ boardId: board.id, title: `Nested ${crypto.randomUUID()}`, ownerAgentId: "atlas" }) });
+    const response = await fetch(`${base}/internal/task`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "X-Open-Harness-Run": held.id, "Content-Type": "application/json" }, body: JSON.stringify({ action: "move", taskId: created.id, ...body }) });
+    assert.equal(response.status, 200, JSON.stringify(await response.json()));
+    return (await request("/v1/tasks")).tasks.find((task: any) => task.id === created.id).stageId;
+  }
+  try {
+    assert.equal(await move({ input: { stageId: review.id } }), review.id, "nested is the documented shape");
+    assert.equal(await move({ stageId: review.id }), review.id, "alongside the action must work too");
+    assert.equal(await move({ input: JSON.stringify({ stageId: review.id }) }), review.id, "a JSON string must be parsed, not spread");
+  } finally {
+    const events = await request(`/v1/runs/${held.id}/events?after=0`);
+    const approval = events.events.find((event: any) => event.type === "approval.request");
+    await request(`/v1/runs/${held.id}/approval`, { method: "POST", body: JSON.stringify({ approvalId: approval.payload.approvalId, decision: "approve" }) });
+    await waitRun(held.id);
+  }
+});

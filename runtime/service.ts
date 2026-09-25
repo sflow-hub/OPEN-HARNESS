@@ -780,7 +780,15 @@ const server = createServer(async (req, res) => {
       const input = await body(req), runId = String(req.headers['x-open-harness-run'] || '');
       if (!internalAllowed(internalAgent, TASK_TOOL, runId)) return json(res, 403, { error: 'Task board access is disabled for this run.' });
       const profile = profiles.get(internalAgent!); if (!profile) return json(res, 403, { error: 'Agent profile not found.' });
-      const action = String(input.action || ''), taskId = String(input.taskId || ''), patch = (input.input || {}) as Record<string, unknown>;
+      // The schema nests an action's fields under `input`, and nothing else says so, so a model
+      // that puts stageId or text alongside `action` is guessing reasonably -- and used to get
+      // "Stage is required." with no hint about where the field belonged. Both spellings work;
+      // `input` wins where they disagree.
+      const action = String(input.action || ''), taskId = String(input.taskId || '');
+      // A model may also send `input` as a JSON string. Spreading a string yields one key per
+      // character and loses every field, so parse it rather than quietly producing nonsense.
+      const nested = typeof input.input === 'string' ? (() => { try { const value = JSON.parse(input.input); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch { return {}; } })() : (input.input && typeof input.input === 'object' && !Array.isArray(input.input) ? input.input : {});
+      const patch = { ...Object.fromEntries(Object.entries(input).filter(([key]) => !['action', 'taskId', 'input'].includes(key))), ...nested } as Record<string, unknown>;
       const mayTouch = (task: ReturnType<typeof tasks.getTask>) => agentMayTouchTask(internalAgent!, profile.board.assignOthers, task);
       if (action === 'list') return json(res, 200, { boards: tasks.listBoards(), tasks: tasks.listTasks().filter(mayTouch) });
       if (action === 'columns') return json(res, 200, { boards: tasks.listBoards() });

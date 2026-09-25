@@ -10,7 +10,7 @@ const tools = [
   {
     name: "task",
     description: "Read and manage board tasks and projects. Team tasks are visible only to members; changing another agent's card requires that profile's board permission, and board_create and board_update require its manage-projects permission. A project's stages, automation settings, and archived state stay under human control.",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "columns", "get", "create", "update", "move", "comment", "check", "additem", "claim", "release", "run", "board_create", "board_update"] }, taskId: { type: "string" }, boardId: { type: "string" }, input: { type: "object" } }, required: ["action"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "columns", "get", "create", "update", "move", "comment", "check", "additem", "claim", "release", "run", "board_create", "board_update"] }, taskId: { type: "string", description: "The task to act on: required for get, update, move, comment, check, additem, claim, release and run." }, boardId: { type: "string", description: "The board to act on: required for create and board_update." }, input: { type: "object", description: "The fields for this action, always nested here rather than alongside action. move: {stageId} from action columns, optionally {beforeId} to place it. create: {title, description, teamId, ownerAgentId}. update: {revision, and the fields to change}. comment: {text}. check: {item, done}. additem: {text}. release: {reason}. board_create and board_update: {name, description, color}." } }, required: ["action"], additionalProperties: false },
   },
   {
     name: "delegate_named_agent",

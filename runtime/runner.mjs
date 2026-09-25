@@ -247,8 +247,8 @@ function stateSharing(stateRoot2) {
   sharingCache = { root, value };
   return value;
 }
-function containerSignature(selected, imageId) {
-  return createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, imageId })).digest("hex").slice(0, 24);
+function containerSignature(selected, imageId, stateRoot2 = "") {
+  return createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, imageId, stateRoot: stateRoot2 && resolve(stateRoot2) })).digest("hex").slice(0, 24);
 }
 var imageIdCache = null;
 function currentImageId() {
@@ -267,7 +267,7 @@ function ensureContainer(agentId, stateRoot2, computer) {
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
   const selected = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
-  const signature = containerSignature(selected, currentImageId());
+  const signature = containerSignature(selected, currentImageId(), stateRoot2);
   const inspect = spawnSync2("docker", ["inspect", "-f", '{{.State.Running}} {{index .Config.Labels "open-harness.config"}}', name], { encoding: "utf8", timeout: 1e4 });
   if (inspect.status === 0) {
     const [running, currentSignature] = inspect.stdout.trim().split(/\s+/);

@@ -256,9 +256,14 @@ export function stateSharing(stateRoot: string): SharingProbe {
 
 // A container is reused by name for as long as this signature matches. The image ID is
 // part of it: a container created from a superseded image would otherwise be reused
-// forever, so updating the runtime would appear to change nothing.
-export function containerSignature(selected: ComputerConfig, imageId: string) {
-  return createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, imageId })).digest('hex').slice(0, 24);
+// forever, so updating the runtime would appear to change nothing. So is the state root,
+// because the mounts are built from it: after the data folder moves -- a different
+// OPEN_HARNESS_STATE_DIR, or a backup restored somewhere else, which SELF_HOSTING.md
+// documents as a supported operation -- the old container was reused with its mounts still
+// pointing at the previous path, Docker recreated that path empty, and every run died with
+// "Hermes gateway exited during startup" and a log line blaming the image.
+export function containerSignature(selected: ComputerConfig, imageId: string, stateRoot = '') {
+  return createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, imageId, stateRoot: stateRoot && resolve(stateRoot) })).digest('hex').slice(0, 24);
 }
 // Short-lived so a rebuild from Settings takes effect without restarting the coordinator.
 let imageIdCache: { id: string; at: number } | null = null;
@@ -295,7 +300,7 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
   const selected = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
-  const signature = containerSignature(selected, currentImageId());
+  const signature = containerSignature(selected, currentImageId(), stateRoot);
   const inspect = spawnSync("docker", ["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"open-harness.config\"}}", name], { encoding: "utf8", timeout: 10_000 });
   if (inspect.status === 0) {
     const [running, currentSignature] = inspect.stdout.trim().split(/\s+/);

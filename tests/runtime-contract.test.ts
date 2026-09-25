@@ -52,6 +52,13 @@ test('a container signature changes with the image and with nothing else', () =>
   assert.equal(containerSignature(computer, 'sha256:a'), containerSignature({ ...computer, machineId: 'other', reserveMachine: true }, 'sha256:a'), 'fields that do not affect the container must not change it');
   assert.notEqual(containerSignature(computer, 'sha256:a'), containerSignature(computer, 'sha256:b'), 'a rebuilt image must invalidate the container');
   assert.notEqual(containerSignature(computer, 'sha256:a'), containerSignature({ ...computer, resources: { ...computer.resources, cpu: 4 } }, 'sha256:a'));
+  // The mounts are built from the state root. Reusing a container after the data folder moved
+  // left it bound to the old path, Docker recreated that path empty, and the run died with
+  // "Hermes gateway exited during startup" over a log line telling the operator to rebuild the image.
+  assert.notEqual(containerSignature(computer, 'sha256:a', '/home/a/state'), containerSignature(computer, 'sha256:a', '/home/b/state'),
+    'a moved state directory must invalidate the container');
+  assert.equal(containerSignature(computer, 'sha256:a', '/home/a/state'), containerSignature(computer, 'sha256:a', '/home/a/state/'),
+    'the same directory spelled differently must not');
 });
 
 test('chooseStateDir: explicit, then existing state, then a readable project folder, then home', () => {
