@@ -219,3 +219,27 @@ test('creates, filters, and moves an agent task across desktop and phone layouts
   await page.getByRole('button', { name: 'By agent', exact: true }).click();
   await expect(page.locator('.agent-task-card').filter({ hasText: 'Atlas' })).toContainText('Owned');
 });
+
+test('adding a phone explains how to make the coordinator reachable', async ({ page }) => {
+  // The test coordinator answers on loopback only, which is the situation most people are in
+  // the first time they try to pair a phone: the code would be minted against an address the
+  // phone can never resolve.
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
+  await panel.getByRole('button', { name: 'Add computer' }).click();
+
+  // A computer runner fetches its own installer, so it is not asked for an address.
+  await expect(panel.locator('.reach-panel')).toBeHidden();
+
+  await panel.getByLabel('Computer operating system').selectOption('android');
+  const guidance = panel.locator('.reach-panel');
+  await expect(guidance).toBeVisible();
+  // Both routes, each with something to actually run.
+  await expect(guidance).toContainText('Tailscale');
+  await expect(guidance).toContainText('OPEN_HARNESS_PUBLIC_URL=https:');
+  await expect(guidance.locator('code').first()).toBeVisible();
+
+  await panel.getByRole('button', { name: 'Close agent settings' }).click();
+});

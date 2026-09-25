@@ -15,6 +15,7 @@ import { TaskError, TaskStore } from "./tasks";
 import { MachineError, Machines } from "./machines";
 import { exportAgentFiles, importAgentFiles, type TransferBundle } from './transfer-files';
 import { onboardingAction, onboardingStatus } from './readiness';
+import { reachability } from './reachability';
 
 const root = resolve(process.env.OPEN_HARNESS_STATE_DIR || ".open-harness");
 mkdirSync(root, { recursive: true }); mkdirSync(join(root, "shared"), { recursive: true }); mkdirSync(join(root, "agents"), { recursive: true });
@@ -389,6 +390,11 @@ const server = createServer(async (req, res) => {
       configuredCredentialNames: secrets.names(), secretStorage: secrets.backend, note: 'Secret values, prompts, messages, results, file contents, and model responses are excluded.',
     });
     if (req.method === 'GET' && url.pathname === '/v1/onboarding/status') return json(res, 200, onboardingStatus());
+    // How a device that is not this computer can reach this coordinator. Read before showing
+    // a pairing code, so the wizard can guide instead of minting one that cannot be used.
+    if (req.method === 'GET' && url.pathname === '/v1/reachability') {
+      return json(res, 200, reachability({ publicUrl: String(process.env.OPEN_HARNESS_PUBLIC_URL || ''), bind, port }));
+    }
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action)); }
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/model-test') {
       const input = await body(req), model = validateModel(input.model);
@@ -427,7 +433,12 @@ const server = createServer(async (req, res) => {
         // address while developing. It stays blocked otherwise: a runner on another machine
         // could never reach it, and the error explains that rather than failing later.
         const loopbackPairingAllowed = process.env.OPEN_HARNESS_MOCK === '1' || process.env.OPEN_HARNESS_ALLOW_LOOPBACK_PAIRING === '1';
-        if (loopback && !loopbackPairingAllowed) return json(res, 409, { error: 'This address only works on this computer. Enter the HTTPS address that the new computer can reach.' });
+        // The refusal now carries the ways out of it, because "enter a reachable address" is
+        // not useful to someone whose coordinator does not have one yet.
+        if (loopback && !loopbackPairingAllowed) return json(res, 409, {
+          error: 'This address only works on this computer. Your phone needs an address it can reach from outside it.',
+          reachability: reachability({ publicUrl, bind, port }),
+        });
         return json(res, 201, machines.createPairing(input, publicUrl));
       }
     }

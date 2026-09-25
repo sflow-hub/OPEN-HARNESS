@@ -76,7 +76,16 @@ The **Try a guided run** action remains an explicitly scripted demonstration. No
 
 Use the settings icon on any agent card, or **Agent settings** in a conversation header. The tabs cover identity, computer assignment, model selection, custom instructions, and expandable tool/connection switches. The panel fills the screen on phones and supports keyboard navigation.
 
-The Android app is a companion dashboard, not an agent host. Pairing gives it a revocable device credential for tasks, run status, and approvals; the credential is stored in a native Stronghold encrypted vault and is rejected by runner command endpoints. See [ANDROID.md](ANDROID.md) for builds and release signing.
+### Use Open Harness from a phone
+
+A phone is a companion dashboard, not an agent host: it sends tasks, follows runs, and answers approvals while agents keep running on a connected computer. There are two ways in, and they share the same mobile-first interface and the same security model.
+
+- **The Android app.** See [ANDROID.md](ANDROID.md) for builds and release signing.
+- **A phone browser**, pointed at a self-hosted deployment. Nothing to install.
+
+Either way the phone pairs for its own revocable device credential, which reaches dashboard routes only and is rejected by runner command endpoints. The app keeps it in a native Stronghold encrypted vault. A browser that reached the dashboard over the network pairs too, rather than being handed the control token that authorizes run creation, host-path mounts and direct OS execution; `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` remains as an opt-out for operators who authenticate in front of the dashboard themselves.
+
+Pair from **Agent settings → Computer → Add computer**, choosing iPhone or Android. A coordinator listening only on loopback cannot be reached by a phone at all, so that screen says so and offers the two ways to fix it: serve it on a tailnet, which needs no open port and no certificate, or put it behind your own authenticated HTTPS address. It detects an existing tailnet and offers that address directly. Codes expire after ten minutes and work once.
 
 ### Connect another computer
 

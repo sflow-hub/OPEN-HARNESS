@@ -17,6 +17,11 @@ pre-1.0, so breaking changes can still land in a minor version.
   `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` becomes a legacy opt-out rather than
   the only way in.
 - A web manifest, so the browser path installs to the home screen.
+- Adding a phone now says how to make the coordinator reachable when it only
+  answers on loopback, instead of minting a code against an address the phone
+  can never resolve. It detects an existing tailnet and offers that address, and
+  otherwise gives the commands for a tunnel or a reverse proxy. Also available
+  as `GET /v1/reachability`.
 
 ### Fixed
 
