@@ -227,6 +227,27 @@ test.describe('back closes overlays instead of leaving', () => {
     await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
   });
 
+  test('back unwinds stacked overlays one at a time', async ({ page }) => {
+    // The sidebar stays open behind the settings dialog, so two overlays are live at once.
+    // On the device this was the case that got it wrong: the first Back closed the dialog and
+    // the second left the app entirely instead of closing the sidebar.
+    await page.getByRole('button', { name: 'Open navigation' }).click();
+    const sidebar = page.locator('aside.sidebar.open');
+    await expect(sidebar).toBeVisible();
+    await sidebar.getByRole('button', { name: /^Settings/ }).click();
+    const settings = page.getByRole('heading', { name: 'Workspace settings' });
+    await expect(settings).toBeVisible();
+
+    await page.goBack();
+    await expect(settings).toBeHidden();
+    await expect(sidebar).toBeVisible();
+
+    await page.goBack();
+    await expect(sidebar).toBeHidden();
+    // Still here, rather than having walked off the page.
+    await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
+  });
+
   test('handing off from one overlay to another leaves back still working', async ({ page }) => {
     // Settings closes and onboarding opens in the same click. One shared history entry means
     // that transition touches history not at all; one entry per overlay used to make the
@@ -241,5 +262,37 @@ test.describe('back closes overlays instead of leaving', () => {
 
     await expect(setup).toBeHidden();
     await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
+  });
+});
+
+// Found by running the app on the emulator, not by any test: pairing a phone with a
+// coordinator that has no agents crashed the dashboard outright. Every existing spec seeds
+// agents first, so the empty workspace never occurred. The coordinator is shared across this
+// suite and cannot be emptied without breaking its neighbours, so the empty read is served
+// here instead — which is the client-side guard this covers anyway.
+test.describe('a coordinator with no agents', () => {
+  test.skip(({ isMobile }) => !isMobile, 'the paired client is the one that reads instead of seeding');
+
+  test('pairing with an empty workspace explains itself instead of crashing', async ({ page, request }) => {
+    const headers = await operator(request);
+    const pairing = await (await request.post(control + '/v1/machines', { headers, data: { name: 'Empty', platform: 'android', kind: 'device', coordinatorUrl: control } })).json();
+
+    await page.route(url => url.pathname.endsWith('/v1/agents'), route =>
+      route.request().method() === 'GET'
+        ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ agents: [] }) })
+        : route.fallback());
+
+    await page.addInitScript(() => {
+      localStorage.setItem('open-harness.onboarding.v1', 'done');
+      localStorage.setItem('open-harness.force-mobile', '1');
+    });
+    await page.goto('/');
+    await page.getByRole('textbox', { name: /^Hub address/ }).fill(pairing.hubUrl);
+    await page.getByLabel('Pairing code', { exact: true }).fill(pairing.code);
+    await page.getByRole('button', { name: 'Connect' }).click();
+
+    await expect(page.getByRole('heading', { name: 'No agents yet' })).toBeVisible({ timeout: 10_000 });
+    // The error boundary is what used to appear here.
+    await expect(page.getByText('The dashboard hit an error.')).toBeHidden();
   });
 });

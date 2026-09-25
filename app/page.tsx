@@ -1322,6 +1322,34 @@ export default function Home() {
     );
   }
 
+  // A paired client reads the coordinator's agents instead of pushing its own starter set, so
+  // it can legitimately land on a workspace with none — a coordinator nobody has created an
+  // agent on yet. Everything below dereferences `agent`, so without this the dashboard threw
+  // "Cannot read properties of undefined (reading 'name')" the moment a phone paired with a
+  // fresh coordinator. Only the emulator showed it: the browser suite always seeds agents.
+  if (!agent) {
+    return (
+      <div className="hub-connect">
+        <div className="hub-connect-panel">
+          <div className="hub-connect-heading">
+            <Bot size={26} aria-hidden="true" />
+            <h1>No agents yet</h1>
+            <p>
+              Agents live on the computer running Open Harness, and this workspace does not
+              have any. Create one there and it will appear here.
+            </p>
+          </div>
+          {device && device !== 'unknown' && (
+            <p className="hub-connect-footnote">Connected to {device.hubUrl} as {device.name}.</p>
+          )}
+          <button type="button" className="light-button" onClick={() => window.location.reload()}>
+            Check again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       {mobileOpen && (
