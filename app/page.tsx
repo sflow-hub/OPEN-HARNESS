@@ -59,7 +59,7 @@ import { HubConnect } from "../components/hub-connect";
 import { parsePairingLink, type DeviceCredential } from "../lib/hub";
 import { PHONE_LAYOUT_QUERY, eventPollIntervalMs, isMobileApp, isPhoneLayout, notificationsGranted, notify, platformFetch, requestNotificationPermission, secureStore } from "../lib/platform";
 import { useBackGuard } from "../lib/back-guard";
-import { hasTauri, loadTauriPlugin, openExternal, saveFile } from "../lib/platform";
+import { hasTauri, loadTauriPlugin, openExternal, saveFile, trackKeyboardInset } from "../lib/platform";
 
 const STORAGE_KEY = "open-harness.workspace.v1";
 const SETTINGS_KEY = "open-harness.settings.v1";
@@ -356,6 +356,11 @@ export default function Home() {
     })();
     return () => { cancelled = true; dispose?.(); };
   }, [device]);
+
+  // Publishes how much of the screen the soft keyboard is covering, so the composer can stay
+  // above it. Measured rather than declared: the viewport's interactive-widget hint is set
+  // but the Android WebView ignored it.
+  useEffect(() => trackKeyboardInset(), []);
 
   // The screen can change category without a reload: a rotated tablet, a resized desktop
   // window, a foldable opening. Layout follows it; how the client authenticates does not.

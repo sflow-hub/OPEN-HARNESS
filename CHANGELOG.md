@@ -8,6 +8,37 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ### Added
 
+- The dashboard is now mobile-first on both paths to a remote coordinator: the
+  Android app and a phone browser pointed at a self-hosted deployment. Phone
+  layout is decided by the screen rather than by the presence of Tauri, so a
+  phone browser stops being served the desktop layout.
+- A remote browser can pair for its own scoped, revocable device credential
+  instead of being handed the master control token.
+  `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` becomes a legacy opt-out rather than
+  the only way in.
+- A web manifest, so the browser path installs to the home screen.
+
+### Fixed
+
+- Android: Back closed the app from any modal, destroying unsaved profile edits,
+  because the static export gave the webview no history to go back to.
+- Android: downloads and external links silently did nothing. The WebView needs
+  a download listener and a second-window handler, and the shell registers
+  neither, so files and links now go through the `fs` and `opener` plugins.
+- Android: content drew under the status and gesture bars, and the safe-area CSS
+  that was meant to prevent it was dead because the build carried no
+  `viewport-fit=cover`.
+- Pairing with a coordinator that has no agents crashed the dashboard instead of
+  saying so.
+- The task board forced roughly 1300px of horizontal panning on a phone, and the
+  only touch control for moving a task was about 21px.
+
+### Known issues
+
+- Android: the soft keyboard covers the chat composer. The shell never applies
+  the IME window insets to the webview, so the web layer is told nothing about
+  the keyboard; see ANDROID.md.
+
 - An Android companion app. It is the same dashboard shipped as static files in a
   Tauri 2 shell, paired to a coordinator over HTTPS with a typable 12-character code
   or an `openharness://` link. The phone gets its own revocable device credential,

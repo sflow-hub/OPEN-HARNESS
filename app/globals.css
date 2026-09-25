@@ -2070,3 +2070,14 @@ header {
 @media (max-width: 760px) {
   header { padding-left: max(18px, env(safe-area-inset-left)); padding-right: max(18px, env(safe-area-inset-right)); }
 }
+
+/* The soft keyboard covers the bottom of the screen without resizing anything, so the
+   composer has to be lifted out from under it. --keyboard-inset is published by
+   trackKeyboardInset() and is 0px whenever no keyboard is up — which, on the packaged
+   Android app, is always: see the note on that function. */
+.chat-layout {
+  height: calc(100dvh - 65px - var(--keyboard-inset, 0px));
+}
+.task-drawer, .agent-settings-panel {
+  padding-bottom: var(--keyboard-inset, 0px);
+}

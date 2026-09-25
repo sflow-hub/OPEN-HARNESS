@@ -252,3 +252,40 @@ export async function saveFile(name: string, contents: string | Uint8Array): Pro
   if (opener) { try { await opener.openPath(path); } catch { /* Nothing registered for this type. */ } }
   return { path };
 }
+
+// How much of the layout viewport the soft keyboard is covering, published as a CSS variable
+// so layouts can subtract it.
+//
+// `interactive-widget=resizes-content` is the declarative way to ask for this and is set on
+// the viewport; measuring is the reliable way, because a browser reports the keyboard through
+// the visual viewport whether or not it honours that hint.
+//
+// Known limitation, measured on the emulator: inside the packaged Android app this always
+// reports 0. With the keyboard shown and the composer focused, visualViewport.height equals
+// window.innerHeight exactly — the shell draws edge to edge and never applies the IME window
+// insets to the webview, so the web layer is told nothing. Neither the viewport hint nor
+// android:windowSoftInputMode="adjustResize" changes that; the fix belongs in the Android
+// activity, which Tauri generates. This still does its job in a phone browser, which is a
+// first-class way to reach a coordinator.
+//
+// Returns a cleanup function.
+export function trackKeyboardInset(): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const viewport = window.visualViewport;
+  const root = document.documentElement;
+  if (!viewport) return () => {};
+  const apply = () => {
+    // Anything the visual viewport has lost off the bottom is keyboard, or another
+    // on-screen widget occupying the same space.
+    const inset = Math.max(0, Math.round(window.innerHeight - viewport.height - viewport.offsetTop));
+    root.style.setProperty('--keyboard-inset', `${inset}px`);
+  };
+  apply();
+  viewport.addEventListener('resize', apply);
+  viewport.addEventListener('scroll', apply);
+  return () => {
+    viewport.removeEventListener('resize', apply);
+    viewport.removeEventListener('scroll', apply);
+    root.style.removeProperty('--keyboard-inset');
+  };
+}
