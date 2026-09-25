@@ -6,8 +6,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
 import { discoverTools, discoverModels, nativeRuntimeProbe, prepareProfile, runtimeProbe } from "./profile-runtime";
 import { profileAgent, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
-import { Store, type RunRow } from "./db";
-import { SecretStore } from "./secrets";
+import { SchemaTooNewError, Store, type RunRow } from "./db";
+import { SecretStore, SecretsUnavailableError } from "./secrets";
 import { Credentials, CredentialError } from "./credentials";
 import type { CredentialRecord, CredentialUsage, CredentialUse } from "../lib/credentials";
 import { validateComputerTarget } from './computer-validation';
@@ -22,8 +22,26 @@ import { APP_VERSION } from '../lib/version';
 
 const root = resolve(process.env.OPEN_HARNESS_STATE_DIR || ".open-harness");
 mkdirSync(root, { recursive: true }); mkdirSync(join(root, "shared"), { recursive: true }); mkdirSync(join(root, "agents"), { recursive: true });
-const store = new Store(join(root, "state.db"));
-const secrets = new SecretStore(join(root, "secrets.json"));
+const store = openStore(join(root, "state.db"));
+function openStore(file: string) {
+  try { return new Store(file); }
+  catch (error) {
+    if (!(error instanceof SchemaTooNewError)) throw error;
+    console.error(error.message);
+    process.exit(1);
+  }
+}
+// A vault that cannot be read is reported and fatal, never worked around: continuing would
+// mint a new control token and overwrite the stored keys on the first save.
+const secrets = openSecrets(join(root, "secrets.json"));
+function openSecrets(file: string) {
+  try { return new SecretStore(file); }
+  catch (error) {
+    if (!(error instanceof SecretsUnavailableError)) throw error;
+    console.error(error.message);
+    process.exit(1);
+  }
+}
 const credentials = new Credentials(store.db, secrets);
 const profiles = new Profiles(store.db);
 const teams = new TeamStore(store.db);

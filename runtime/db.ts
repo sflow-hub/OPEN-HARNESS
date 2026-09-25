@@ -27,6 +27,28 @@ export type RunRow = {
   error: string | null;
 };
 
+// Bump when a release changes the schema in a way an older build would mishandle. It is
+// recorded in PRAGMA user_version, which is how a downgrade is detected: an older binary
+// opening a newer database cannot know which columns and tables it must keep filling.
+export const SCHEMA_VERSION = 1;
+
+// Whole-database steps for an upgrade, keyed by the version they bring the file to.
+// Column additions for a single store's own tables stay in that store, because it creates
+// those tables itself and the coordinator builds the stores after this one.
+const MIGRATIONS: Array<{ to: number; apply: (db: DatabaseSync) => void }> = [];
+
+export class SchemaTooNewError extends Error {}
+
+// SQLite has no ADD COLUMN IF NOT EXISTS. Comparing against table_info adds the column
+// exactly when it is missing, so a genuine failure still surfaces instead of being
+// swallowed by a catch that cannot tell "already there" from "the disk is full".
+export function addColumn(db: DatabaseSync, table: string, column: string, definition: string) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.length || columns.some(existing => existing.name === column)) return false;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  return true;
+}
+
 export class Store {
   readonly db: DatabaseSync;
   runListener?: (run: RunRow) => void;
@@ -35,6 +57,11 @@ export class Store {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
+    const found = Number((this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version || 0);
+    if (found > SCHEMA_VERSION) throw new SchemaTooNewError(
+      `This Open Harness data folder was written by a newer version (database format ${found}; this build understands ${SCHEMA_VERSION}). ` +
+      `Install the newer version again, or move ${path} aside to start with an empty workspace. Nothing was changed.`,
+    );
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL,
@@ -79,6 +106,8 @@ export class Store {
         UNIQUE(agent_id,name)
       );
     `);
+    for (const migration of MIGRATIONS) if (migration.to > found) migration.apply(this.db);
+    if (found !== SCHEMA_VERSION) this.db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
     const stamp = new Date().toISOString();
     this.db.prepare("UPDATE runs SET state='interrupted', error=?, updated_at=? WHERE state IN ('running','waiting_approval','waiting_input')")
       .run("The local runtime restarted. Completed actions were preserved; this run was not replayed.", stamp);

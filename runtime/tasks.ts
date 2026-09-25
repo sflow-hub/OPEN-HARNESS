@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { DatabaseSync } from "node:sqlite";
-import type { RunRow } from "./db";
+import { addColumn, type RunRow } from "./db";
 
 type Row = Record<string, any>;
 const categories = ["backlog", "ready", "in_progress", "review", "done"] as const;
@@ -77,20 +77,19 @@ export class TaskStore {
       );
       CREATE INDEX IF NOT EXISTS idx_task_runs_task_attempt ON task_runs(task_id,attempt);
     `);
-    // Existing local installations predate board settings and run output. SQLite
-    // has no ADD COLUMN IF NOT EXISTS, so these are intentionally idempotent.
-    for (const sql of [
-      "ALTER TABLE task_boards ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}'",
-      "ALTER TABLE task_comments ADD COLUMN author TEXT NOT NULL DEFAULT 'you'",
-      "ALTER TABLE task_runs ADD COLUMN output TEXT NOT NULL DEFAULT ''",
-      "ALTER TABLE task_runs ADD COLUMN stop_reason TEXT",
-      "ALTER TABLE task_boards ADD COLUMN description TEXT NOT NULL DEFAULT ''",
-      "ALTER TABLE task_boards ADD COLUMN color TEXT NOT NULL DEFAULT 'sage'",
-      "ALTER TABLE task_boards ADD COLUMN position REAL NOT NULL DEFAULT 0",
-      "ALTER TABLE task_boards ADD COLUMN default_owner_agent_id TEXT",
-      "ALTER TABLE tasks ADD COLUMN team_id TEXT",
-    ]) try { db.exec(sql); } catch { /* already migrated */ }
-    // Create this only after the idempotent ALTER above. On an existing database,
+    // Existing local installations predate board settings and run output.
+    for (const [table, column, definition] of [
+      ['task_boards', 'settings_json', "TEXT NOT NULL DEFAULT '{}'"],
+      ['task_comments', 'author', "TEXT NOT NULL DEFAULT 'you'"],
+      ['task_runs', 'output', "TEXT NOT NULL DEFAULT ''"],
+      ['task_runs', 'stop_reason', 'TEXT'],
+      ['task_boards', 'description', "TEXT NOT NULL DEFAULT ''"],
+      ['task_boards', 'color', "TEXT NOT NULL DEFAULT 'sage'"],
+      ['task_boards', 'position', 'REAL NOT NULL DEFAULT 0'],
+      ['task_boards', 'default_owner_agent_id', 'TEXT'],
+      ['tasks', 'team_id', 'TEXT'],
+    ] as const) addColumn(db, table, column, definition);
+    // Create this only after the column is added above. On an existing database,
     // CREATE TABLE IF NOT EXISTS keeps the legacy tasks table unchanged, so indexing
     // team_id inside the initial schema batch would fail before the column is added.
     db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_team_archived ON tasks(team_id,archived)");

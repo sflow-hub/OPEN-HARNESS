@@ -19,7 +19,9 @@ for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith('--
 const stateRoot = resolve(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join(homedir(), '.open-harness-runner'));
 const credentialPath = join(stateRoot, 'connection.json');
 const spool = join(stateRoot, 'spool'); mkdirSync(spool, { recursive: true });
-const runnerSecrets = new SecretStore(join(stateRoot, 'secrets.json'));
+let runnerSecrets: SecretStore;
+try { runnerSecrets = new SecretStore(join(stateRoot, 'secrets.json')); }
+catch (error) { console.error(error instanceof Error ? error.message : 'The runner could not open its credential store.'); process.exit(1); }
 
 type Capabilities = MachineInfo['capabilities'];
 const pythons = ([process.env.HERMES_PYTHON, process.platform === 'win32' ? 'python' : 'python3', 'python'].filter(Boolean) as string[]);

@@ -510,25 +510,38 @@ function command2(name, args2, input) {
   return spawnSync4(name, args2, { input, encoding: "utf8", timeout: 8e3, windowsHide: true, maxBuffer: 2e6 });
 }
 var account = (path) => `open-harness-${createHash3("sha256").update(path).digest("hex").slice(0, 16)}`;
+var DISABLED = { state: "unavailable", backend: "OS vault", reason: "OPEN_HARNESS_DISABLE_OS_VAULT=1 is set." };
 function loadVault(path) {
-  if (process.env.OPEN_HARNESS_DISABLE_OS_VAULT === "1") return null;
+  if (process.env.OPEN_HARNESS_DISABLE_OS_VAULT === "1") return DISABLED;
   try {
     if (process.platform === "darwin") {
+      const backend = "macOS Keychain";
       const result = command2("security", ["find-generic-password", "-s", service, "-a", account(path), "-w"]);
-      return result.status === 0 ? { value: result.stdout.trim(), backend: "macOS Keychain" } : null;
+      if (result.status === 0) return { state: "ok", value: result.stdout.trim(), backend };
+      if (result.status === 44) return { state: "empty", backend };
+      return { state: "unavailable", backend, reason: result.error ? result.error.message : (result.stderr || "").trim() || `security exited ${result.status}.` };
     }
-    if (process.platform === "linux" && process.env.DBUS_SESSION_BUS_ADDRESS) {
+    if (process.platform === "linux") {
+      const backend = "system password vault";
+      if (!process.env.DBUS_SESSION_BUS_ADDRESS) return { state: "unavailable", backend, reason: "No D-Bus session is available, so the password vault cannot be reached." };
       const result = command2("secret-tool", ["lookup", "application", service, "workspace", account(path)]);
-      return result.status === 0 && result.stdout.trim() ? { value: result.stdout.trim(), backend: "system password vault" } : null;
+      if (result.status === 0) return result.stdout.trim() ? { state: "ok", value: result.stdout.trim(), backend } : { state: "empty", backend };
+      if (result.status === 1 && !(result.stderr || "").trim()) return { state: "empty", backend };
+      return { state: "unavailable", backend, reason: result.error ? result.error.message : (result.stderr || "").trim() || `secret-tool exited ${result.status}.` };
     }
     if (process.platform === "win32") {
-      const script = "$p=$args[0];if(Test-Path -LiteralPath $p){$b=[IO.File]::ReadAllBytes($p);$d=[Security.Cryptography.ProtectedData]::Unprotect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($d))}";
-      const result = command2("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, `${process.env.APPDATA || dirname2(process.execPath)}\\Open Harness\\${account(path)}.dpapi`]);
-      return result.status === 0 && result.stdout ? { value: result.stdout, backend: "Windows account vault" } : null;
+      const backend = "Windows account vault";
+      const target = `${process.env.APPDATA || dirname2(process.execPath)}\\Open Harness\\${account(path)}.dpapi`;
+      const script = "$p=$args[0];if(-not (Test-Path -LiteralPath $p)){exit 44};$b=[IO.File]::ReadAllBytes($p);$d=[Security.Cryptography.ProtectedData]::Unprotect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($d))";
+      const result = command2("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, target]);
+      if (result.status === 0 && result.stdout) return { state: "ok", value: result.stdout, backend };
+      if (result.status === 44) return { state: "empty", backend };
+      return { state: "unavailable", backend, reason: result.error ? result.error.message : (result.stderr || "").trim() || `PowerShell exited ${result.status}.` };
     }
-  } catch {
+    return { state: "empty", backend: "OS vault" };
+  } catch (error) {
+    return { state: "unavailable", backend: "OS vault", reason: error instanceof Error ? error.message : "The OS vault could not be read." };
   }
-  return null;
 }
 function saveVault(path, value) {
   if (process.env.OPEN_HARNESS_DISABLE_OS_VAULT === "1") return null;
@@ -544,22 +557,35 @@ function saveVault(path, value) {
   }
   return null;
 }
+var SecretsUnavailableError = class extends Error {
+};
 var SecretStore = class {
   constructor(path) {
     this.path = path;
     this.backend = "restricted local file";
     mkdirSync4(dirname2(path), { recursive: true });
+    this.markerPath = `${path.replace(/\.json$/, "")}.backend`;
+    const recorded = existsSync3(this.markerPath) ? readFileSync2(this.markerPath, "utf8").trim() : "";
     const vaulted = loadVault(path);
-    try {
-      this.values = vaulted?.value ? JSON.parse(vaulted.value) : existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : {};
-    } catch {
-      this.values = {};
-    }
-    if (vaulted) this.backend = vaulted.backend;
+    const onDisk = existsSync3(path);
+    if (vaulted.state === "ok") {
+      this.values = this.parse(vaulted.value, vaulted.backend);
+      this.backend = vaulted.backend;
+    } else if (onDisk) {
+      this.values = this.parse(readFileSync2(path, "utf8"), path);
+      this.backend = "restricted local file";
+    } else if (recorded.startsWith("vault")) {
+      const detail = vaulted.state === "unavailable" ? vaulted.reason : "The vault reports no stored credentials.";
+      throw new SecretsUnavailableError(
+        `Open Harness stored its credentials in the ${recorded.slice(6) || vaulted.backend} and cannot read them now. ${detail}
+Start Open Harness from an unlocked desktop session, or set OPEN_HARNESS_DISABLE_OS_VAULT=1 and re-enter the keys.
+Nothing was changed. Delete ${this.markerPath} to start over with an empty credential store.`
+      );
+    } else this.values = {};
     if (!this.values.controlToken) {
       this.values.controlToken = crypto.randomUUID() + crypto.randomUUID();
       this.save();
-    }
+    } else this.record();
     if (existsSync3(path)) chmodSync2(path, 384);
   }
   get token() {
@@ -588,17 +614,41 @@ var SecretStore = class {
     this.save();
     return true;
   }
+  // Unreadable stored credentials are not the same as none: replacing them with a fresh
+  // map is the one thing that cannot be undone, so say so and change nothing.
+  parse(raw, source) {
+    if (!raw.trim()) return {};
+    let value;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      throw new SecretsUnavailableError(`The stored Open Harness credentials in ${source} are not readable JSON. Nothing was changed. Move that entry aside to start over with an empty credential store.`);
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new SecretsUnavailableError(`The stored Open Harness credentials in ${source} are not in the expected format. Nothing was changed. Move that entry aside to start over with an empty credential store.`);
+    return value;
+  }
+  record() {
+    try {
+      writeFileSync4(this.markerPath, this.backend === "restricted local file" ? "file" : `vault:${this.backend}`, { mode: 384 });
+    } catch {
+    }
+  }
   save() {
     const serialized = JSON.stringify(this.values);
     const backend = saveVault(this.path, serialized);
     if (backend) {
-      this.backend = backend;
-      if (existsSync3(this.path)) unlinkSync(this.path);
-      return;
+      const confirmed = loadVault(this.path);
+      if (confirmed.state === "ok" && confirmed.value.trim() === serialized) {
+        this.backend = backend;
+        this.record();
+        if (existsSync3(this.path)) unlinkSync(this.path);
+        return;
+      }
     }
     this.backend = "restricted local file";
     writeFileSync4(this.path, JSON.stringify(this.values, null, 2), { mode: 384 });
     chmodSync2(this.path, 384);
+    this.record();
   }
 };
 
@@ -651,7 +701,13 @@ var stateRoot = resolve3(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join4(home
 var credentialPath = join4(stateRoot, "connection.json");
 var spool = join4(stateRoot, "spool");
 mkdirSync5(spool, { recursive: true });
-var runnerSecrets = new SecretStore(join4(stateRoot, "secrets.json"));
+var runnerSecrets;
+try {
+  runnerSecrets = new SecretStore(join4(stateRoot, "secrets.json"));
+} catch (error) {
+  console.error(error instanceof Error ? error.message : "The runner could not open its credential store.");
+  process.exit(1);
+}
 var pythons = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean);
 function exitCode(command3, args2, timeout) {
   return new Promise((resolve4) => {
