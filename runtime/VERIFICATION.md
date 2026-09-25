@@ -58,8 +58,24 @@ same fallback a paired runner already used for its own containers. Docker Deskto
 reaches the coordinator on loopback, so nothing had to be exposed: `--add-host
 host.docker.internal:host-gateway` was already set, and the container still needs the run's token.
 
+Two more defects came out of driving the board from a live agent:
+
+5. **The container signature left out the state root** the mounts are built from. Pointing
+   `OPEN_HARNESS_STATE_DIR` at a new directory reused the existing container with its mounts still
+   on the old path; Docker recreated that path as an empty directory, so the agent started with no
+   `config.yaml`, the policy extension never registered, and the run died with "Hermes gateway
+   exited during startup" over a log line telling the operator to rebuild the image. Restoring a
+   backup to a different path, which `docs/SELF_HOSTING.md` documents, hits exactly this.
+6. **The task tool's schema did not say where an action's fields go.** They nest under `input`, and
+   a model that sent `stageId` beside `action` — the obvious reading — got "Stage is required."
+   with no hint. The schema now documents the shape per action and the route accepts either
+   spelling, plus an `input` sent as a JSON string, which would previously have been spread into
+   one key per character.
+
 Verified after those fixes:
 
+- **A board task reaches Review.** A task assigned to Beta in the app moved to the Review stage by
+  Beta's own `action: "move"` call, with the stage id it had read from the same tool.
 - **Named handoff.** Alpha called `mcp__open_harness__delegate_named_agent` with Beta's id; the
   coordinator recorded `handoff.created`, created a child run for Beta in its own container, and
   recorded `handoff.completed` with its state. Beta wrote `handoff.md` to the shared workspace with
@@ -97,9 +113,13 @@ Also confirmed incidentally: `POST /v1/onboarding/status` correctly refused a st
 Docker cannot read (the probe named the real cause and pointed at the fix), and all five readiness
 checks passed once the directory moved under `$HOME`.
 
+**`runtime/hermes/Dockerfile` builds from scratch**, for the first time: earlier passes could only
+patch the existing image because a full build did not fit on the root disk. The result carries
+`dev.openharness.runtime=2`, imports the policy extension, and serves all three coordination
+tools. Built under a throwaway tag and removed afterwards, so the pinned image is untouched.
+
 Still not exercised live: real third-party MCP servers, Direct Computer Access, native subagent
-restrictions, a from-scratch build of `runtime/hermes/Dockerfile`, a Compose install from a
-packaged source release, and a backup and restore cycle.
+restrictions, a Compose install from a packaged source release, and a backup and restore cycle.
 
 ## Third real-runtime pass — September 25, 2026
 

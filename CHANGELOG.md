@@ -62,6 +62,16 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ### Fixed
 
+- An agent container is recreated when the data folder moves. The signature that
+  decides whether to reuse one left out the state root its mounts are built from, so
+  a new `OPEN_HARNESS_STATE_DIR` — or a backup restored to another path — reused a
+  container bound to the old directory. Docker recreates a missing bind source empty,
+  so the agent found no config, the policy extension never registered, and the run
+  died with "Hermes gateway exited during startup" over a log line blaming the image.
+- The task board tool documents where each action's fields go. They nest under
+  `input`, which only the schema said, so a model that sent `stageId` beside `action`
+  got "Stage is required." and no hint. Either spelling now works, as does an `input`
+  sent as a JSON string.
 - Task boards, named handoffs and agent-created routines now work on a container
   agent. They never had. Four things each broke them on their own: Hermes registers
   an MCP tool as `mcp__<server>__<tool>` while Open Harness granted
