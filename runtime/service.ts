@@ -16,6 +16,7 @@ import { coordinationSocket } from "./coordination-socket";
 import { TaskError, TaskStore } from "./tasks";
 import { TeamError, TeamStore } from "./teams";
 import { MachineError, Machines } from "./machines";
+import { encryptRunnerSecret } from "../lib/runner-crypto";
 import { exportAgentFiles, importAgentFiles, type TransferBundle } from './transfer-files';
 import { onboardingAction, onboardingStatus } from './readiness';
 import { APP_VERSION } from '../lib/version';
@@ -62,6 +63,8 @@ const coordinationSockets = new Map<string, ReturnType<typeof coordinationSocket
 let pumping = false;
 const maxTaskQueue = Math.max(1, Number(process.env.MAX_TASK_QUEUE || 100));
 const maxTaskRuns = Math.max(1, Number(process.env.MAX_TASK_RUNS || 3));
+// How long a dispatched run waits for a runner that has stopped heartbeating.
+const REMOTE_OFFLINE_GRACE_MS = Math.max(60_000, Number(process.env.OPEN_HARNESS_REMOTE_OFFLINE_GRACE_MS || 5 * 60_000));
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": allowedOrigin(res.req.headers.origin), "Vary": "Origin", "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" });
@@ -80,7 +83,10 @@ async function body(req: IncomingMessage) {
   let text = ""; for await (const chunk of req) { text += chunk; if (text.length > 5_000_000) throw new Error("Request too large."); }
   return text ? JSON.parse(text) : {};
 }
-function authenticated(req: IncomingMessage) { return req.headers.authorization === `Bearer ${secrets.token}`; }
+function authenticated(req: IncomingMessage) {
+  const supplied = String(req.headers.authorization || ''), expected = `Bearer ${secrets.token}`;
+  return supplied.length === expected.length && timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+}
 function runnerIdentity(req: IncomingMessage) {
   const machineId = String(req.headers['x-open-harness-machine'] || ''), token = String(req.headers.authorization || '').replace(/^Bearer /, '');
   return machineId && machines.authenticate(machineId, token) ? machineId : null;
@@ -135,19 +141,34 @@ function selectedSecrets(profile: AgentProfile, effective: ReturnType<Profiles['
   const names = new Set([effective.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean));
   const available = secrets.environment(); return Object.fromEntries([...names].filter(name => available[name]).map(name => [name, available[name]]));
 }
-async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) { const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input, secrets: selectedSecrets(profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
+// A dispatched command is a durable row, so a provider key must never travel through it in
+// the clear: it would outlive the run in state.db with no way to notice. Each value is
+// sealed to the runner's own public key, which only that machine can open.
+async function dispatchSecrets(machineId: string, profile: AgentProfile, effective: ReturnType<Profiles['effective']>) {
+  const plain = selectedSecrets(profile, effective);
+  if (!Object.keys(plain).length) return {};
+  const key = machines.encryptionKey(machineId);
+  if (!key) throw new MachineError('This computer has not published its encryption key yet. It is sent on every heartbeat, so wait a few seconds for it to check in, or pair it again.', 409);
+  return Object.fromEntries(await Promise.all(Object.entries(plain).map(async ([name, value]) => [name, await encryptRunnerSecret(key, value)])));
+}
+async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) { const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input, encryptedSecrets: await dispatchSecrets(machine.id, profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
 
 async function executeRemote(run: RunRow, snapshot: AgentProfile & { effectiveModel: ReturnType<Profiles['effective']> }) {
   const machine = machines.canAssign(snapshot.computer.machineId, run.agent_id);
   if (machine.status !== 'online') throw new Error(`${machine.name} is offline. This task will remain queued until its runner reconnects.`);
-  const command = machines.enqueue(machine.id, run.agent_id, 'run', { runId: run.id, prompt: run.prompt, snapshot, secrets: selectedSecrets(snapshot, snapshot.effectiveModel), coordinationToken: agentToken(run.agent_id) });
+  const command = machines.enqueue(machine.id, run.agent_id, 'run', { runId: run.id, prompt: run.prompt, snapshot, encryptedSecrets: await dispatchSecrets(machine.id, snapshot, snapshot.effectiveModel), coordinationToken: agentToken(run.agent_id) });
   remoteActive.set(run.id, { machineId: machine.id, commandId: command.id });
+  let offlineSince = 0;
   event(run.id, 'runner.dispatched', { commandId: command.id, machineId: machine.id, machineName: machine.name });
   try {
     for (;;) {
       await new Promise(resolve => setTimeout(resolve, 250));
       const current = store.getRun(run.id); if (!current || current.state === 'cancelled') throw Object.assign(new Error('Run cancelled.'), { cancelled: true });
       const status = machines.command(command.id); if (!status) throw new Error('The runner command disappeared before completion.');
+      if (machines.get(machine.id).status !== 'online') {
+        if (!offlineSince) offlineSince = Date.now();
+        else if (Date.now() - offlineSince > REMOTE_OFFLINE_GRACE_MS) throw new Error(`${machine.name} stopped responding and did not return within ${Math.round(REMOTE_OFFLINE_GRACE_MS / 60_000)} minutes. Its work was not replayed because the outcome is uncertain.`);
+      } else offlineSince = 0;
       if (status.state === 'completed') return status.result || {};
       if (status.state === 'failed') throw new Error(String((status.result as { error?: string } | null)?.error || 'Remote runner failed.'));
     }
@@ -287,6 +308,7 @@ async function pump() {
 async function stopRunTree(runId: string) {
   const ids = [runId, ...store.descendants(runId).map(item => item.id)];
   let stopped = 0;
+  const failures: string[] = [];
   for (const id of ids) {
     const run = store.getRun(id);
     if (!run || ["completed", "failed", "interrupted", "cancelled"].includes(run.state)) continue;
@@ -307,14 +329,16 @@ async function stopRunTree(runId: string) {
       const message = error instanceof Error ? error.message : "Runtime stop could not be confirmed.";
       store.setRun(id, { state: "interrupted", error: message });
       event(id, "run.interrupted", { error: message });
-      // Keep this agent out of admission until the service restarts and Docker is checked.
-      throw error;
+      failures.push(message);
+    } finally {
+      // Always release the agent. Holding it would keep it out of admission for the life of
+      // the process, and the run is already recorded as cancelled or interrupted either way.
+      stoppingAgents.delete(run.agent_id);
     }
-    stoppingAgents.delete(run.agent_id);
     event(id, "run.cancelled", { stoppedWithParent: id !== runId }); stopped++;
   }
   void pump();
-  return stopped;
+  return { stopped, failures };
 }
 
 async function waitForRun(id: string, timeoutMs = 30 * 60 * 1000) {
@@ -357,7 +381,7 @@ function mimeType(name: string) {
   const ext = name.toLowerCase().split(".").pop();
   return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml", pdf: "application/pdf", json: "application/json", csv: "text/csv", md: "text/markdown", html: "text/html" } as Record<string, string>)[ext || ""] || (isText(name) ? "text/plain" : "application/octet-stream");
 }
-function workspaceDir(url: URL) { const scope = url.searchParams.get("scope") || "shared", agentId = url.searchParams.get("agentId") || ""; return { scope, dir: scope === "private" ? join(root, "agents", agentId.replace(/[^a-zA-Z0-9_.-]/g, "-"), "private") : join(root, "shared") }; }
+function workspaceDir(url: URL) { const scope = url.searchParams.get("scope") || "shared", agentId = url.searchParams.get("agentId") || ""; return { scope, dir: scope === "private" ? join(root, "agents", validId(agentId), "private") : join(root, "shared") }; }
 function safeFile(dir: string, name: string) { if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(name) || name.includes("..")) throw new Error("Invalid filename."); const target = join(dir, name); if (!target.startsWith(dir + "/")) throw new Error("Invalid path."); return target; }
 
 function validTaskMutation(input: Record<string, unknown>, current?: ReturnType<TaskStore["getTask"]>) {
@@ -469,7 +493,7 @@ const server = createServer(async (req, res) => {
     const agentComputerMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(stop|transfer)$/);
     if (agentComputerMatch && req.method === 'POST') {
       const agentId = validId(decodeURIComponent(agentComputerMatch[1])), input = await body(req), profile = profiles.get(agentId); if (!profile) return json(res, 404, { error: 'Agent profile not found.' });
-      if (agentComputerMatch[2] === 'stop') { const runs = store.listRuns().filter(run => run.agent_id === agentId && ['queued','running','waiting_approval','waiting_input'].includes(run.state)); let stopped = 0; for (const run of runs) stopped += await stopRunTree(run.id); return json(res, 200, { ok: true, stopped, pending: remoteActive.has(runs[0]?.id) }); }
+      if (agentComputerMatch[2] === 'stop') { const runs = store.listRuns().filter(run => run.agent_id === agentId && ['queued','running','waiting_approval','waiting_input'].includes(run.state)); let stopped = 0; const failures: string[] = []; for (const run of runs) { const result = await stopRunTree(run.id); stopped += result.stopped; failures.push(...result.failures); } return json(res, 200, { ok: true, stopped, ...(failures.length ? { failures } : {}), pending: remoteActive.has(runs[0]?.id) }); }
       const destination = String(input.destinationMachineId || ''), pending = { ...profile, computer: { ...profile.computer, machineId: destination } };
       const transfer = machines.transfer(agentId, profile.computer.machineId, destination, pending); void performTransfer(transfer);
       return json(res, 202, transfer);
@@ -580,7 +604,7 @@ const server = createServer(async (req, res) => {
     }
     const skillMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/context\/skills\/([^/]+)$/);
     if (skillMatch) {
-      const safe = skillMatch[1].replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
+      const safe = validId(skillMatch[1]);
       const skill = decodeURIComponent(skillMatch[2]);
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(skill)) return json(res, 400, { error: "Invalid skill name." });
       const skillDir = join(root, "agents", safe, "profile", "skills", skill), skillFile = join(skillDir, "SKILL.md");
@@ -590,7 +614,7 @@ const server = createServer(async (req, res) => {
     }
     const contextMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/context$/);
     if (contextMatch) {
-      const safe = contextMatch[1].replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48), profile = join(root, "agents", safe, "profile"), memoryPath = join(profile, "MEMORY.md"), userPath = join(profile, "USER.md"), skillsPath = join(profile, "skills"); mkdirSync(profile, { recursive: true });
+      const safe = validId(contextMatch[1]), profile = join(root, "agents", safe, "profile"), memoryPath = join(profile, "MEMORY.md"), userPath = join(profile, "USER.md"), skillsPath = join(profile, "skills"); mkdirSync(profile, { recursive: true });
       if (req.method === "PUT") { const input = await body(req); if (String(input.memory || "").length > 50_000) return json(res, 413, { error: "Memory is limited to 50 KB." }); writeFileSync(memoryPath, String(input.memory || ""), { mode: 0o600 }); return json(res, 200, { ok: true }); }
       if (req.method === "GET") { const skills = existsSync(skillsPath) ? readdirSync(skillsPath, { withFileTypes: true }).filter(item => item.isDirectory()).map(item => item.name).slice(0, 200) : [], available = (await dockerStatusCached()).available; return json(res, 200, { memory: existsSync(memoryPath) ? readFileSync(memoryPath, "utf8") : "", user: existsSync(userPath) ? readFileSync(userPath, "utf8") : "", skills, capabilities: { terminal: available, process: available, code: available, files: available, web: available, browser: available, memory: available, skills: available, mcp: available, delegation: available, schedules: true } }); }
     }
@@ -600,7 +624,7 @@ const server = createServer(async (req, res) => {
       store.db.prepare("INSERT INTO migrations(key,payload_json,created_at) VALUES(?,?,?)").run("browser-v1", JSON.stringify(input), new Date().toISOString());
       for (const agent of input.agents || []) {
         profiles.import(agent);
-        const safe = String(agent.id).replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48), profile = join(root, "agents", safe, "profile");
+        const safe = validId(String(agent.id)), profile = join(root, "agents", safe, "profile");
         mkdirSync(profile, { recursive: true });
         if (Array.isArray(agent.memory) && agent.memory.length) writeFileSync(join(profile, "MEMORY.md"), agent.memory.map((item: unknown) => `- ${String(item)}`).join("\n") + "\n", { mode: 0o600 });
       }
@@ -644,7 +668,7 @@ const server = createServer(async (req, res) => {
       if (action === "check" && req.method === "POST") { const input = await body(req); return json(res, 200, tasks.check(taskId, String(input.item || ''), input.done === undefined ? undefined : Boolean(input.done))); }
       if (action === "additem" && req.method === "POST") { const input = await body(req); return json(res, 201, tasks.addItem(taskId, String(input.text || ''))); }
       if ((action === "start" || action === "request-changes") && req.method === "POST") { const started = tasks.start(taskId, await body(req), input => createRun({ ...input, deferStart: true })); void pump(); return json(res, 202, started); }
-      if (action === "stop" && req.method === "POST") { const task = tasks.getTask(taskId); if (!task.activeRunId) return json(res, 409, { error: 'This task is not running.' }); return json(res, 200, { ok: true, stopped: await stopRunTree(task.activeRunId) }); }
+      if (action === "stop" && req.method === "POST") { const task = tasks.getTask(taskId); if (!task.activeRunId) return json(res, 409, { error: 'This task is not running.' }); const result = await stopRunTree(task.activeRunId); return json(res, 200, { ok: true, stopped: result.stopped, ...(result.failures.length ? { failures: result.failures } : {}) }); }
       if (action === "approve" && req.method === "POST") { const input = await body(req); return json(res, 200, tasks.approve(taskId, input.revision === undefined ? undefined : Number(input.revision))); }
       if (action === "runs" && req.method === "GET") return json(res, 200, { runs: tasks.getTask(taskId).runs });
     }
@@ -656,10 +680,10 @@ const server = createServer(async (req, res) => {
       if (!action && req.method === "GET") return json(res, 200, runResponse(run));
       if (action === "events" && req.method === "GET") return json(res, 200, { events: store.events(run.id, Number(url.searchParams.get("after") || 0)), run: runResponse(store.getRun(run.id)!) });
       if (action === "steer" && req.method === "POST") { const input = await body(req), live = active.get(run.id), remote = remoteActive.get(run.id); if (!live && !remote) return json(res, 409, { error: "Run is not active." }); if (live) await live.gateway.request("session.steer", { session_id: live.sessionId, text: String(input.text || "") }); else machines.enqueue(remote!.machineId, run.agent_id, 'steer', { runId: run.id, commandId: remote!.commandId, text: String(input.text || '') }); event(run.id, "run.steered", { text: input.text }); return json(res, 200, { ok: true }); }
-      if (action === "stop" && req.method === "POST") return json(res, 200, { ok: true, stopped: await stopRunTree(run.id) });
+      if (action === "stop" && req.method === "POST") { const result = await stopRunTree(run.id); return json(res, 200, { ok: true, stopped: result.stopped, ...(result.failures.length ? { failures: result.failures } : {}) }); }
       if (action === "approval" && req.method === "POST") { const input = await body(req), approval = store.approval(String(input.approvalId)); if (!approval || approval.run_id !== run.id) return json(res, 404, { error: "Approval not found." }); const live = active.get(run.id), remote = remoteActive.get(run.id); if (!live && !remote) return json(res, 409, { error: "Run is not active." }); const decision = input.decision === "approve" ? "approve" : "deny"; if (live) await live.gateway.request("approval.respond", { request_id: approval.gateway_request_id, decision }); else machines.enqueue(remote!.machineId, run.agent_id, 'approval', { runId: run.id, commandId: remote!.commandId, requestId: approval.gateway_request_id, decision }); store.resolveApproval(String(input.approvalId), decision); store.setRun(run.id, { state: "running" }); event(run.id, "approval.resolved", { approvalId: input.approvalId, decision }); return json(res, 200, { ok: true }); }
     }
-    if (req.method === "POST" && url.pathname === "/v1/runs/stop-all") { let stopped = 0; for (const run of store.listRuns().filter(item => !item.parent_run_id && ["queued","running","waiting_approval","waiting_input"].includes(item.state))) stopped += await stopRunTree(run.id); return json(res, 200, { stopped }); }
+    if (req.method === "POST" && url.pathname === "/v1/runs/stop-all") { let stopped = 0; const failures: string[] = []; for (const run of store.listRuns().filter(item => !item.parent_run_id && ["queued","running","waiting_approval","waiting_input"].includes(item.state))) { const result = await stopRunTree(run.id); stopped += result.stopped; failures.push(...result.failures); } return json(res, 200, { stopped, ...(failures.length ? { failures } : {}) }); }
     if (url.pathname === "/v1/credentials") {
       if (req.method === "GET") return json(res, 200, { credentials: credentialRecords(), backend: credentials.backend });
       if (req.method === "POST") { const input = await body(req); return json(res, 201, credentialRecord(credentials.create(input))); }

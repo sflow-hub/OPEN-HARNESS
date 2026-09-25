@@ -86,15 +86,24 @@ async function flushSpool() { for (const name of readdirSync(spool).filter(name 
 async function emit(command: RunnerCommand, event: any) { const eventId = crypto.randomUUID(); await deliver({ id: eventId, path: `/v1/runner/commands/${command.id}/events`, body: { eventId, runId: command.payload.runId, event } }); }
 async function finish(command: RunnerCommand, result?: unknown, error?: unknown) { await deliver({ id: `complete-${command.id}`, path: `/v1/runner/commands/${command.id}/complete`, body: error ? { error: error instanceof Error ? error.message : String(error) } : { result } }); }
 
+// Credentials arrive sealed to this runner's key and are held only for the life of the
+// command: they go into the agent's profile .env and are never written to runner state.
+async function openDispatchedSecrets(sealed?: Record<string, EncryptedRunnerSecret>) {
+  if (!sealed) return {};
+  const opened = await Promise.all(Object.entries(sealed).map(async ([name, payload]) => [name, await decryptRunnerSecret(credentials.encryptionPrivateKey, payload)] as const));
+  return Object.fromEntries(opened);
+}
+
 async function run(command: RunnerCommand) {
-  const payload = command.payload as { runId: string; prompt: string; snapshot: AgentProfile & { effectiveModel: any }; secrets: Record<string,string>; coordinationToken: string };
+  const payload = command.payload as { runId: string; prompt: string; snapshot: AgentProfile & { effectiveModel: any }; encryptedSecrets?: Record<string, EncryptedRunnerSecret>; coordinationToken: string };
   const profile = payload.snapshot, direct = profile.computer.access === 'direct';
   try {
     const agentRoot = join(stateRoot, 'agents', profile.id), shared = join(stateRoot, 'shared'); mkdirSync(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean);
     const availableSecrets = { ...runnerSecrets.environment(), ...process.env } as Record<string,string>;
     const localSecrets = Object.fromEntries(needed.filter(name => availableSecrets[name]).map(name => [name, availableSecrets[name]]));
-    const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...payload.secrets }) };
+    const dispatched = await openDispatchedSecrets(payload.encryptedSecrets);
+    const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...dispatched }) };
     const coordinatorForContainer = credentials.coordinator.replace('://localhost', '://host.docker.internal').replace('://127.0.0.1', '://host.docker.internal');
     prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator } : { controlUrl: coordinatorForContainer });
     const gateway = direct
@@ -127,7 +136,7 @@ async function control(command: RunnerCommand) {
     }
     if (command.kind.startsWith('probe-')) {
       const profile = command.payload.profile as AgentProfile & { effectiveModel: any }, direct = profile.computer.access === 'direct', shared = join(stateRoot, 'shared'), agentRoot = join(stateRoot, 'agents', profile.id); mkdirSync(shared, { recursive: true });
-      const availableSecrets = { ...runnerSecrets.environment(), ...process.env } as Record<string,string>, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter(name => availableSecrets[name]).map(name => [name, availableSecrets[name]])), secretSource = { environment: () => ({ ...localSecrets, ...(command.payload.secrets || {}) }) };
+      const availableSecrets = { ...runnerSecrets.environment(), ...process.env } as Record<string,string>, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter(name => availableSecrets[name]).map(name => [name, availableSecrets[name]])), dispatched = await openDispatchedSecrets(command.payload.encryptedSecrets as Record<string, EncryptedRunnerSecret> | undefined), secretSource = { environment: () => ({ ...localSecrets, ...dispatched }) };
       prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command.payload.coordinationToken || '', `probe-${command.id}`, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator } : {});
       if (command.kind === 'probe-runtime') {
         const probeInput = { ...(command.payload.input || {}) } as any;

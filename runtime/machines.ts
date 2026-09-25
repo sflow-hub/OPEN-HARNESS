@@ -6,13 +6,20 @@ import type { AgentProfile, MachineInfo } from '../lib/agent-profile';
 import { dockerStatus } from './hermes';
 import { addColumn } from './db';
 
-type MachineRow = { id: string; name: string; platform: string; arch: string; status: string; last_seen_at: string | null; local: number; reserved_agent_id: string | null; capabilities_json: string; credential_hash: string | null; revoked_at: string | null };
+type MachineRow = { id: string; name: string; platform: string; arch: string; status: string; last_seen_at: string | null; local: number; reserved_agent_id: string | null; capabilities_json: string; credential_hash: string | null; revoked_at: string | null; encryption_public_key: string | null };
 type CommandRow = { id: string; machine_id: string; agent_id: string | null; kind: string; payload_json: string; state: string; created_at: string; leased_at: string | null; finished_at: string | null; result_json: string | null };
 const now = () => new Date().toISOString();
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const safeEqual = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 export class MachineError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
+
+// An RSA JWK from a runner. Stored only when it parses, so a malformed value cannot make
+// every later dispatch throw somewhere further away.
+function publicKey(value: unknown) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try { const jwk = JSON.parse(value); return jwk && typeof jwk === 'object' && (jwk as { kty?: string }).kty === 'RSA' ? value : null; } catch { return null; }
+}
 
 export class Machines {
   constructor(readonly db: DatabaseSync) {
@@ -42,6 +49,7 @@ export class Machines {
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL, pending_profile_json TEXT
     );`);
     addColumn(db, 'agent_transfers', 'pending_profile_json', 'TEXT');
+    addColumn(db, 'machines', 'encryption_public_key', 'TEXT');
     const interrupted = db.prepare("SELECT agent_id,destination_machine_id FROM agent_transfers WHERE state IN ('queued','exporting','importing','verifying')").all() as Array<{ agent_id: string; destination_machine_id: string }>;
     for (const transfer of interrupted) db.prepare('UPDATE machines SET reserved_agent_id=NULL,updated_at=? WHERE id=? AND reserved_agent_id=?').run(now(), transfer.destination_machine_id, transfer.agent_id);
     db.prepare("UPDATE agent_transfers SET state='failed',detail='The coordinator restarted during transfer. The source assignment and data were preserved.',updated_at=? WHERE state IN ('queued','exporting','importing','verifying')").run(now());
@@ -94,7 +102,7 @@ export class Machines {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare('UPDATE machine_pairings SET used_at=? WHERE id=? AND used_at IS NULL').run(stamp, pairing.id);
-      this.db.prepare('INSERT INTO machines VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id, String(input.name || pairing.name).slice(0, 80), String(input.platform || pairing.platform), String(input.arch || 'unknown').slice(0, 40), 'online', stamp, 0, null, JSON.stringify(capabilities), hash(token), null, stamp, stamp);
+      this.db.prepare('INSERT INTO machines(id,name,platform,arch,status,last_seen_at,local,reserved_agent_id,capabilities_json,credential_hash,revoked_at,created_at,updated_at,encryption_public_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id, String(input.name || pairing.name).slice(0, 80), String(input.platform || pairing.platform), String(input.arch || 'unknown').slice(0, 40), 'online', stamp, 0, null, JSON.stringify(capabilities), hash(token), null, stamp, stamp, publicKey(input.encryptionPublicKey));
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return { machine: this.get(id), machineId: id, token };
@@ -103,7 +111,7 @@ export class Machines {
   heartbeat(machineId: string, input: Record<string, unknown>) {
     if (!this.exists(machineId)) throw new MachineError('Computer not found or revoked.', 404);
     const stamp = now();
-    this.db.prepare('UPDATE machines SET status=?,last_seen_at=?,capabilities_json=COALESCE(?,capabilities_json),updated_at=? WHERE id=?').run('online', stamp, input.capabilities ? JSON.stringify(input.capabilities) : null, stamp, machineId);
+    this.db.prepare('UPDATE machines SET status=?,last_seen_at=?,capabilities_json=COALESCE(?,capabilities_json),encryption_public_key=COALESCE(?,encryption_public_key),updated_at=? WHERE id=?').run('online', stamp, input.capabilities ? JSON.stringify(input.capabilities) : null, publicKey(input.encryptionPublicKey), stamp, machineId);
     return this.get(machineId);
   }
   reconcileLeases(machineId: string, activeCommandIds: string[]) {
@@ -146,7 +154,18 @@ export class Machines {
   // and park it in waiting_approval indefinitely. A command carries exactly one run.
   receiveEvent(machineId: string, commandId: string, eventId: string, runId: string) { const command = this.command(commandId); if (!command || command.machineId !== machineId) throw new MachineError('Runner command not found.', 404); if (command.runId !== runId) throw new MachineError('This event does not belong to the run its command was issued for.', 403); const changed = this.db.prepare('INSERT OR IGNORE INTO runner_event_receipts VALUES(?,?,?)').run(commandId, eventId, now()); return Boolean(changed.changes); }
   poll(machineId: string) { const rows = this.db.prepare("SELECT * FROM runner_commands WHERE machine_id=? AND state='queued' ORDER BY created_at LIMIT 10").all(machineId) as CommandRow[]; const leased = now(); for (const row of rows) this.db.prepare("UPDATE runner_commands SET state='leased',leased_at=? WHERE id=? AND state='queued'").run(leased, row.id); return rows.map(row => ({ id: row.id, agentId: row.agent_id, kind: row.kind, payload: JSON.parse(row.payload_json), createdAt: row.created_at })); }
-  finish(machineId: string, commandId: string, result: unknown, failed = false) { const existing = this.command(commandId); if (!existing || existing.machineId !== machineId) throw new MachineError('Runner command not found.', 404); if (['completed','failed'].includes(existing.state)) return { ok: true, duplicate: true }; this.db.prepare("UPDATE runner_commands SET state=?,finished_at=?,result_json=? WHERE id=? AND machine_id=? AND state IN ('queued','leased')").run(failed ? 'failed' : 'completed', now(), JSON.stringify(result), commandId, machineId); return { ok: true }; }
+  finish(machineId: string, commandId: string, result: unknown, failed = false) { const existing = this.command(commandId); if (!existing || existing.machineId !== machineId) throw new MachineError('Runner command not found.', 404); if (['completed','failed'].includes(existing.state)) return { ok: true, duplicate: true }; this.db.prepare("UPDATE runner_commands SET state=?,finished_at=?,result_json=?,payload_json=? WHERE id=? AND machine_id=? AND state IN ('queued','leased')").run(failed ? 'failed' : 'completed', now(), JSON.stringify(result), this.spentPayload(commandId), commandId, machineId); return { ok: true }; }
+  // A finished command keeps only what a later lookup needs. Nothing rereads the credential
+  // material it carried, and a queue table is a poor place to leave any copy of it.
+  private spentPayload(commandId: string) {
+    const row = this.db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(commandId) as { payload_json: string } | undefined;
+    try {
+      const payload = JSON.parse(row?.payload_json || '{}') as Record<string, unknown>;
+      delete payload.secrets; delete payload.encryptedSecrets; delete payload.bundle; delete payload.encrypted;
+      return JSON.stringify(payload);
+    } catch { return '{}'; }
+  }
+  encryptionKey(machineId: string) { return this.row(machineId)?.encryption_public_key || ''; }
   transfer(agentId: string, source: string, destination: string, pendingProfile?: AgentProfile) { if (this.transferring(agentId)) throw new MachineError('This agent is already transferring. Wait for it to finish before changing computers again.', 409); if (source === destination) throw new MachineError('This agent is already on that computer.', 409); this.canAssign(destination, agentId); const id = crypto.randomUUID(), stamp = now(); this.db.prepare('INSERT INTO agent_transfers(id,agent_id,source_machine_id,destination_machine_id,state,detail,created_at,updated_at,pending_profile_json) VALUES(?,?,?,?,?,?,?,?,?)').run(id, agentId, source, destination, 'queued', 'Waiting for active work to finish.', stamp, stamp, pendingProfile ? JSON.stringify(pendingProfile) : null); return { id, agentId, sourceMachineId: source, destinationMachineId: destination, state: 'queued', detail: 'Waiting for active work to finish.', pendingProfile }; }
   transferring(agentId: string) { return Boolean(this.db.prepare("SELECT 1 FROM agent_transfers WHERE agent_id=? AND state IN ('queued','exporting','importing','verifying') LIMIT 1").get(agentId)); }
   transferStatus(agentId: string) { const row = this.db.prepare('SELECT state,detail FROM agent_transfers WHERE agent_id=? ORDER BY created_at DESC LIMIT 1').get(agentId) as { state: string; detail: string } | undefined; return row || null; }

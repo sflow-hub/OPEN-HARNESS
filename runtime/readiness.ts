@@ -126,13 +126,18 @@ async function waitForDocker(timeout = 120_000) {
   throw new Error('Docker did not become ready. Open Docker Desktop, wait for it to finish starting, then try again.');
 }
 
-function runStreaming(name: string, args: string[], cwd?: string) {
+function runStreaming(name: string, args: string[], cwd?: string, timeoutMs = 45 * 60_000) {
   return new Promise<void>((resolve, reject) => {
     const child = spawn(name, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let error = '';
+    // Both pipes must be drained. Whatever the builder decides to write progress to, an
+    // unread pipe fills at about 64 KB and blocks the child forever.
+    child.stdout.resume();
     child.stderr.on('data', chunk => { error = (error + String(chunk)).slice(-8_000); });
-    child.once('error', reject);
-    child.once('exit', code => code === 0 ? resolve() : reject(new Error(error.trim() || `${name} exited with code ${code ?? 'unknown'}.`)));
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`${name} did not finish within ${Math.round(timeoutMs / 60_000)} minutes. Check that Docker has disk space and network access, then try again.`)); }, timeoutMs);
+    timer.unref();
+    child.once('error', failure => { clearTimeout(timer); reject(failure); });
+    child.once('exit', code => { clearTimeout(timer); if (code === 0) resolve(); else reject(new Error(error.trim() || `${name} exited with code ${code ?? 'unknown'}.`)); });
   });
 }
 

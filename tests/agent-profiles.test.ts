@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createHmac } from 'node:crypto';
 import type { AgentProfile, ProfileResponse, ModelChoice } from '../lib/agent-profile';
 import type { PersistentRun } from '../lib/control-client';
+import { decryptRunnerSecret, generateRunnerKeyPair, type EncryptedRunnerSecret } from '../lib/runner-crypto';
 const port = 14318, base = `http://127.0.0.1:${port}`, state = mkdtempSync(join(tmpdir(), 'harness-profiles-'));
 let child: ChildProcess, token = '';
 async function start() {
@@ -109,8 +110,9 @@ test('MCP inventory survives refresh without claiming a stale handshake is conne
 });
 
 test('pairs and authenticates a remote runner, dispatches work once, and revokes it', async () => {
+  const encryption = await generateRunnerKeyPair();
   const pairing = await request<{ code: string }>('/v1/machines', 'POST', { name: 'Test VPS', platform: 'linux' });
-  const pairedResponse = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, name: 'Test VPS', platform: 'linux', arch: 'x64', capabilities: { container: true, direct: true, desktop: false, virtualDesktop: true } }) });
+  const pairedResponse = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, name: 'Test VPS', platform: 'linux', arch: 'x64', encryptionPublicKey: encryption.publicKey, capabilities: { container: true, direct: true, desktop: false, virtualDesktop: true } }) });
   assert.equal(pairedResponse.status, 201); const paired = await pairedResponse.json() as { machineId: string; token: string };
   const reused = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code }) }); assert.equal(reused.status, 410);
   const runnerHeaders = { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId, 'Content-Type': 'application/json' };
@@ -118,9 +120,16 @@ test('pairs and authenticates a remote runner, dispatches work once, and revokes
   const current = await profile(); const moving = await save({ ...current, computer: { ...current.computer, machineId: paired.machineId, access: 'private', desktop: 'virtual', reserveMachine: true } });
   assert.equal(moving.profile.computer.machineId, 'local'); assert.ok(moving.transfer && ['queued','exporting','importing'].includes(moving.transfer.state));
   const created = await run('remote test');
-  let command: { id: string; payload: { runId: string } } | undefined;
+  let command: { id: string; payload: { runId: string; secrets?: unknown; encryptedSecrets?: Record<string, EncryptedRunnerSecret> } } | undefined;
   for (let i = 0; i < 80 && !command; i++) { const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { runId: string; bundle?: { checksum: string } } }> }; for (const item of value.commands) { if (item.kind === 'import-agent') await fetch(`${base}/v1/runner/commands/${item.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { checksum: item.payload.bundle?.checksum, validated: true } }) }); if (item.kind === 'run' && item.payload.runId === created.id) command = item; } if (!command) await new Promise(resolve => setTimeout(resolve, 20)); }
-  assert.ok(command); const duplicate = crypto.randomUUID();
+  assert.ok(command);
+  // A dispatched command is a durable row in state.db. The agent's provider key has to
+  // travel as ciphertext only this runner can open, and never as plaintext beside it.
+  assert.equal(command.payload.secrets, undefined);
+  assert.ok(command.payload.encryptedSecrets?.ATLAS_KEY, 'the selected credential should be dispatched sealed');
+  assert.doesNotMatch(JSON.stringify(command.payload), /secret-atlas-value/);
+  assert.equal(await decryptRunnerSecret(encryption.privateKey, command.payload.encryptedSecrets.ATLAS_KEY), 'secret-atlas-value');
+  const duplicate = crypto.randomUUID();
   // C5: an event claiming a run other than the one this command was issued for is rejected
   // before it can touch any run's event log (verified below by the message.delta count staying 1).
   assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: crypto.randomUUID(), runId: `${created.id}-other`, event: { type: 'message.delta', payload: { text: 'forged' } } }) })).status, 403);
@@ -128,6 +137,8 @@ test('pairs and authenticates a remote runner, dispatches work once, and revokes
   assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { final_response: 'remote complete' } }) })).status, 200);
   assert.equal((await waitRun(created.id)).result, 'remote complete');
   const events = await request<{ events: Array<{ type: string }> }>(`/v1/runs/${created.id}/events`); assert.equal(events.events.filter(item => item.type === 'message.delta').length, 1);
+  const spent = await (await fetch(`${base}/v1/runner/commands`, { headers: runnerHeaders })).json() as { commands: Array<{ id: string }> };
+  assert.equal(spent.commands.some(item => item.id === command!.id), false, 'a completed command should not be handed out again');
   const scout = await profile('scout'); await assert.rejects(save({ ...scout, computer: { ...scout.computer, machineId: paired.machineId } }), { status: 409 });
   await request(`/v1/machines/${paired.machineId}/revoke`, 'POST'); assert.equal((await fetch(base + '/v1/runner/heartbeat', { method: 'POST', headers: runnerHeaders, body: '{}' })).status, 401);
   const latest = await profile(); await save({ ...latest, computer: { ...latest.computer, machineId: 'local', desktop: 'none', reserveMachine: false } });
