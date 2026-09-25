@@ -9,6 +9,7 @@ import {
   BellOff,
   Check,
   ChevronRight,
+  CircleAlert,
   Copy,
   Download,
   FileText,
@@ -180,6 +181,9 @@ export default function Home() {
 
   const [notice, setNotice] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
+  const [offline, setOffline] = useState("");
+  const [retrying, setRetrying] = useState(false);
+  const connectAttempt = useRef(0);
   const [notifyWhenDone, setNotifyWhenDone] = useState(false);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [inspector, setInspector] = useState(true);
@@ -200,6 +204,33 @@ export default function Home() {
   const testMode = runtime?.mode === "test";
   const connected = Boolean(runtime?.runtime.available && !testMode);
 
+  function updateConversation(
+    id: string,
+    update: (c: Conversation) => Conversation,
+  ) {
+    setWorkspace((w) => ({
+      ...w,
+      conversations: w.conversations.map((c) => (c.id === id ? update(c) : c)),
+    }));
+  }
+  // Reattaching to a run means finding the assistant message its events belong to, or adding
+  // one. Doing only half of that is how reopening a task streamed into a message that was
+  // never in the conversation, so every token, tool call and error was silently discarded.
+  function attachRunMessage(run: PersistentRun, title: string) {
+    const existing = workspace.conversations.find((item) => item.id === run.conversation_id);
+    const existingReply = existing?.messages.find((message) => message.runId === run.id);
+    const messageId = existingReply?.id || uid();
+    const reply = { id: messageId, runId: run.id, role: "assistant" as const, content: run.result || run.error || "", error: Boolean(run.error), activities: [] };
+    if (!existing) {
+      setWorkspace((current) => ({
+        ...current,
+        conversations: [{ id: run.conversation_id, agentId: run.agent_id, title, updatedAt: now(), messages: [{ id: uid(), role: "user" as const, content: run.prompt }, reply] }, ...current.conversations],
+      }));
+    } else if (!existingReply) {
+      updateConversation(existing.id, (current) => ({ ...current, messages: [...current.messages, reply] }));
+    }
+    return { messageId, cursor: existingReply?.eventCursor || 0, hadContent: Boolean(existingReply?.content) };
+  }
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 1000px)");
     const matchLayout = () => setInspector(!narrow.matches);
@@ -240,6 +271,7 @@ export default function Home() {
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
+    let retryTimer = 0;
     const connect = async () => {
       try {
         const client = controlRef.current;
@@ -282,65 +314,14 @@ export default function Home() {
             ),
           );
           if (live) {
-            const existing = workspace.conversations.find(
-              (item) => item.id === live.conversation_id,
-            );
-            const existingMessage = existing?.messages.find(
-              (message) => message.runId === live.id,
-            );
-            const messageId = existingMessage?.id || uid();
-            if (!existing) {
-              setWorkspace((current) => ({
-                ...current,
-                conversations: [
-                  {
-                    id: live.conversation_id,
-                    agentId: live.agent_id,
-                    title: live.prompt.slice(0, 52),
-                    updatedAt: now(),
-                    messages: [
-                      { id: uid(), role: "user", content: live.prompt },
-                      {
-                        id: messageId,
-                        runId: live.id,
-                        role: "assistant",
-                        content: "",
-                        activities: [],
-                      },
-                    ],
-                  },
-                  ...current.conversations,
-                ],
-              }));
-            } else if (!existingMessage) {
-              updateConversation(existing.id, (current) => ({
-                ...current,
-                messages: [
-                  ...current.messages,
-                  {
-                    id: messageId,
-                    runId: live.id,
-                    role: "assistant",
-                    content: "",
-                    activities: [],
-                  },
-                ],
-              }));
-            }
+            const { messageId, cursor, hadContent } = attachRunMessage(live, live.prompt.slice(0, 52));
             setSelectedAgent(live.agent_id);
             setConversationId(live.conversation_id);
             setView("chat");
             setPersistentRun(live);
             setRunning(true);
             runLock.current = true;
-            void followRun(
-              live,
-              live.conversation_id,
-              messageId,
-              live.agent_id,
-              existingMessage?.eventCursor || 0,
-              Boolean(existingMessage?.content),
-            )
+            void followRun(live, live.conversation_id, messageId, live.agent_id, cursor, hadContent)
               .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
               .finally(() => {
                 runLock.current = false;
@@ -350,18 +331,23 @@ export default function Home() {
               });
           }
         }
+        if (!cancelled) setOffline("");
       } catch (error) {
-        if (!cancelled)
-          setNotice(
-            error instanceof Error
-              ? `${error.message} Run npm run harness:doctor, then npm run dev.`
-              : "The local agent runtime is unavailable.",
-          );
+        if (cancelled) return;
+        setOffline(error instanceof Error ? error.message : "The local agent runtime is unavailable.");
+        // First run needs the guide most when nothing is reachable yet, and the gate for it
+        // used to sit inside the success path.
+        if (localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
+        // Back off, but keep trying: starting the coordinator should be enough to recover
+        // without reloading the page.
+        const wait = Math.min(30_000, 2_000 * 2 ** Math.min(connectAttempt.current++, 4));
+        retryTimer = window.setTimeout(() => { if (!cancelled) void connect(); }, wait);
       }
     };
     void connect();
     return () => {
       cancelled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
     };
     // The one-time migration intentionally snapshots the hydrated browser workspace.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -388,17 +374,18 @@ export default function Home() {
   }, [runtime, selectedAgent]);
   // Surface storage failures from the external persistence operation.
   useEffect(() => {
-    if (ready) {
+    if (!ready) return;
+    const timer = window.setTimeout(() => {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(storable(workspace)));
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
       } catch {
-        // eslint-disable-next-line react-hooks/set-state-in-effect
         setNotice(
           "Browser storage is full or unavailable. Export a backup now to keep your work.",
         );
       }
-    }
+    }, 800);
+    return () => window.clearTimeout(timer);
   }, [workspace, settings, ready]);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -568,24 +555,7 @@ export default function Home() {
     );
   }
   function openTaskRun(run: PersistentRun, title: string) {
-    const existing = workspace.conversations.find(item => item.id === run.conversation_id);
-    const existingReply = existing?.messages.find(message => message.runId === run.id);
-    const messageId = existingReply?.id || uid();
-    if (!existing) {
-      setWorkspace(current => ({
-        ...current,
-        conversations: [{
-          id: run.conversation_id,
-          agentId: run.agent_id,
-          title,
-          updatedAt: now(),
-          messages: [
-            { id: uid(), role: "user", content: run.prompt },
-            { id: messageId, runId: run.id, role: "assistant", content: run.result || run.error || "", error: Boolean(run.error), activities: [] },
-          ],
-        }, ...current.conversations],
-      }));
-    }
+    const { messageId, cursor, hadContent } = attachRunMessage(run, title);
     setSelectedAgent(run.agent_id);
     setConversationId(run.conversation_id);
     setView("chat");
@@ -593,7 +563,7 @@ export default function Home() {
       runLock.current = true;
       setRunning(true);
       setPersistentRun(run);
-      void followRun(run, run.conversation_id, messageId, run.agent_id, existingReply?.eventCursor || 0, Boolean(existingReply?.content))
+      void followRun(run, run.conversation_id, messageId, run.agent_id, cursor, hadContent)
         .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
         .finally(() => {
           runLock.current = false;
@@ -613,15 +583,6 @@ export default function Home() {
       memory: [],
       tone: workspace.agents.length % 3,
     });
-  }
-  function updateConversation(
-    id: string,
-    update: (c: Conversation) => Conversation,
-  ) {
-    setWorkspace((w) => ({
-      ...w,
-      conversations: w.conversations.map((c) => (c.id === id ? update(c) : c)),
-    }));
   }
   function handleEvent(
     event: RunEvent,
@@ -1183,8 +1144,8 @@ export default function Home() {
           )}
         </div>
         <div className="sidebar-bottom">
-          <span className="status-dot" />
-          {testMode ? "Automated test mode" : connected ? "Agent runtime ready" : "Agent runtime needs setup"}
+          <span className={`status-dot ${offline ? "offline" : connected || testMode ? "" : "pending"}`} />
+          {testMode ? "Automated test mode" : offline ? "Not connected" : connected ? "Agent runtime ready" : "Agent runtime needs setup"}
           <button onClick={() => openSettings()}>
             <Settings size={15} /> Settings <span>↗</span>
           </button>
@@ -1533,10 +1494,10 @@ export default function Home() {
                           aria-label="Stop run"
                           onClick={() => {
                             if (persistentRun)
-                              void controlRef.current.request(
-                                `/v1/runs/${persistentRun.id}/stop`,
-                                { method: "POST" },
-                              );
+                              void controlRef.current
+                                .request<{ failures?: string[] }>(`/v1/runs/${persistentRun.id}/stop`, { method: "POST" })
+                                .then((result) => { if (result.failures?.length) setNotice(`This task was marked stopped, but the runtime did not confirm: ${result.failures[0]}`); })
+                                .catch((error) => setNotice(error instanceof Error ? error.message : "Could not stop this task."));
                           }}
                         >
                           <Square size={14} fill="currentColor" />
@@ -1546,9 +1507,10 @@ export default function Home() {
                           type="button"
                           aria-label="Stop all runs"
                           onClick={() =>
-                            void controlRef.current.request("/v1/runs/stop-all", {
-                              method: "POST",
-                            })
+                            void controlRef.current
+                              .request<{ failures?: string[] }>("/v1/runs/stop-all", { method: "POST" })
+                              .then((result) => { if (result.failures?.length) setNotice(`Some tasks were marked stopped without the runtime confirming: ${result.failures[0]}`); })
+                              .catch((error) => setNotice(error instanceof Error ? error.message : "Could not stop the running tasks."))
                           }
                         >
                           Stop all
@@ -1804,15 +1766,12 @@ export default function Home() {
                       disabled={running}
                       onClick={() => {
                         if (!confirm(`Delete ${f.name}?`)) return;
-                        if (runtime)
-                          void controlRef.current.request(
-                            `/v1/files?scope=shared&name=${encodeURIComponent(f.name)}`,
-                            { method: "DELETE" },
-                          );
-                        setWorkspace((w) => ({
-                          ...w,
-                          files: w.files.filter((x) => x.id !== f.id),
-                        }));
+                        const drop = () => setWorkspace((w) => ({ ...w, files: w.files.filter((x) => x.id !== f.id) }));
+                        if (!runtime) { drop(); return; }
+                        void controlRef.current
+                          .request(`/v1/files?scope=shared&name=${encodeURIComponent(f.name)}`, { method: "DELETE" })
+                          .then(drop)
+                          .catch((error) => setNotice(error instanceof Error ? `${f.name} was not deleted: ${error.message}` : `${f.name} could not be deleted.`));
                       }}
                     >
                       <Trash2 size={15} />
@@ -2079,6 +2038,27 @@ export default function Home() {
         accept=".json"
         onChange={(e) => importWorkspace(e.target.files?.[0])}
       />
+      {offline && (
+        <div className="offline-banner" role="alert">
+          <CircleAlert size={15} />
+          <span>
+            <strong>Open Harness cannot reach its control service.</strong>
+            <small>{offline} Agents and tasks already running are unaffected. Start it with <code>npm run dev</code>, or check <code>npm run harness:doctor</code>.</small>
+          </span>
+          <button
+            className="subtle-button"
+            disabled={retrying}
+            onClick={() => {
+              setRetrying(true);
+              connectAttempt.current = 0;
+              setReady(false);
+              window.setTimeout(() => { setReady(true); setRetrying(false); }, 50);
+            }}
+          >
+            {retrying ? "Reconnecting…" : "Try again"}
+          </button>
+        </div>
+      )}
       {notice && (
         <div className="toast" role="status">
           {notice}
@@ -2363,8 +2343,21 @@ function normalizeWorkspace(value: unknown): Workspace | null {
   if (!value || typeof value !== "object") return null;
   const source = value as Record<string, unknown>;
   if (source.version !== 1 && source.version !== 2) return null;
-  const normalized = { ...source, version: 2 as const, teams: Array.isArray(source.teams) ? source.teams : [] } as unknown as Workspace;
+  const files = (Array.isArray(source.files) ? source.files : []).filter(storableFile);
+  const normalized = { ...source, version: 2 as const, files, teams: Array.isArray(source.teams) ? source.teams : [] } as unknown as Workspace;
   return validWorkspace(normalized) ? normalized : null;
+}
+
+const FILE_CONTENT_LIMIT = 100_000;
+function storableFile(file: unknown): file is Artifact {
+  const value = file as Artifact | null;
+  return Boolean(value && typeof value.id === "string" && typeof value.name === "string" && typeof value.content === "string" && value.content.length <= FILE_CONTENT_LIMIT && typeof value.agentId === "string" && typeof value.updatedAt === "string");
+}
+// What goes to browser storage must be readable back. A runtime file bigger than the limit is
+// left out rather than saved in a shape that would invalidate the whole record on the next load.
+function storable(value: Workspace): Workspace {
+  const files = value.files.filter(storableFile);
+  return files.length === value.files.length ? value : { ...value, files };
 }
 
 function validWorkspace(value: unknown): value is Workspace {

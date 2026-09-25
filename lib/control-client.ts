@@ -33,16 +33,36 @@ function base() {
   return "http://127.0.0.1:4317";
 }
 
+// A coordinator that accepts the socket and then never answers used to leave the page on
+// "Working on it…" for good, because only a rejected fetch was ever retried.
+const REQUEST_TIMEOUT_MS = 30_000;
+
+// The proxy forwards whatever content type it was given, so a reverse proxy's HTML 502 or an
+// empty body would surface as "Unexpected end of JSON input". Say what actually arrived.
+async function parseBody(response: Response) {
+  const text = await response.text();
+  if (!text.trim()) return {};
+  try { return JSON.parse(text) as Record<string, unknown>; }
+  catch { throw new Error(response.ok ? "Open Harness received a reply it could not read. Check whether something else is answering on the coordinator's address." : `The coordinator returned HTTP ${response.status}. Check that it is running and reachable.`); }
+}
+
 export class ControlClient {
   token = "";
   async bootstrap() {
-    const response = await fetch(`${base()}/v1/bootstrap`);
-    if (!response.ok) throw new Error("Open Harness control service is unavailable.");
-    const status = (await response.json()) as RuntimeStatus; this.token = status.token; return status;
+    const response = await fetch(`${base()}/v1/bootstrap`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    const body = await parseBody(response);
+    if (!response.ok) throw new Error((body as { error?: string }).error || "Open Harness control service is unavailable.");
+    const status = body as unknown as RuntimeStatus; this.token = status.token; return status;
   }
-  async request<T>(path: string, init: RequestInit = {}) {
-    const response = await fetch(`${base()}${path}`, { ...init, headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}`, ...init.headers } });
-    const value = await response.json() as T & { error?: string };
+  async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const send = () => fetch(`${base()}${path}`, { ...init, signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS), headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}`, ...init.headers } });
+    let response = await send();
+    // The token changes when the coordinator restarts with a new data folder. One silent
+    // re-bootstrap beats making the operator reload to escape "Invalid local control token".
+    if (response.status === 401 && this.token) {
+      try { await this.bootstrap(); response = await send(); } catch { /* report the original 401 below */ }
+    }
+    const value = await parseBody(response) as T & { error?: string };
     if (!response.ok) throw new Error(value.error || `Control service returned HTTP ${response.status}.`);
     return value;
   }

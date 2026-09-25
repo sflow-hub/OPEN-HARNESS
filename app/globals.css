@@ -459,6 +459,35 @@ a {
   border-radius: 50%;
   margin-right: 7px;
 }
+/* The dot is the only always-visible connection signal, so it has to be able to disagree
+   with "ready" rather than sitting green while nothing is reachable. */
+.status-dot.pending { background: #d8c98a; }
+.status-dot.offline { background: #d59e9e; }
+
+.offline-banner {
+  position: fixed;
+  bottom: 23px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 70;
+  max-width: min(620px, calc(100vw - 32px));
+  background: #302726;
+  border: 1px solid #6d4a46;
+  color: #e8d5d2;
+  padding: 13px 16px;
+  border-radius: 9px;
+  box-shadow: 0 6px 25px #0005;
+  font-size: 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.offline-banner strong { display: block; color: #f2e3e0; font-weight: 520; }
+.offline-banner small { display: block; margin-top: 3px; color: #cdb6b2; line-height: 1.5; }
+.offline-banner code { background: #00000030; padding: 1px 4px; border-radius: 4px; }
+.offline-banner span { flex: 1; }
+.offline-banner button { flex-shrink: 0; }
+.offline-banner svg { margin-top: 1px; flex-shrink: 0; }
 .main {
   margin-left: 248px;
   min-width: 0;

@@ -143,3 +143,65 @@ test('downloads the exact contents of a workspace file', async ({ page }, testIn
   expect(saved.suggestedFilename()).toBe('launch-smoke.md');
   expect(readFileSync(await saved.path(), 'utf8')).toBe(contents);
 });
+
+test('a coordinator that cannot be reached is stated plainly and recovered from', async ({ page }, testInfo) => {
+  // The failure used to be a toast that cleared itself after a few seconds, leaving the app
+  // looking healthy beside a status dot that was always green.
+  let reachable = false;
+  await page.route(`${control}/v1/bootstrap`, async route => {
+    if (!reachable) return route.abort('connectionrefused');
+    await route.continue();
+  });
+  await page.reload();
+
+  const banner = page.getByRole('alert').filter({ hasText: 'cannot reach its control service' });
+  await expect(banner).toBeVisible();
+  const dot = page.locator('.status-dot.offline');
+  await expect(dot).toHaveCount(1);
+  if (testInfo.project.name === 'desktop') await expect(dot).toBeVisible();
+  // It has to still be there well after the old toast would have cleared.
+  await page.waitForTimeout(7000);
+  await expect(banner).toBeVisible();
+
+  reachable = true;
+  await banner.getByRole('button', { name: 'Try again' }).click();
+  await expect(banner).toBeHidden();
+  await expect(page.locator('.status-dot.offline')).toHaveCount(0);
+});
+
+test('reopening a task run streams the work into the conversation it belongs to', async ({ page, request }) => {
+  await page.route(`${control}/v1/bootstrap`, async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...(await response.json()), mode: 'live' } });
+  });
+  await page.reload();
+
+  // A conversation that already exists but holds no reply for this run is the case that used
+  // to drop everything: the page followed a message id it had never added to the thread, so
+  // every token, tool call and error went nowhere.
+  const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  const conversationId = `conversation-${Date.now()}`;
+  // Written before page scripts run, and built outright rather than patched onto whatever a
+  // previous test happened to save, so the conversation is always there when the page hydrates.
+  await page.addInitScript(({ workspace, id }) => {
+    localStorage.setItem('open-harness.workspace.v2', JSON.stringify({
+      ...workspace,
+      conversations: [{ id, agentId: 'atlas', title: 'Earlier work', updatedAt: new Date().toISOString(), messages: [{ id: 'm-old', role: 'user' as const, content: 'Earlier work here' }] }],
+    }));
+  }, { workspace: initialWorkspace, id: conversationId });
+
+  // Pause the run on an approval so it is still live when the page comes back.
+  await request.post(control + '/v1/runs', {
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    data: { agentId: 'atlas', conversationId, prompt: 'MOCK_APPROVAL reattach into the right message' },
+  });
+  page.on('dialog', dialog => void dialog.accept());
+  await page.reload();
+
+  const approval = page.getByRole('alert').filter({ hasText: 'needs approval' });
+  await expect(approval).toBeVisible();
+  await approval.getByRole('button', { name: 'Approve once' }).click();
+  // Visible completion text means the events landed in a message the conversation actually has.
+  await expect(page.getByText('Hermes mock completed the task.')).toBeVisible();
+  await expect(page.getByText('Earlier work here')).toBeVisible();
+});
