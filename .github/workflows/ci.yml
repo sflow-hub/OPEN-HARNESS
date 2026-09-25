@@ -8,19 +8,18 @@ on:
 permissions:
   contents: read
 
+# macOS and Windows are deferred while the supported path is a local browser
+# install on Linux; see ROADMAP.md. Restore the matrix with those platforms.
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   app:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: windows-2025
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -32,20 +31,23 @@ jobs:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
       - name: Install Linux desktop libraries
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
       - run: npm run lint
-      - run: node desktop/fetch-node.mjs ${{ matrix.target }}
+      - run: node desktop/fetch-node.mjs $TARGET
       - run: npm run desktop:prepare
-      - run: npx tauri build --debug --no-bundle --target ${{ matrix.target }}
+      - run: npx tauri build --debug --no-bundle --target $TARGET
 
   browser:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

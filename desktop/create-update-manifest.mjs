@@ -2,8 +2,11 @@ import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 const directory = resolve(process.argv[2] || 'release-assets');
-const tag = process.env.GITHUB_REF_NAME || process.argv[3];
-const repository = process.env.GITHUB_REPOSITORY || process.argv[4];
+// An explicit argument wins: GITHUB_REF_NAME is a branch name on a push to main,
+// which would otherwise be published as the release version.
+const taggedRef = /^v/.test(process.env.GITHUB_REF_NAME || '') ? process.env.GITHUB_REF_NAME : '';
+const tag = process.argv[3] || taggedRef;
+const repository = process.argv[4] || process.env.GITHUB_REPOSITORY;
 if (!tag || !repository) throw new Error('Release tag and GitHub repository are required.');
 
 async function files(root) {
