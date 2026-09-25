@@ -3,6 +3,9 @@
 Verified on September 25, 2026 in a macOS ARM64 VM using Node 22.23.3,
 Python 3.12, and pinned Hermes `939e45c91d751fadd94dcd1b873ac3cb44846213`
 (`v2026.9.11`). This records completed checks separately from environment limits.
+Claude independently verified the synchronized source on Linux 6.18 with Node
+22.22.2: all 131 Node tests, typecheck, and lint passed, including the real MCP
+subprocess socket test using the coordinator's explicit PID in its `/proc` path.
 
 ## Automated checks
 
