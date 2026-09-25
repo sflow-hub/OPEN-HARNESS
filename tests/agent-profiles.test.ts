@@ -8,11 +8,17 @@ import { createHmac } from 'node:crypto';
 import type { AgentProfile, ProfileResponse, ModelChoice } from '../lib/agent-profile';
 import type { PersistentRun } from '../lib/control-client';
 import { decryptRunnerSecret, generateRunnerKeyPair, type EncryptedRunnerSecret } from '../lib/runner-crypto';
+
+// A generous budget: these loops only need to outlast a slow or loaded machine, and
+// `npm test --test-timeout` is the real backstop. Fixed iteration counts gave them four
+// seconds, which a busy runner could exceed while the coordinator was working correctly.
+const POLL_BUDGET_MS = 30_000;
 const port = 14318, base = `http://127.0.0.1:${port}`, state = mkdtempSync(join(tmpdir(), 'harness-profiles-'));
 let child: ChildProcess, token = '';
 async function start() {
   child = spawn(process.execPath, ['--import', 'tsx', 'runtime/service.ts'], { cwd: join(import.meta.dirname, '..'), env: { ...process.env, OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: state }, stdio: 'pipe' });
-  for (let i = 0; i < 80; i++) { try { const r = await fetch(`${base}/v1/bootstrap`); if (r.ok) { token = (await r.json() as { token: string }).token; return; } } catch {} await new Promise(r => setTimeout(r, 50)); }
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < deadline) { try { const r = await fetch(`${base}/v1/bootstrap`); if (r.ok) { token = (await r.json() as { token: string }).token; return; } } catch {} await new Promise(r => setTimeout(r, 50)); }
   throw new Error('Service did not start.');
 }
 async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
@@ -22,10 +28,12 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
 async function profile(id = 'atlas') { return (await request<ProfileResponse>(`/v1/agents/${id}/profile`)).profile; }
 async function save(p: AgentProfile) { return request<ProfileResponse>(`/v1/agents/${p.id}/profile`, 'PUT', p); }
 async function waitTransfer(id: string, states = ['completed','failed']) {
-  for (let i = 0; i < 120; i++) { const value = await request<ProfileResponse>(`/v1/agents/${id}/profile`); if (value.transfer && states.includes(value.transfer.state)) return value; await new Promise(r => setTimeout(r, 25)); } throw new Error('Transfer timed out.');
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < deadline) { const value = await request<ProfileResponse>(`/v1/agents/${id}/profile`); if (value.transfer && states.includes(value.transfer.state)) return value; await new Promise(r => setTimeout(r, 25)); } throw new Error('Transfer timed out.');
 }
 async function waitRun(id: string, states = ['completed','failed','cancelled']) {
-  for (let i = 0; i < 100; i++) { const run = await request<PersistentRun>(`/v1/runs/${id}`); if (states.includes(run.state)) return run; await new Promise(r => setTimeout(r, 30)); } throw new Error('Run timed out.');
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < deadline) { const run = await request<PersistentRun>(`/v1/runs/${id}`); if (states.includes(run.state)) return run; await new Promise(r => setTimeout(r, 30)); } throw new Error('Run timed out.');
 }
 async function run(prompt: string, agentId = 'atlas') { return request<PersistentRun>('/v1/runs', 'POST', { agentId, prompt }); }
 test.before(async () => { await start(); await request('/v1/agents/sync', 'POST', { agents: ['atlas','scout'].map(id => ({ id, name: id, role: 'Assistant', description: 'A durable profile', tone: 1, instructions: 'Keep context.', memory: [] })) }); });

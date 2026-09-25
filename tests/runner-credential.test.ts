@@ -7,6 +7,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encryptRunnerSecret } from '../lib/runner-crypto';
 
+// A generous budget: these loops only need to outlast a slow or loaded machine, and
+// `npm test --test-timeout` is the real backstop. Fixed iteration counts gave them four
+// seconds, which a busy runner could exceed while the coordinator was working correctly.
+const POLL_BUDGET_MS = 30_000;
+
 test('paired runner decrypts a dashboard credential into its local vault', async () => {
   const state = mkdtempSync(join(tmpdir(), 'open-harness-runner-secret-'));
   const cleartext = 'provider-key-kept-off-the-coordinator';
@@ -40,7 +45,7 @@ test('paired runner decrypts a dashboard credential into its local vault', async
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('Test server did not bind.');
   const child = spawn(process.execPath, ['runtime/runner.mjs', '--coordinator', `http://127.0.0.1:${address.port}`, '--pairing-code', 'pair-once'], { cwd: join(import.meta.dirname, '..'), env: { ...process.env, ...(binDir ? { PATH: `${binDir}:${process.env.PATH || ''}` } : {}), OPEN_HARNESS_DISABLE_OS_VAULT: '1', OPEN_HARNESS_RUNNER_STATE_DIR: state }, stdio: 'pipe' });
   try {
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + POLL_BUDGET_MS;
     while (!completed && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
     assert.ok(completed, 'runner did not confirm credential storage');
     assert.equal((completed as { result?: { stored?: boolean } }).result?.stored, true);

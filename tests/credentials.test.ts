@@ -9,13 +9,19 @@ import type { CredentialList, CredentialRecord, CredentialUsage } from '../lib/c
 import { refFromLabel } from '../lib/credentials';
 import type { PersistentRun } from '../lib/control-client';
 
+// A generous budget: these loops only need to outlast a slow or loaded machine, and
+// `npm test --test-timeout` is the real backstop. Fixed iteration counts gave them four
+// seconds, which a busy runner could exceed while the coordinator was working correctly.
+const POLL_BUDGET_MS = 30_000;
+
 const port = 14321, base = `http://127.0.0.1:${port}`, state = mkdtempSync(join(tmpdir(), 'harness-credentials-'));
 let child: ChildProcess, token = '';
 const ATLAS_KEY = 'atlas-secret-value-0001', SCOUT_KEY = 'scout-secret-value-0002';
 
 async function start() {
   child = spawn(process.execPath, ['--import', 'tsx', 'runtime/service.ts'], { cwd: join(import.meta.dirname, '..'), env: { ...process.env, OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: state, OPEN_HARNESS_DISABLE_OS_VAULT: '1' }, stdio: 'pipe' });
-  for (let i = 0; i < 80; i++) { try { const r = await fetch(`${base}/v1/bootstrap`); if (r.ok) { token = (await r.json() as { token: string }).token; return; } } catch {} await new Promise(r => setTimeout(r, 50)); }
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < deadline) { try { const r = await fetch(`${base}/v1/bootstrap`); if (r.ok) { token = (await r.json() as { token: string }).token; return; } } catch {} await new Promise(r => setTimeout(r, 50)); }
   throw new Error('Service did not start.');
 }
 async function stop() { if (child && child.exitCode === null) { const exited = new Promise(r => child.once('exit', r)); child.kill('SIGTERM'); await exited; } }
@@ -32,7 +38,8 @@ const save = (p: AgentProfile) => request<ProfileResponse>(`/v1/agents/${p.id}/p
 const secretsFile = () => readFileSync(join(state, 'secrets.json'), 'utf8');
 const agentEnv = (id: string) => readFileSync(join(state, 'agents', id, 'profile', '.env'), 'utf8');
 async function waitRun(id: string) {
-  for (let i = 0; i < 100; i++) { const run = await request<PersistentRun>(`/v1/runs/${id}`); if (['completed','failed','cancelled'].includes(run.state)) return run; await new Promise(r => setTimeout(r, 30)); }
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < deadline) { const run = await request<PersistentRun>(`/v1/runs/${id}`); if (['completed','failed','cancelled'].includes(run.state)) return run; await new Promise(r => setTimeout(r, 30)); }
   throw new Error('Run timed out.');
 }
 

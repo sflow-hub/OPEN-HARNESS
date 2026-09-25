@@ -7,13 +7,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
 
+// A generous budget: these loops only need to outlast a slow or loaded machine, and
+// `npm test --test-timeout` is the real backstop. Fixed iteration counts gave them four
+// seconds, which a busy runner could exceed while the coordinator was working correctly.
+const POLL_BUDGET_MS = 30_000;
+
 let child: ChildProcess;
 let stateDir: string;
 const port = 14317;
 const base = `http://127.0.0.1:${port}`;
 let token = "";
 async function waitReady() {
-  for (let i = 0; i < 80; i++) {
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < deadline) {
     try { const response = await fetch(`${base}/v1/bootstrap`); if (response.ok) { const value = await response.json() as { token: string }; token = value.token; return; } } catch {}
     await new Promise(resolve => setTimeout(resolve, 50));
   }
@@ -28,7 +34,8 @@ async function request(path: string, init: RequestInit = {}) {
   const value = await response.json(); if (!response.ok) throw new Error(JSON.stringify(value)); return value as any;
 }
 async function waitRun(id: string) {
-  for (let i = 0; i < 80; i++) { const run = await request(`/v1/runs/${id}`); if (["completed","failed","interrupted","cancelled"].includes(run.state)) return run; await new Promise(resolve => setTimeout(resolve, 50)); }
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < deadline) { const run = await request(`/v1/runs/${id}`); if (["completed","failed","interrupted","cancelled"].includes(run.state)) return run; await new Promise(resolve => setTimeout(resolve, 50)); }
   throw new Error("Run did not finish.");
 }
 
@@ -79,7 +86,8 @@ test("runs independently of event polling and replays stable events", async () =
 test("pauses for approval and resumes only after an explicit decision", async () => {
   const run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_APPROVAL" }) });
   let approval: any;
-  for (let i = 0; i < 40; i++) { const events = await request(`/v1/runs/${run.id}/events?after=0`); approval = events.events.find((event: any) => event.type === "approval.request"); if (approval) break; await new Promise(resolve => setTimeout(resolve, 50)); }
+  const approvalDeadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < approvalDeadline) { const events = await request(`/v1/runs/${run.id}/events?after=0`); approval = events.events.find((event: any) => event.type === "approval.request"); if (approval) break; await new Promise(resolve => setTimeout(resolve, 50)); }
   assert.ok(approval); assert.equal((await request(`/v1/runs/${run.id}`)).state, "waiting_approval");
   await request(`/v1/runs/${run.id}/approval`, { method: "POST", body: JSON.stringify({ approvalId: approval.payload.approvalId, decision: "approve" }) });
   assert.equal((await waitRun(run.id)).state, "completed");
