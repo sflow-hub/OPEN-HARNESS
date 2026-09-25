@@ -42,7 +42,7 @@ docker compose up -d
 
 Open `http://localhost:3000`. Compose starts the dashboard, coordinator, a private Docker engine for agent containers, and persistent data volumes. No host Node or Python installation is required. By default the dashboard listens only on this computer. For remote access, keep it on loopback behind an authenticated HTTPS reverse proxy, set `OPEN_HARNESS_PUBLIC_URL=https://agents.example.com/api/local`, and explicitly set `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` only after proxy authentication works.
 
-The default interface focuses on agents, conversations, files, credentials, and runtime status. Turn on **Workspace settings → Advanced features** to show teams, task boards, routines, remote computers, direct computer access, and MCP connections. These advanced paths remain experimental for the self-hosted MVP.
+The workspace shows agents, conversations, files, credentials, runtime status, routines, teams, and task boards. Turning off **Workspace settings → Advanced features** hides teams, task boards, remote computers, direct computer access, and MCP connections, for a simpler workspace. Routines stay visible either way, because the coordinator runs them whether or not the view is shown.
 
 See [Self-hosting operations](docs/SELF_HOSTING.md) for a complete authenticated reverse-proxy example, health checks, updates, diagnostics, and stopped-stack backup and restore.
 Release candidates must also pass the [self-hosted beta checklist](docs/BETA_RELEASE.md).

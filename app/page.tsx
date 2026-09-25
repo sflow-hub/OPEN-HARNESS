@@ -219,7 +219,7 @@ export default function Home() {
         setSelectedAgent(parsed.agents[0].id);
       }
       if (localStorage.getItem(NOTIFY_KEY) === "on" && typeof Notification !== "undefined" && Notification.permission === "granted") setNotifyWhenDone(true);
-      setAdvancedFeatures(localStorage.getItem(ADVANCED_KEY) === "on");
+      setAdvancedFeatures(localStorage.getItem(ADVANCED_KEY) !== "off");
       const prefs = localStorage.getItem(SETTINGS_KEY);
       if (prefs) {
         const p = JSON.parse(prefs);
@@ -1121,7 +1121,7 @@ export default function Home() {
           <FolderOpen size={16} /> Files{" "}
           <span>{workspace.files.length || ""}</span>
         </button>
-        {advancedFeatures && <button
+        <button
           className={`nav-item ${view === "routines" ? "active" : ""}`}
           onClick={() => {
             setView("routines");
@@ -1129,7 +1129,7 @@ export default function Home() {
           }}
         >
           <CalendarClock size={16} /> Routines <span>{routines.length || ""}</span>
-        </button>}
+        </button>
         <div className="nav-label">YOUR AGENTS</div>
         <div className="sidebar-scroll">
           {workspace.agents
@@ -2196,12 +2196,12 @@ export default function Home() {
                   setAdvancedFeatures(enabled);
                   if (!enabled) {
                     setAgentTeamFilter("all");
-                    if (["teams", "routines", "tasks"].includes(view)) setView("home");
+                    if (["teams", "tasks"].includes(view)) setView("home");
                   }
                   localStorage.setItem(ADVANCED_KEY, enabled ? "on" : "off");
                 }}
               />
-              <span><strong>Advanced features</strong><small>Show teams, task boards, routines, remote computers, direct computer access, and MCP connections. These features are experimental in the self-hosted MVP.</small></span>
+              <span><strong>Advanced features</strong><small>Show teams, task boards, remote computers, direct computer access, and MCP connections. Turn this off for a simpler workspace of agents, conversations and files.</small></span>
             </label>
             <div className="settings-divider" />
             <h3>Your data stays with you</h3>

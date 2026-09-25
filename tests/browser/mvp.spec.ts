@@ -15,7 +15,7 @@ test.beforeEach(async ({ request, page }) => {
   await seed(request);
   await page.addInitScript(() => {
     localStorage.setItem('open-harness.onboarding.v1', 'done');
-    localStorage.removeItem('open-harness.advanced.v1');
+    localStorage.setItem('open-harness.advanced.v1', 'on');
   });
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
@@ -26,25 +26,52 @@ test.afterEach(async ({ request }) => {
   await request.post(control + '/v1/runs/stop-all', { headers: { Authorization: `Bearer ${token}` } });
 });
 
-test('keeps the MVP navigation focused until advanced features are enabled', async ({ page }, testInfo) => {
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+test('offers a focused workspace when advanced features are turned off, and restores them', async ({ page }, testInfo) => {
+  // Teams, boards and remote computers ship on, so turning them off is what produces the
+  // focused workspace. Routines stay reachable either way: the coordinator runs them whether
+  // or not the view is shown, and hiding the only place to pause one would strand them.
+  const mobile = testInfo.project.name === 'mobile';
+  const openNav = async () => { if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click(); };
+  const closeNav = async () => { if (mobile) await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click'); };
+
+  await openNav();
+  await expect(page.getByRole('button', { name: /Teams/ }).first()).toBeVisible();
+  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await page.getByLabel('Advanced features').uncheck();
+  await page.getByRole('button', { name: 'Close settings' }).click();
+  await expect(page.getByRole('button', { name: /Routines/ }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: /Teams/ })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: /Routines/ })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Tasks', exact: true })).toHaveCount(0);
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click');
+
+  await closeNav();
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
   await expect(page.getByRole('tab', { name: 'Computer' })).toHaveCount(0);
   await page.getByRole('tab', { name: 'Tools & connections' }).click();
   await expect(page.getByRole('heading', { name: 'MCP connections' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Close agent settings' }).click();
 
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNav();
   await page.getByRole('button', { name: /Settings/ }).first().click();
   await page.getByLabel('Advanced features').check();
   await page.getByRole('button', { name: 'Close settings' }).click();
   await expect(page.getByRole('button', { name: /Teams/ }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: /Routines/ }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tasks', exact: true })).toBeVisible();
+});
+
+test('a hidden Computer tab never opens a panel with no way back', async ({ page }, testInfo) => {
+  const mobile = testInfo.project.name === 'mobile';
+  if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await page.getByLabel('Advanced features').uncheck();
+  await page.getByRole('button', { name: 'Close settings' }).click();
+  if (mobile) await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click');
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  await expect(page.getByRole('tab', { name: 'Computer' })).toHaveCount(0);
+  // Whatever panel opens has to belong to a tab the tablist actually offers.
+  const selected = page.getByRole('tab', { selected: true });
+  await expect(selected).toHaveCount(1);
+  await expect(selected).toHaveAccessibleName('Profile');
 });
 
 test('does not mark setup complete after a failed model check and supports retry', async ({ page }, testInfo) => {

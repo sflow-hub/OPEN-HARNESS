@@ -19,7 +19,7 @@ function Toggle({ checked, onChange, label, description, mixed = false, disabled
 export default function AgentSettings({ agent, client, onClose, onSaved, initialTab = 'profile', advancedFeatures = false, onManageCredentials }: Props) {
   const [draft, setDraft] = useState(() => draftProfile(agent));
   const [baseline, setBaseline] = useState(() => serialize(draftProfile(agent)));
-  const [tab, setTab] = useState<Tab>(initialTab);
+  const [tab, setTab] = useState<Tab>(advancedFeatures || initialTab !== 'computer' ? initialTab : 'profile');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');

@@ -21,5 +21,7 @@ async function stop(code = 0) {
 }
 process.on('SIGINT', () => void stop());
 process.on('SIGTERM', () => void stop());
-start('/opt/open-harness/runtime/service.mjs', '/opt/open-harness/runtime', { OPEN_HARNESS_PORT: '4317' });
+// Pin the live runtime as the desktop shell does: the mock adapter is for the test suite,
+// and a stray OPEN_HARNESS_MOCK in the environment must not hand an operator fake agents.
+start('/opt/open-harness/runtime/service.mjs', '/opt/open-harness/runtime', { OPEN_HARNESS_PORT: '4317', OPEN_HARNESS_MOCK: '0' });
 start('/opt/open-harness/app/server.js', '/opt/open-harness/app', { PORT: '3000', HOST: '0.0.0.0' });
