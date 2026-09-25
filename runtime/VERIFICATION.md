@@ -7,7 +7,7 @@ Environment: Linux, Docker Desktop 4.77.0 with Docker Engine 29.5.3. Docker Desk
 Verified in this pass:
 
 - A fresh Compose project built and started with both services healthy. `GET /api/health` returned `{"ok":true}`. Pausing the coordinator made the dashboard endpoint return 503, and unpausing it restored 200. Execution readiness remained a separate status: a restored stack with an empty private Docker volume stayed healthy while reporting that the Hermes runtime needed setup.
-- Remote bootstrap with a non-loopback `Host` header returned 403 with the trust switch at its default. The authenticated HTTPS proxy path has not yet been exercised.
+- An ephemeral Nginx HTTPS proxy used the documented Basic authentication and no-buffering settings. Without proxy authentication it returned 401. With authentication but the trust switch off, remote bootstrap returned 403. After explicitly setting `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` and the HTTPS public URL, authenticated bootstrap and `/api/health` returned 200. The stack was then restored to the default-off setting; repeat this test on the clean acceptance host with its real certificate and hostname.
 - The coordinator rebuilt from the final source, stopped on SIGTERM within the configured grace period, logged coordinator shutdown, and restarted healthy with the original data volume.
 - The full Hermes Dockerfile built as image `432f7e5fbf27`, and the pinned `open-harness-hermes:2026.9.11` tag points at that image. Smoke checks passed for Hermes 0.21.2, the Open Harness policy extension, Node, `agent-browser`, the Hermes CLI, and a nested Docker build. Build-only compilers, npm, Git metadata, and package-manager caches are absent from the runtime image.
 - The exact final coordinator image had zero high/critical vulnerabilities and zero detected secrets. The hardened Hermes image had 80 high/critical package occurrences across 32 unique CVEs, zero detected secrets, and no available fixed versions. Each Hermes finding has a narrow written rationale and an exception expiring 2026-10-09; Trivy completed with exit code 0 using `security/trivy-exceptions.yaml`. Any new finding or expired entry still fails the release workflow.
@@ -18,7 +18,7 @@ Verified in this pass:
 
 Automated checks on the resulting source: 116 Node tests, 52 Playwright tests across desktop and mobile, TypeScript, ESLint, the production Vinext build, `docker compose config`, and the release scan policy passed. `npm audit --omit=dev --audit-level=high` reports 0 known vulnerabilities; the current npm metadata counts 107 production dependencies.
 
-Release remains blocked on the clean Ubuntu 24.04 run, a real-provider `launch-smoke.md` workflow from this Compose install, authenticated proxy acceptance, the representative 0.3.0 upgrade and complete stopped-stack restore, the 24-hour soak, and GitHub CI/repository-rule checks. Do not create the tag or GitHub Release until every item in `docs/BETA_RELEASE.md` is complete.
+Release remains blocked on the clean Ubuntu 24.04 run, a real-provider `launch-smoke.md` workflow from this Compose install, the representative 0.3.0 upgrade and complete stopped-stack restore, the 24-hour soak, and GitHub CI/repository-rule checks. Do not create the tag or GitHub Release until every item in `docs/BETA_RELEASE.md` is complete.
 
 ## Fourth real-runtime pass — September 25, 2026
 
