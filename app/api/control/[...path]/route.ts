@@ -70,6 +70,8 @@ async function prepare(db: D1Database) {
   await db.batch([...hostedTaskSchema, ...hostedRuntimeSchema].map(sql => db.prepare(sql)));
   try { await db.prepare('ALTER TABLE machines ADD COLUMN encryption_public_key TEXT').run(); } catch { /* Existing and new databases already have this column after the first migration. */ }
   try { await db.prepare('ALTER TABLE agent_transfers ADD COLUMN pending_profile_json TEXT').run(); } catch { /* Existing and new databases already have this column after the first migration. */ }
+  try { await db.prepare("ALTER TABLE machines ADD COLUMN kind TEXT NOT NULL DEFAULT 'runner'").run(); } catch { /* Existing and new databases already have this column after the first migration. */ }
+  try { await db.prepare("ALTER TABLE machine_pairings ADD COLUMN kind TEXT NOT NULL DEFAULT 'runner'").run(); } catch { /* Existing and new databases already have this column after the first migration. */ }
   const now = stamp();
   await db.batch([
     db.prepare("INSERT OR IGNORE INTO task_boards(id,name,archived,revision,created_at,updated_at) VALUES(?,?,?,?,?,?)").bind("default-board", "Open Harness", 0, 1, now, now),
@@ -77,11 +79,23 @@ async function prepare(db: D1Database) {
   ]);
 }
 
+// The hosted platform gates /api/control on a signed-in-user header the phone cannot produce,
+// so a paired phone presents this bypass token alongside its device credential instead.
+function sitesBypassToken() { return String((env as unknown as { RUNNER_SITES_BYPASS_TOKEN?: string }).RUNNER_SITES_BYPASS_TOKEN || ''); }
 async function digest(value: string) { const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)); return [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, '0')).join(''); }
 function normalizeProfile(input: AgentProfile): AgentProfile { return { ...input, computer: input.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } }; }
+const ONLINE_MS = 45_000;
+// A phone stops polling every time the OS backgrounds it. Treating that as a dead runner
+// would interrupt healthy work whenever the screen locks, so phones get a long grace window
+// and a 'suspended' status. Computers keep the original 45s and go straight to offline.
+const MOBILE_LEASE_GRACE_MS = 600_000;
+function machineCapabilities(row: Row): { mobile?: boolean } { try { return JSON.parse(String(row.capabilities_json || '{}')); } catch { return {}; } }
+function machineGraceMs(row: Row) { return machineCapabilities(row).mobile ? MOBILE_LEASE_GRACE_MS : ONLINE_MS; }
+function machineReachable(status: string) { return status === 'online' || status === 'suspended'; }
 function mapMachine(row: Row, assignedAgents = 0) {
-  const fresh = row.last_seen_at && Date.now() - Date.parse(String(row.last_seen_at)) < 45_000;
-  return { id: String(row.id), name: String(row.name), platform: String(row.platform), arch: String(row.arch), status: row.revoked_at ? 'revoked' : fresh ? 'online' : 'offline', lastSeenAt: row.last_seen_at ? String(row.last_seen_at) : null, local: false, reservedAgentId: row.reserved_agent_id ? String(row.reserved_agent_id) : null, assignedAgents, capabilities: JSON.parse(String(row.capabilities_json || '{}')) };
+  const age = row.last_seen_at ? Date.now() - Date.parse(String(row.last_seen_at)) : Number.POSITIVE_INFINITY;
+  const status = row.revoked_at ? 'revoked' : age < ONLINE_MS ? 'online' : age < machineGraceMs(row) ? 'suspended' : 'offline';
+  return { id: String(row.id), name: String(row.name), platform: String(row.platform), arch: String(row.arch), status, lastSeenAt: row.last_seen_at ? String(row.last_seen_at) : null, local: false, kind: String(row.kind || 'runner') === 'device' ? 'device' : 'runner', reservedAgentId: row.reserved_agent_id ? String(row.reserved_agent_id) : null, assignedAgents, capabilities: JSON.parse(String(row.capabilities_json || '{}')) };
 }
 async function machineList(db: D1Database) {
   const profiles = (await db.prepare('SELECT json FROM agent_profiles').all<Row>()).results.map(row => normalizeProfile(JSON.parse(String(row.json))));
@@ -91,6 +105,13 @@ async function runnerMachine(db: D1Database, request: Request) {
   const machineId = request.headers.get('x-open-harness-machine') || '', token = (request.headers.get('authorization') || '').replace(/^Bearer /, '');
   if (!machineId || !token) return null; const row = await db.prepare('SELECT * FROM machines WHERE id=? AND revoked_at IS NULL').bind(machineId).first<Row>();
   return row && String(row.credential_hash) === await digest(token) ? row : null;
+}
+// A phone's credential reaches the dashboard routes a computer's runner credential must not.
+// The kind is fixed when the operator creates the pairing, so a paired computer cannot
+// promote itself by sending different headers.
+async function deviceMachine(db: D1Database, request: Request) {
+  const row = await runnerMachine(db, request);
+  return row && String(row.kind || 'runner') === 'device' ? row : null;
 }
 async function appendRunEvent(db: D1Database, runId: string, type: string, payload: unknown, eventId = id()) { await db.prepare('INSERT OR IGNORE INTO run_events(id,run_id,type,payload_json,created_at) VALUES(?,?,?,?,?)').bind(eventId, runId, type, JSON.stringify(payload), stamp()).run(); }
 async function publicRun(db: D1Database, row: Row) { const machine = await db.prepare('SELECT * FROM machines WHERE id=?').bind(row.machine_id).first<Row>(); return { id: String(row.id), agent_id: String(row.agent_id), conversation_id: String(row.conversation_id), prompt: String(row.prompt), state: String(row.state), machine_id: String(row.machine_id), machine_connection: machine ? mapMachine(machine).status : 'offline', result: row.result ? String(row.result) : null, error: row.error ? String(row.error) : null }; }
@@ -167,7 +188,13 @@ async function startReadyTransfers(db: D1Database, sourceMachineId: string) {
 }
 async function dispatchHostedRun(db: D1Database, run: Row, profile: AgentProfile) {
   const machine = await db.prepare('SELECT * FROM machines WHERE id=? AND revoked_at IS NULL').bind(profile.computer.machineId).first<Row>();
-  if (!machine || !machine.last_seen_at || Date.now() - Date.parse(String(machine.last_seen_at)) >= 45_000) return;
+  if (machine && machineCapabilities(machine).mobile) {
+    const error = 'Phones are companion dashboards in this release and cannot run agents. Choose a connected computer.';
+    await db.prepare("UPDATE runs SET state='failed',error=?,updated_at=? WHERE id=? AND state='queued'").bind(error, stamp(), run.id).run();
+    await appendRunEvent(db, String(run.id), 'run.failed', { error });
+    return;
+  }
+  if (!machine || !machine.last_seen_at || Date.now() - Date.parse(String(machine.last_seen_at)) >= machineGraceMs(machine)) return;
   if (await activeTransfer(db, profile.id)) return;
   if (await db.prepare("SELECT 1 FROM runs WHERE agent_id=? AND id<>? AND state IN ('running','waiting_approval') LIMIT 1").bind(profile.id, run.id).first()) return;
   const activeCount = await db.prepare("SELECT COUNT(*) AS count FROM runs WHERE state IN ('running','waiting_approval')").first<Row>(); if (Number(activeCount?.count || 0) >= 4) return;
@@ -407,7 +434,16 @@ async function handler(request: Request, context: RouteContext) {
     if (request.method === 'GET' && pathname === '/v1/install/runner.ps1') return new Response(runnerInstallPs1, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
     if (request.method === 'GET' && pathname === '/v1/install/file') { const file = runnerFiles[String(url.searchParams.get('path') || '')]; if (!file) throw new HttpError(404, 'Runner file not found.'); return new Response(file, { headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'public, max-age=300', 'X-Content-Type-Options': 'nosniff' } }); }
     const runnerFacing = pathname === '/v1/runner/pair' || pathname.startsWith('/v1/runner/') || pathname.startsWith('/internal/') || pathname.startsWith('/v1/install/');
-    if (!runnerFacing && !request.headers.get('oai-authenticated-user-id')) throw new HttpError(401, 'Sign in to manage this workspace.');
+    // A phone cannot obtain the platform's signed-in-user header, so its own device
+    // credential stands in for it. Revoking the phone closes this door with it.
+    if (!runnerFacing && !request.headers.get('oai-authenticated-user-id') && !(await deviceMachine(db, request))) throw new HttpError(401, 'Sign in to manage this workspace.');
+    if (pathname === '/v1/device/session' && request.method === 'GET') {
+      const device = await deviceMachine(db, request);
+      if (!device) throw new HttpError(401, 'Pair this phone again to reconnect it.');
+      const now = stamp();
+      await db.prepare("UPDATE machines SET status='online',last_seen_at=?,updated_at=? WHERE id=?").bind(now, now, device.id).run();
+      return json({ token: '', machine: mapMachine({ ...device, last_seen_at: now }), runtime: { available: true, version: 'companion', message: 'This phone is a companion dashboard. Agents run on a connected computer.' }, version: '0.3.0', hermes: { release: 'v2026.9.11', commit: '939e45c91d751fadd94dcd1b873ac3cb44846213' } });
+    }
 
     if (pathname === "/v1/bootstrap" && request.method === "GET") return json({ token: "hosted-site", runtime: { available: true, version: 'runner', message: "Connect a computer to run agents from this hosted dashboard." }, version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } });
     if ((pathname === '/internal/handoff' || pathname === '/internal/schedule') && request.method === 'POST') {
@@ -432,18 +468,22 @@ async function handler(request: Request, context: RouteContext) {
     if (pathname === '/v1/runner/pair' && request.method === 'POST') {
       const code = String(body.code || ''), pairing = await db.prepare('SELECT * FROM machine_pairings WHERE code_hash=?').bind(await digest(code)).first<Row>();
       if (!pairing || pairing.used_at || Date.parse(String(pairing.expires_at)) <= Date.now()) throw new HttpError(410, 'This pairing code is invalid, expired, or already used.');
+      const pairedKind = String(pairing.kind || 'runner') === 'device' ? 'device' : 'runner';
       const machineId = `machine-${id()}`, token = crypto.randomUUID() + crypto.randomUUID(), now = stamp();
       const encryptionPublicKey = String(body.encryptionPublicKey || '');
       if (encryptionPublicKey) { try { const key = JSON.parse(encryptionPublicKey) as Row; if (key.kty !== 'RSA' || key.alg && key.alg !== 'RSA-OAEP-256') throw new Error(); } catch { throw new HttpError(400, 'The runner supplied an invalid encryption key.'); } }
       const used = await db.prepare('UPDATE machine_pairings SET used_at=? WHERE id=? AND used_at IS NULL').bind(now, pairing.id).run(); if (!used.meta.changes) throw new HttpError(409, 'This pairing code was already used.');
-      await db.prepare('INSERT INTO machines(id,name,platform,arch,status,last_seen_at,reserved_agent_id,capabilities_json,credential_hash,revoked_at,created_at,updated_at,encryption_public_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(machineId, String(body.name || pairing.name).slice(0,80), String(body.platform || pairing.platform), String(body.arch || 'unknown'), 'online', now, null, JSON.stringify(body.capabilities || {}), await digest(token), null, now, now, encryptionPublicKey || null).run();
-      return json({ machineId, token, machine: mapMachine({ id: machineId, name: body.name || pairing.name, platform: body.platform || pairing.platform, arch: body.arch || 'unknown', last_seen_at: now, capabilities_json: JSON.stringify(body.capabilities || {}) }) }, 201);
+      const supplied = body.capabilities && typeof body.capabilities === 'object' ? body.capabilities as Row : {};
+      const pairedCapabilities = pairedKind === 'device' ? { container: false, direct: false, desktop: false, virtualDesktop: false, detail: 'Companion dashboard only; agents run on a connected computer.', ...supplied, mobile: true } : supplied;
+      await db.prepare('INSERT INTO machines(id,name,platform,arch,status,last_seen_at,reserved_agent_id,capabilities_json,credential_hash,revoked_at,created_at,updated_at,encryption_public_key,kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(machineId, String(body.name || pairing.name).slice(0,80), String(body.platform || pairing.platform), String(body.arch || 'unknown'), 'online', now, null, JSON.stringify(pairedCapabilities), await digest(token), null, now, now, encryptionPublicKey || null, pairedKind).run();
+      return json({ machineId, token, machine: mapMachine({ id: machineId, name: body.name || pairing.name, platform: body.platform || pairing.platform, arch: body.arch || 'unknown', last_seen_at: now, capabilities_json: JSON.stringify(pairedCapabilities), kind: pairedKind }) }, 201);
     }
     if (pathname.startsWith('/v1/runner/')) {
       const runner = await runnerMachine(db, request); if (!runner) throw new HttpError(401, 'Invalid or revoked runner credential.'); const machineId = String(runner.id);
+      if (String(runner.kind || 'runner') === 'device' || machineCapabilities(runner).mobile) throw new HttpError(403, 'Phone credentials authorize the companion dashboard, not runner commands.');
       if (pathname === '/v1/runner/heartbeat' && request.method === 'POST') {
         const now = stamp(); await db.prepare("UPDATE machines SET status='online',last_seen_at=?,capabilities_json=?,encryption_public_key=COALESCE(?,encryption_public_key),updated_at=? WHERE id=?").bind(now, JSON.stringify(body.capabilities || {}), body.encryptionPublicKey ? String(body.encryptionPublicKey) : null, now, machineId).run();
-        const activeIds = new Set(Array.isArray(body.activeCommandIds) ? body.activeCommandIds.map(String) : []), cutoff = new Date(Date.now() - 45_000).toISOString(), leased = (await db.prepare("SELECT * FROM runner_commands WHERE machine_id=? AND state='leased' AND leased_at<?").bind(machineId, cutoff).all<Row>()).results.filter(command => !activeIds.has(String(command.id)));
+        const activeIds = new Set(Array.isArray(body.activeCommandIds) ? body.activeCommandIds.map(String) : []), cutoff = new Date(Date.now() - machineGraceMs(runner)).toISOString(), leased = (await db.prepare("SELECT * FROM runner_commands WHERE machine_id=? AND state='leased' AND leased_at<?").bind(machineId, cutoff).all<Row>()).results.filter(command => !activeIds.has(String(command.id)));
         for (const command of leased) {
           const error = 'Runner restarted after accepting this work. Completed events were preserved and the task was not replayed.', run = await db.prepare('SELECT id FROM runs WHERE command_id=?').bind(command.id).first<Row>();
           await db.batch([db.prepare("UPDATE runner_commands SET state='failed',finished_at=?,result_json=? WHERE id=? AND state='leased'").bind(now, JSON.stringify({ error, interrupted: true }), command.id), db.prepare("UPDATE runs SET state='interrupted',error=?,updated_at=? WHERE command_id=? AND state NOT IN ('completed','failed','cancelled','interrupted')").bind(error, now, command.id), ...(run ? [db.prepare('DELETE FROM run_credentials WHERE run_id=?').bind(run.id)] : [])]);
@@ -515,6 +555,12 @@ async function handler(request: Request, context: RouteContext) {
       }
       throw new HttpError(404, 'Runner endpoint not found.');
     }
+    // A paired phone reads the workspace it joined rather than pushing its own starter
+    // agents into it, so it needs a plain read that /v1/agents/sync does not provide.
+    if (pathname === "/v1/agents" && request.method === "GET") {
+      const rows = (await db.prepare('SELECT json FROM agent_profiles ORDER BY updated_at').all<Row>()).results;
+      return json({ agents: rows.map(row => { const profile = normalizeProfile(JSON.parse(String(row.json))); return { id: profile.id, name: profile.name, role: profile.role, description: profile.description, tone: profile.tone, instructions: profile.prompt.text, memory: [], profile }; }) });
+    }
     if (pathname === "/v1/agents/sync" && request.method === "POST") {
       const agents = Array.isArray(body.agents) ? body.agents as Agent[] : [], now = stamp();
       for (const agent of agents) { const existing = await db.prepare('SELECT 1 FROM agent_profiles WHERE id=?').bind(agent.id).first(); if (!existing) { const profile = draftProfile(agent); await db.prepare('INSERT INTO agent_profiles VALUES(?,?,?,?)').bind(profile.id, 1, JSON.stringify({ ...profile, revision: 1 }), now).run(); } }
@@ -535,15 +581,32 @@ async function handler(request: Request, context: RouteContext) {
       ] });
     }
     if (pathname === '/v1/onboarding/action' && request.method === 'POST') throw new HttpError(409, 'Finish this setup on the connected computer, then check again.');
-    if (pathname === '/v1/onboarding/model-test' && request.method === 'POST') return json({ ok: true, message: 'Model choice and encrypted runner credential are ready.' });
+    if (pathname === '/v1/onboarding/model-test' && request.method === 'POST') return json({ ok: false, message: 'The hosted coordinator cannot claim this model is ready until a connected runner performs the provider test. Test the model from that computer.' });
     if (pathname === "/v1/workspace/model/import" && request.method === "POST") { const existing = await db.prepare('SELECT * FROM workspace_settings WHERE id=1').first<Row>(); if (existing) return json({ model: JSON.parse(String(existing.json)), revision: Number(existing.revision) }); await db.prepare('INSERT INTO workspace_settings VALUES(1,?,?)').bind(0, JSON.stringify(body.model || DEFAULT_MODEL)).run(); return json({ model: body.model || DEFAULT_MODEL, revision: 0 }); }
     if (pathname === '/v1/workspace/model') { const current = await db.prepare('SELECT * FROM workspace_settings WHERE id=1').first<Row>(); if (request.method === 'GET') return json(current ? { model: JSON.parse(String(current.json)), revision: Number(current.revision) } : { model: DEFAULT_MODEL, revision: 0 }); if (request.method === 'PUT') { const revision = Number(body.revision || 0); if (current && Number(current.revision) !== revision) throw new HttpError(409, 'Workspace settings changed elsewhere.'); await db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').bind(revision + 1, JSON.stringify(body.model || DEFAULT_MODEL)).run(); return json({ model: body.model, revision: revision + 1 }); } }
     if (pathname === '/v1/machines') {
       if (request.method === 'GET') return json({ machines: await machineList(db) });
       if (request.method === 'POST') {
-        const code = crypto.randomUUID().replaceAll('-','') + crypto.randomUUID().replaceAll('-',''), pairingId = id(), expiresAt = new Date(Date.now() + 600_000).toISOString(), platform = ['linux','darwin','win32'].includes(String(body.platform)) ? String(body.platform) : 'linux', base = `${new URL(request.url).origin}/api/control`;
-        await db.prepare('INSERT INTO machine_pairings VALUES(?,?,?,?,?,?,?)').bind(pairingId, await digest(code), String(body.name || 'New computer').slice(0,80), platform, expiresAt, null, stamp()).run();
-        const sitesToken = String((env as unknown as { RUNNER_SITES_BYPASS_TOKEN?: string }).RUNNER_SITES_BYPASS_TOKEN || ''), sh = (value: string) => `'${value.replaceAll("'", "'\\''")}'`, ps = (value: string) => value.replaceAll("'", "''");
+        const phone = String(body.platform) === 'ios' || String(body.platform) === 'android';
+        const pairingKind = body.kind === 'device' || phone ? 'device' : 'runner';
+        if (pairingKind === 'device' && !phone) throw new HttpError(400, 'Choose iPhone or Android to pair a phone.');
+        // A phone code is typed by hand, so it trades length for legibility: 60 bits of
+        // Crockford base32 without the characters that read alike. The ten minute expiry and
+        // single use are what keep it safe.
+        const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+        const code = pairingKind === 'device'
+          ? [...crypto.getRandomValues(new Uint8Array(12))].map(byte => alphabet[byte % alphabet.length]).join('')
+          : crypto.randomUUID().replaceAll('-','') + crypto.randomUUID().replaceAll('-','');
+        const pairingId = id(), expiresAt = new Date(Date.now() + 600_000).toISOString(), platform = ['linux','darwin','win32','ios','android'].includes(String(body.platform)) ? String(body.platform) : 'linux', base = `${new URL(request.url).origin}/api/control`;
+        await db.prepare('INSERT INTO machine_pairings(id,code_hash,name,platform,expires_at,used_at,created_at,kind) VALUES(?,?,?,?,?,?,?,?)').bind(pairingId, await digest(code), String(body.name || (pairingKind === 'device' ? 'New phone' : 'New computer')).slice(0,80), platform, expiresAt, null, stamp(), pairingKind).run();
+        if (pairingKind === 'device') {
+          const enrollment = new URL('openharness://pair');
+          enrollment.searchParams.set('hub', base);
+          enrollment.searchParams.set('code', code);
+          if (sitesBypassToken()) enrollment.searchParams.set('sites', sitesBypassToken());
+          return json({ id: pairingId, code, expiresAt, platform, kind: pairingKind, hubUrl: base, pairingUri: enrollment.toString() }, 201);
+        }
+        const sitesToken = sitesBypassToken(), sh = (value: string) => `'${value.replaceAll("'", "'\\''")}'`, ps = (value: string) => value.replaceAll("'", "''");
         const command = platform === 'win32'
           ? `$env:OPEN_HARNESS_COORDINATOR='${ps(base)}'; $env:OPEN_HARNESS_PAIRING_CODE='${ps(code)}';${sitesToken ? ` $env:OPEN_HARNESS_SITES_TOKEN='${ps(sitesToken)}'; irm -Headers @{'OAI-Sites-Authorization'="Bearer $env:OPEN_HARNESS_SITES_TOKEN"}` : ' irm'} '${ps(`${base}/v1/install/runner.ps1`)}' | iex`
           : `curl -fsSL${sitesToken ? ` -H ${sh(`OAI-Sites-Authorization: Bearer ${sitesToken}`)}` : ''} ${sh(`${base}/v1/install/runner.sh`)} | sh -s -- --coordinator ${sh(base)} --pairing-code ${sh(code)}${sitesToken ? ` --sites-token ${sh(sitesToken)}` : ''}`;
@@ -559,9 +622,14 @@ async function handler(request: Request, context: RouteContext) {
     if (hostedMachine && request.method === 'POST') {
       const machine = await db.prepare('SELECT * FROM machines WHERE id=? AND revoked_at IS NULL').bind(decodeURIComponent(hostedMachine[1])).first<Row>(); if (!machine) throw new HttpError(404, 'Computer not found.'); const mapped = mapMachine(machine);
       if (hostedMachine[2] === 'revoke') { await db.prepare("UPDATE machines SET status='revoked',revoked_at=?,credential_hash=NULL,updated_at=? WHERE id=?").bind(stamp(), stamp(), machine.id).run(); return json({ ok: true, message: `${mapped.name} was revoked.` }); }
-      if (hostedMachine[2] === 'reconnect') return json({ ok: mapped.status === 'online', message: mapped.status === 'online' ? `${mapped.name} is connected.` : `Waiting for ${mapped.name} to reconnect. The runner only needs outbound HTTPS access.` });
+      if (hostedMachine[2] === 'reconnect') return json({ ok: machineReachable(mapped.status), message: mapped.status === 'online' ? `${mapped.name} is connected.` : mapped.status === 'suspended' ? `${mapped.name} is asleep. Work you start now runs when it wakes up.` : mapped.kind === 'device' ? `Waiting for ${mapped.name} to reconnect. Open Open Harness on that phone.` : `Waiting for ${mapped.name} to reconnect. The runner only needs outbound HTTPS access.` });
       const profileRow = body.agentId ? await db.prepare('SELECT json FROM agent_profiles WHERE id=?').bind(body.agentId).first<Row>() : null, profile = profileRow ? normalizeProfile(JSON.parse(String(profileRow.json))) : null, issues: string[] = [];
-      if (mapped.status !== 'online') issues.push('Runner is offline.'); if (profile?.computer.access === 'private' && !mapped.capabilities.container) issues.push('Container execution is unavailable.'); if (profile?.computer.access === 'direct' && !mapped.capabilities.direct) issues.push(`Direct execution is unavailable. ${mapped.capabilities.detail || 'Install Hermes and the Open Harness policy extension on the runner.'}`); if (profile?.computer.desktop === 'existing' && !mapped.capabilities.desktop) issues.push(mapped.platform === 'darwin' ? 'Grant Accessibility and Screen Recording to the runner.' : mapped.platform === 'win32' ? 'Sign in to an interactive Windows session and start the runner there.' : 'Start a graphical session with DISPLAY or Wayland and enable AT-SPI.'); if (profile?.computer.desktop === 'virtual' && !mapped.capabilities.virtualDesktop) issues.push('Private virtual desktops are available on Linux runners only.');
+      const phone = Boolean(mapped.capabilities.mobile);
+      if (!machineReachable(mapped.status)) issues.push(phone ? 'Phone is not connected.' : 'Runner is offline.');
+      if (phone || profile?.computer.access === 'mobile') issues.push('Phones are companion dashboards in this release and cannot run agents. Choose a connected computer.');
+      if (phone && profile && profile.computer.desktop !== 'none') issues.push('Phones cannot control a desktop. Set Desktop access to No desktop.');
+      if (phone && profile && profile.computer.folders.length) issues.push('Phones do not mount host folders. Remove the selected folders.');
+      if (profile?.computer.access === 'private' && !mapped.capabilities.container) issues.push('Container execution is unavailable.'); if (profile?.computer.access === 'direct' && !mapped.capabilities.direct) issues.push(`Direct execution is unavailable. ${mapped.capabilities.detail || 'Install Hermes and the Open Harness policy extension on the runner.'}`); if (profile?.computer.desktop === 'existing' && !mapped.capabilities.desktop) issues.push(mapped.platform === 'darwin' ? 'Grant Accessibility and Screen Recording to the runner.' : mapped.platform === 'win32' ? 'Sign in to an interactive Windows session and start the runner there.' : 'Start a graphical session with DISPLAY or Wayland and enable AT-SPI.'); if (profile?.computer.desktop === 'virtual' && !mapped.capabilities.virtualDesktop) issues.push('Private virtual desktops are available on Linux runners only.');
       if (!issues.length && profile && hostedMachine[2] === 'test') { try { const result = await hostedProbe(db, profile, 'probe-runtime', { action: 'computer', desktop: profile.computer.desktop }); return json({ ok: Boolean(result.ok), message: String(result.message || `${mapped.name} is ready for this agent.`), machine: mapped }); } catch (error) { issues.push(error instanceof Error ? error.message : 'Computer access check failed.'); } }
       return json({ ok: !issues.length, message: issues.length ? issues.join(' ') : `${mapped.name} is ready for this agent.`, machine: mapped });
     }

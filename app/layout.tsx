@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import "./globals.css";
 export const metadata: Metadata = {
-  metadataBase: new URL("https://open-harness-workspace.alive-cabin-2798.chatgpt.site"),
+  // Was a hard-coded domain from the scaffold this project started as, which meant every
+  // self-hosted deployment resolved its social-card image against someone else's host.
+  metadataBase: new URL(process.env.OPEN_HARNESS_PUBLIC_URL || "http://localhost:3000"),
   title: "Open Harness — Your personal agent workspace",
   description:
     "An open-source workspace for persistent agents, useful tools, and work you own.",

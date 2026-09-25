@@ -1,0 +1,51 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Open Harness",
+  "version": "0.3.0",
+  "identifier": "dev.openharness.mobile",
+  "build": {
+    "frontendDist": "../dist/client",
+    "devUrl": "http://localhost:3000",
+    "beforeBuildCommand": "npm run build:mobile"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "url": "index.html",
+        "title": "Open Harness"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: http://asset.localhost; font-src 'self' data:; connect-src 'self' https: ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'; form-action 'self'"
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "mobile": [
+        {
+          "host": "pair",
+          "scheme": [
+            "openharness"
+          ]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": null,
+    "resources": null,
+    "android": {
+      "minSdkVersion": 24
+    }
+  }
+}

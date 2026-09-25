@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
 const service = 'dev.openharness.secrets';
+const bootstrapNames = ['XAI_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'MODEL_API_KEY'] as const;
 
 function command(name: string, args: string[], input?: string) {
   return spawnSync(name, args, { input, encoding: 'utf8', timeout: 8_000, windowsHide: true, maxBuffer: 2_000_000 });
@@ -47,7 +48,16 @@ export class SecretStore {
     try { this.values = vaulted?.value ? JSON.parse(vaulted.value) : existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {}; }
     catch { this.values = {}; }
     if (vaulted) this.backend = vaulted.backend;
-    if (!this.values.controlToken) { this.values.controlToken = crypto.randomUUID() + crypto.randomUUID(); this.save(); }
+    let changed = false;
+    if (!this.values.controlToken) { this.values.controlToken = crypto.randomUUID() + crypto.randomUUID(); changed = true; }
+    // `npm run dev` and `harness:serve` load .env before constructing this store. Import
+    // those documented bootstrap credentials once, while preserving anything the user
+    // already saved through Settings or an OS vault.
+    for (const name of bootstrapNames) {
+      const value = process.env[name];
+      if (!this.values[name] && value) { this.values[name] = value; changed = true; }
+    }
+    if (changed) this.save();
     if (existsSync(path)) chmodSync(path, 0o600);
   }
   get token() { return this.values.controlToken; }

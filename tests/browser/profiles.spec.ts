@@ -20,14 +20,14 @@ test('guides first-time users through computer and model readiness', async ({ pa
   const setup = page.getByRole('dialog', { name: 'Welcome to Open Harness' });
   await expect(setup).toBeVisible();
   await setup.getByRole('button', { name: /Use this computer/ }).click();
-  await expect(page.getByRole('dialog', { name: 'Check this computer' }).getByText('The pinned Hermes runtime is ready.')).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Check this computer' }).getByText(/Deterministic mock mode is active/)).toBeVisible();
   await page.getByRole('button', { name: 'Continue' }).click();
   await expect(page.getByRole('dialog', { name: 'Connect your model' })).toBeVisible();
   await page.getByRole('dialog', { name: 'Connect your model' }).getByLabel('API key').fill('test-key');
   await page.getByRole('button', { name: 'Save and test' }).click();
-  await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeVisible();
-  await page.getByRole('button', { name: 'Start using Open Harness' }).click();
+  await expect(page.getByRole('dialog', { name: 'Connect your model' }).getByText(/Mock mode is active/)).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeHidden();
+  await page.getByRole('button', { name: 'Set up later' }).click();
 });
 
 test('edits identity, model, prompt and tools, then persists on reload', async ({ page }) => {
@@ -148,11 +148,11 @@ test('configures computer access and automatically selects a paired computer', a
   await request.post(control + '/v1/runner/pair', { data: { code, name: 'Design workstation', platform: 'win32', arch: 'x64', capabilities: { container: true, direct: true, desktop: true, virtualDesktop: false } } });
   await expect(panel.getByText('Design workstation connected and was selected for this agent.')).toBeVisible({ timeout: 5_000 });
   await expect(panel.getByLabel('Connected computer')).toHaveValue(/machine-/);
-  await panel.getByRole('button', { name: 'Save changes' }).click();
-  await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
+  await panel.getByRole('button', { name: 'Close agent settings' }).click();
+  await panel.getByRole('button', { name: 'Discard changes' }).click();
 });
 
-test('group switches and Disable all tools preserve an explicit empty selection', async ({ page, request }) => {
+test('group switches and Disable all tools keep only the mandatory task tool', async ({ page, request }) => {
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
   const panel = page.getByRole('dialog', { name: 'Agent settings' });
   await expect(panel.getByText('Loading saved profile…')).toBeHidden();
@@ -167,7 +167,7 @@ test('group switches and Disable all tools preserve an explicit empty selection'
   await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
   const { token } = await (await request.get(control + '/v1/bootstrap')).json();
   const { profile } = await (await request.get(control + '/v1/agents/atlas/profile', { headers: { Authorization: `Bearer ${token}` } })).json();
-  expect(profile.allowedTools).toEqual([]);
+  expect(profile.allowedTools).toEqual(['mcp_open_harness_task']);
 });
 
 test('a stale save keeps the draft and can load the winning revision', async ({ page, request }) => {

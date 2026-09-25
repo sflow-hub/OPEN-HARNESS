@@ -1,9 +1,13 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import type { DeviceCredential } from './hub';
+import type { MachineInfo } from './agent-profile';
+
 export type RuntimeStatus = {
   token: string;
   runtime: { available: boolean; version: string | null; message: string };
   version: string;
   hermes: { release: string; commit: string };
+  machine?: MachineInfo;
 };
 
 export type PersistentRun = {
@@ -15,7 +19,7 @@ export type PersistentRun = {
   result?: string | null;
   error?: string | null;
   machine_id?: string | null;
-  machine_connection?: "online" | "offline" | "revoked" | null;
+  machine_connection?: "online" | "suspended" | "offline" | "revoked" | null;
 };
 
 function base() {
@@ -30,13 +34,46 @@ function base() {
 
 export class ControlClient {
   token = "";
+  // Set once a phone has paired. It changes three things: where requests go, which headers
+  // identify the caller, and which fetch makes the call. Everything above this layer is
+  // unchanged, which is why the whole dashboard works on a phone without knowing about it.
+  private device: DeviceCredential | null = null;
+  private fetchImpl: typeof fetch = (...args) => fetch(...args);
+
+  useDevice(credential: DeviceCredential | null, fetchImpl?: typeof fetch) {
+    this.device = credential;
+    if (fetchImpl) this.fetchImpl = fetchImpl;
+    this.token = "";
+  }
+  get pairedMachineId() { return this.device?.machineId || ""; }
+  private endpoint() { return this.device ? this.device.hubUrl : base(); }
+  private headers(extra: HeadersInit = {}): HeadersInit {
+    if (this.device) {
+      return {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.device.token}`,
+        "X-Open-Harness-Machine": this.device.machineId,
+        ...(this.device.sitesToken ? { "OAI-Sites-Authorization": `Bearer ${this.device.sitesToken}` } : {}),
+        ...extra,
+      };
+    }
+    return { "Content-Type": "application/json", Authorization: `Bearer ${this.token}`, ...extra };
+  }
   async bootstrap() {
-    const response = await fetch(`${base()}/v1/bootstrap`);
+    // A phone never receives the master control token. It asks for its own session instead,
+    // which reports the same runtime facts plus the machine row it is paired as.
+    if (this.device) {
+      const response = await this.fetchImpl(`${this.endpoint()}/v1/device/session`, { headers: this.headers() });
+      if (response.status === 401) throw new Error("This phone is no longer paired. Connect it to your hub again.");
+      if (!response.ok) throw new Error("Could not reach your Open Harness hub.");
+      return (await response.json()) as RuntimeStatus;
+    }
+    const response = await this.fetchImpl(`${base()}/v1/bootstrap`);
     if (!response.ok) throw new Error("Open Harness control service is unavailable.");
     const status = (await response.json()) as RuntimeStatus; this.token = status.token; return status;
   }
   async request<T>(path: string, init: RequestInit = {}) {
-    const response = await fetch(`${base()}${path}`, { ...init, headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}`, ...init.headers } });
+    const response = await this.fetchImpl(`${this.endpoint()}${path}`, { ...init, headers: this.headers(init.headers) });
     const value = await response.json() as T & { error?: string };
     if (!response.ok) throw new Error(value.error || `Control service returned HTTP ${response.status}.`);
     return value;

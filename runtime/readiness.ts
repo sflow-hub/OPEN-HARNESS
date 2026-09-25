@@ -48,7 +48,7 @@ export function onboardingStatus(): OnboardingStatus {
     checks: [
       { id: 'coordinator', label: 'Open Harness', state: 'ready', detail: 'The coordinator is running.' },
       { id: 'container-engine', label: 'Private workspaces', state: 'ready', detail: 'The container engine is running.' },
-      { id: 'agent-runtime', label: 'Agent runtime', state: 'ready', detail: 'The pinned Hermes runtime is ready.' },
+      { id: 'agent-runtime', label: 'Agent runtime', state: 'ready', detail: 'Deterministic mock mode is active. Model providers and real agent tools will not be called.' },
       desktopCheck(),
     ],
   };

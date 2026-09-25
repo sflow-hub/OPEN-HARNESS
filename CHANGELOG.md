@@ -6,6 +6,17 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ## [Unreleased]
 
+### Added
+
+- An Android companion app. It is the same dashboard shipped as static files in a
+  Tauri 2 shell, paired to a coordinator over HTTPS with a typable 12-character code
+  or an `openharness://` link. The phone gets its own revocable device credential,
+  kept in a native Stronghold vault, that reaches dashboard routes only; runner
+  command endpoints reject it. Phones send tasks, follow runs, and answer approvals;
+  execution stays on a connected computer. See [ANDROID.md](ANDROID.md).
+- `Verify` builds a debug ARM64 APK on every push; tagged releases build a signed
+  APK and AAB when the four `ANDROID_*` repository secrets are present.
+
 ### Security
 
 - Closed a DNS-rebinding hole that could expose the dashboard bootstrap token

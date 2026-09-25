@@ -10,6 +10,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ControlClient, PersistentRun } from "../lib/control-client";
+import { taskPollIntervalMs } from "../lib/platform";
 import type { Agent } from "../lib/types";
 import type { AgentTask, TaskBoard, TaskPriority, TaskSnapshot, WorkflowCategory } from "../lib/task-types";
 
@@ -24,6 +25,22 @@ const CATEGORIES: Array<{ id: WorkflowCategory; label: string }> = [
   { id: "backlog", label: "Backlog" }, { id: "ready", label: "Ready" },
   { id: "in_progress", label: "In progress" }, { id: "review", label: "Review" }, { id: "done", label: "Done" },
 ];
+// Priority is an ordered scale and dueAt is a date; comparing either as text ranks
+// "high" above "low" and sorts 2026-01 before 2025-12 once the day widths differ.
+const PRIORITY_ORDER: Record<string, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+function compareTasks(a: AgentTask, b: AgentTask, key: keyof AgentTask) {
+  if (key === "priority") return (PRIORITY_ORDER[a.priority] ?? 99) - (PRIORITY_ORDER[b.priority] ?? 99);
+  if (key === "dueAt") {
+    // Tasks with no due date sort last in either direction rather than clumping at the top.
+    if (!a.dueAt && !b.dueAt) return 0;
+    if (!a.dueAt) return 1;
+    if (!b.dueAt) return -1;
+    return Date.parse(a.dueAt) - Date.parse(b.dueAt);
+  }
+  if (key === "position") return a.position - b.position;
+  return String(a[key] ?? "").localeCompare(String(b[key] ?? ""));
+}
+
 const PRIORITIES: TaskPriority[] = ["low", "normal", "high", "urgent"];
 const ACTIVE_RUNS = ["queued", "running", "waiting_approval", "waiting_input"];
 const PREF_KEY = "open-harness.tasks.view.v1";
@@ -74,6 +91,10 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
   const [draft, setDraft] = useState<Draft | null>(null);
   const [comment, setComment] = useState("");
   const [feedback, setFeedback] = useState("");
+  // What the drawer held when it opened. Closing is only free if nothing has changed
+  // since; otherwise a backdrop click would throw away edits with no way to get them back.
+  const [baseline, setBaseline] = useState("");
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [sort, setSort] = useState<{ key: keyof AgentTask; direction: 1 | -1 }>({ key: "position", direction: 1 });
   const [dragged, setDragged] = useState<string | null>(null);
   const [clock, setClock] = useState(Date.now);
@@ -100,7 +121,7 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
     // The service is the task source of truth; refresh immediately on mount.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
-    const timer = window.setInterval(() => { if (!document.hidden && !dragged) void refresh(true); }, snapshot.tasks.some(isActive) ? 2000 : 8000);
+    const timer = window.setInterval(() => { if (!document.hidden && !dragged) void refresh(true); }, taskPollIntervalMs(snapshot.tasks.some(isActive)));
     return () => window.clearInterval(timer);
   }, [refresh, snapshot.tasks, dragged]);
   useEffect(() => { const timer = window.setInterval(() => setClock(Date.now()), 60_000); return () => window.clearInterval(timer); }, []);
@@ -139,26 +160,45 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
 
   const openTask = (task: AgentTask) => {
     setDetailId(task.id);
-    setDraft({ id: task.id, boardId: task.boardId, stageId: task.stageId, title: task.title, description: task.description, ownerAgentId: task.ownerAgentId, collaboratorAgentIds: task.collaboratorAgentIds, priority: task.priority, labels: task.labels, dueAt: task.dueAt, position: task.position, archived: task.archived, revision: task.revision, checklist: task.checklist });
+    const next: Draft = { id: task.id, boardId: task.boardId, stageId: task.stageId, title: task.title, description: task.description, ownerAgentId: task.ownerAgentId, collaboratorAgentIds: task.collaboratorAgentIds, priority: task.priority, labels: task.labels, dueAt: task.dueAt, position: task.position, archived: task.archived, revision: task.revision, checklist: task.checklist };
+    setDraft(next); setBaseline(JSON.stringify(next)); setConfirmDiscard(false);
   };
   const createTask = (stageId?: string) => {
     const target = board || snapshot.boards.find(item => !item.archived);
     if (!target) return;
     const next = emptyDraft(target); if (stageId) next.stageId = stageId;
-    setDetailId("new"); setDraft(next);
+    setDetailId("new"); setDraft(next); setBaseline(JSON.stringify(next)); setConfirmDiscard(false);
   };
   const createBoard = async () => {
     const created = await request<TaskBoard>("/v1/boards", { method: "POST", body: JSON.stringify({ name: newBoardName }) });
     if (created) { setSelectedBoard(created.id); setNewBoardName(""); setNewBoardOpen(false); }
   };
-  const closeDetail = () => { setDetailId(null); setDraft(null); setComment(""); setFeedback(""); };
+  const closeDetail = () => { setDetailId(null); setDraft(null); setComment(""); setFeedback(""); setBaseline(""); setConfirmDiscard(false); };
+  const dirty = Boolean(draft) && (JSON.stringify(draft) !== baseline || comment.trim() !== "" || feedback.trim() !== "");
+  // Saving, archiving and approving call closeDetail directly: the work is already
+  // committed, so there is nothing to warn about. Only user-initiated dismissal asks.
+  const requestClose = () => { if (dirty) setConfirmDiscard(true); else closeDetail(); };
+  // Escape is how people close a panel. The page-level handler only knows about the
+  // settings and file modals, so without this the drawer can only be dismissed by mouse.
+  useEffect(() => {
+    if (!draft) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      if (confirmDiscard) setConfirmDiscard(false);
+      else if (dirty) setConfirmDiscard(true);
+      else closeDetail();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [draft, dirty, confirmDiscard]);
   const current = detailId && detailId !== "new" ? snapshot.tasks.find(task => task.id === detailId) : null;
 
   const save = async () => {
     if (!draft) return null;
     const path = draft.id ? `/v1/tasks/${draft.id}` : "/v1/tasks";
     const saved = await request<AgentTask>(path, { method: draft.id ? "PUT" : "POST", body: JSON.stringify(draft) });
-    if (saved) { setDetailId(saved.id); setDraft({ ...draft, id: saved.id, revision: saved.revision }); }
+    if (saved) { const synced = { ...draft, id: saved.id, revision: saved.revision }; setDetailId(saved.id); setDraft(synced); setBaseline(JSON.stringify(synced)); setComment(""); setFeedback(""); }
     return saved;
   };
   const start = async (changes = "") => {
@@ -244,9 +284,9 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
       </section>;
     })}</div>}
 
-    {taskView === "list" && <div className="task-table-wrap"><table className="task-table"><thead><tr>{[["title", "Task"], ["boardId", "Project"], ["stageId", "Stage"], ["ownerAgentId", "Owner"], ["priority", "Priority"], ["dueAt", "Due"], ["runState", "Execution"]].map(([key, label]) => <th key={key}><button onClick={() => setSort(currentSort => ({ key: key as keyof AgentTask, direction: currentSort.key === key ? currentSort.direction === 1 ? -1 : 1 : 1 }))}>{label}{sort.key === key && (sort.direction === 1 ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}</button></th>)}</tr></thead><tbody>{[...tasks].sort((a, b) => String(a[sort.key] || "").localeCompare(String(b[sort.key] || "")) * sort.direction).map(task => {
+    {taskView === "list" && <div className="task-table-wrap"><table className="task-table"><thead><tr>{[["title", "Task"], ["boardId", "Project"], ["stageId", "Stage"], ["ownerAgentId", "Owner"], ["priority", "Priority"], ["dueAt", "Due"], ["runState", "Execution"]].map(([key, label]) => <th key={key}><button onClick={() => setSort(currentSort => ({ key: key as keyof AgentTask, direction: currentSort.key === key ? currentSort.direction === 1 ? -1 : 1 : 1 }))}>{label}{sort.key === key && (sort.direction === 1 ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}</button></th>)}</tr></thead><tbody>{[...tasks].sort((a, b) => compareTasks(a, b, sort.key) * sort.direction).map(task => {
       const taskBoard = boardsById.get(task.boardId); const owner = task.ownerAgentId ? agentsById.get(task.ownerAgentId) : undefined;
-      return <tr key={task.id} onClick={() => openTask(task)}><td><strong>{task.title}</strong>{task.labels.length > 0 && <small>{task.labels.join(" · ")}</small>}</td><td>{taskBoard?.name}</td><td>{taskBoard?.stages.find(stage => stage.id === task.stageId)?.name}</td><td><span className="table-owner"><Avatar agent={owner} empty={!owner} />{owner?.name || "Unassigned"}{task.collaboratorAgentIds.length > 0 && <small>+{task.collaboratorAgentIds.length}</small>}</span></td><td><span className={`task-priority ${task.priority}`}>{task.priority}</span></td><td>{displayDate(task.dueAt)}</td><td><span className={`run-pill ${task.runState || ""}`}>{runLabel(task.runState)}</span></td></tr>;
+      return <tr key={task.id} tabIndex={0} role="button" aria-label={`Open task ${task.title}`} onClick={() => openTask(task)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openTask(task); } }}><td><strong>{task.title}</strong>{task.labels.length > 0 && <small>{task.labels.join(" · ")}</small>}</td><td>{taskBoard?.name}</td><td>{taskBoard?.stages.find(stage => stage.id === task.stageId)?.name}</td><td><span className="table-owner"><Avatar agent={owner} empty={!owner} />{owner?.name || "Unassigned"}{task.collaboratorAgentIds.length > 0 && <small>+{task.collaboratorAgentIds.length}</small>}</span></td><td><span className={`task-priority ${task.priority}`}>{task.priority}</span></td><td>{displayDate(task.dueAt)}</td><td><span className={`run-pill ${task.runState || ""}`}>{runLabel(task.runState)}</span></td></tr>;
     })}</tbody></table>{tasks.length === 0 && <div className="task-empty">No tasks match this view.</div>}</div>}
 
     {taskView === "agent" && <div className="agent-task-grid">{[...agents, undefined].map(agent => {
@@ -258,8 +298,9 @@ export default function TaskManager({ agents, client, onOpenRun }: { agents: Age
       return <article className="agent-task-card" key={agent?.id || "unassigned"}><div className="agent-task-head"><Avatar agent={agent} empty={!agent} /><div><strong>{agent?.name || "Unassigned"}</strong><small>{agent?.role || "Tasks waiting for an owner"}</small></div></div><div className="agent-task-counts"><button onClick={() => applyAgent("owned")}><b>{owned.length}</b><span>Owned</span></button><button onClick={() => applyAgent("collab")} disabled={!agent}><b>{collaborating.length}</b><span>Collaborating</span></button><button onClick={() => applyAgent("running")}><b>{running.length}</b><span>Running</span></button><button onClick={() => applyAgent("queued")}><b>{queued.length}</b><span>Queued</span></button><button onClick={() => applyAgent("review")}><b>{review.length}</b><span>Review</span></button></div></article>;
     })}</div>}
 
-    {draft && <div className="task-drawer-backdrop" onClick={closeDetail}><aside className="task-drawer" role="dialog" aria-modal="true" aria-labelledby="task-detail-title" onClick={event => event.stopPropagation()}>
-      <div className="task-drawer-head"><span>{draft.id ? "Task details" : "New task"}</span><button onClick={closeDetail} aria-label="Close task"><X size={19} /></button></div>
+    {draft && <div className="task-drawer-backdrop" onClick={requestClose}><aside className="task-drawer" role="dialog" aria-modal="true" aria-labelledby="task-detail-title" onClick={event => event.stopPropagation()}>
+      {confirmDiscard && <div className="task-discard" role="alertdialog" aria-labelledby="task-discard-title"><h3 id="task-discard-title">Discard unsaved changes?</h3><p>This task will stay as it was last saved.</p><div className="task-discard-actions"><button type="button" autoFocus onClick={() => setConfirmDiscard(false)}>Keep editing</button><button type="button" className="task-primary" onClick={closeDetail}>Discard changes</button></div></div>}
+      <div className="task-drawer-head"><span>{draft.id ? "Task details" : "New task"}</span><button onClick={requestClose} aria-label="Close task"><X size={19} /></button></div>
       <div className="task-drawer-scroll">
         <input id="task-detail-title" className="task-title-input" value={draft.title} onChange={event => setDraft(value => value && ({ ...value, title: event.target.value }))} placeholder="What needs to be done?" autoFocus />
         <div className="task-form-grid"><label>Project<select value={draft.boardId} disabled={Boolean(current && isActive(current))} onChange={event => { const nextBoard = boardsById.get(event.target.value); setDraft(value => value && ({ ...value, boardId: event.target.value, stageId: nextBoard?.stages.find(stage => stage.category === "backlog")?.id || nextBoard?.stages[0]?.id || "" })); }}>{snapshot.boards.filter(item => !item.archived || item.id === draft.boardId).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>

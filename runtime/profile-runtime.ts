@@ -59,7 +59,7 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
     Object.assign(env, connectorEnv);
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: '${' + c.secretRef + '}' } : {} };
   }
-  const config = { model: { default: effective.model, provider: effective.provider === 'local' ? 'custom' : effective.provider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { entries: { open_harness_policy: { enabled: true } } }, mcp_servers: mcp };
+  const config = { model: { default: effective.model, provider: effective.provider === 'local' ? 'custom' : effective.provider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ['open_harness_policy'] }, mcp_servers: mcp };
   // JSON is a YAML subset; serialization prevents YAML injection from prompts, names, and endpoints.
   atomic(join(home, 'config.yaml'), JSON.stringify(config, null, 2));
   atomic(join(home, 'SOUL.md'), profile.prompt.enabled ? profile.prompt.text : '');

@@ -19,6 +19,12 @@ var HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || "open-harness-hermes
 var platform = ["linux", "darwin", "win32"].includes(process.platform) ? process.platform : "unknown";
 
 // runtime/hermes.ts
+function lastWords(stderrTail, keep = 3, limit = 400) {
+  const lines = stderrTail.filter((line) => line.trim()).slice(-keep);
+  if (!lines.length) return "";
+  const text = lines.join(" | ");
+  return ` Last output: ${text.length > limit ? `\u2026${text.slice(-limit)}` : text}`;
+}
 var HermesGateway = class extends EventEmitter {
   constructor(container, allowedTools = null, native = null) {
     super();
@@ -29,6 +35,9 @@ var HermesGateway = class extends EventEmitter {
     this.requestId = 0;
     this.pending = /* @__PURE__ */ new Map();
     this.mockApproval = null;
+    // Hermes reports its failures on stderr and then dies. Without a copy, the exit
+    // code is all that survives, and "exited with code 1" tells an operator nothing.
+    this.stderrTail = [];
   }
   async start() {
     if (process.env.OPEN_HARNESS_MOCK === "1") {
@@ -54,9 +63,15 @@ var HermesGateway = class extends EventEmitter {
         this.emit("log", { level: "warn", message: line.slice(0, 1e3) });
       }
     });
-    createInterface({ input: this.child.stderr }).on("line", (line) => this.emit("log", { level: "debug", message: line.slice(0, 1e3) }));
+    this.stderrTail = [];
+    createInterface({ input: this.child.stderr }).on("line", (line) => {
+      const message = line.slice(0, 1e3);
+      this.stderrTail.push(message);
+      if (this.stderrTail.length > 50) this.stderrTail.shift();
+      this.emit("log", { level: "debug", message });
+    });
     this.child.once("exit", (code) => {
-      const error = Object.assign(new Error(`Hermes ${this.native ? "host" : "container"} gateway exited with code ${code ?? "unknown"}. Inspect its saved work before retrying.`), { interrupted: true });
+      const error = Object.assign(new Error(`Hermes ${this.native ? "host" : "container"} gateway exited with code ${code ?? "unknown"}.${lastWords(this.stderrTail)} Inspect its saved work before retrying.`), { interrupted: true });
       for (const pending of this.pending.values()) {
         clearTimeout(pending.timer);
         pending.reject(error);
@@ -75,9 +90,9 @@ var HermesGateway = class extends EventEmitter {
         }
       };
       this.on("event", ready);
-      this.child.once("exit", () => {
+      this.child.once("exit", (code) => {
         clearTimeout(timer);
-        reject(new Error("Hermes gateway exited during startup."));
+        reject(new Error(`Hermes ${this.native ? "host" : "container"} gateway exited during startup with code ${code ?? "unknown"}.${lastWords(this.stderrTail)}`));
       });
     });
   }
@@ -186,7 +201,7 @@ function ensureContainer(agentId, stateRoot2, computer) {
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
   const selected = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
-  const signature = createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources })).digest("hex").slice(0, 24);
+  const signature = createHash("sha256").update(JSON.stringify({ stateRoot: resolve(stateRoot2), access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources })).digest("hex").slice(0, 24);
   const inspect = spawnSync("docker", ["inspect", "-f", '{{.State.Running}} {{index .Config.Labels "open-harness.config"}}', name], { encoding: "utf8", timeout: 1e4 });
   if (inspect.status === 0) {
     const [running, currentSignature] = inspect.stdout.trim().split(/\s+/);
@@ -339,7 +354,7 @@ function prepareProfile(root, profile, effective, secrets, token, runId, options
     Object.assign(env, connectorEnv);
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: "${" + c.secretRef + "}" } : {} };
   }
-  const config = { model: { default: effective.model, provider: effective.provider === "local" ? "custom" : effective.provider, ...effective.baseUrl ? { base_url: effective.baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "smart", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { entries: { open_harness_policy: { enabled: true } } }, mcp_servers: mcp };
+  const config = { model: { default: effective.model, provider: effective.provider === "local" ? "custom" : effective.provider, ...effective.baseUrl ? { base_url: effective.baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "smart", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ["open_harness_policy"] }, mcp_servers: mcp };
   atomic(join(home, "config.yaml"), JSON.stringify(config, null, 2));
   atomic(join(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
   atomic(join(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
@@ -427,6 +442,7 @@ import { dirname as dirname2 } from "node:path";
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 var service = "dev.openharness.secrets";
+var bootstrapNames = ["XAI_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "MODEL_API_KEY"];
 function command(name, args2, input) {
   return spawnSync3(name, args2, { input, encoding: "utf8", timeout: 8e3, windowsHide: true, maxBuffer: 2e6 });
 }
@@ -477,10 +493,19 @@ var SecretStore = class {
       this.values = {};
     }
     if (vaulted) this.backend = vaulted.backend;
+    let changed = false;
     if (!this.values.controlToken) {
       this.values.controlToken = crypto.randomUUID() + crypto.randomUUID();
-      this.save();
+      changed = true;
     }
+    for (const name of bootstrapNames) {
+      const value = process.env[name];
+      if (!this.values[name] && value) {
+        this.values[name] = value;
+        changed = true;
+      }
+    }
+    if (changed) this.save();
     if (existsSync3(path)) chmodSync2(path, 384);
   }
   get token() {
@@ -537,6 +562,7 @@ async function decryptRunnerSecret(privateKey, payload) {
 import { accessSync, constants, statSync } from "node:fs";
 function validateComputerTarget(profile, capabilities2, requiredSecrets = [], hasSecret = () => true) {
   const issues = [];
+  if (profile.computer.access === "mobile" || capabilities2.mobile) issues.push("Phones are companion dashboards in this release and cannot run agents. Choose a connected computer.");
   if (profile.computer.access === "private" && !capabilities2.container) issues.push("Container execution is unavailable. Install and start Docker, then retry the transfer.");
   if (profile.computer.access === "direct" && !capabilities2.direct) issues.push(capabilities2.detail || "The Hermes host runtime is unavailable. Finish direct-access setup, then retry the transfer.");
   if (profile.computer.desktop === "existing" && !capabilities2.desktop) issues.push("The existing desktop is unavailable. Sign in to a graphical session and grant the runner the requested desktop permissions.");

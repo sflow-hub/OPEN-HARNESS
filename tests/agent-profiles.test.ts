@@ -51,6 +51,7 @@ test('a running task keeps its snapshot; the next queued task uses the new profi
   const next = await run('MOCK_TOOL:terminal');
   const current = await profile(); const saved = await save({ ...current, allowedTools: [], prompt: { enabled: false, text: current.prompt.text } }); assert.equal(saved.pending, true);
   const policy = JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')); assert.deepEqual(policy.allowedTools, ['terminal', 'mcp_open_harness_task']);
+  const config = JSON.parse(readFileSync(join(state, 'agents/atlas/profile/config.yaml'), 'utf8')); assert.deepEqual(config.plugins.enabled, ['open_harness_policy']);
   assert.equal((await waitRun(first.id)).state, 'completed'); assert.equal((await waitRun(next.id)).state, 'failed');
   assert.deepEqual(JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')).allowedTools, ['mcp_open_harness_task']);
   assert.equal(readFileSync(join(state, 'agents/atlas/profile/SOUL.md'), 'utf8'), '');

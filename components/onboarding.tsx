@@ -68,8 +68,9 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
     const selected: ModelChoice = { provider, model: modelId.trim(), baseUrl: provider === 'local' ? baseUrl.trim() : '', credentialRef };
     try {
       if (apiKey && credentialRef) { await client.request('/v1/secrets', { method: 'POST', body: JSON.stringify({ name: credentialRef, value: apiKey, ...(status?.credentialMode === 'runner' ? { machineId: status.credentialMachineId } : {}) }) }); setSecretNames(current => [...new Set([...current, credentialRef])]); }
+      const test = await client.request<{ ok: boolean; message: string }>('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: selected }) });
+      if (!test.ok) { setModelReady(false); setMessage(`${test.message} Your previous workspace model is still active.`); return; }
       const saved = await client.request<{ model: ModelChoice; revision: number }>('/v1/workspace/model', { method: 'PUT', body: JSON.stringify({ revision, model: selected }) });
-      const test = await client.request<{ ok: boolean; message: string }>('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: saved.model }) });
       onModelSaved(saved.model, saved.revision); setApiKey(''); setModelReady(test.ok); setMessage(test.message);
       if (test.ok) setTimeout(() => setStep(3), 450);
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not save the model connection.'); }

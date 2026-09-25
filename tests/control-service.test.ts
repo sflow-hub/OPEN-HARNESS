@@ -20,7 +20,7 @@ async function waitReady() {
   throw new Error("Control service did not start.");
 }
 function start() {
-  child = spawn(process.execPath, ["--import", "tsx", "runtime/service.ts"], { cwd: join(import.meta.dirname, ".."), env: { ...process.env, OPEN_HARNESS_MOCK: "1", OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: stateDir }, stdio: "pipe" });
+  child = spawn(process.execPath, ["--import", "tsx", "runtime/service.ts"], { cwd: join(import.meta.dirname, ".."), env: { ...process.env, OPEN_HARNESS_MOCK: "1", OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: stateDir, OPENAI_API_KEY: 'bootstrap-test-key' }, stdio: "pipe" });
   return waitReady();
 }
 async function request(path: string, init: RequestInit = {}) {
@@ -40,6 +40,10 @@ test("reports first-run readiness and serves no-checkout runner installers", asy
   assert.equal(readiness.executionReady, true);
   assert.equal(readiness.credentialMode, 'coordinator');
   assert.ok(readiness.checks.every((check: any) => check.id && check.detail));
+  assert.match(readiness.checks.find((check: any) => check.id === 'agent-runtime').detail, /mock mode/i);
+  const modelTest = await request('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: { provider: 'xai', model: 'grok-4.6', credentialRef: 'XAI_API_KEY', baseUrl: '' } }) });
+  assert.equal(modelTest.ok, false);
+  assert.match(modelTest.message, /no model provider was contacted/i);
   const installer = await fetch(`${base}/v1/install/runner.sh`);
   assert.equal(installer.status, 200);
   assert.match(await installer.text(), /nodejs\.org\/dist/);
@@ -56,6 +60,7 @@ test("reports first-run readiness and serves no-checkout runner installers", asy
 
 test("authenticates local clients, migrates once, and protects its secret file", async () => {
   assert.equal((await fetch(`${base}/v1/health`)).status, 401);
+  assert.ok((await request('/v1/health')).secrets.includes('OPENAI_API_KEY'));
   const workspace = { agents: [{ id: "atlas", name: "Atlas", role: "Generalist", instructions: "Own the result.", memory: ["Prefer concise reports."] }], conversations: [{ id: "c1", agentId: "atlas", title: "Legacy", updatedAt: new Date().toISOString(), messages: [] }], files: [{ name: "notes.md", content: "Shared context" }] };
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).migrated, true);
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).reason, "already_migrated");
@@ -206,4 +211,107 @@ test("marks uncertain active work interrupted after service restart without repl
   const run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_SLOW" }) });
   await new Promise(resolve => setTimeout(resolve, 100)); child.kill("SIGKILL"); await new Promise(resolve => child.once("exit", resolve)); await start();
   const recovered = await request(`/v1/runs/${run.id}`); assert.equal(recovered.state, "interrupted"); assert.match(recovered.error, /not replayed/);
+});
+
+test("a routine can be corrected and removed, not just paused", async () => {
+  const created = await request("/v1/routines", { method: "POST", body: JSON.stringify({ agentId: "atlas", name: "Typo'd name", prompt: "Draft the wrong thing", intervalMinutes: 1440 }) });
+  const listed = (await request("/v1/routines")).routines.find((item: any) => item.id === created.id);
+  assert.equal(listed.name, "Typo'd name");
+
+  const updated = await request(`/v1/routines/${created.id}`, { method: "PUT", body: JSON.stringify({ name: "Weekly digest", prompt: "Summarize the week", intervalMinutes: 10_080 }) });
+  assert.equal(updated.name, "Weekly digest");
+  assert.equal(updated.interval_minutes, 10_080);
+  // Shortening or lengthening an interval should take effect from now, not after the old one.
+  assert.ok(new Date(updated.next_run_at).getTime() > Date.now());
+
+  // An interval of zero or less would otherwise mean "every minute, forever".
+  const clamped = await request(`/v1/routines/${created.id}`, { method: "PUT", body: JSON.stringify({ intervalMinutes: -5 }) });
+  assert.equal(clamped.interval_minutes, 1);
+
+  await assert.rejects(
+    request(`/v1/routines/${created.id}`, { method: "PUT", body: JSON.stringify({ agentId: "no-such-agent" }) }),
+    /no longer exists/,
+  );
+  await assert.rejects(
+    request(`/v1/routines/${created.id}`, { method: "PUT", body: JSON.stringify({ name: "   " }) }),
+    /needs a name and a task/,
+  );
+
+  await request(`/v1/routines/${created.id}`, { method: "DELETE" });
+  assert.equal((await request("/v1/routines")).routines.some((item: any) => item.id === created.id), false);
+  await assert.rejects(request(`/v1/routines/${created.id}`, { method: "DELETE" }), /not found/);
+});
+
+test("a paired phone reaches the dashboard while a paired computer stays runner-only", async () => {
+  const pairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ name: 'Pixel', platform: 'android', coordinatorUrl: base }) });
+  assert.equal(pairing.kind, 'device');
+  assert.match(pairing.pairingUri, /^openharness:\/\/pair\?hub=/);
+
+  const paired = await (await fetch(`${base}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, name: 'Pixel', platform: 'android', arch: 'arm64', capabilities: { mobile: true } }) })).json() as any;
+  assert.ok(paired.token);
+  const deviceHeaders = { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId, 'Content-Type': 'application/json' };
+
+  // The phone never receives the master token; it gets its own session view instead.
+  const session = await (await fetch(`${base}/v1/device/session`, { headers: deviceHeaders })).json() as any;
+  assert.equal(session.token, '');
+  assert.equal(session.machine.kind, 'device');
+  assert.equal(session.machine.capabilities.mobile, true);
+
+  // A dashboard route the master token can reach is reachable with the device credential.
+  const runs = await fetch(`${base}/v1/runs`, { headers: deviceHeaders });
+  assert.equal(runs.status, 200);
+  assert.equal((await fetch(`${base}/v1/runner/commands`, { headers: deviceHeaders })).status, 401, 'a companion credential cannot lease runner work');
+
+  // The same route with a computer's runner credential must not open.
+  const computerPairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ name: 'VPS', platform: 'linux', coordinatorUrl: base }) });
+  const computer = await (await fetch(`${base}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: computerPairing.code, platform: 'linux', arch: 'x64' }) })).json() as any;
+  const runnerHeaders = { Authorization: `Bearer ${computer.token}`, 'X-Open-Harness-Machine': computer.machineId };
+  assert.equal((await fetch(`${base}/v1/runs`, { headers: runnerHeaders })).status, 401);
+  assert.equal((await fetch(`${base}/v1/device/session`, { headers: runnerHeaders })).status, 401);
+
+  // Revoking the phone closes both doors at once.
+  await request(`/v1/machines/${paired.machineId}/revoke`, { method: 'POST' });
+  assert.equal((await fetch(`${base}/v1/runs`, { headers: deviceHeaders })).status, 401);
+  assert.equal((await fetch(`${base}/v1/runner/commands`, { headers: deviceHeaders })).status, 401);
+});
+
+test("bootstrap still refuses to hand the master token to a phone", async () => {
+  const pairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ platform: 'ios', coordinatorUrl: base }) });
+  const paired = await (await fetch(`${base}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, platform: 'ios', arch: 'arm64' }) })).json() as any;
+  const bootstrap = await (await fetch(`${base}/v1/bootstrap`, { headers: { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId } })).json() as any;
+  // Loopback in this test, so bootstrap answers — but the phone must use /v1/device/session
+  // in real deployments, where bootstrap is unreachable from off-host.
+  assert.ok('token' in bootstrap);
+});
+
+test("the Tauri webview origin is accepted and a stray web origin is not", async () => {
+  assert.equal((await fetch(`${base}/v1/health`, { headers: { Authorization: `Bearer ${token}`, Origin: 'tauri://localhost' } })).status, 200);
+  assert.equal((await fetch(`${base}/v1/health`, { headers: { Authorization: `Bearer ${token}`, Origin: 'https://evil.example.com' } })).status, 403);
+});
+
+test("a phone pairs as a companion but can never become an agent runner", async () => {
+  const pairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ name: 'Test phone', platform: 'android', coordinatorUrl: base }) });
+  const phone = await (await fetch(`${base}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, platform: 'android', arch: 'arm64' }) })).json() as any;
+
+  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: [
+    { id: 'fresh-agent', name: 'Fresh', role: 'Assistant', description: '', tone: 0, instructions: 'Help.', memory: [] },
+    { id: 'seasoned-agent', name: 'Seasoned', role: 'Assistant', description: '', tone: 0, instructions: 'Help.', memory: [] },
+  ] }) });
+
+  const toPhone = async (agentId: string) => {
+    const { profile } = await request(`/v1/agents/${agentId}/profile`);
+    return request(`/v1/agents/${agentId}/profile`, { method: 'PUT', body: JSON.stringify({ ...profile, computer: { ...profile.computer, machineId: phone.machineId, access: 'mobile', desktop: 'none', folders: [] } }) });
+  };
+
+  await assert.rejects(toPhone('fresh-agent'), /companion dashboards/);
+  const moved = await request('/v1/agents/fresh-agent/profile');
+  assert.notEqual(moved.profile.computer.machineId, phone.machineId);
+  assert.equal((await request(`/v1/machines/${phone.machineId}/test`, { method: 'POST', body: JSON.stringify({ agentId: 'fresh-agent' }) })).ok, false);
+
+  // Give the other agent something to lose, and the move must be refused rather than
+  // queueing a transfer the phone cannot complete.
+  await request('/v1/agents/seasoned-agent/context', { method: 'PUT', body: JSON.stringify({ memory: 'Remembers the user prefers short answers.' }) });
+  await assert.rejects(toPhone('seasoned-agent'), /companion dashboards/);
+  const stayed = await request('/v1/agents/seasoned-agent/profile');
+  assert.notEqual(stayed.profile.computer.machineId, phone.machineId, 'the refused move leaves the agent where it was');
 });

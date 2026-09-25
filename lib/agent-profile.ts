@@ -2,7 +2,9 @@ import type { Agent } from './types';
 
 export type ModelChoice = { provider: string; model: string; credentialRef: string; baseUrl: string };
 export type ConnectorConfig = { id: string; name: string; command: string; args: string[]; secretRef: string; enabled: boolean };
-export type ComputerAccess = 'private' | 'folders' | 'direct';
+// `mobile` is retained only so pre-MVP stored profiles can be loaded and repaired. New
+// profiles reject it and phones are never execution targets.
+export type ComputerAccess = 'private' | 'folders' | 'direct' | 'mobile';
 export type DesktopMode = 'none' | 'virtual' | 'existing';
 export type FolderGrant = { id: string; path: string; mode: 'read' | 'write' };
 export type ComputerConfig = {
@@ -13,12 +15,20 @@ export type ComputerConfig = {
   reserveMachine: boolean;
   resources: { cpu: number; memoryMb: number; concurrency: number };
 };
+export type MachinePlatform = 'linux' | 'darwin' | 'win32' | 'ios' | 'android' | 'unknown';
+export type MachineKind = 'runner' | 'device';
+// 'suspended' is a phone that stopped polling but is still inside its lease grace window.
+// Work stays queued for it rather than failing, because phones are backgrounded constantly.
+export type MachineStatus = 'online' | 'suspended' | 'offline' | 'pairing' | 'revoked';
 export type MachineInfo = {
-  id: string; name: string; platform: 'linux' | 'darwin' | 'win32' | 'unknown'; arch: string;
-  status: 'online' | 'offline' | 'pairing' | 'revoked'; lastSeenAt: string | null;
-  local: boolean; reservedAgentId: string | null; assignedAgents: number;
-  capabilities: { container: boolean; direct: boolean; desktop: boolean; virtualDesktop: boolean; detail?: string };
+  id: string; name: string; platform: MachinePlatform; arch: string;
+  status: MachineStatus; lastSeenAt: string | null;
+  local: boolean; kind: MachineKind; reservedAgentId: string | null; assignedAgents: number;
+  capabilities: { container: boolean; direct: boolean; desktop: boolean; virtualDesktop: boolean; mobile?: boolean; detail?: string };
 };
+export const MACHINE_PLATFORMS: MachinePlatform[] = ['linux', 'darwin', 'win32', 'ios', 'android'];
+export const PHONE_PLATFORMS: MachinePlatform[] = ['ios', 'android'];
+export function isPhonePlatform(value: unknown): value is 'ios' | 'android' { return value === 'ios' || value === 'android'; }
 export type AgentProfile = {
   id: string; revision: number; name: string; role: string; description: string; tone: number;
   prompt: { enabled: boolean; text: string };

@@ -109,9 +109,55 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK and NDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.3.13750724"
+      - run: npm ci
+      - run: npx tauri android init --ci --config src-tauri/tauri.mobile.conf.json
+      - name: Configure Android release signing
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          OPEN_HARNESS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          OPEN_HARNESS_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          OPEN_HARNESS_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64" || { echo "ANDROID_KEYSTORE_BASE64 is required"; exit 1; }
+          OPEN_HARNESS_ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/open-harness-release.jks"
+          export OPEN_HARNESS_ANDROID_KEYSTORE_PATH OPEN_HARNESS_ANDROID_KEYSTORE_PASSWORD OPEN_HARNESS_ANDROID_KEY_ALIAS OPEN_HARNESS_ANDROID_KEY_PASSWORD
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$OPEN_HARNESS_ANDROID_KEYSTORE_PATH"
+          node mobile/configure-android-signing.mjs
+          printf 'OPEN_HARNESS_ANDROID_KEYSTORE_PATH=%s\n' "$OPEN_HARNESS_ANDROID_KEYSTORE_PATH" >> "$GITHUB_ENV"
+      - name: Build signed Android release
+        env:
+          OPEN_HARNESS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          OPEN_HARNESS_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          OPEN_HARNESS_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: npx tauri android build --ci --target aarch64 --apk --aab --config src-tauri/tauri.mobile.conf.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: open-harness-android-arm64
+          path: |
+            src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+            src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
+
   publish:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [desktop, hermes-image]
+    needs: [desktop, hermes-image, android]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

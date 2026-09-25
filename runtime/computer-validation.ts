@@ -5,6 +5,7 @@ type Capabilities = MachineInfo['capabilities'];
 
 export function validateComputerTarget(profile: AgentProfile, capabilities: Capabilities, requiredSecrets: string[] = [], hasSecret: (name: string) => boolean = () => true) {
   const issues: string[] = [];
+  if (profile.computer.access === 'mobile' || capabilities.mobile) issues.push('Phones are companion dashboards in this release and cannot run agents. Choose a connected computer.');
   if (profile.computer.access === 'private' && !capabilities.container) issues.push('Container execution is unavailable. Install and start Docker, then retry the transfer.');
   if (profile.computer.access === 'direct' && !capabilities.direct) issues.push(capabilities.detail || 'The Hermes host runtime is unavailable. Finish direct-access setup, then retry the transfer.');
   if (profile.computer.desktop === 'existing' && !capabilities.desktop) issues.push('The existing desktop is unavailable. Sign in to a graphical session and grant the runner the requested desktop permissions.');

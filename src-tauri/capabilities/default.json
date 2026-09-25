@@ -2,13 +2,25 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "desktop",
   "description": "Permissions for the local Open Harness window and its managed Node sidecar.",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     {
       "identifier": "shell:allow-execute",
-      "allow": [{ "name": "node", "sidecar": true }]
+      "allow": [
+        {
+          "name": "node",
+          "sidecar": true
+        }
+      ]
     },
     "shell:allow-kill"
+  ],
+  "platforms": [
+    "linux",
+    "macOS",
+    "windows"
   ]
 }

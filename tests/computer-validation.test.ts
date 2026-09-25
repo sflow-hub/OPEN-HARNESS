@@ -23,3 +23,12 @@ test('no-desktop runs cannot dispatch the computer-use tool', () => {
   assert.deepEqual(runToolGrants(selected), ['terminal']);
   assert.deepEqual(runToolGrants({ ...selected, computer: { ...selected.computer, desktop: 'virtual' } }), ['computer_use', 'terminal']);
 });
+
+test('phones are companion dashboards and cannot become execution targets', () => {
+  const phoneCapabilities = { container: false, direct: false, desktop: false, virtualDesktop: false, mobile: true };
+  const onPhone = { ...profile, computer: { ...profile.computer, access: 'mobile' as const, folders: [], desktop: 'none' as const } };
+
+  assert.throws(() => validateComputerTarget(onPhone, phoneCapabilities), /companion dashboards/);
+  assert.throws(() => validateComputerTarget(onPhone, capabilities), /companion dashboards/);
+  assert.throws(() => validateComputerTarget(profile, phoneCapabilities), /companion dashboards/);
+});

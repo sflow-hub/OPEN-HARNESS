@@ -29,7 +29,9 @@ export function validateProfile(value: AgentProfile): AgentProfile {
     return { id: short(c.id, 'Connection ID', 100, true), name: c.name, command: short(c.command, 'Executable', 300, true), args: c.args, secretRef: c.secretRef || '', enabled: c.enabled };
   });
   const computerInput = (value.computer || DEFAULT_COMPUTER) as ComputerConfig;
-  if (!['private', 'folders', 'direct'].includes(computerInput.access) || !['none', 'virtual', 'existing'].includes(computerInput.desktop)) throw new ProfileError('Choose a valid computer access and desktop mode.');
+  if (!['private', 'folders', 'direct'].includes(computerInput.access) || !['none', 'virtual', 'existing'].includes(computerInput.desktop)) throw new ProfileError('Choose Private workspace, Selected folders, or Direct computer access. Phones are companion dashboards and cannot run agents.');
+  // A phone has no container to isolate and no desktop to drive. Rejecting these rather than
+  // silently dropping them keeps the saved profile an honest record of what was asked for.
   if (computerInput.desktop === 'existing' && computerInput.access !== 'direct') throw new ProfileError('Existing desktop control requires direct computer access.');
   if (computerInput.desktop === 'virtual' && computerInput.access === 'direct') throw new ProfileError('A private virtual desktop requires an isolated workspace.');
   const resources = computerInput.resources || DEFAULT_COMPUTER.resources;

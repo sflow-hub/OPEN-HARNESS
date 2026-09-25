@@ -26,9 +26,9 @@ export const hostedTaskSchema = [
 export const hostedRuntimeSchema = [
   `CREATE TABLE IF NOT EXISTS agent_profiles (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, json TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS workspace_settings (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, json TEXT NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL, arch TEXT NOT NULL, status TEXT NOT NULL, last_seen_at TEXT, reserved_agent_id TEXT, capabilities_json TEXT NOT NULL, credential_hash TEXT, revoked_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, encryption_public_key TEXT)`,
+  `CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL, arch TEXT NOT NULL, status TEXT NOT NULL, last_seen_at TEXT, reserved_agent_id TEXT, capabilities_json TEXT NOT NULL, credential_hash TEXT, revoked_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, encryption_public_key TEXT, kind TEXT NOT NULL DEFAULT 'runner')`,
   `CREATE TABLE IF NOT EXISTS machine_secrets (machine_id TEXT NOT NULL, name TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(machine_id,name))`,
-  `CREATE TABLE IF NOT EXISTS machine_pairings (id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL, platform TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS machine_pairings (id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL, platform TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'runner')`,
   `CREATE TABLE IF NOT EXISTS runner_commands (id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, agent_id TEXT, kind TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, leased_at TEXT, finished_at TEXT, result_json TEXT)`,
   `CREATE INDEX IF NOT EXISTS idx_hosted_runner_commands_machine_state ON runner_commands(machine_id,state,created_at)`,
   `CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, conversation_id TEXT NOT NULL, prompt TEXT NOT NULL, state TEXT NOT NULL, machine_id TEXT NOT NULL, command_id TEXT, result TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,

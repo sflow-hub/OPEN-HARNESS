@@ -1,0 +1,101 @@
+import { test, expect, type APIRequestContext } from '@playwright/test';
+import { initialWorkspace } from '../../lib/types';
+
+// The phone app is the same dashboard behind a pairing screen. Playwright cannot run the
+// Android build, but lib/platform.ts has a forced-mobile mode for exactly this: the pairing
+// screen, the stored device credential, and the hub-backed dashboard all run in Chromium
+// with their web fallbacks, against the same mock coordinator the desktop suite uses. What
+// this cannot cover is the Tauri side (Stronghold, the native HTTP client, the QR scanner);
+// ANDROID.md describes the emulator run for that.
+const control = `http://127.0.0.1:${process.env.OPEN_HARNESS_TEST_PORT || 4317}`;
+
+async function operator(request: APIRequestContext) {
+  const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  return { Authorization: `Bearer ${token}` };
+}
+
+test.describe('phone companion', () => {
+  test.skip(({ isMobile }) => !isMobile, 'the pairing screen only exists on phones');
+
+  test.beforeEach(async ({ request, page }) => {
+    const headers = await operator(request);
+    // The hub already has agents; the phone must show these, not its own starter set.
+    await request.post(control + '/v1/agents/sync', { headers, data: { agents: initialWorkspace.agents } });
+    await page.addInitScript(() => {
+      localStorage.setItem('open-harness.onboarding.v1', 'done');
+      localStorage.setItem('open-harness.force-mobile', '1');
+    });
+  });
+
+  test('pairs with the code from the computer, survives a relaunch, and disconnects from the phone', async ({ page, request }) => {
+    const headers = await operator(request);
+    // What the operator does on the computer: Agent settings → Computer → Add computer → Android.
+    const pairing = await (await request.post(control + '/v1/machines', { headers, data: { name: 'Test phone', platform: 'android', kind: 'device', coordinatorUrl: control } })).json();
+    expect(pairing.kind).toBe('device');
+    expect(pairing.code).toMatch(/^[0-9A-Z]{12}$/);
+    expect(pairing.pairingUri).toContain('openharness://pair?');
+
+    await page.goto('/');
+    await expect(page.getByRole('heading', { name: 'Connect this phone' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Connect' })).toBeDisabled();
+
+    // A wrong code is explained in words, and the form stays put.
+    await page.getByRole('textbox', { name: /^Hub address/ }).fill(pairing.hubUrl);
+    await page.getByLabel('Pairing code', { exact: true }).fill('AAAA AAAA AAAA');
+    await page.getByRole('button', { name: 'Connect' }).click();
+    await expect(page.getByRole('alert')).toContainText(/expired or was already used/);
+
+    // Typed the way a person types it: grouped, and in whatever case the keyboard gave.
+    await page.getByLabel('Pairing code', { exact: true }).fill(pairing.code.replace(/(.{4})/g, '$1 ').trim().toLowerCase());
+    // The phone names itself; the name the operator typed on the computer is only a label
+    // for the pairing code until the device reports what it actually is.
+    await page.getByText('This phone’s name and hosted access').click();
+    await page.getByLabel('Phone name').fill('Test phone');
+    await page.getByRole('button', { name: 'Connect' }).click();
+
+    await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible({ timeout: 10_000 });
+    const { machines } = await (await request.get(control + '/v1/machines', { headers })).json();
+    const phone = machines.find((machine: { kind: string }) => machine.kind === 'device');
+    expect(phone).toMatchObject({ name: 'Test phone', status: 'online' });
+    expect(['ios', 'android']).toContain(phone.platform);
+    // Companion only: the coordinator must never treat this row as somewhere agents can run.
+    expect(phone.capabilities).toMatchObject({ mobile: true, container: false, direct: false });
+
+    // The credential lives on the device, so a relaunch goes straight to the dashboard.
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('heading', { name: 'Connect this phone' })).toBeHidden();
+
+    await page.getByRole('button', { name: 'Open navigation' }).click();
+    await page.locator('aside.sidebar').getByRole('button', { name: /^Settings/ }).click();
+    const summary = page.locator('.hub-summary');
+    await expect(summary).toContainText('Connected to your hub');
+    await expect(summary).toContainText(pairing.hubUrl);
+    await expect(summary).toContainText('Paired as Test phone');
+    await page.getByRole('button', { name: 'Disconnect this phone' }).click();
+
+    // Back to the pairing screen here, and the credential is dead on the hub too.
+    await expect(page.getByRole('heading', { name: 'Connect this phone' })).toBeVisible();
+    const after = await (await request.get(control + '/v1/machines', { headers })).json();
+    expect(after.machines.some((machine: { kind: string }) => machine.kind === 'device')).toBe(false);
+  });
+
+  test('a revoked phone is sent back to pairing instead of showing a broken dashboard', async ({ page, request }) => {
+    const headers = await operator(request);
+    const pairing = await (await request.post(control + '/v1/machines', { headers, data: { name: 'Old phone', platform: 'android', kind: 'device', coordinatorUrl: control } })).json();
+    await page.goto('/');
+    await page.getByRole('textbox', { name: /^Hub address/ }).fill(pairing.hubUrl);
+    await page.getByLabel('Pairing code', { exact: true }).fill(pairing.code);
+    await page.getByRole('button', { name: 'Connect' }).click();
+    await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible({ timeout: 10_000 });
+
+    // The operator revokes it from the computer while the phone is closed.
+    const { machines } = await (await request.get(control + '/v1/machines', { headers })).json();
+    const phone = machines.find((machine: { kind: string }) => machine.kind === 'device');
+    expect(phone).toBeTruthy();
+    await request.post(control + `/v1/machines/${phone.id}/revoke`, { headers });
+
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'Connect this phone' })).toBeVisible({ timeout: 10_000 });
+  });
+});

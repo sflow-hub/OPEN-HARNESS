@@ -55,3 +55,28 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
+
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK and NDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.3.13750724"
+      - run: npm ci
+      - run: npx tauri android init --ci --config src-tauri/tauri.mobile.conf.json
+      - run: npx tauri android build --ci --debug --target aarch64 --apk --config src-tauri/tauri.mobile.conf.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: open-harness-android-debug
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error

@@ -12,6 +12,7 @@ maturity and what's outstanding before a 1.0, not a scheduled feature list.
 | Direct computer access | Least mature. Deliberately trades container isolation for host-native capability (screen, accessibility, an existing desktop session). Has the least real-world testing of the three modes — see [`runtime/VERIFICATION.md`](runtime/VERIFICATION.md). |
 | Self-hosted Docker Compose stack | Functional; hardening (container capabilities, healthchecks) is ongoing. |
 | Desktop app (Windows/macOS/Linux) | Functional; signed-release infrastructure exists but depends on release secrets being provisioned per platform. |
+| Android companion app | Functional against a self-hosted or desktop coordinator: pairing, run following, tasks, approvals, and native notifications, covered by the Playwright `mobile` project in forced-mobile mode. Verified on the emulator ([ANDROID.md](ANDROID.md)); not yet on a physical device or against a real Hermes run. No iOS build exists (needs macOS). |
 | Hosted "Open Harness Site" (Cloudflare/D1) | Earliest-stage surface. Currently authenticates via a single bearer control token, not per-user login — not yet suited to serving multiple independent operators. |
 
 ## Before 1.0

@@ -14,6 +14,7 @@ This is independent software and is not affiliated with xAI or Nous Research.
 - Two concurrent top-level runs and four total executions, including delegated subagents
 - Durable routines, approvals, memories, skills, sessions, handoffs, and crash recovery
 - Persistent project boards with editable stages, agent-owned tasks, collaborators, filters, checklists, comments, and linked run history
+- An Android companion for sending tasks, following runs, and handling approvals; execution remains on a connected computer
 
 The host home directory, Docker socket, and other agents' private directories are not mounted. Containers provide the filesystem boundary; Hermes execution guards still apply inside it.
 
@@ -67,11 +68,15 @@ The installed user service owns background work. The UI and control service bind
 
 Configure xAI, OpenAI, OpenRouter, or another model in **Settings**. The desktop coordinator uses Windows account encryption, macOS Keychain, or the Linux password vault when available. Headless servers fall back to `.open-harness/secrets.json` with mode `0600`. Credentials are written only to managed profiles and are never returned to the browser, diagnostics, or normal exports. Agents inherit workspace model settings unless their profile overrides them.
 
+**Save and test** authenticates, confirms the exact model is available, and sends a minimal live completion before changing the workspace default. A failed test leaves the previous model active. Mock mode explicitly refuses this check and never reports a provider as ready.
+
 The **Try a guided run** action remains an explicitly scripted demonstration. Normal tasks always enter the persistent Hermes queue; there is no silent fallback to the old four-tool loop.
 
 ## Agent settings
 
 Use the settings icon on any agent card, or **Agent settings** in a conversation header. The tabs cover identity, computer assignment, model selection, custom instructions, and expandable tool/connection switches. The panel fills the screen on phones and supports keyboard navigation.
+
+The Android app is a companion dashboard, not an agent host. Pairing gives it a revocable device credential for tasks, run status, and approvals; the credential is stored in a native Stronghold encrypted vault and is rejected by runner command endpoints. See [ANDROID.md](ANDROID.md) for builds and release signing.
 
 ### Connect another computer
 
@@ -103,7 +108,7 @@ Independent agents may share a runner up to its configured capacity. Existing-de
 
 Profiles are authoritative in SQLite. Each save creates a revision; active work keeps its original revision, and queued work snapshots the latest profile when it starts. Workspace model changes affect inheriting agents only. Disabling instructions preserves their text. Failed saves keep your draft, and conflicting saves ask you to reload the winning revision.
 
-Tool choices compile into an explicit allowlist, including an empty list when everything is off. Newly discovered tools start disabled. The managed Hermes extension filters model-visible tools and rejects disallowed dispatch, including tools called from code and temporary subagents. Named handoffs use the recipient's profile. Terminal can still run programs that read files or access the network; switches do not add filesystem or network isolation.
+Tool choices compile into an explicit allowlist. **Disable all tools** leaves only the mandatory task-board coordination tool; newly discovered tools start disabled. The managed Hermes extension filters model-visible tools and rejects disallowed dispatch, including tools called from code and temporary subagents. Named handoffs use the recipient's profile. Terminal can still run programs that read files or access the network; switches do not add filesystem or network isolation.
 
 MCP connections use inline configuration and a real initialize/tools-list handshake inside the agent container. Cached inventories are labeled unavailable until rechecked. The model picker uses Hermes's catalog; custom model IDs remain editable if the runtime is unavailable. Saved credentials are references, and only selected secrets are placed in the next run's environment.
 
@@ -164,6 +169,45 @@ npm run test:browser
 The browser suite starts an isolated mock control service and the production app, and tests desktop and mobile editors. To use an existing Chromium install, set `OPEN_HARNESS_TEST_CHROMIUM` to its executable path. Python 3 is used for the policy middleware tests.
 
 The deterministic suite sets `OPEN_HARNESS_MOCK=1` and uses no paid inference. Full acceptance additionally requires a running Docker daemon and model credentials configured in Settings. Verify real code repair, Chromium navigation and screenshots, cross-agent isolation, named handoffs, memory/skill reuse, background routines, steering, process-tree stopping, and approval behavior before relying on a new Hermes release or provider model.
+
+## Troubleshooting
+
+**`npm run dev` fails immediately.** Check your Node version first: the coordinator
+imports `node:sqlite`, which needs Node 22.13 or newer. `nvm use` in this checkout
+picks up `.nvmrc`. The `predev` guard reports this before anything else runs.
+
+**Nothing in `.env` seems to apply.** `npm run dev` and `npm run harness:serve`
+load `.env` if it is present. Other entry points do not — export the variables in
+your shell, as shown under [Self-host with Docker Compose](#self-host-with-docker-compose).
+
+**"Port 4317 is already in use."** Another coordinator is running. Stop it, or set
+`OPEN_HARNESS_PORT` to a free port. `npm run harness -- doctor` reports whether a
+coordinator is actually responding, as opposed to merely having state on disk.
+
+**Check the whole setup at once.** `npm run harness -- doctor` verifies the Node
+version, the port, Docker, the pinned Hermes image and desktop capability, and exits
+non-zero if anything needs attention. Add `--json` to consume it from a script.
+
+**An agent failed and the message is not enough.** The last lines the agent wrote to
+stderr are included in the run's error. For more, `npm run harness -- doctor --json`
+and the in-app **Download diagnostics** button (Workspace settings) capture the
+coordinator's view. On Linux the service logs to the journal:
+`journalctl --user -u open-harness.service -f`.
+
+**A task is queued and never starts.** The coordinator runs at most one task per
+agent, two you started yourself, and four counting anything agents delegate. A run
+paused on an unanswered approval still holds its slot — answer or stop it from the
+conversation it belongs to.
+
+**Docker is already running and you want a faster restart.** Use `npm run dev:fast`,
+which skips the attempt to start Docker but still uses the real Hermes runtime and your
+configured model provider. Use `npm run dev:mock` only for deterministic UI and service
+testing; mock mode never contacts a model provider or performs real agent work.
+
+**Containers keep coming back after you quit.** Agent containers run with
+`--restart unless-stopped`. Quit from the tray item or stop the coordinator with
+Ctrl-C so it can stop them; if some were orphaned by an earlier hard kill, remove them
+with `docker rm -f $(docker ps -aq --filter name=open-harness-)`.
 
 ## License and attribution
 

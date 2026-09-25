@@ -4,7 +4,7 @@ Verified locally on September 14, 2026, using Node 22 and the pinned Hermes sour
 
 - `npm test`: 32 passing tests, including persistent profile revisions, independent model overrides, inheritance, stale saves, next-task snapshots, explicit empty grants, credential separation, MCP inventory retention, stream completion, provider errors, and scoped Unix coordination sockets. This total also includes the existing legacy-loop regression tests.
 - The Node suite invokes seven Python policy tests for allowed and denied dispatch, nested code-tool dispatch, model schema filtering, forced disabled choices, and fail-closed empty/missing policy behavior.
-- Playwright: 14 passing Chromium tests across desktop and mobile, covering all four editor tabs, Save/Cancel, prompt switches, individual/group/all-off tools, inline MCP configuration, failed-save retry, reload persistence, stale-save recovery, keyboard navigation, and visible mobile save controls.
+- Playwright: 20 passing Chromium tests across desktop and mobile, covering onboarding mock safety, all editor tabs, Save/Cancel, prompt switches, individual/group/all-off tools, computer pairing, inline MCP configuration, failed-save retry, reload persistence, stale-save recovery, tasks, keyboard navigation, and visible mobile save controls.
 - `npm run lint`, `npm run typecheck`, `npm run build`, and `git diff --check`: passed.
 
 The deterministic control tests and browser tests use an explicitly labeled mock runtime and no paid inference. They do not establish live Hermes acceptance.

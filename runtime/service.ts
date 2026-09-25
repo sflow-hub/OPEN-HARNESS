@@ -40,14 +40,27 @@ const maxTaskQueue = Math.max(1, Number(process.env.MAX_TASK_QUEUE || 100));
 const maxTaskRuns = Math.max(1, Number(process.env.MAX_TASK_RUNS || 3));
 
 function json(res: ServerResponse, status: number, body: unknown) {
-  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": allowedOrigin(res.req.headers.origin), "Vary": "Origin", "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" });
+  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": allowedOrigin(res.req.headers.origin), "Vary": "Origin", "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Open-Harness-Machine", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" });
   res.end(JSON.stringify(body));
 }
 function raw(res: ServerResponse, status: number, contentType: string, value: string | Buffer) {
   res.writeHead(status, { 'Content-Type': contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
   res.end(value);
 }
-function allowedOrigin(origin?: string) { return origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ? origin : "http://localhost:3000"; }
+async function providerFailure(response: Response) {
+  try {
+    const value = await response.json() as { error?: string | { message?: string }; message?: string };
+    const detail = typeof value.error === 'string' ? value.error : value.error?.message || value.message;
+    if (detail) return String(detail).trim().slice(0, 500);
+  } catch { /* Some providers return an empty or non-JSON error response. */ }
+  const messages: Record<number,string> = { 401: 'The API key was rejected.', 402: 'The provider account needs credits.', 403: 'The provider denied access.', 404: 'The model server address was not found.', 429: 'The provider rate limit was reached. Try again shortly.' };
+  return messages[response.status] || `The provider returned HTTP ${response.status}.`;
+}
+// The Tauri mobile webview serves the dashboard from tauri://localhost. Its native HTTP
+// client sends no Origin at all, so this allowance is belt and braces for the cases where
+// the webview's own fetch is used instead.
+const LOCAL_ORIGIN = /^(https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?|tauri:\/\/localhost|https?:\/\/tauri\.localhost)$/;
+function allowedOrigin(origin?: string) { return origin && LOCAL_ORIGIN.test(origin) ? origin : "http://localhost:3000"; }
 // A DNS-rebinding page reaches this service from 127.0.0.1 and sends no Origin header,
 // because from the browser's point of view the request is same-origin. The one thing it
 // cannot forge is the Host header, which still carries the attacker's own name.
@@ -56,17 +69,34 @@ async function body(req: IncomingMessage) {
   let text = ""; for await (const chunk of req) { text += chunk; if (text.length > 5_000_000) throw new Error("Request too large."); }
   return text ? JSON.parse(text) : {};
 }
-function authenticated(req: IncomingMessage) { return req.headers.authorization === `Bearer ${secrets.token}`; }
 function runnerIdentity(req: IncomingMessage) {
   const machineId = String(req.headers['x-open-harness-machine'] || ''), token = String(req.headers.authorization || '').replace(/^Bearer /, '');
-  return machineId && machines.authenticate(machineId, token) ? machineId : null;
+  return machineId && machines.authenticate(machineId, token, 'runner') ? machineId : null;
 }
+// A phone is a companion dashboard only. Its credential reaches dashboard routes that a
+// computer runner credential must not, and runnerIdentity rejects it for command polling.
+function deviceIdentity(req: IncomingMessage) {
+  const machineId = String(req.headers['x-open-harness-machine'] || ''), token = String(req.headers.authorization || '').replace(/^Bearer /, '');
+  return machineId && machines.authenticate(machineId, token, 'device') ? machineId : null;
+}
+function authenticated(req: IncomingMessage) { return req.headers.authorization === `Bearer ${secrets.token}` || Boolean(deviceIdentity(req)); }
 function agentToken(agentId: string) { return createHmac("sha256", secrets.token).update(`agent:${agentId}`).digest("hex"); }
 function authenticatedAgent(req: IncomingMessage) {
   const id = String(req.headers["x-open-harness-agent"] || ""), supplied = String(req.headers.authorization || "").replace(/^Bearer /, ""), expected = agentToken(id);
   return Boolean(id && supplied.length === expected.length && timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) ? id : null;
 }
+// Computer runners are dispatchable only while connected. The suspended state remains for
+// companion presence, but canAssign rejects companions before this check.
+function reachable(machine: { status: string }) { return machine.status === 'online' || machine.status === 'suspended'; }
 function event(runId: string, type: string, payload: unknown) { return store.appendEvent(runId, type, payload); }
+// A command whose outcome nobody can vouch for leaves its run in limbo. Both the heartbeat
+// reconciliation and legacy stale-device cleanup end here so a run is retired exactly once.
+function interruptRunForCommand(command: { payload?: unknown }, error: string) {
+  const run = store.getRun(String((command.payload as { runId?: unknown } | undefined)?.runId || ''));
+  if (!run || ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.state)) return;
+  store.setRun(run.id, { state: 'interrupted', error });
+  event(run.id, 'run.interrupted', { error });
+}
 function profileResponse(profile: AgentProfile) {
   const live = store.listRuns().find(run => run.agent_id === profile.id && ["running", "waiting_approval", "waiting_input"].includes(run.state));
   const snapshot = live ? profiles.runSnapshot(live.id) : null;
@@ -77,11 +107,11 @@ function selectedSecrets(profile: AgentProfile, effective: ReturnType<Profiles['
   const names = new Set([effective.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean));
   const available = secrets.environment(); return Object.fromEntries([...names].filter(name => available[name]).map(name => [name, available[name]]));
 }
-async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) { const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input, secrets: selectedSecrets(profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
+async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) { const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(machine.status === 'suspended' ? `${machine.name} is asleep. Open Open Harness on it, then check this setting again.` : `${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input, secrets: selectedSecrets(profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
 
 async function executeRemote(run: RunRow, snapshot: AgentProfile & { effectiveModel: ReturnType<Profiles['effective']> }) {
   const machine = machines.canAssign(snapshot.computer.machineId, run.agent_id);
-  if (machine.status !== 'online') throw new Error(`${machine.name} is offline. This task will remain queued until its runner reconnects.`);
+  if (!reachable(machine)) throw new Error(`${machine.name} is offline. This task will remain queued until its runner reconnects.`);
   const command = machines.enqueue(machine.id, run.agent_id, 'run', { runId: run.id, prompt: run.prompt, snapshot, secrets: selectedSecrets(snapshot, snapshot.effectiveModel), coordinationToken: agentToken(run.agent_id) });
   remoteActive.set(run.id, { machineId: machine.id, commandId: command.id });
   event(run.id, 'runner.dispatched', { commandId: command.id, machineId: machine.id, machineName: machine.name });
@@ -214,7 +244,7 @@ async function pump() {
         (!tasks.isTaskRun(candidate.id) || tasks.activeRunCount() < maxTaskRuns) &&
         (candidate.depth > 0 || store.activeTopLevelCount() < 2) && (() => {
           const profile = profiles.get(candidate.agent_id); if (!profile) return true;
-          try { if (machines.canAssign(profile.computer.machineId, candidate.agent_id).status !== 'online') return false; } catch { return false; }
+          try { if (!reachable(machines.canAssign(profile.computer.machineId, candidate.agent_id))) return false; } catch { return false; }
           const occupants = store.listRuns().filter(run => ['running','waiting_approval','waiting_input'].includes(run.state)).map(run => profiles.runSnapshot(run.id) || profiles.get(run.agent_id)).filter((other): other is AgentProfile => Boolean(other && other.computer.machineId === profile.computer.machineId));
           if (occupants.length >= profile.computer.resources.concurrency) return false;
           return profile.computer.desktop !== 'existing' || occupants.every(other => other.computer.desktop !== 'existing');
@@ -303,11 +333,20 @@ function safeFile(dir: string, name: string) { if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]
 
 const server = createServer(async (req, res) => {
   const origin = req.headers.origin;
-  if (origin && !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return json(res, 403, { error: "Open Harness accepts local browser clients only." });
-  if (req.method === "OPTIONS") { res.writeHead(204, { "Access-Control-Allow-Origin": allowedOrigin(origin), "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" }); return res.end(); }
+  if (origin && !LOCAL_ORIGIN.test(origin)) return json(res, 403, { error: "Open Harness accepts local browser clients only." });
+  if (req.method === "OPTIONS") { res.writeHead(204, { "Access-Control-Allow-Origin": allowedOrigin(origin), "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Open-Harness-Machine", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" }); return res.end(); }
   const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
   try {
     if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); if (!loopbackHost(req.headers.host)) return json(res, 403, { error: 'Dashboard bootstrap requires a loopback address. Open Open Harness at http://localhost:3000.' }); return json(res, 200, { token: secrets.token, runtime: await dockerStatusCached(), version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } }); }
+    // Phones never receive the master token. They already hold a revocable per-device
+    // credential, so this returns the same status shape with the token field left empty.
+    if (req.method === 'GET' && url.pathname === '/v1/device/session') {
+      const device = deviceIdentity(req);
+      if (!device) return json(res, 401, { error: 'Pair this phone again to reconnect it.' });
+      machines.heartbeat(device, {});
+      const runtime = await dockerStatusCached();
+      return json(res, 200, { token: '', machine: machines.get(device), runtime: { ...runtime, message: runtime.available ? 'This phone is a companion dashboard. Agents run on the connected coordinator.' : runtime.message }, version: "0.3.0", hermes: { release: "v2026.9.11", commit: "939e45c91d751fadd94dcd1b873ac3cb44846213" } });
+    }
     if (req.method === 'GET' && (url.pathname === '/v1/install/runner.sh' || url.pathname === '/v1/install/runner.ps1')) {
       const name = url.pathname.endsWith('.ps1') ? 'install-runner.ps1' : 'install-runner.sh';
       return raw(res, 200, name.endsWith('.ps1') ? 'text/plain; charset=utf-8' : 'text/x-shellscript; charset=utf-8', readFileSync(join(import.meta.dirname, 'installers', name)));
@@ -323,7 +362,12 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/runner/pair') return json(res, 201, machines.pair(await body(req)));
     const runner = url.pathname.startsWith('/v1/runner/') ? runnerIdentity(req) : null;
     if (url.pathname.startsWith('/v1/runner/') && !runner) return json(res, 401, { error: 'Invalid or revoked runner credential.' });
-    if (runner && req.method === 'POST' && url.pathname === '/v1/runner/heartbeat') { const input = await body(req), result = machines.heartbeat(runner, input); for (const command of machines.reconcileLeases(runner, Array.isArray(input.activeCommandIds) ? input.activeCommandIds.map(String) : [])) { const run = store.getRun(String((command as any).payload?.runId || '')); if (run && !['completed','failed','cancelled','interrupted'].includes(run.state)) { const error = 'Runner restarted after accepting this work. Completed events were preserved and the task was not replayed.'; store.setRun(run.id, { state: 'interrupted', error }); event(run.id, 'run.interrupted', { error }); } } void pump(); return json(res, 200, result); }
+    if (runner && req.method === 'POST' && url.pathname === '/v1/runner/heartbeat') {
+      const input = await body(req), result = machines.heartbeat(runner, input);
+      const activeCommandIds = Array.isArray(input.activeCommandIds) ? input.activeCommandIds.map(String) : [];
+      for (const command of machines.reconcileLeases(runner, activeCommandIds)) interruptRunForCommand(command, 'Runner restarted after accepting this work. Completed events were preserved and the task was not replayed.');
+      void pump(); return json(res, 200, result);
+    }
     if (runner && req.method === 'GET' && url.pathname === '/v1/runner/commands') return json(res, 200, { commands: machines.poll(runner) });
     const runnerCommand = url.pathname.match(/^\/v1\/runner\/commands\/([^/]+)\/(events|complete)$/);
     if (runner && runnerCommand && req.method === 'POST') {
@@ -348,17 +392,28 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action)); }
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/model-test') {
       const input = await body(req), model = validateModel(input.model);
-      if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { ok: true, message: 'Model connection is ready.' });
+      if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, {
+        ok: false,
+        message: 'Mock mode is active, so no model provider was contacted. Restart with npm run dev or npm run dev:fast to test this API key and run real tasks.',
+      });
       if (model.credentialRef && !secrets.has(model.credentialRef)) return json(res, 200, { ok: false, message: 'Save your API key first.' });
       const endpoints: Record<string,string> = { xai: 'https://api.x.ai/v1', openrouter: 'https://openrouter.ai/api/v1', openai: 'https://api.openai.com/v1' };
       const baseUrl = (model.baseUrl || endpoints[model.provider] || '').replace(/\/$/, '');
       if (!baseUrl) return json(res, 200, { ok: false, message: 'Enter the address of your model server.' });
       const key = model.credentialRef ? secrets.environment()[model.credentialRef] : '';
       try {
-        const response = await fetch(`${baseUrl}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(15_000), redirect: 'error' });
-        if (response.ok) return json(res, 200, { ok: true, message: 'Model connection is ready.' });
-        const messages: Record<number,string> = { 401: 'The API key was rejected.', 403: 'The provider denied access.', 404: 'The model server address was not found.', 429: 'The provider rate limit was reached. Try again shortly.' };
-        return json(res, 200, { ok: false, message: messages[response.status] || `The provider returned HTTP ${response.status}.` });
+        const headers = { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) };
+        const catalogResponse = await fetch(`${baseUrl}/models`, { headers, signal: AbortSignal.timeout(15_000), redirect: 'error' });
+        if (!catalogResponse.ok) return json(res, 200, { ok: false, message: await providerFailure(catalogResponse) });
+        const catalog = await catalogResponse.json().catch(() => null) as { data?: Array<{ id?: string }> } | null;
+        const modelIds = Array.isArray(catalog?.data) ? catalog.data.map(item => String(item.id || '')).filter(Boolean) : [];
+        if (modelIds.length && !modelIds.includes(model.model)) return json(res, 200, { ok: false, message: `The provider connection works, but model ${model.model} is not available to this API key.` });
+        const completion = await fetch(`${baseUrl}/chat/completions`, {
+          method: 'POST', headers, signal: AbortSignal.timeout(30_000), redirect: 'error',
+          body: JSON.stringify({ model: model.model, messages: [{ role: 'user', content: 'Reply with OK.' }], max_tokens: 1, stream: false }),
+        });
+        if (!completion.ok) return json(res, 200, { ok: false, message: await providerFailure(completion) });
+        return json(res, 200, { ok: true, message: 'Provider authenticated and the selected model accepted a live test request.' });
       } catch (error) { return json(res, 200, { ok: false, message: error instanceof Error ? error.message : 'Could not reach the model provider.' }); }
     }
     if (url.pathname === '/v1/machines') {
@@ -368,7 +423,11 @@ const server = createServer(async (req, res) => {
         let target: URL; try { target = new URL(publicUrl); } catch { return json(res, 400, { error: 'Enter a valid public coordinator address.' }); }
         const loopback = ['localhost', '127.0.0.1', '::1'].includes(target.hostname);
         if (target.protocol !== 'https:' && !loopback) return json(res, 400, { error: 'The public coordinator address must use HTTPS.' });
-        if (loopback && process.env.OPEN_HARNESS_MOCK !== '1') return json(res, 409, { error: 'This address only works on this computer. Enter the HTTPS address that the new computer can reach.' });
+        // An emulator reaches the host over adb reverse, so loopback is a legitimate hub
+        // address while developing. It stays blocked otherwise: a runner on another machine
+        // could never reach it, and the error explains that rather than failing later.
+        const loopbackPairingAllowed = process.env.OPEN_HARNESS_MOCK === '1' || process.env.OPEN_HARNESS_ALLOW_LOOPBACK_PAIRING === '1';
+        if (loopback && !loopbackPairingAllowed) return json(res, 409, { error: 'This address only works on this computer. Enter the HTTPS address that the new computer can reach.' });
         return json(res, 201, machines.createPairing(input, publicUrl));
       }
     }
@@ -419,8 +478,21 @@ const server = createServer(async (req, res) => {
       if (action === 'profile' && req.method === 'PUT') {
         const input = await body(req); if (input.id !== id) throw new ProfileError('Profile ID does not match the selected agent.');
         const current = profiles.get(id), desired = validateProfile(input); if (machines.transferring(id)) throw new MachineError('This agent is already transferring. Wait for it to finish before editing its computer.', 409); machines.canAssign(desired.computer.machineId, id);
-        const moving = Boolean(current && current.computer.machineId !== desired.computer.machineId), saved = profiles.save(moving ? { ...desired, computer: current!.computer } : desired); ensureProfileDirs(id);
-        if (moving) { const pending = { ...desired, revision: saved.revision }; machines.reserve(desired.computer.machineId, id, desired.computer.reserveMachine); void performTransfer(machines.transfer(id, current!.computer.machineId, desired.computer.machineId, pending)); }
+        const moving = Boolean(current && current.computer.machineId !== desired.computer.machineId);
+        // Changing an agent's computer normally starts a file transfer so its memory and
+        // skills travel with it. Phones cannot take part in that yet. An agent that has not
+        // written anything has nothing to carry, so it can simply be reassigned; one that has
+        // would silently lose its work, so that is refused with a reason.
+        const phoneMove = moving && (machines.get(desired.computer.machineId).capabilities.mobile || machines.get(current!.computer.machineId).capabilities.mobile);
+        if (phoneMove) {
+          const onThisComputer = current!.computer.machineId === 'local';
+          const carries = onThisComputer ? exportAgentFiles(root, id).files.length > 0 : true;
+          if (carries) throw new MachineError('This agent has saved files that cannot move to or from a phone yet. Create a new agent and choose the phone as its computer.', 409);
+        }
+        const transferring = moving && !phoneMove;
+        const saved = profiles.save(transferring ? { ...desired, computer: current!.computer } : desired); ensureProfileDirs(id);
+        if (transferring) { const pending = { ...desired, revision: saved.revision }; machines.reserve(desired.computer.machineId, id, desired.computer.reserveMachine); void performTransfer(machines.transfer(id, current!.computer.machineId, desired.computer.machineId, pending)); }
+        else if (phoneMove) machines.reserve(desired.computer.machineId, id, desired.computer.reserveMachine);
         else machines.reserve(saved.computer.machineId, id, saved.computer.reserveMachine);
         return json(res, 200, profileResponse(saved));
       }
@@ -562,6 +634,38 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/v1/files") { const { scope, dir } = workspaceDir(url); mkdirSync(dir, { recursive: true }); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = safeFile(dir, name); if (!existsSync(target)) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readFileSync(target, encoding), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(dir), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = safeFile(dir, String(input.name || "")); writeFileSync(target, content, { encoding, mode: 0o600 }); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = safeFile(dir, String(url.searchParams.get("name") || "")); if (existsSync(target)) unlinkSync(target); return json(res, 200, { ok: true }); } }
     if (req.method === "GET" && url.pathname === "/v1/routines") return json(res, 200, { routines: store.db.prepare("SELECT * FROM schedules ORDER BY created_at DESC").all() });
     if (req.method === "POST" && url.pathname === "/v1/routines") { const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)); const next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, input.agentId, input.name, input.prompt, minutes, input.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone, 1, next, stamp.toISOString(), stamp.toISOString()); return json(res, 201, { id, nextRunAt: next }); }
+    // A routine with a typo, a wrong agent, or a runaway interval could previously only
+    // be paused, never corrected or removed — so every mistake was permanent.
+    const routineItem = url.pathname.match(/^\/v1\/routines\/([^/]+)$/);
+    if (routineItem) {
+      const routine = store.db.prepare("SELECT * FROM schedules WHERE id=?").get(routineItem[1]) as any;
+      if (!routine) return json(res, 404, { error: "Routine not found." });
+      if (req.method === "DELETE") {
+        store.db.prepare("DELETE FROM schedule_runs WHERE schedule_id=?").run(routine.id);
+        store.db.prepare("DELETE FROM schedules WHERE id=?").run(routine.id);
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === "PUT") {
+        const input = await body(req), stamp = new Date().toISOString();
+        const name = input.name === undefined ? routine.name : String(input.name).trim().slice(0, 200);
+        const prompt = input.prompt === undefined ? routine.prompt : String(input.prompt).trim().slice(0, 20_000);
+        if (!name || !prompt) return json(res, 400, { error: "A routine needs a name and a task." });
+        const agentId = input.agentId === undefined ? routine.agent_id : String(input.agentId);
+        if (!profiles.list().some(profile => profile.id === agentId)) return json(res, 400, { error: "That agent no longer exists." });
+        // Clamped like the hosted route: an interval of 0 or a negative number would
+        // otherwise land as "every minute, forever".
+        const minutes = input.intervalMinutes === undefined
+          ? Number(routine.interval_minutes)
+          : Math.max(1, Math.min(525_600, Math.round(Number(input.intervalMinutes))));
+        if (!Number.isFinite(minutes)) return json(res, 400, { error: "Enter how often this should run, in minutes." });
+        // Re-base the next run so a shortened interval takes effect now rather than
+        // waiting out the old one.
+        const next = new Date(Date.now() + minutes * 60_000).toISOString();
+        store.db.prepare("UPDATE schedules SET agent_id=?,name=?,prompt=?,interval_minutes=?,next_run_at=?,updated_at=? WHERE id=?")
+          .run(agentId, name, prompt, minutes, next, stamp, routine.id);
+        return json(res, 200, { ...routine, agent_id: agentId, name, prompt, interval_minutes: minutes, next_run_at: next, updated_at: stamp });
+      }
+    }
     const routineMatch = url.pathname.match(/^\/v1\/routines\/([^/]+)\/(run|toggle|history)$/);
     if (routineMatch) {
       const routine = store.db.prepare("SELECT * FROM schedules WHERE id=?").get(routineMatch[1]) as any;
@@ -632,9 +736,25 @@ setInterval(() => {
   } catch (error) {
     console.error(`The routine scheduler skipped this tick: ${error instanceof Error ? error.message : "unknown error"}`);
   }
+  try {
+    // Clean up leases created by pre-MVP builds that briefly allowed phone execution.
+    for (const command of machines.sweepStaleLeases()) interruptRunForCommand(command, 'A legacy phone-hosted task stopped responding. It was not replayed because its outcome is uncertain.');
+  } catch (error) {
+    console.error(`The phone lease sweep skipped this tick: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
 }, 30_000).unref();
 
 const bind = process.env.OPEN_HARNESS_BIND || '127.0.0.1';
+server.on("error", error => {
+  // A bare EADDRINUSE here reaches the operator as a raw stack via uncaughtException,
+  // which buries the one fact that matters: something already holds the port.
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "EADDRINUSE") console.error(`Port ${port} on ${bind} is already in use. Another coordinator is probably running — stop it, or set OPEN_HARNESS_PORT to a free port.`);
+  else if (code === "EACCES") console.error(`Not allowed to bind ${bind}:${port}. Use a port above 1024, or set OPEN_HARNESS_PORT.`);
+  else if (code === "EADDRNOTAVAIL") console.error(`No interface on this machine has the address ${bind}. Check OPEN_HARNESS_BIND.`);
+  else console.error(`The coordinator could not listen on ${bind}:${port}: ${error.message}`);
+  process.exit(1);
+});
 server.listen(port, bind, () => console.log(`Open Harness coordinator listening on http://${bind}:${port}`));
 // Without these the coordinator exits silently when anything throws outside a request —
 // a timer callback, a detached promise — leaving no record of why the service stopped.
@@ -642,4 +762,44 @@ server.listen(port, bind, () => console.log(`Open Harness coordinator listening 
 // unable to tell that it happened is not.
 process.on("unhandledRejection", reason => console.error(`Unhandled rejection in the coordinator: ${reason instanceof Error ? reason.stack || reason.message : String(reason)}`));
 process.on("uncaughtException", error => { console.error(`The coordinator stopped on an unhandled error: ${error.stack || error.message}`); process.exit(1); });
-process.on("SIGTERM", async () => { for (const gateway of gateways.values()) await gateway.stop().catch(() => {}); for (const socket of coordinationSockets.values()) await socket.then(s => s.close()).catch(() => {}); server.close(); });
+// Agent containers run with --restart unless-stopped, so a coordinator that dies
+// without stopping them leaves containers that come back on every Docker start and
+// hold their CPU/memory reservations forever. SIGINT (Ctrl-C on `npm run harness:serve`)
+// has to clean up exactly like SIGTERM does; stopping gateways in parallel and under a
+// deadline keeps that cleanup from itself hanging on a wedged daemon.
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Open Harness coordinator stopping on ${signal}.`);
+  const deadline = setTimeout(() => { console.error("Shutdown took too long; exiting with agents possibly still running."); process.exit(1); }, 15_000);
+  deadline.unref();
+  server.close();
+  await Promise.allSettled([
+    ...[...gateways.values()].map(gateway => gateway.stop()),
+    ...[...coordinationSockets.values()].map(socket => socket.then(s => s.close())),
+  ]);
+  clearTimeout(deadline);
+  process.exit(0);
+}
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(signal, () => void shutdown(signal));
+// The desktop shell supervises this process through tauri-plugin-shell, whose only
+// stop primitive is SIGKILL — which the handlers above cannot catch, so quitting the
+// app would strand agent containers. It asks for a clean stop over stdin instead.
+// Gated on the env var so a coordinator started from a terminal never touches stdin.
+if (process.env.OPEN_HARNESS_STDIN_CONTROL === "1") {
+  let pending = "";
+  process.stdin.on("data", chunk => {
+    pending = (pending + String(chunk)).slice(-256);
+    let index = pending.indexOf("\n");
+    while (index >= 0) {
+      const line = pending.slice(0, index).trim();
+      pending = pending.slice(index + 1);
+      if (line === "shutdown") void shutdown("a shutdown request from the desktop app");
+      index = pending.indexOf("\n");
+    }
+  });
+  process.stdin.on("error", () => {});
+  // Never let an idle stdin pipe be the reason this process stays alive.
+  process.stdin.unref();
+}
