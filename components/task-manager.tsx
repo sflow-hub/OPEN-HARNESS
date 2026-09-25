@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CalendarDays, Check,
   CheckCircle2, ChevronDown, CircleAlert, Clock3, Copy, Filter, FolderKanban, GripVertical, LayoutDashboard,
@@ -126,10 +126,16 @@ export default function TaskManager({ agents, teams, client, onOpenRun }: { agen
 
   // The Projects view needs archived projects without forcing archived tasks into every
   // other view, so it widens the request alone; visibleBoards keeps them out elsewhere.
+  // Polling replaced the snapshot on every tick whether or not anything had changed, so the
+  // whole board re-rendered on a timer. Holding on to the previous object when the payload is
+  // identical is what stops a native picker being torn down while it is open.
+  const lastPayload = useRef("");
   const refresh = useCallback(async (quiet = false) => {
     try {
       const value = await client.request<TaskSnapshot>(`/v1/tasks?includeArchived=${filters.archived || showArchivedProjects ? "1" : "0"}`);
-      setSnapshot(value); setLoaded(true); setStale(false);
+      const serialized = JSON.stringify(value);
+      if (serialized !== lastPayload.current) { lastPayload.current = serialized; setSnapshot(value); }
+      setLoaded(true); setStale(false);
       setSelectedBoard(current => current === "all" || value.boards.some(board => board.id === current) ? current : "all");
       if (!quiet) setError("");
     } catch (cause) {
@@ -144,13 +150,20 @@ export default function TaskManager({ agents, teams, client, onOpenRun }: { agen
     try { const saved = JSON.parse(localStorage.getItem(PREF_KEY) || "{}"); if (TASK_VIEWS.includes(saved.taskView)) setTaskView(saved.taskView); if (typeof saved.selectedBoard === "string") setSelectedBoard(saved.selectedBoard); } catch {}
   }, []);
   useEffect(() => { localStorage.setItem(PREF_KEY, JSON.stringify({ taskView, selectedBoard })); }, [taskView, selectedBoard]);
+  // snapshot.tasks was a dependency of the effect that also sets the snapshot, so every fetch
+  // scheduled the next one immediately: the view refetched in a continuous loop, re-rendered
+  // without pause, and a native dropdown could not stay open long enough to choose a project.
+  // The poll now watches a boolean, and the immediate fetch belongs to the request shape alone.
+  const watchingActiveWork = snapshot.tasks.some(isActive);
   useEffect(() => {
     // The service is the task source of truth; refresh immediately on mount.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
-    const timer = window.setInterval(() => { if (!document.hidden && !dragged) void refresh(true); }, snapshot.tasks.some(isActive) ? 2000 : 8000);
+  }, [refresh]);
+  useEffect(() => {
+    const timer = window.setInterval(() => { if (!document.hidden && !dragged) void refresh(true); }, watchingActiveWork ? 2000 : 8000);
     return () => window.clearInterval(timer);
-  }, [refresh, snapshot.tasks, dragged]);
+  }, [refresh, watchingActiveWork, dragged]);
   useEffect(() => { const timer = window.setInterval(() => setClock(Date.now()), 60_000); return () => window.clearInterval(timer); }, []);
 
   const board = snapshot.boards.find(item => item.id === selectedBoard);
