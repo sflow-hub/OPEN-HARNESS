@@ -23,18 +23,45 @@ const tools = [
     inputSchema: { type: "object", properties: { name: { type: "string" }, prompt: { type: "string" }, intervalMinutes: { type: "integer", minimum: 1 }, timezone: { type: "string" } }, required: ["name", "prompt", "intervalMinutes"], additionalProperties: false },
   },
 ];
-async function call(path, input) {
+class Unreachable extends Error {}
+let reported = false;
+function attempt(options, input) {
   return new Promise((resolve, reject) => {
-    const target = controlUrl ? new URL(`${controlUrl.replace(/\/$/, '')}${path}`) : null;
-    const send = target?.protocol === 'https:' ? httpsRequest : httpRequest;
-    const req = send(target || { socketPath, path }, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, "X-Open-Harness-Agent": agentId, "X-Open-Harness-Run": process.env.OPEN_HARNESS_RUN_ID || "" } }, response => {
+    const send = options.protocol === 'https:' ? httpsRequest : httpRequest;
+    const req = send(options, response => {
       let body = "";
       response.on("data", chunk => { body += chunk; });
       response.on("end", () => { try { const value = JSON.parse(body); if ((response.statusCode || 500) >= 400) reject(new Error(value.error || "Coordination request failed.")); else resolve(value); } catch { reject(new Error("Invalid coordination response.")); } });
     });
-    req.on("error", () => reject(new Error("The local coordination service is unavailable. Check Open Harness runtime status.")));
+    // Only a failure to reach the coordinator is retryable. A 4xx is the coordinator's answer --
+    // "delegation is disabled for this run" must not be retried down another route.
+    req.on("error", () => reject(new Unreachable("unreachable")));
     req.end(JSON.stringify(input));
   });
+}
+async function call(path, input) {
+  // One options object, never (url, options, callback): node reads the second argument as the
+  // response listener when the first is options rather than a URL, so the socket route -- how
+  // every local container agent reaches the coordinator -- failed on every call with
+  // "The listener argument must be of type function".
+  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}`, "X-Open-Harness-Agent": agentId, "X-Open-Harness-Run": process.env.OPEN_HARNESS_RUN_ID || "" };
+  // The socket first, always: it needs no open port and cannot be reached from off the machine.
+  // Docker Desktop passes a bind mount through a VM, and a unix socket inside that mount is
+  // visible but refuses every connection, so the configured URL is a fallback for that case
+  // rather than the default. One failed connect to a socket that is not there costs nothing.
+  const routes = [{ socketPath, path, method: "POST", headers }];
+  if (controlUrl) {
+    const target = new URL(`${controlUrl.replace(/\/$/, '')}${path}`);
+    routes.push({ protocol: target.protocol, hostname: target.hostname, port: target.port || undefined, path: `${target.pathname}${target.search}`, method: "POST", headers });
+  }
+  for (const [index, route] of routes.entries()) {
+    try {
+      const value = await attempt(route, input);
+      if (index && !reported) { reported = true; process.stderr.write("Open Harness: the coordination socket refused the connection; using the coordinator URL instead.\n"); }
+      return value;
+    } catch (error) { if (!(error instanceof Unreachable)) throw error; }
+  }
+  throw new Error("The local coordination service is unavailable. Check Open Harness runtime status.");
 }
 async function dispatch(message) {
   if (message.method === "initialize") return { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "open-harness-coordination", version: "0.2.0" } };

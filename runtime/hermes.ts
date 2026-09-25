@@ -23,6 +23,25 @@ export function lastWords(stderrTail: string[], keep = 3, limit = 400) {
   return ` Last output: ${text.length > limit ? `…${text.slice(-limit)}` : text}`;
 }
 
+// Hermes offers an approval channel only when it can see one: tools/approval_context.py treats a
+// session as a gateway that can answer approvals if HERMES_GATEWAY_SESSION is set (or a session
+// platform is bound), and otherwise finds no interactive context, no unattended context either,
+// and approves every flagged command outright. Open Harness set neither, so the whole approval
+// feature was inert on a real run -- a container agent ran `chmod 777`, `curl | sh` or
+// `rm -rf` in a bind-mounted host folder without anyone being asked, while the dashboard's
+// approval UI and the configured approvals.unattended_mode: deny quietly did nothing. Passed on
+// the exec rather than baked into the container so an existing agent picks it up immediately.
+const GATEWAY_ENV = ['-e', 'HERMES_GATEWAY_SESSION=1'];
+
+// Hermes's approval choices are once | session | always | deny, and it treats anything else as a
+// refusal. Open Harness sent "approve", so a run the operator had just allowed resumed with the
+// agent told that the user blocked the command and should not be asked again. The dashboard keeps
+// its own approve/deny wording; it is translated here, at the one boundary where it matters.
+// Anything unrecognised denies, because a decision nobody understands must not run a command.
+export function hermesApprovalDecision(decision: string) {
+  return decision === 'approve' || decision === 'once' ? 'once' : decision === 'session' || decision === 'always' ? decision : 'deny';
+}
+
 export class HermesGateway extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null;
   private requestId = 0;
@@ -41,7 +60,7 @@ export class HermesGateway extends EventEmitter {
     if (this.child && !this.child.killed) return;
     this.child = this.native
       ? spawn(this.native.python || process.env.HERMES_PYTHON || 'python3', [this.native.entry], { cwd: this.native.cwd, env: this.native.env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== 'win32' })
-      : spawn("docker", ["exec", "-i", this.container, "python", "/opt/open-harness/managed_entry.py"], { stdio: ["pipe", "pipe", "pipe"] });
+      : spawn("docker", ["exec", "-i", ...GATEWAY_ENV, this.container, "python", "/opt/open-harness/managed_entry.py"], { stdio: ["pipe", "pipe", "pipe"] });
     createInterface({ input: this.child.stdout }).on("line", line => {
       try {
         const value = JSON.parse(line);
@@ -117,13 +136,15 @@ export class HermesGateway extends EventEmitter {
       if (prompt.includes("MOCK_APPROVAL")) {
         this.emit("event", { type: "approval.request", payload: { request_id: "mock-approval", command: "publish mock result" } });
         const decision = await new Promise<string>(resolve => { this.mockApproval = resolve; });
-        if (decision !== "approve") throw new Error("Mock action was denied.");
+        // Hermes's own vocabulary, so the deterministic runtime cannot pass on a word the real
+        // one rejects -- which is exactly how "approve" survived until a live run tried it.
+        if (decision === "deny") throw new Error("Mock action was denied.");
       }
       if (canUseTerminal) this.emit("event", { type: "tool.complete", payload: { id: "mock-tool", name: "terminal", result: "Created and executed task.py" } });
       this.emit("event", { type: "message.delta", payload: { text: "Hermes mock completed the task." } });
       return { final_response: "Hermes mock completed the task." };
     }
-    if (method === "approval.respond") { this.mockApproval?.(String(params.decision)); this.mockApproval = null; return { ok: true }; }
+    if (method === "approval.respond") { this.mockApproval?.(String(params.choice)); this.mockApproval = null; return { resolved: 1 }; }
     if (["session.steer", "session.interrupt", "process.stop"].includes(method)) return { ok: true };
     return { ok: true };
   }

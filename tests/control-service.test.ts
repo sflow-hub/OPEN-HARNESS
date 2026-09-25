@@ -125,7 +125,7 @@ test("delegates to another named agent and records the handoff", async () => {
   await request("/v1/agents/sync", { method: "POST", body: JSON.stringify({ agents: [{ id: "scout", name: "Scout", role: "Researcher", instructions: "Analyze.", config: { model: "mock" } }] }) });
   await request("/v1/teams", { method: "POST", body: JSON.stringify({ name: "Delegation team", description: "Shared handoffs", color: "blue", icon: "people", memberAgentIds: ["atlas", "scout"] }) });
   const { profile } = await request("/v1/agents/atlas/profile");
-  await request("/v1/agents/atlas/profile", { method: "PUT", body: JSON.stringify({ ...profile, allowedTools: ["mcp_open_harness_delegate_named_agent"] }) });
+  await request("/v1/agents/atlas/profile", { method: "PUT", body: JSON.stringify({ ...profile, allowedTools: ["mcp__open_harness__delegate_named_agent"] }) });
   const parent = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_SLOW prepare final artifact" }) });
   await new Promise(resolve => setTimeout(resolve, 80));
   const scoped = createHmac("sha256", token).update("agent:atlas").digest("hex");

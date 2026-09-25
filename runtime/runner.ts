@@ -107,7 +107,7 @@ async function run(command: RunnerCommand) {
     const coordinatorForContainer = credentials.coordinator.replace('://localhost', '://host.docker.internal').replace('://127.0.0.1', '://host.docker.internal');
     prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator } : { controlUrl: coordinatorForContainer });
     const gateway = direct
-      ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } })
+      ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', HERMES_GATEWAY_SESSION: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } })
       : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
     gateway.on('event', event => void emit(command, event)); await gateway.start();
     const session = await gateway.request('session.create', { cwd: direct ? shared : '/workspace/shared', profile: 'default' });
@@ -149,7 +149,7 @@ async function control(command: RunnerCommand) {
         else await finish(command, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), probeInput));
         return;
       }
-      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
+      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', HERMES_GATEWAY_SESSION: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
       if (command.kind === 'probe-tools') { const input = direct ? (() => { const result = spawnSync(process.env.HERMES_PYTHON || 'python3', [join(import.meta.dirname, 'hermes', 'inspect_runtime.py')], { input: '{"action":"catalog"}\n', encoding: 'utf8', env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile') }, maxBuffer: 5_000_000, timeout: 25_000 }); if (result.status || !result.stdout) throw new Error(result.stderr || 'Tool discovery failed.'); return JSON.parse(result.stdout); })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), { action: 'catalog' }); await finish(command, { source: 'runtime', tools: [...(input.tools || []).filter((tool: any) => tool.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }); return; }
       await gateway.start(); try { await finish(command, await discoverModels(gateway)); } finally { await gateway.stop(); } return;
     }
@@ -157,7 +157,7 @@ async function control(command: RunnerCommand) {
     if (!live) throw new Error('The requested run is no longer active on this runner.');
     if (command.kind === 'stop') { await live.gateway.request('session.interrupt', { session_id: live.sessionId }, 5000).catch(() => {}); await live.gateway.stop(); }
     if (command.kind === 'steer') await live.gateway.request('session.steer', { session_id: live.sessionId, text: String(command.payload.text || '') });
-    if (command.kind === 'approval') await live.gateway.request('approval.respond', { request_id: command.payload.requestId, decision: command.payload.decision });
+    if (command.kind === 'approval') await live.gateway.request('approval.respond', { session_id: live.sessionId, request_id: command.payload.requestId, choice: command.payload.decision, all: false });
     await finish(command, { ok: true });
   } catch (error) { await finish(command, undefined, error); }
 }

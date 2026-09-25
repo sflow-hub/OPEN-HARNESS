@@ -181,7 +181,7 @@ test('group switches and Disable all tools preserve only the required task tool'
   await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
   const { token } = await (await request.get(control + '/v1/bootstrap')).json();
   const { profile } = await (await request.get(control + '/v1/agents/atlas/profile', { headers: { Authorization: `Bearer ${token}` } })).json();
-  expect(profile.allowedTools).toEqual(['mcp_open_harness_task']);
+  expect(profile.allowedTools).toEqual(['mcp__open_harness__task']);
 });
 
 test('a stale save keeps the draft and can load the winning revision', async ({ page, request }) => {

@@ -37,3 +37,41 @@ test('http coordination preserves the coordinator base path and the agent token'
     assert.equal(received.url, '/api/local/internal/schedule'); assert.equal(received.agent, 'atlas'); assert.equal(received.authorization, 'Bearer run-token');
   } finally { child.kill(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
+
+// The test above drives the socket with node's own http.request, and the one below it drives
+// coordination.mjs over a URL. Neither exercised coordination.mjs over a socket -- which is how
+// every local container agent reaches the coordinator -- and that path was broken outright:
+// http.request(options, options, callback) makes node read the second argument as the response
+// listener, so each coordination call failed inside the agent with "The listener argument must
+// be of type function" and no coordination tool worked at all on the default local setup.
+test('socket coordination through the agent-side server reaches the coordinator', async () => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'harness-socket-call-')), 'managed');
+  let received: { url?: string; agent?: string; authorization?: string; run?: string; body?: string } = {};
+  const socket = await coordinationSocket(dir, 'atlas', (req, res) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      received = { url: req.url, agent: String(req.headers['x-open-harness-agent'] || ''), authorization: String(req.headers.authorization || ''), run: String(req.headers['x-open-harness-run'] || ''), body };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"runId":"child-1","state":"completed"}');
+    });
+  });
+  // A separate process cannot borrow this one's /proc/self/fd handle, and it does not need to:
+  // in a container the socket is /run/open-harness/coord.sock, well inside the 108-byte limit.
+  const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs')], {
+    env: { ...process.env, OPEN_HARNESS_CONTROL_SOCKET: join(dir, 'coord.sock'), OPEN_HARNESS_AGENT_ID: 'atlas', OPEN_HARNESS_AGENT_TOKEN: 'run-token', OPEN_HARNESS_RUN_ID: 'run-1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  try {
+    const reply = new Promise<string>((resolve, reject) => { child.stdout.once('data', part => resolve(String(part))); child.once('error', reject); });
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'delegate_named_agent', arguments: { agentId: 'scout', prompt: 'Write the file' } } }) + '\n');
+    const value = JSON.parse(await reply);
+    assert.equal(value.error, undefined, JSON.stringify(value.error));
+    assert.equal(value.result.content[0].text, '{"runId":"child-1","state":"completed"}');
+    assert.equal(received.url, '/internal/handoff');
+    assert.equal(received.agent, 'atlas');
+    assert.equal(received.authorization, 'Bearer run-token');
+    assert.equal(received.run, 'run-1');
+    assert.deepEqual(JSON.parse(received.body!), { agentId: 'scout', prompt: 'Write the file' });
+  } finally { child.kill(); await socket.close(); }
+});

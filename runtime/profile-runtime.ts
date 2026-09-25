@@ -1,13 +1,13 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
+import { copyFileSync, mkdirSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AgentProfile, ModelChoice, ToolCatalog, ToolInfo } from '../lib/agent-profile';
+import { HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ModelChoice, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
 import { dockerStatusCached, ensureContainer, HermesGateway } from './hermes';
 
 export const COORDINATION_TOOLS: ToolInfo[] = [
-  { id: 'mcp_open_harness_task', name: 'Task board', group: 'other', description: 'Read and update assigned board tasks.', available: true },
-  { id: 'mcp_open_harness_delegate_named_agent', name: 'Hand off to another agent', group: 'delegation', description: 'Assign explicit task context to a named agent on a shared team.', available: true },
-  { id: 'mcp_open_harness_create_open_harness_routine', name: 'Create a routine', group: 'scheduling', description: 'Schedule work through Open Harness.', available: true },
+  { id: TASK_TOOL, name: 'Task board', group: 'other', description: 'Read and update assigned board tasks.', available: true },
+  { id: HANDOFF_TOOL, name: 'Hand off to another agent', group: 'delegation', description: 'Assign explicit task context to a named agent on a shared team.', available: true },
+  { id: ROUTINE_TOOL, name: 'Create a routine', group: 'scheduling', description: 'Schedule work through Open Harness.', available: true },
 ];
 const mockTools: ToolInfo[] = [
   ['terminal', 'terminal'], ['process', 'terminal'], ['execute_code', 'code'], ['read_file', 'files'], ['write_file', 'files'], ['search_files', 'files'],
@@ -46,7 +46,15 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
   const dir = join(root, 'agents', profile.id), home = join(dir, 'profile'), managed = join(dir, 'managed');
   for (const path of [home, managed, join(dir, 'private')]) mkdirSync(path, { recursive: true });
   const mcp: Record<string, unknown> = {};
-  if (profile.allowedTools.some(id => COORDINATION_TOOLS.some(t => t.id === id))) mcp.open_harness = { command: 'node', args: [options.coordinationCommand || '/opt/open-harness/coordination.mjs'], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...(options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}), ...(options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {}) } };
+  // The agent image bakes its own copy of coordination.mjs, which goes stale the moment the
+  // checkout adds a tool: the pinned image's copy predates the task tool, so task boards were
+  // unreachable from inside a container no matter what the profile granted. The checkout's copy
+  // is placed in the agent's managed directory, which the container already mounts read-only, so
+  // the runtime always speaks the coordination protocol this build implements.
+  const coordination = join(managed, 'coordination.mjs');
+  copyFileSync(join(import.meta.dirname, 'hermes', 'coordination.mjs'), coordination);
+  chmodSync(coordination, 0o600);
+  if (profile.allowedTools.some(id => COORDINATION_TOOLS.some(t => t.id === id))) mcp.open_harness = { command: 'node', args: [options.coordinationCommand || '/run/open-harness/coordination.mjs'], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...(options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}), ...(options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {}) } };
   const env: Record<string, string> = {};
   const secretValues = secrets.environment();
   // A custom or local endpoint is any OpenAI-compatible server: Ollama, LM Studio, vLLM,
@@ -80,7 +88,13 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
     Object.assign(env, connectorEnv);
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: '${' + c.secretRef + '}' } : {} };
   }
-  const config = { model: { default: effective.model, provider: hermesProvider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ['open_harness_policy'] }, ...(providers ? { providers } : {}), mcp_servers: mcp };
+  const config = { model: { default: effective.model, provider: hermesProvider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, tools: { tool_search: { enabled: 'off' } }, plugins: { enabled: ['open_harness_policy'] }, ...(providers ? { providers } : {}), mcp_servers: mcp };
+  // Hermes's Tool Search defers every MCP tool out of the model-facing array and offers
+  // tool_search/tool_describe/tool_call bridges instead. Those bridges are not tools an Open
+  // Harness profile grants, so the policy extension strips them, and the deferred tools are
+  // then reachable by neither route: the agent is simply told they do not exist. A profile's
+  // grant is already a short explicit allow-list, so deferral saves no context here and only
+  // removes the tools the operator deliberately switched on.
   // plugins.enabled is an allow-LIST of plugin keys, and Hermes treats a missing or
   // non-list value as "nothing enabled". Any other shape silently gates the managed
   // policy extension off, managed_entry.py then aborts, and every run dies at startup.

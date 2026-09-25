@@ -46,6 +46,7 @@ function lastWords(stderrTail, keep = 3, limit = 400) {
   const text = lines.join(" | ");
   return ` Last output: ${text.length > limit ? `\u2026${text.slice(-limit)}` : text}`;
 }
+var GATEWAY_ENV = ["-e", "HERMES_GATEWAY_SESSION=1"];
 var HermesGateway = class extends EventEmitter {
   constructor(container, allowedTools = null, native = null) {
     super();
@@ -66,7 +67,7 @@ var HermesGateway = class extends EventEmitter {
       return;
     }
     if (this.child && !this.child.killed) return;
-    this.child = this.native ? spawn2(this.native.python || process.env.HERMES_PYTHON || "python3", [this.native.entry], { cwd: this.native.cwd, env: this.native.env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32" }) : spawn2("docker", ["exec", "-i", this.container, "python", "/opt/open-harness/managed_entry.py"], { stdio: ["pipe", "pipe", "pipe"] });
+    this.child = this.native ? spawn2(this.native.python || process.env.HERMES_PYTHON || "python3", [this.native.entry], { cwd: this.native.cwd, env: this.native.env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32" }) : spawn2("docker", ["exec", "-i", ...GATEWAY_ENV, this.container, "python", "/opt/open-harness/managed_entry.py"], { stdio: ["pipe", "pipe", "pipe"] });
     createInterface({ input: this.child.stdout }).on("line", (line) => {
       try {
         const value = JSON.parse(line);
@@ -180,16 +181,16 @@ var HermesGateway = class extends EventEmitter {
         const decision = await new Promise((resolve4) => {
           this.mockApproval = resolve4;
         });
-        if (decision !== "approve") throw new Error("Mock action was denied.");
+        if (decision === "deny") throw new Error("Mock action was denied.");
       }
       if (canUseTerminal) this.emit("event", { type: "tool.complete", payload: { id: "mock-tool", name: "terminal", result: "Created and executed task.py" } });
       this.emit("event", { type: "message.delta", payload: { text: "Hermes mock completed the task." } });
       return { final_response: "Hermes mock completed the task." };
     }
     if (method === "approval.respond") {
-      this.mockApproval?.(String(params.decision));
+      this.mockApproval?.(String(params.choice));
       this.mockApproval = null;
-      return { ok: true };
+      return { resolved: 1 };
     }
     if (["session.steer", "session.interrupt", "process.stop"].includes(method)) return { ok: true };
     return { ok: true };
@@ -332,12 +333,24 @@ function ensureContainer(agentId, stateRoot2, computer) {
 
 // runtime/profile-runtime.ts
 import { spawn as spawn3, spawnSync as spawnSync3 } from "node:child_process";
-import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, renameSync, chmodSync } from "node:fs";
+import { copyFileSync, mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, renameSync, chmodSync } from "node:fs";
 import { join as join2 } from "node:path";
+
+// lib/agent-profile.ts
+var MCP_PREFIX = "mcp__";
+var COORDINATION_SERVER = "open_harness";
+function mcpToolId(server, tool) {
+  return `${MCP_PREFIX}${server}__${tool}`;
+}
+var TASK_TOOL = mcpToolId(COORDINATION_SERVER, "task");
+var HANDOFF_TOOL = mcpToolId(COORDINATION_SERVER, "delegate_named_agent");
+var ROUTINE_TOOL = mcpToolId(COORDINATION_SERVER, "create_open_harness_routine");
+
+// runtime/profile-runtime.ts
 var COORDINATION_TOOLS = [
-  { id: "mcp_open_harness_task", name: "Task board", group: "other", description: "Read and update assigned board tasks.", available: true },
-  { id: "mcp_open_harness_delegate_named_agent", name: "Hand off to another agent", group: "delegation", description: "Assign explicit task context to a named agent on a shared team.", available: true },
-  { id: "mcp_open_harness_create_open_harness_routine", name: "Create a routine", group: "scheduling", description: "Schedule work through Open Harness.", available: true }
+  { id: TASK_TOOL, name: "Task board", group: "other", description: "Read and update assigned board tasks.", available: true },
+  { id: HANDOFF_TOOL, name: "Hand off to another agent", group: "delegation", description: "Assign explicit task context to a named agent on a shared team.", available: true },
+  { id: ROUTINE_TOOL, name: "Create a routine", group: "scheduling", description: "Schedule work through Open Harness.", available: true }
 ];
 var mockTools = [
   ["terminal", "terminal"],
@@ -408,7 +421,10 @@ function prepareProfile(root, profile, effective, secrets, token, runId, options
   const dir = join2(root, "agents", profile.id), home = join2(dir, "profile"), managed = join2(dir, "managed");
   for (const path of [home, managed, join2(dir, "private")]) mkdirSync2(path, { recursive: true });
   const mcp = {};
-  if (profile.allowedTools.some((id) => COORDINATION_TOOLS.some((t) => t.id === id))) mcp.open_harness = { command: "node", args: [options.coordinationCommand || "/opt/open-harness/coordination.mjs"], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}, ...options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {} } };
+  const coordination = join2(managed, "coordination.mjs");
+  copyFileSync(join2(import.meta.dirname, "hermes", "coordination.mjs"), coordination);
+  chmodSync(coordination, 384);
+  if (profile.allowedTools.some((id) => COORDINATION_TOOLS.some((t) => t.id === id))) mcp.open_harness = { command: "node", args: [options.coordinationCommand || "/run/open-harness/coordination.mjs"], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}, ...options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {} } };
   const env = {};
   const secretValues = secrets.environment();
   const customEndpoint = Boolean(effective.baseUrl);
@@ -427,7 +443,7 @@ function prepareProfile(root, profile, effective, secrets, token, runId, options
     Object.assign(env, connectorEnv);
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: "${" + c.secretRef + "}" } : {} };
   }
-  const config = { model: { default: effective.model, provider: hermesProvider, ...effective.baseUrl ? { base_url: effective.baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "smart", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, plugins: { enabled: ["open_harness_policy"] }, ...providers ? { providers } : {}, mcp_servers: mcp };
+  const config = { model: { default: effective.model, provider: hermesProvider, ...effective.baseUrl ? { base_url: effective.baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "smart", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, tools: { tool_search: { enabled: "off" } }, plugins: { enabled: ["open_harness_policy"] }, ...providers ? { providers } : {}, mcp_servers: mcp };
   atomic(join2(home, "config.yaml"), JSON.stringify(config, null, 2));
   atomic(join2(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
   atomic(join2(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
@@ -846,7 +862,7 @@ async function run(command3) {
     const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...dispatched }) };
     const coordinatorForContainer = credentials.coordinator.replace("://localhost", "://host.docker.internal").replace("://127.0.0.1", "://host.docker.internal");
     prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : { controlUrl: coordinatorForContainer });
-    const gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join4(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join4(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
+    const gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join4(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile"), HERMES_TUI: "1", HERMES_GATEWAY_SESSION: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join4(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
     gateway.on("event", (event) => void emit(command3, event));
     await gateway.start();
     const session = await gateway.request("session.create", { cwd: direct ? shared : "/workspace/shared", profile: "default" });
@@ -906,7 +922,7 @@ async function control(command3) {
         } else await finish(command3, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), probeInput));
         return;
       }
-      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join4(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join4(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
+      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join4(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile"), HERMES_TUI: "1", HERMES_GATEWAY_SESSION: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join4(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
       if (command3.kind === "probe-tools") {
         const input = direct ? (() => {
           const result = spawnSync5(process.env.HERMES_PYTHON || "python3", [join4(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
@@ -932,7 +948,7 @@ async function control(command3) {
       await live.gateway.stop();
     }
     if (command3.kind === "steer") await live.gateway.request("session.steer", { session_id: live.sessionId, text: String(command3.payload.text || "") });
-    if (command3.kind === "approval") await live.gateway.request("approval.respond", { request_id: command3.payload.requestId, decision: command3.payload.decision });
+    if (command3.kind === "approval") await live.gateway.request("approval.respond", { session_id: live.sessionId, request_id: command3.payload.requestId, choice: command3.payload.decision, all: false });
     await finish(command3, { ok: true });
   } catch (error) {
     await finish(command3, void 0, error);

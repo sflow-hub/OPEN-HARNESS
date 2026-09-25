@@ -7,8 +7,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { prepareProfile } from '../runtime/profile-runtime';
-import { DEFAULT_BOARD, DEFAULT_COMPUTER, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
+import { COORDINATION_TOOLS, prepareProfile } from '../runtime/profile-runtime';
+import { hermesApprovalDecision } from '../runtime/hermes';
+import { DEFAULT_BOARD, DEFAULT_COMPUTER, HANDOFF_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
 
 const model: ModelChoice = { provider: 'custom', model: 'some-model', credentialRef: 'SOME_KEY', baseUrl: 'http://localhost:9/v1' };
 const profile: AgentProfile = {
@@ -105,4 +106,75 @@ test('the policy extension entry point resolves to a module, not a function', ()
   const entry = pyproject.split('\n').find(line => line.trimStart().startsWith('open_harness_policy =') );
   assert.ok(entry, 'entry point declaration is missing');
   assert.match(entry!, /open_harness_policy\s*=\s*"open_harness_policy"\s*$/);
+});
+
+// Hermes registers an MCP tool as mcp__<server>__<tool> (tools/mcp_tool_schema.py,
+// MCP_TOOL_NAME_PREFIX = "mcp__"), and the managed policy extension compares a granted name
+// with that registry name exactly. Open Harness granted mcp_open_harness_task, so every
+// coordination tool was filtered out of every request: a container agent was told the task,
+// hand-off and routine tools did not exist, and a user's own MCP connection lost all of its
+// tools the same way. These names are a wire contract with a Python runtime, so they are
+// pinned here rather than left to whichever spelling reads nicely.
+test('coordination tools are named the way Hermes registers them', () => {
+  assert.equal(MCP_PREFIX, 'mcp__');
+  assert.equal(TASK_TOOL, 'mcp__open_harness__task');
+  assert.equal(HANDOFF_TOOL, 'mcp__open_harness__delegate_named_agent');
+  assert.equal(ROUTINE_TOOL, 'mcp__open_harness__create_open_harness_routine');
+  assert.equal(mcpToolId('research', 'lookup'), 'mcp__research__lookup');
+  assert.equal(mcpServerOf('mcp__research__lookup'), 'research');
+  assert.equal(mcpServerOf('terminal'), null);
+  // Every name the coordination server offers must be a tool Open Harness can grant, or the
+  // model is shown a tool the policy will refuse; and every tool it grants must exist there.
+  const offered = readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs'), 'utf8')
+    .match(/^\s*name: "([a-z_]+)",$/gm)!.map(line => line.split('"')[1]);
+  assert.deepEqual(offered.map(name => mcpToolId('open_harness', name)).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL].sort());
+  assert.deepEqual(COORDINATION_TOOLS.map(tool => tool.id).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL].sort());
+});
+
+// A grant saved by an earlier version must keep working. This renames; it must never widen.
+test('a legacy tool grant is renamed, and an unknown mcp_ name is not guessed at', () => {
+  assert.deepEqual(normalizeToolIds(['mcp_open_harness_task', 'terminal']), [TASK_TOOL, 'terminal']);
+  assert.deepEqual(normalizeToolIds(['mcp_research_lookup'], ['research']), ['mcp__research__lookup']);
+  assert.deepEqual(normalizeToolIds(['mcp_research_lookup']), ['mcp_research_lookup']);
+  assert.deepEqual(normalizeToolIds([TASK_TOOL]), [TASK_TOOL]);
+  const connectors = [{ id: 'r', name: 'research', command: 'npx', args: [], secretRef: '', enabled: true }];
+  assert.deepEqual(runToolGrants({ ...profile, allowedTools: ['mcp_open_harness_task', 'mcp_research_lookup', 'mcp_other_thing'], connectors }),
+    [TASK_TOOL, 'mcp__research__lookup']);
+});
+
+// The image bakes its own coordination.mjs; the pinned one predates the task tool. Running
+// the checkout's copy is what makes a granted tool actually reachable.
+test('the agent runs the checkout copy of the coordination server', () => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-coordination-'));
+  prepareProfile(root, { ...profile, allowedTools: [TASK_TOOL] }, model, { environment: () => ({}) }, 'token', 'run-1');
+  const config = JSON.parse(readFileSync(join(root, 'agents', profile.id, 'profile', 'config.yaml'), 'utf8'));
+  assert.deepEqual(config.mcp_servers.open_harness.args, ['/run/open-harness/coordination.mjs']);
+  const shipped = join(root, 'agents', profile.id, 'managed', 'coordination.mjs');
+  assert.equal(readFileSync(shipped, 'utf8'), readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs'), 'utf8'));
+});
+
+// Hermes answers an approval with once | session | always | deny and reads anything else as a
+// refusal, so "approve" made a resumed run tell the agent the operator had blocked it. The mock
+// runtime accepted "approve" too, which is why every test passed while the real thing denied.
+test('an approval is answered in the vocabulary Hermes accepts', () => {
+  assert.equal(hermesApprovalDecision('approve'), 'once');
+  assert.equal(hermesApprovalDecision('once'), 'once');
+  assert.equal(hermesApprovalDecision('session'), 'session');
+  assert.equal(hermesApprovalDecision('always'), 'always');
+  assert.equal(hermesApprovalDecision('deny'), 'deny');
+  for (const unknown of ['', 'yes', 'ok', 'APPROVE', 'allow']) assert.equal(hermesApprovalDecision(unknown), 'deny');
+  // The choices Hermes offers in the request payload must all be answerable.
+  for (const choice of ['once', 'session', 'always', 'deny']) assert.equal(hermesApprovalDecision(choice), choice);
+});
+
+// Without this marker Hermes finds no interactive context, no gateway context and no unattended
+// context, and approves every flagged command outright: the dashboard's approval UI and the
+// configured approvals.unattended_mode never came into play on a real run.
+test('the managed gateway announces itself as a session that can answer approvals', () => {
+  const hermes = readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes.ts'), 'utf8');
+  assert.match(hermes, /HERMES_GATEWAY_SESSION=1/);
+  for (const path of ['runtime/service.ts', 'runtime/runner.ts']) {
+    assert.match(readFileSync(join(import.meta.dirname, '..', path), 'utf8'), /HERMES_GATEWAY_SESSION: '1'/,
+      `${path} must mark its native gateway as an approval channel too`);
+  }
 });

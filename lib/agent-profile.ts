@@ -54,6 +54,41 @@ export const TOOL_GROUPS = [
   ['mcp', 'MCP connections', 'Use tools supplied by your configured connections.'],
   ['other', 'Other tools', 'Additional tools discovered in this Hermes runtime.'],
 ] as const;
+// Hermes registers every MCP tool under `mcp__<server>__<tool>` (its MCP_TOOL_NAME_PREFIX),
+// and the managed policy extension decides what the model may see by matching a granted name
+// against that registry name exactly. Open Harness named the same tools with single
+// underscores, so no grant ever matched: the policy stripped the task, hand-off and routine
+// tools from every request, and a container agent was told they did not exist. The same
+// mismatch silently removed every tool from a user's own MCP connection.
+export const MCP_PREFIX = 'mcp__';
+export const COORDINATION_SERVER = 'open_harness';
+export function mcpToolId(server: string, tool: string) { return `${MCP_PREFIX}${server}__${tool}`; }
+export function mcpServerOf(id: string) {
+  if (!id.startsWith(MCP_PREFIX)) return null;
+  const server = id.slice(MCP_PREFIX.length).split('__')[0];
+  return server || null;
+}
+export const TASK_TOOL = mcpToolId(COORDINATION_SERVER, 'task');
+export const HANDOFF_TOOL = mcpToolId(COORDINATION_SERVER, 'delegate_named_agent');
+export const ROUTINE_TOOL = mcpToolId(COORDINATION_SERVER, 'create_open_harness_routine');
+const LEGACY_TOOL_IDS: Record<string, string> = {
+  mcp_open_harness_task: TASK_TOOL,
+  mcp_open_harness_delegate_named_agent: HANDOFF_TOOL,
+  mcp_open_harness_create_open_harness_routine: ROUTINE_TOOL,
+};
+// Grants written before the naming was corrected. Rewritten wherever a profile is read or
+// saved so an existing agent keeps exactly the access it was given: this renames tools, it
+// never adds one. A single-underscore name that matches no connection is left alone, and
+// runToolGrants then drops it, because guessing where the server name ends could widen access.
+export function normalizeToolIds(ids: string[], connectorNames: string[] = []): string[] {
+  return ids.map(id => {
+    if (LEGACY_TOOL_IDS[id]) return LEGACY_TOOL_IDS[id];
+    if (id.startsWith(MCP_PREFIX) || !id.startsWith('mcp_')) return id;
+    const server = connectorNames.find(name => id.startsWith(`mcp_${name}_`));
+    return server ? mcpToolId(server, id.slice(`mcp_${server}_`.length)) : id;
+  });
+}
+
 // What a new agent can do before anyone opens its settings. A fresh agent used to be granted
 // only the task tool, so the first thing anyone asked it to do -- read something, write a file,
 // run a command -- it truthfully answered that it could not. These are the tools for doing work
@@ -63,7 +98,7 @@ export const TOOL_GROUPS = [
 // desktop control, delegation, scheduling, MCP connectors, and the third-party integrations.
 // Existing agents keep whatever they were given; an upgrade must not widen their access.
 export const DEFAULT_TOOLS = [
-  'mcp_open_harness_task',
+  TASK_TOOL,
   'read_file', 'write_file', 'patch', 'search_files',
   'terminal', 'process_manage',
   'execute_code',
@@ -74,7 +109,7 @@ export const DEFAULT_TOOLS = [
 ];
 
 export function draftProfile(agent: Agent): AgentProfile {
-  if (agent.profile) return { ...agent.profile, allowedTools: [...new Set([...(agent.profile.allowedTools || []), 'mcp_open_harness_task'])], board: { ...DEFAULT_BOARD, ...(agent.profile.board || {}) }, computer: agent.profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
+  if (agent.profile) return { ...agent.profile, allowedTools: [...new Set([...normalizeToolIds(agent.profile.allowedTools || [], (agent.profile.connectors || []).map(connector => connector.name)), TASK_TOOL])], board: { ...DEFAULT_BOARD, ...(agent.profile.board || {}) }, computer: agent.profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
   return { id: agent.id, revision: 0, name: agent.name, role: agent.role, description: agent.description, tone: agent.tone,
     prompt: { enabled: true, text: agent.instructions }, model: { ...DEFAULT_MODEL, inherit: true }, allowedTools: [...DEFAULT_TOOLS], board: { ...DEFAULT_BOARD }, connectors: [], computer: { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
 }
@@ -82,8 +117,9 @@ export function profileAgent(profile: AgentProfile, memory: string[] = []): Agen
   return { id: profile.id, name: profile.name, role: profile.role, description: profile.description, tone: profile.tone, instructions: profile.prompt.text, memory, profile };
 }
 export function runToolGrants(profile: AgentProfile): string[] {
-  return profile.allowedTools.filter(id =>
+  const servers = new Set([COORDINATION_SERVER, ...profile.connectors.filter(connector => connector.enabled).map(connector => connector.name)]);
+  return normalizeToolIds(profile.allowedTools, profile.connectors.map(connector => connector.name)).filter(id =>
     (profile.computer.desktop !== 'none' || id !== 'computer_use') &&
-    (!id.startsWith('mcp_') || id.startsWith('mcp_open_harness_') || profile.connectors.some(connector => connector.enabled && id.startsWith(`mcp_${connector.name}_`)))
+    (!id.startsWith('mcp_') || servers.has(mcpServerOf(id) || ''))
   );
 }
