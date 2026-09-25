@@ -150,3 +150,50 @@ test.describe('phone browser against a self-hosted coordinator', () => {
     await expect(page.getByRole('heading', { name: 'Connect this device' })).toBeHidden();
   });
 });
+
+// The phone layout has to hold for a browser too, and horizontal overflow is the failure
+// that keeps coming back: it is invisible on a desktop-sized viewport and obvious on a phone.
+test.describe('phone layout', () => {
+  test.skip(({ isMobile }) => !isMobile, 'this is about the phone viewport');
+
+  test.beforeEach(async ({ request, page }) => {
+    const headers = await operator(request);
+    await request.post(control + '/v1/agents/sync', { headers, data: { agents: initialWorkspace.agents } });
+    await page.addInitScript(() => localStorage.setItem('open-harness.onboarding.v1', 'done'));
+  });
+
+  test('the task board fits the screen instead of panning sideways', async ({ page }) => {
+    await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+    await page.getByRole('button', { name: 'Tasks', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
+
+    await page.getByRole('button', { name: 'New board', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'New project board' });
+    await dialog.getByLabel('Board name').fill('Phone board');
+    await dialog.getByRole('button', { name: 'Create board' }).click();
+    await expect(dialog).toBeHidden();
+
+    // The stages stack rather than sitting in a 1300px row. Measured rather than asserted
+    // on CSS, because what matters is the result on this viewport.
+    const board = page.locator('.kanban-board');
+    await expect(board).toBeVisible();
+    const boardFits = await board.evaluate((el: HTMLElement) => el.scrollWidth <= el.clientWidth + 1);
+    expect(boardFits, 'the board scrolls sideways on a phone').toBe(true);
+
+    // And nothing else pushes the page wider than the screen either.
+    const pageFits = await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1);
+    expect(pageFits, 'the page scrolls sideways on a phone').toBe(true);
+  });
+
+  test('the primary touch targets are big enough to hit', async ({ page }) => {
+    await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+    // Open a conversation so the composer, and its send button, exist.
+    await page.getByRole('button', { name: /^Meet Atlas|^Atlas/ }).first().click();
+    const send = page.locator('.send-button').first();
+    await expect(send).toBeVisible();
+    const box = await send.boundingBox();
+    // 44px is the smallest target a finger hits reliably, and this is the primary action
+    // of the chat screen.
+    expect(Math.min(box!.width, box!.height)).toBeGreaterThanOrEqual(44);
+  });
+});

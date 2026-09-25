@@ -1914,7 +1914,11 @@ export default function Home() {
                   {runtime?.runtime.available
                     ? "Hermes is ready in this agent’s isolated workspace. External actions still follow the approval policy."
                     : runtime?.runtime.message ||
-                      "Run npm run harness:doctor to connect the local Hermes runtime."}
+                      // The fallback names a terminal command, which is the right advice on the
+                      // machine hosting the coordinator and useless on a device without a shell.
+                      (pairs
+                        ? "The Hermes runtime is not available on your coordinator. Check the computer running Open Harness."
+                        : "Run npm run harness:doctor to connect the local Hermes runtime.")}
                 </div>
               </aside>
             )}
@@ -2400,12 +2404,17 @@ export default function Home() {
               closes.
             </p>
             <div className="button-row">
-              <button
-                className="subtle-button"
-                onClick={() => { closeSettings(); setOnboardingOpen(true); }}
-              >
-                <Sparkles size={14} /> Run setup again
-              </button>
+              {/* First-run setup checks Docker and the Hermes runtime on the machine hosting
+                  the coordinator. A paired client is not that machine, and the auto-open path
+                  is already gated the same way. */}
+              {!pairs && (
+                <button
+                  className="subtle-button"
+                  onClick={() => { closeSettings(); setOnboardingOpen(true); }}
+                >
+                  <Sparkles size={14} /> Run setup again
+                </button>
+              )}
               <button
                 className="subtle-button"
                 aria-pressed={notifyWhenDone}
@@ -2431,13 +2440,19 @@ export default function Home() {
               >
                 <Download size={14} /> Export workspace
               </button>
-              <button
-                className="subtle-button"
-                disabled={running}
-                onClick={() => importRef.current?.click()}
-              >
-                <FolderOpen size={14} /> Import backup
-              </button>
+              {/* Import replaces the whole workspace and is then pushed to the coordinator.
+                  From a paired client that means overwriting an established shared workspace
+                  with a file picked out of cloud storage, so it stays on the host. Export is
+                  read-only and remains available everywhere. */}
+              {!pairs && (
+                <button
+                  className="subtle-button"
+                  disabled={running}
+                  onClick={() => importRef.current?.click()}
+                >
+                  <FolderOpen size={14} /> Import backup
+                </button>
+              )}
             </div>
             <div className="modal-footer">
               <span className="muted small">

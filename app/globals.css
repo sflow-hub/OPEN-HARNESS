@@ -33,8 +33,10 @@ button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
-button:hover {
-  filter: brightness(1.12);
+@media (hover: hover) {
+  button:hover {
+    filter: brightness(1.12);
+  }
 }
 button:focus-visible,
 a:focus-visible {
@@ -264,7 +266,11 @@ a {
   .task-view-switch button { flex: 1; justify-content: center; }
   .task-icon-button { grid-column: 2; }
   .filter-panel { grid-template-columns: 1fr; max-height: 58vh; overflow: auto; }
-  .kanban-board { grid-template-columns: repeat(5, 250px); min-width: 1300px; }
+  /* Was repeat(5, 250px) at min-width 1300px: on a 360px screen that is nearly four
+     screens of sideways panning, inside a container that also scrolls vertically. Stages
+     stack instead, which is the ordinary way a board reads on a phone. */
+  .kanban-board { grid-template-columns: 1fr; min-width: 0; overflow-x: visible; padding-bottom: 0; }
+  .kanban-column { min-height: 0; }
   .task-drawer { width: 100vw; border-left: 0; }
   .task-drawer-scroll { padding: 18px 15px; }
   .task-form-grid { grid-template-columns: 1fr; }.task-form-grid label.full { grid-column: auto; }
@@ -504,9 +510,11 @@ h1 span {
     border-color 0.2s;
   min-width: 0;
 }
-.agent-card:hover {
-  transform: translateY(-3px);
-  border-color: #637156;
+@media (hover: hover) {
+  .agent-card:hover {
+    transform: translateY(-3px);
+    border-color: #637156;
+  }
 }
 .large {
   height: 46px;
@@ -1555,7 +1563,7 @@ h1 span {
 .onboarding > footer { margin-top: 22px; padding-top: 18px; border-top: 1px solid #30372d; color: #707b6b; font-size: 10px; text-align: center; }
 .spin { animation: onboarding-spin .9s linear infinite; }
 @keyframes onboarding-spin { to { transform: rotate(360deg); } }
-@media (max-width: 640px) {
+@media (max-width: 760px) {
   .onboarding-backdrop { padding: 0; align-items: stretch; }
   .onboarding { width: 100%; max-height: 100dvh; border: 0; border-radius: 0; padding: 23px 18px; }
   .onboarding-hero, .onboarding-done { padding-left: 5px; padding-right: 5px; }
@@ -1882,7 +1890,7 @@ h1 span {
 .profile-discard h3 { font-size: 17px; margin: 0 0 12px; }
 .profile-discard p { color: #b3c2a4; font-size: 12px; }
 .agent-settings-panel button:focus-visible, .agent-settings-panel input:focus-visible, .agent-settings-panel textarea:focus-visible, .agent-settings-panel select:focus-visible, .agent-settings-panel summary:focus-visible { outline: 2px solid #c9dfb0; outline-offset: 3px; }
-@media(max-width: 640px) {
+@media (max-width: 760px) {
   .profile-backdrop { padding: 0; }
   .agent-settings-panel { width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border: 0; }
   .profile-header { padding: 20px 18px 15px; }
@@ -2025,3 +2033,14 @@ h1 span {
 .hub-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
 .hub-summary div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .hub-summary small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+
+/* A finger needs a bigger target than a cursor. These two matter most: the send button is
+   the primary action of the chat screen, and the task move controls are the *only* way to
+   move a task on a touch device, because HTML5 drag-and-drop never fires on touch. */
+@media (pointer: coarse) {
+  .send-button { width: 44px; height: 44px; }
+  .task-move-controls { gap: 8px; padding: 6px 9px 10px; }
+  .task-move-controls button { min-width: 44px; min-height: 44px; padding: 0; align-items: center; justify-content: center; }
+  .profile-icon-button { min-width: 44px; min-height: 44px; align-items: center; justify-content: center; }
+  .file-row-actions button, .task-icon-button { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+}
