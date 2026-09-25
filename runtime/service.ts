@@ -64,6 +64,13 @@ const coordinationSockets = new Map<string, ReturnType<typeof coordinationSocket
 let pumping = false;
 const maxTaskQueue = Math.max(1, Number(process.env.MAX_TASK_QUEUE || 100));
 const maxTaskRuns = Math.max(1, Number(process.env.MAX_TASK_RUNS || 3));
+// Two agents could work at once, hard-coded, in a workspace whose whole point is several named
+// agents. Four by default, because each one is a container with its own CPU and memory ceiling,
+// and raisable for a machine that can take it. The per-agent Computer settings still apply, so a
+// profile can hold itself to less.
+const maxActiveAgents = Math.max(1, Number(process.env.OPEN_HARNESS_MAX_ACTIVE_AGENTS || 4));
+// Handoff children run alongside their parent, so the overall ceiling leaves room for them.
+const maxActiveRuns = Math.max(maxActiveAgents, Number(process.env.OPEN_HARNESS_MAX_ACTIVE_RUNS || maxActiveAgents * 2));
 // How long a dispatched run waits for a runner that has stopped heartbeating.
 const REMOTE_OFFLINE_GRACE_MS = Math.max(60_000, Number(process.env.OPEN_HARNESS_REMOTE_OFFLINE_GRACE_MS || 5 * 60_000));
 
@@ -310,11 +317,11 @@ async function execute(run: RunRow) {
 async function pump() {
   if (pumping) return; pumping = true;
   try {
-    while (store.activeCount() < 4) {
+    while (store.activeCount() < maxActiveRuns) {
       const next = store.queued().find(candidate =>
         !store.agentBusy(candidate.agent_id) && !stoppingAgents.has(candidate.agent_id) && !machines.transferring(candidate.agent_id) &&
         (!tasks.isTaskRun(candidate.id) || tasks.activeRunCount() < maxTaskRuns) &&
-        (candidate.depth > 0 || store.activeTopLevelCount() < 2) && (() => {
+        (candidate.depth > 0 || store.activeTopLevelCount() < maxActiveAgents) && (() => {
           const profile = profiles.get(candidate.agent_id); if (!profile) return true;
           try { if (machines.canAssign(profile.computer.machineId, candidate.agent_id).status !== 'online') return false; } catch { return false; }
           const occupants = store.listRuns().filter(run => ['running','waiting_approval','waiting_input'].includes(run.state)).map(run => profiles.runSnapshot(run.id) || profiles.get(run.agent_id)).filter((other): other is AgentProfile => Boolean(other && other.computer.machineId === profile.computer.machineId));
@@ -372,6 +379,28 @@ async function waitForRun(id: string, timeoutMs = 30 * 60 * 1000) {
   }
   throw new Error("Delegated run is still active after 30 minutes. Its run ID remains available in Open Harness.");
 }
+
+// Picking a model was a bare text box in every first-run and workspace screen: the operator
+// saved a key and then had to already know an exact model ID, and for OpenRouter the field
+// started empty. The provider's own /models endpoint is already fetched to validate the key,
+// and its body was thrown away. One helper, so the list is available wherever a model is chosen
+// without starting a container the way the per-agent catalogue has to.
+export const PROVIDER_ENDPOINTS: Record<string, string> = { xai: 'https://api.x.ai/v1', openrouter: 'https://openrouter.ai/api/v1', openai: 'https://api.openai.com/v1' };
+async function providerModelList(baseUrl: string, key: string) {
+  const response = await fetch(`${baseUrl}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(15_000), redirect: 'error' });
+  if (!response.ok) return { ok: false, status: response.status, models: [] as string[] };
+  let models: string[] = [];
+  try {
+    const payload = await response.json() as { data?: unknown; models?: unknown };
+    const entries = Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : [];
+    models = [...new Set(entries.map(entry => {
+      const row = entry as { id?: unknown; name?: unknown };
+      return String(row?.id ?? row?.name ?? '').trim();
+    }).filter(Boolean))].sort().slice(0, 500);
+  } catch { /* a provider that answers 200 with something else still proves the key works */ }
+  return { ok: true, status: response.status, models };
+}
+const PROVIDER_STATUS: Record<number, string> = { 401: 'The API key was rejected.', 403: 'The provider denied access.', 404: 'The model server address was not found.', 429: 'The provider rate limit was reached. Try again shortly.' };
 
 function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number; deferStart?: boolean }) {
   if (!input.agentId || !input.prompt?.trim()) throw new Error("agentId and prompt are required.");
@@ -470,18 +499,32 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action, secrets.names())); }
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/model-test') {
       const input = await body(req), model = validateModel(input.model);
-      if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { ok: true, message: 'Model connection is ready.' });
-      if (model.credentialRef && !secrets.has(model.credentialRef)) return json(res, 200, { ok: false, message: 'Save your API key first.' });
-      const endpoints: Record<string,string> = { xai: 'https://api.x.ai/v1', openrouter: 'https://openrouter.ai/api/v1', openai: 'https://api.openai.com/v1' };
-      const baseUrl = (model.baseUrl || endpoints[model.provider] || '').replace(/\/$/, '');
-      if (!baseUrl) return json(res, 200, { ok: false, message: 'Enter the address of your model server.' });
+      if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { ok: true, message: 'Model connection is ready.', models: ['mock-atlas', 'mock-scout'] });
+      if (model.credentialRef && !secrets.has(model.credentialRef)) return json(res, 200, { ok: false, message: 'Save your API key first.', models: [] });
+      const baseUrl = (model.baseUrl || PROVIDER_ENDPOINTS[model.provider] || '').replace(/\/$/, '');
+      if (!baseUrl) return json(res, 200, { ok: false, message: 'Enter the address of your model server.', models: [] });
       const key = model.credentialRef ? secrets.environment()[model.credentialRef] : '';
       try {
-        const response = await fetch(`${baseUrl}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(15_000), redirect: 'error' });
-        if (response.ok) return json(res, 200, { ok: true, message: 'Model connection is ready.' });
-        const messages: Record<number,string> = { 401: 'The API key was rejected.', 403: 'The provider denied access.', 404: 'The model server address was not found.', 429: 'The provider rate limit was reached. Try again shortly.' };
-        return json(res, 200, { ok: false, message: messages[response.status] || `The provider returned HTTP ${response.status}.` });
-      } catch (error) { return json(res, 200, { ok: false, message: error instanceof Error ? error.message : 'Could not reach the model provider.' }); }
+        const result = await providerModelList(baseUrl, key);
+        // The models the key can actually reach come back with the test, so the operator picks
+        // from a list instead of typing an ID they had to find somewhere else.
+        if (result.ok) return json(res, 200, { ok: true, message: result.models.length ? `Model connection is ready. ${result.models.length} models available.` : 'Model connection is ready.', models: result.models });
+        return json(res, 200, { ok: false, message: PROVIDER_STATUS[result.status] || `The provider returned HTTP ${result.status}.`, models: [] });
+      } catch (error) { return json(res, 200, { ok: false, message: error instanceof Error ? error.message : 'Could not reach the model provider.', models: [] }); }
+    }
+    // The models a saved credential can reach, for every screen that chooses one. Unlike the
+    // per-agent catalogue this needs no container, so it answers in under a second and works
+    // before any agent has ever run.
+    if (req.method === 'GET' && url.pathname === '/v1/models') {
+      const provider = url.searchParams.get('provider') || '', ref = url.searchParams.get('credentialRef') || '';
+      const baseUrl = (url.searchParams.get('baseUrl') || PROVIDER_ENDPOINTS[provider] || '').replace(/\/$/, '');
+      if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { models: ['mock-atlas', 'mock-scout'] });
+      if (!baseUrl) return json(res, 200, { models: [], error: 'This provider has no model-list address. Enter a model ID, or set the endpoint under Advanced.' });
+      if (ref && !secrets.has(ref)) return json(res, 200, { models: [], error: `Save the ${ref} credential first.` });
+      try {
+        const result = await providerModelList(baseUrl, ref ? secrets.environment()[ref] || '' : '');
+        return json(res, 200, result.ok ? { models: result.models } : { models: [], error: PROVIDER_STATUS[result.status] || `The provider returned HTTP ${result.status}.` });
+      } catch (error) { return json(res, 200, { models: [], error: error instanceof Error ? error.message : 'Could not reach the model provider.' }); }
     }
     if (url.pathname === '/v1/machines') {
       if (req.method === 'GET') return json(res, 200, { machines: machines.list() });
@@ -599,8 +642,7 @@ const server = createServer(async (req, res) => {
         const input = await body(req), model = validateModel(input.model);
         if (model.credentialRef && !secrets.has(model.credentialRef)) return json(res, 200, { ok: false, message: `Add the ${model.credentialRef} credential first.` });
         if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { ok: true, message: 'Deterministic test connection is ready.' });
-        const endpoints: Record<string,string> = { xai: 'https://api.x.ai/v1', openrouter: 'https://openrouter.ai/api/v1', openai: 'https://api.openai.com/v1' };
-        const baseUrl = model.baseUrl || endpoints[model.provider];
+        const baseUrl = model.baseUrl || PROVIDER_ENDPOINTS[model.provider];
         if (!baseUrl) return json(res, 200, { ok: false, message: 'This provider does not expose a compatible model-list endpoint. Model authentication will be checked by Hermes at task start.' });
         ensureProfileDirs(id);
         try { return json(res, 200, profile.computer.machineId === 'local' ? await runtimeProbe(ensureContainer(id, root, profile.computer), { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' }) : await runnerProbe(profile, 'probe-runtime', { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' })); }

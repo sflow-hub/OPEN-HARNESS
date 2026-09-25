@@ -1,22 +1,24 @@
 # Runtime verification
 
-## Public beta release-candidate implementation pass — September 24, 2026
+## Local Docker release-gate pass — September 25, 2026
 
-Implemented and verified without paid inference:
+Environment: Linux, Docker Desktop 4.77.0 with Docker Engine 29.5.3. Docker Desktop is running and enabled for the user's graphical session. This is a local release-candidate preflight, not the required clean Ubuntu 24.04 acceptance host.
 
-- The production dashboard now exposes `/api/health`, which returns only coordinator reachability. Compose uses it for the service healthcheck, passes the remote-dashboard trust switch explicitly, and gives the coordinator up to 25 seconds for cleanup during shutdown.
-- Remote bootstrap remains denied by default and is allowed only when `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1`; both paths have route coverage.
-- First-run setup no longer records completion when dismissed, when runtime preparation is incomplete, or after a failed model test. Failed connection tests preserve the saved revision and can be retried.
-- Teams, boards, routines, remote computers, direct access, and MCP configuration are hidden behind a local Advanced features preference that defaults off. Existing data and APIs are unchanged.
-- Browser hydration no longer describes a persistent run as interrupted merely because its tab was closed; the coordinator remains authoritative and replay supplies the current state after reconnect.
-- Pending approvals are rebuilt from durable run events after reconnect, including when the saved event cursor has already passed the approval request. The mobile workspace panel now starts closed so it cannot cover task and approval controls.
-- Self-hosting documentation now covers authenticated HTTPS proxying with streaming, health checks, updates, diagnostics, and stopped-stack backup and restore.
-- Every reported version is `0.4.0-beta.1`. Self-hosted release publication is separate from signed desktop packaging, rejects tags that do not match the reviewed `main` commit and package version, and depends on tests, browser coverage, a fresh Compose health smoke test, coordinator/Hermes builds, and high/critical image scans.
-- The source-release builder archives the reviewed Git tree with the lockfile, Compose files, runtime Dockerfile, and operations documentation; it rejects local state, environment files, dependencies, and build/test output. The publishing job adds SHA-256 checksums.
+Verified in this pass:
 
-Checks: 97 Node tests, 46 Playwright desktop/mobile tests, TypeScript, ESLint, the production Vinext build, Cargo manifest/lock metadata, workflow YAML parsing, `git diff --check`, and `docker compose config` passed. Browser coverage includes incomplete setup, failed model retry, advanced-feature visibility, agent creation, task submission, pending-approval reconnect, and exact file download. `npm audit --omit=dev` reported 0 known vulnerabilities across 126 production dependencies.
+- A fresh Compose project built and started with both services healthy. `GET /api/health` returned `{"ok":true}`. Pausing the coordinator made the dashboard endpoint return 503, and unpausing it restored 200. Execution readiness remained a separate status: a restored stack with an empty private Docker volume stayed healthy while reporting that the Hermes runtime needed setup.
+- Remote bootstrap with a non-loopback `Host` header returned 403 with the trust switch at its default. The authenticated HTTPS proxy path has not yet been exercised.
+- The coordinator rebuilt from the final source, stopped on SIGTERM within the configured grace period, logged coordinator shutdown, and restarted healthy with the original data volume.
+- The full Hermes Dockerfile built as image `432f7e5fbf27`, and the pinned `open-harness-hermes:2026.9.11` tag points at that image. Smoke checks passed for Hermes 0.21.2, the Open Harness policy extension, Node, `agent-browser`, the Hermes CLI, and a nested Docker build. Build-only compilers, npm, Git metadata, and package-manager caches are absent from the runtime image.
+- The exact final coordinator image had zero high/critical vulnerabilities and zero detected secrets. The hardened Hermes image had 80 high/critical package occurrences across 32 unique CVEs, zero detected secrets, and no available fixed versions. Each Hermes finding has a narrow written rationale and an exception expiring 2026-10-09; Trivy completed with exit code 0 using `security/trivy-exceptions.yaml`. Any new finding or expired entry still fails the release workflow.
+- The beta now writes Hermes approval mode `manual`, so a flagged command reaches the durable operator approval flow rather than being decided silently by the guardian model. The already-verified approve and deny round trips below cover the real Hermes vocabulary.
+- First-run and workspace model fields can list models available to the saved credential, and OpenRouter starts with its `openrouter/auto` route instead of an empty model ID. The dashboard tracks active work per agent, while the coordinator admits four top-level agents by default, so one busy agent no longer disables every other agent.
+- A stopped `harness-data` archive passed gzip validation, restored into an empty volume, and matched all six source files byte for byte. The restored project started healthy and preserved the expected empty agent and credential counts. Archiving the 9.9 GB `harness-docker` volume caused Docker Desktop's engine to exit twice and left an incomplete archive; that optional cache-volume archive and a complete representative 0.3.0 upgrade/rollback remain release gates.
+- The source release implementation preserves the lockfile, Compose files, runtime Dockerfile, and operations documentation while excluding environment files, local state, dependencies, and build/test output.
 
-Live release acceptance remains blocked on this machine: its selected Docker Desktop socket does not exist, the system Docker socket is not accessible, and `.env` has no configured model credential. Therefore the full coordinator/Hermes builds and Trivy scans, fresh Compose smoke test, authenticated proxy test, real-provider `launch-smoke.md` workflow, process-tree termination, upgrade/restore comparison, and 24-hour soak are not claimed as passed. The release tag and GitHub Release must not be created until those gates and the repository-rule checklist in `docs/BETA_RELEASE.md` are complete.
+Automated checks on the resulting source: 116 Node tests, 52 Playwright tests across desktop and mobile, TypeScript, ESLint, the production Vinext build, `docker compose config`, and the release scan policy passed. `npm audit --omit=dev --audit-level=high` reports 0 known vulnerabilities; the current npm metadata counts 107 production dependencies.
+
+Release remains blocked on the clean Ubuntu 24.04 run, a real-provider `launch-smoke.md` workflow from this Compose install, authenticated proxy acceptance, the representative 0.3.0 upgrade and complete stopped-stack restore, the 24-hour soak, GitHub CI/repository-rule checks, and final source-archive inspection. Do not create the tag or GitHub Release until every item in `docs/BETA_RELEASE.md` is complete.
 
 ## Fourth real-runtime pass — September 25, 2026
 
@@ -102,12 +104,9 @@ after: a run paused in `waiting_approval` carrying the real command and its
 reported it "was approved by the user"; denying left it at 644 and stopped the command. The gate
 was forced to `manual` for that pair of runs only, and `smart` is unchanged in the shipped code.
 
-**One finding left for a decision, not fixed here.** With the shipped `approvals.mode: 'smart'`,
-Hermes hands each flagged command to an auxiliary "guardian" model rather than to the operator. On
-this machine it approved `chmod 777` on a bind-mounted host file silently, and it spends the
-operator's own key to make that judgement. `manual` — which gates only commands Hermes has already
-flagged, and is what the dashboard's approval UI exists for — is a one-word change in
-`runtime/profile-runtime.ts`. Worth deciding before the beta.
+**Resolved for the beta.** The shipped profile now uses `approvals.mode: 'manual'`, which sends
+Hermes-flagged commands to the operator approval flow. This avoids a guardian model silently
+approving a risky command with the operator's credential.
 
 Also confirmed incidentally: `POST /v1/onboarding/status` correctly refused a state directory that
 Docker cannot read (the probe named the real cause and pointed at the fix), and all five readiness

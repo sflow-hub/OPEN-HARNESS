@@ -140,6 +140,9 @@ export default function Home() {
   const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
   const [credentialsOpen, setCredentialsOpen] = useState(false);
   const [workspaceModelRevision, setWorkspaceModelRevision] = useState(0);
+  // Workspace settings asked for an exact "Model ID" with no way to see what was available.
+  const [workspaceModels, setWorkspaceModels] = useState<string[]>([]);
+  const [workspaceModelsNote, setWorkspaceModelsNote] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [advancedFeatures, setAdvancedFeatures] = useState(false);
   // Snapshot of the settings when the dialog opened, so dismissing it can tell an
@@ -153,8 +156,11 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
   const [agentTeamFilter, setAgentTeamFilter] = useState("all");
-  const [running, setRunning] = useState(false);
-  const [persistentRun, setPersistentRun] = useState<PersistentRun | null>(null);
+  // One boolean and one run meant the whole workspace was busy whenever any agent was: the
+  // sidebar disabled every other agent, so a named-agent workspace could only ever talk to one
+  // agent at a time. Runs are tracked per agent, and what the composer shows is simply the
+  // selected agent's run.
+  const [activeRuns, setActiveRuns] = useState<Record<string, PersistentRun>>({});
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   // A queue, not a slot. Two agents can pause at once, and the second request used to
   // overwrite the first — leaving a run blocked on an approval with no way to answer it.
@@ -188,7 +194,7 @@ export default function Home() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [inspector, setInspector] = useState(true);
   const controlRef = useRef(new ControlClient());
-  const runLock = useRef(false);
+  const runLocks = useRef(new Set<string>());
   const bottomRef = useRef<HTMLDivElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
@@ -198,6 +204,16 @@ export default function Home() {
   const conversation = workspace.conversations.find(
     (c) => c.id === conversationId,
   );
+  const persistentRun = agent ? activeRuns[agent.id] || null : null;
+  const running = Boolean(persistentRun);
+  const anyRunning = Object.keys(activeRuns).length > 0;
+  const agentRunning = (id: string) => Boolean(activeRuns[id]);
+  function startRun(agentId: string, run: PersistentRun) {
+    setActiveRuns(current => ({ ...current, [agentId]: run }));
+  }
+  function endRun(agentId: string) {
+    setActiveRuns(current => { if (!(agentId in current)) return current; const next = { ...current }; delete next[agentId]; return next; });
+  }
   const file = workspace.files.find((f) => f.id === selectedFile);
   // The deterministic adapter exists for automated tests only. Treating it as a
   // connected runtime let a source preview display canned prose as an agent reply.
@@ -308,25 +324,28 @@ export default function Home() {
         ]);
         if (!cancelled) {
           setRoutines(savedRoutines);
-          const live = runs.find((run) =>
+          // Reattach to every agent that is still working, not only the first one found. One
+          // run was followed and the rest were left to finish invisibly.
+          const liveRuns = runs.filter((run) =>
             ["queued", "running", "waiting_approval", "waiting_input"].includes(
               run.state,
             ),
           );
-          if (live) {
+          for (const [index, live] of liveRuns.entries()) {
+            if (runLocks.current.has(live.agent_id)) continue;
             const { messageId, cursor, hadContent } = attachRunMessage(live, live.prompt.slice(0, 52));
-            setSelectedAgent(live.agent_id);
-            setConversationId(live.conversation_id);
-            setView("chat");
-            setPersistentRun(live);
-            setRunning(true);
-            runLock.current = true;
+            if (index === 0) {
+              setSelectedAgent(live.agent_id);
+              setConversationId(live.conversation_id);
+              setView("chat");
+            }
+            startRun(live.agent_id, live);
+            runLocks.current.add(live.agent_id);
             void followRun(live, live.conversation_id, messageId, live.agent_id, cursor, hadContent)
               .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
               .finally(() => {
-                runLock.current = false;
-                setRunning(false);
-                setPersistentRun(null);
+                runLocks.current.delete(live.agent_id);
+                endRun(live.agent_id);
                 setReconnecting(false);
               });
           }
@@ -470,6 +489,19 @@ export default function Home() {
   // Dismissing this dialog used to drop an unsaved model change or a pasted API key
   // with no warning, which is the worst version of it: the key is gone from the form
   // and was never sent anywhere.
+  // Load the provider's model list whenever Workspace settings is open, so the field offers
+  // real choices instead of demanding an exact ID from memory.
+  useEffect(() => {
+    if (!settingsOpen) return;
+    let cancelled = false;
+    const query = new URLSearchParams({ provider: settings.provider, credentialRef: settings.credentialRef || '', baseUrl: settings.baseUrl || '' });
+    controlRef.current
+      .request<{ models: string[]; error?: string }>(`/v1/models?${query}`)
+      .then(result => { if (!cancelled) { setWorkspaceModels(result.models || []); setWorkspaceModelsNote(result.error || ''); } })
+      .catch(error => { if (!cancelled) { setWorkspaceModels([]); setWorkspaceModelsNote(error instanceof Error ? error.message : 'Could not list models.'); } });
+    return () => { cancelled = true; };
+  }, [settingsOpen, settings.provider, settings.credentialRef, settings.baseUrl]);
+
   const settingsDirty = settingsOpen && settingsSnapshot() !== settingsBaseline;
   const requestCloseSettings = () => { if (settingsDirty) setConfirmCloseSettings(true); else closeSettings(); };
   const escapeSettingsRef = useRef<() => void>(() => {});
@@ -490,7 +522,7 @@ export default function Home() {
       }
     };
     const beforeLeave = (e: BeforeUnloadEvent) => {
-      if (runLock.current) e.preventDefault();
+      if (runLocks.current.size) e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("beforeunload", beforeLeave);
@@ -559,16 +591,14 @@ export default function Home() {
     setSelectedAgent(run.agent_id);
     setConversationId(run.conversation_id);
     setView("chat");
-    if (!runLock.current && ["queued", "running", "waiting_approval", "waiting_input"].includes(run.state)) {
-      runLock.current = true;
-      setRunning(true);
-      setPersistentRun(run);
+    if (!runLocks.current.has(run.agent_id) && ["queued", "running", "waiting_approval", "waiting_input"].includes(run.state)) {
+      runLocks.current.add(run.agent_id);
+      startRun(run.agent_id, run);
       void followRun(run, run.conversation_id, messageId, run.agent_id, cursor, hadContent)
         .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
         .finally(() => {
-          runLock.current = false;
-          setRunning(false);
-          setPersistentRun(null);
+          runLocks.current.delete(run.agent_id);
+          endRun(run.agent_id);
           setReconnecting(false);
         });
     }
@@ -708,7 +738,7 @@ export default function Home() {
         await new Promise(resolve => setTimeout(resolve, Math.min(8000, 500 * 2 ** (consecutiveFailures - 1))));
         continue;
       }
-      setPersistentRun(snapshot.run);
+      startRun(snapshot.run.agent_id, snapshot.run);
       for (const item of snapshot.events) {
         cursor = Math.max(cursor, item.seq);
         const payload = item.payload || {};
@@ -828,7 +858,7 @@ export default function Home() {
       }
       return;
     }
-    if (runLock.current) return;
+    if (runLocks.current.has(agent.id)) return;
     if (!connected) {
       setNotice(
         runtime?.runtime.message ||
@@ -836,8 +866,7 @@ export default function Home() {
       );
       return;
     }
-    runLock.current = true;
-    setRunning(true);
+    runLocks.current.add(agent.id);
     setInput("");
     const cid = conversationId || uid();
     const mid = uid();
@@ -882,7 +911,7 @@ export default function Home() {
         conversationId: cid,
         prompt: text.trim(),
       });
-      setPersistentRun(run);
+      startRun(agentId, run);
       updateConversation(cid, (c) => ({
         ...c,
         messages: c.messages.map((message) =>
@@ -896,9 +925,8 @@ export default function Home() {
         message: error instanceof Error ? error.message : "Something went wrong.",
       });
     } finally {
-      runLock.current = false;
-      setRunning(false);
-      setPersistentRun(null);
+      runLocks.current.delete(agentId);
+      endRun(agentId);
     }
   }
   async function upload(files: FileList | null) {
@@ -1039,7 +1067,7 @@ export default function Home() {
           <span className="brand-mark">h</span> open harness{" "}
           <span className="version">/ 01</span>
         </button>
-        <button className="new-button" onClick={newAgent} disabled={running}>
+        <button className="new-button" onClick={newAgent}>
           <Plus size={15} /> New agent
         </button>
         <div className="search-box">
@@ -1104,14 +1132,13 @@ export default function Home() {
                 className={`agent-row ${view === "chat" && a.id === selectedAgent ? "selected" : ""}`}
                 key={a.id}
                 onClick={() => openAgent(a.id)}
-                disabled={running && a.id !== selectedAgent}
               >
                 <Avatar agent={a} />
                 <div>
                   <strong>{a.name}</strong>
                   <small>{a.role}</small>
                 </div>
-                {running && a.id === selectedAgent && (
+                {agentRunning(a.id) && (
                   <LoaderCircle className="spin" size={12} />
                 )}
               </button>
@@ -1123,7 +1150,6 @@ export default function Home() {
               </div>
               {recent.map((c) => (
                 <button
-                  disabled={running}
                   className={`recent ${c.id === conversationId && view === "chat" ? "selected" : ""}`}
                   key={c.id}
                   onClick={() => {
@@ -1204,7 +1230,7 @@ export default function Home() {
                 Your agents{" "}
                 <span>{String(workspace.agents.length).padStart(2, "0")}</span>
               </h2>
-              <button onClick={newAgent} disabled={running}>
+              <button onClick={newAgent}>
                 <Plus size={13} /> Create agent
               </button>
             </div>
@@ -1219,7 +1245,6 @@ export default function Home() {
                 <button
                   className="agent-card"
                   onClick={() => openAgent(a.id)}
-                  disabled={running && a.id !== selectedAgent}
                 >
                   <Avatar agent={a} large />
                   <ArrowUpRight className="card-arrow" size={17} />
@@ -1232,7 +1257,7 @@ export default function Home() {
                   </p>
                   <div className="card-footer">
                     <span className="status-dot" />
-                    {running && a.id === selectedAgent
+                    {agentRunning(a.id)
                       ? "Working on your task"
                       : "Ready when you are"}
                     <span>→</span>
@@ -1240,7 +1265,7 @@ export default function Home() {
                 </button>
                 <button className="agent-card-settings" onClick={() => setEditingAgent({ ...a })} aria-label={`Edit ${a.name} profile`} title="Agent settings"><SlidersHorizontal size={16} /></button>
                 <div className="agent-card-tools">
-                  <CredentialSwitcher agent={a} credentials={credentials} workspaceRef={settings.credentialRef || ""} client={controlRef.current} running={running && a.id === selectedAgent} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
+                  <CredentialSwitcher agent={a} credentials={credentials} workspaceRef={settings.credentialRef || ""} client={controlRef.current} running={agentRunning(a.id)} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
                 </div>
                 </div>
               ))}
@@ -1609,7 +1634,7 @@ export default function Home() {
                 )}
                 <button
                   className="subtle-button"
-                  disabled={running}
+                  disabled={anyRunning}
                   onClick={() => uploadRef.current?.click()}
                 >
                   <Plus size={12} /> Add a file
@@ -1713,7 +1738,7 @@ export default function Home() {
               </div>
               <button
                 className="light-button"
-                disabled={running}
+                disabled={anyRunning}
                 onClick={() => uploadRef.current?.click()}
               >
                 <Plus size={14} /> Add files
@@ -1763,7 +1788,7 @@ export default function Home() {
                     </button>
                     <button
                       aria-label={`Delete ${f.name}`}
-                      disabled={running}
+                      disabled={anyRunning}
                       onClick={() => {
                         if (!confirm(`Delete ${f.name}?`)) return;
                         const drop = () => setWorkspace((w) => ({ ...w, files: w.files.filter((x) => x.id !== f.id) }));
@@ -2136,15 +2161,27 @@ export default function Home() {
                 </select>
               </label>
               <label>
-                Model ID
+                Model
                 <input
                   value={settings.model}
                   onChange={(e) =>
                     setSettings((s) => ({ ...s, model: e.target.value }))
                   }
-                  placeholder="Enter the exact model ID from your provider"
+                  list="workspace-model-options"
+                  aria-autocomplete="list"
+                  placeholder={workspaceModels.length ? "Choose a model, or type any model ID" : "Enter the exact model ID from your provider"}
                   maxLength={200}
                 />
+                <datalist id="workspace-model-options">
+                  {workspaceModels.map((id) => (
+                    <option key={id} value={id} />
+                  ))}
+                </datalist>
+                <small>
+                  {workspaceModels.length
+                    ? `${workspaceModels.length} models available. Click the field to choose one, or type any exact ID.`
+                    : workspaceModelsNote || "Save a credential for this provider to list the models it can use."}
+                </small>
               </label>
               <label>
                 Credential
@@ -2231,7 +2268,7 @@ export default function Home() {
               </button>
               <button
                 className="subtle-button"
-                disabled={running}
+                disabled={anyRunning}
                 onClick={() => importRef.current?.click()}
               >
                 <FolderOpen size={14} /> Import backup

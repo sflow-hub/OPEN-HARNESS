@@ -443,3 +443,32 @@ test("the task tool accepts its fields nested, alongside the action, or as a JSO
     await waitRun(held.id);
   }
 });
+
+// A workspace of named agents could only ever have two working at once, hard-coded, and the
+// dashboard disabled every agent but the one already running. Four start together now.
+test("several agents work at the same time", async () => {
+  const ids = ["atlas", "scout", "scribe", "sage"];
+  await request("/v1/agents/sync", { method: "POST", body: JSON.stringify({ agents: ids.map(id => ({ id, name: id, role: "tester", instructions: "", config: { model: "mock" } })) }) });
+  const runs = [];
+  for (const id of ids) runs.push(await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: id, prompt: "MOCK_SLOW work in parallel" }) }));
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  let peak = 0;
+  while (Date.now() < deadline) {
+    const states = await Promise.all(runs.map(run => request(`/v1/runs/${run.id}`)));
+    peak = Math.max(peak, states.filter(run => run.state === "running").length);
+    if (states.every(run => ["completed", "failed", "cancelled", "interrupted"].includes(run.state))) break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(peak >= 3, `expected at least three agents running at once, saw ${peak}`);
+  for (const run of runs) assert.equal((await request(`/v1/runs/${run.id}`)).state, "completed");
+});
+
+// Choosing a model was a bare text box in first-run setup and in workspace settings: the key
+// was saved and the operator then had to already know an exact model ID from somewhere else.
+test("the model list a saved credential can reach is available without a container", async () => {
+  const listed = await request("/v1/models?provider=mock");
+  assert.ok(Array.isArray(listed.models) && listed.models.length, "the deterministic runtime must offer models");
+  const tested = await request("/v1/onboarding/model-test", { method: "POST", body: JSON.stringify({ model: { provider: "mock", model: "mock-atlas", credentialRef: "", baseUrl: "" } }) });
+  assert.equal(tested.ok, true);
+  assert.ok(Array.isArray(tested.models) && tested.models.length, "testing a key must also return what it can reach");
+});

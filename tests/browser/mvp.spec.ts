@@ -205,3 +205,32 @@ test('reopening a task run streams the work into the conversation it belongs to'
   await expect(page.getByText('Hermes mock completed the task.')).toBeVisible();
   await expect(page.getByText('Earlier work here')).toBeVisible();
 });
+
+// A single global "running" flag disabled every other agent in the sidebar, so a workspace built
+// around several named agents could only be used one agent at a time. Runs are tracked per agent
+// now: the one that is working shows a spinner, and the rest stay open for a new task.
+test('a second agent stays available while the first one is working', async ({ page, request }, testInfo) => {
+  const mobile = testInfo.project.name === 'mobile';
+  const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  // MOCK_APPROVAL parks the run until someone answers, so it is reliably still active below.
+  const created = await request.post(control + '/v1/runs', { headers: { Authorization: `Bearer ${token}` }, data: { agentId: 'atlas', prompt: 'MOCK_APPROVAL hold this agent busy' } });
+  expect(created.ok()).toBeTruthy();
+  await page.reload();
+  if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+
+  const atlasRow = page.locator('.agent-row', { hasText: 'Atlas' });
+  const scoutRow = page.locator('.agent-row', { hasText: 'Scout' });
+  await expect(atlasRow.locator('.spin')).toBeVisible();
+  await expect(atlasRow).toBeEnabled();
+  // The regression: this was disabled for as long as any agent anywhere was working.
+  await expect(scoutRow).toBeEnabled();
+  await expect(scoutRow.locator('.spin')).toHaveCount(0);
+
+  await scoutRow.click();
+  await expect(page.locator('.agent-row.selected')).toContainText('Scout');
+  // Switching away does not abandon the first agent: it is still marked as working. On a phone
+  // selecting an agent closes the drawer over the list, so only its presence can be asserted.
+  await expect(atlasRow.locator('.spin')).toHaveCount(1);
+  if (!mobile) await expect(atlasRow.locator('.spin')).toBeVisible();
+  await expect(atlasRow).not.toHaveClass(/selected/);
+});

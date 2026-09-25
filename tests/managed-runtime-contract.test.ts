@@ -178,3 +178,9 @@ test('the managed gateway announces itself as a session that can answer approval
       `${path} must mark its native gateway as an approval channel too`);
   }
 });
+
+test('managed profiles send flagged commands to the operator approval flow', () => {
+  const source = readFileSync(join(import.meta.dirname, '..', 'runtime', 'profile-runtime.ts'), 'utf8');
+  assert.match(source, /approvals: \{ mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' \}/);
+  assert.doesNotMatch(source, /approvals: \{ mode: 'smart'/);
+});

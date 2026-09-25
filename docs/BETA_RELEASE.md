@@ -7,8 +7,8 @@ This checklist is the release gate for `v0.4.0-beta.1`. Open Harness remains a s
 - [ ] Merge the release candidate to `main` only after the Verify workflow passes on Linux, macOS, and Windows.
 - [ ] In GitHub repository rules, protect tags matching `v*-beta.*` so only maintainers can create or update them.
 - [ ] Confirm the release tag points at the current `main` commit. The release workflow checks this again before publishing.
-- [x] On 2026-09-24, `npm audit --omit=dev --audit-level=high` reported 0 known vulnerabilities across 126 production dependencies.
-- [ ] Confirm Trivy reports no unapproved high or critical findings in the coordinator and Hermes images.
+- [x] On 2026-09-24, `npm audit --omit=dev --audit-level=high` reported 0 known vulnerabilities across the then-counted 126 production dependencies. Repeated on 2026-09-25, it reported 0 findings and 107 production dependencies in the current npm metadata.
+- [x] On 2026-09-25, the exact coordinator image reported no high/critical vulnerabilities or secrets. The Hermes image reported no secrets and no unapproved findings after applying the 32 reviewed, no-fix exceptions in `security/trivy-exceptions.yaml`; every exception expires 2026-10-09.
 - [ ] Confirm the release archive checksum and inspect its file list for local state, credentials, tokens, and machine-specific paths.
 
 Severity-one blockers are credential disclosure, authentication bypass, container escape, cross-agent private-file access, destructive data loss, unrecoverable upgrade failure, or inability to stop an agent process tree. Do not publish with any severity-one blocker open.
@@ -35,6 +35,8 @@ Use a clean Ubuntu 24.04 host with Docker, a disposable real-provider credential
 - [ ] Run a 24-hour soak with repeated core tasks, reconnects, one coordinator restart, and disk-usage observation.
 
 Allow at least 20 GB of free disk before the first runtime build. Agent files, SQLite events, container layers, and logs grow with use; the beta does not automatically prune user history. Check `docker system df` and the Compose volume sizes during the soak.
+
+The September 25 local Docker Desktop preflight is recorded in `runtime/VERIFICATION.md`. It is useful evidence but does not replace the clean Ubuntu host, authenticated proxy, upgrade, full restore, or soak gates above.
 
 ## Release notes and support
 

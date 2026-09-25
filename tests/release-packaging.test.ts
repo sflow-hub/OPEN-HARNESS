@@ -52,6 +52,24 @@ test('self-hosted publication stays gated by verification and image scanning', (
   assert.match(release, /npm run release:package/);
   assert.match(desktop, /workflow_dispatch:/);
   assert.doesNotMatch(desktop, /push:\s+tags:/);
+  const exceptions = readFileSync(join(root, 'security/trivy-exceptions.yaml'), 'utf8');
+  assert.match(release, /trivyignores: security\/trivy-exceptions\.yaml/);
+  assert.doesNotMatch(release, /ignore-unfixed:\s*true/);
+  assert.equal((exceptions.match(/^  - id: /gm) || []).length, 32);
+  assert.equal((exceptions.match(/^    expired_at: 2026-10-09$/gm) || []).length, 32);
+});
+
+test('coordinator image avoids package managers and uses its application health endpoint', () => {
+  const root = join(import.meta.dirname, '..');
+  const dockerfile = readFileSync(join(root, 'Dockerfile.coordinator'), 'utf8');
+  const compose = readFileSync(join(root, 'compose.yaml'), 'utf8');
+  assert.match(dockerfile, /FROM node:22-alpine/);
+  assert.match(dockerfile, /FROM docker:29-cli AS docker-cli/);
+  assert.doesNotMatch(dockerfile, /cli-plugins/);
+  assert.doesNotMatch(dockerfile, /apt-get|docker\.io/);
+  assert.match(dockerfile, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
+  assert.match(compose, /127\.0\.0\.1:3000\/api\/health/);
+  assert.doesNotMatch(compose, /healthcheck:\s*\n\s*test: \["CMD", "curl"/);
 });
 
 test('desktop launches the live runtime and no user script launches mock chat', () => {

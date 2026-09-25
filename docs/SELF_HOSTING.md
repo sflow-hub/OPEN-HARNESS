@@ -88,6 +88,19 @@ docker compose up -d
 
 The data archive contains the database, credentials, agent profiles, and working files. Protect it like a password vault. The Docker archive avoids rebuilding the pinned Hermes runtime but can be omitted when storage is limited.
 
+Docker Desktop can only bind-mount folders allowed by its file-sharing settings. If the commands above create no archive, move the source release to a shared folder or stage the archive in a named volume and copy it out through the Docker API:
+
+```bash
+docker volume create open-harness-backup-staging
+docker run --rm -v open-harness_harness-data:/source:ro -v open-harness-backup-staging:/backup alpine tar -czf /backup/open-harness-data.tgz -C /source .
+docker create --name open-harness-backup-copy -v open-harness-backup-staging:/backup alpine true
+docker cp open-harness-backup-copy:/backup/open-harness-data.tgz .
+docker rm open-harness-backup-copy
+docker volume rm open-harness-backup-staging
+```
+
+Run `gzip -t open-harness-data.tgz` before treating any archive as a backup. Large private-Docker-volume archives need enough free Docker Desktop VM storage as well as host storage; omitting that optional cache archive is safer when capacity is tight.
+
 Restore only into a stopped stack with empty destination volumes:
 
 ```bash

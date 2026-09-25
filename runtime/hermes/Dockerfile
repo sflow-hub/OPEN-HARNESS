@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-trixie
 
 ARG HERMES_COMMIT=939e45c91d751fadd94dcd1b873ac3cb44846213
 RUN apt-get update && apt-get install -y --no-install-recommends git curl ripgrep nodejs npm chromium ca-certificates tini xvfb openbox dbus-x11 && rm -rf /var/lib/apt/lists/*
@@ -16,10 +16,16 @@ RUN useradd -m -u 10001 hermes && mkdir -p /workspace/private /workspace/shared 
 USER hermes
 ENV HERMES_HOME=/home/hermes/.hermes HERMES_TUI=1 PYTHONUNBUFFERED=1
 RUN hermes computer-use install
+# The compiler, source-control client, package managers, checkout metadata and installer
+# caches are build inputs. They are not needed by a running agent and add a large,
+# independently vulnerable dependency tree to every private workspace.
+USER root
+RUN pip install --no-cache-dir 'httpx2==2.12.0' \
+  && apt-get purge -y --auto-remove git curl npm make g++ gnupg apt-transport-https \
+  && rm -rf /usr/lib/node_modules/npm /root/.npm /opt/hermes-agent/.git /var/lib/apt/lists/*
 # Everything above is upstream and rarely changes. Open Harness's own files come last so
 # that an edit to runtime/hermes/ rebuilds only these layers instead of re-cloning Hermes,
 # re-running pip install .[all] and reinstalling the browsers.
-USER root
 COPY runtime/hermes/ /opt/open-harness/
 RUN chmod +x /opt/open-harness/container-init.sh \
   && pip install --no-cache-dir /opt/open-harness/extension

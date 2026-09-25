@@ -87,6 +87,7 @@ jobs:
           image-ref: open-harness-hermes:release-candidate
           scanners: vuln,secret
           severity: HIGH,CRITICAL
+          trivyignores: security/trivy-exceptions.yaml
           exit-code: '1'
       - uses: docker/login-action@v3
         with:

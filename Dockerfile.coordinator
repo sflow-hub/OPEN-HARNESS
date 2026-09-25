@@ -7,8 +7,13 @@ ENV NEXT_PUBLIC_OPEN_HARNESS_SELF_HOSTED=1
 RUN npm run build && npm run runner:bundle \
   && npx esbuild runtime/service.ts --bundle --platform=node --format=esm --target=node22 --packages=external --banner:js="import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);" --outfile=runtime/service.mjs
 
-FROM node:22-bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends docker.io ca-certificates curl && rm -rf /var/lib/apt/lists/*
+FROM docker:29-cli AS docker-cli
+
+FROM node:22-alpine
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+# The production service only executes Node and the Docker CLI. Removing npm avoids
+# shipping its package-management dependency graph in the coordinator attack surface.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 WORKDIR /opt/open-harness
 COPY --from=builder /source/dist/standalone ./app
 COPY --from=builder /source/runtime/service.mjs /source/runtime/runner.mjs ./runtime/
