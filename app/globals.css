@@ -2044,3 +2044,29 @@ h1 span {
   .profile-icon-button { min-width: 44px; min-height: 44px; align-items: center; justify-content: center; }
   .file-row-actions button, .task-icon-button { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
 }
+
+/* The Android shell draws edge to edge, so anything pinned to an edge sits under the status
+   bar or the gesture bar unless it says otherwise. These insets are 0px everywhere else, so
+   the rules are harmless on desktop and in a browser without a notch. */
+header {
+  padding-top: env(safe-area-inset-top);
+  height: calc(79px + env(safe-area-inset-top));
+  padding-left: max(42px, env(safe-area-inset-left));
+  padding-right: max(42px, env(safe-area-inset-right));
+}
+.sidebar {
+  padding-top: max(29px, calc(env(safe-area-inset-top) + 12px));
+  padding-bottom: max(29px, env(safe-area-inset-bottom));
+  padding-left: max(19px, env(safe-area-inset-left));
+}
+/* Was a flat 23px, which on a gesture-navigation phone is exactly where the home indicator
+   is, so the toast and the swipe-up target fought each other. */
+.toast {
+  bottom: max(23px, calc(env(safe-area-inset-bottom) + 12px));
+}
+.chat-layout, .composer {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+@media (max-width: 760px) {
+  header { padding-left: max(18px, env(safe-area-inset-left)); padding-right: max(18px, env(safe-area-inset-right)); }
+}

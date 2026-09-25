@@ -197,3 +197,49 @@ test.describe('phone layout', () => {
     expect(Math.min(box!.width, box!.height)).toBeGreaterThanOrEqual(44);
   });
 });
+
+// Android's Back is delivered to the webview as ordinary history navigation, so Chromium can
+// exercise the mechanism even though the physical button needs the emulator. What Chromium
+// cannot show is the consequence of getting this wrong: with no history entry the Tauri shell
+// finishes the activity, so Back quit the app from any modal.
+test.describe('back closes overlays instead of leaving', () => {
+  test.skip(({ isMobile }) => !isMobile, 'Back is a phone gesture');
+
+  test.beforeEach(async ({ request, page }) => {
+    const headers = await operator(request);
+    await request.post(control + '/v1/agents/sync', { headers, data: { agents: initialWorkspace.agents } });
+    await page.addInitScript(() => localStorage.setItem('open-harness.onboarding.v1', 'done'));
+    await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+    await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
+  });
+
+  test('back closes an open dialog and stays in the app', async ({ page }) => {
+    await page.getByRole('button', { name: 'Open navigation' }).click();
+    await page.locator('aside.sidebar').getByRole('button', { name: /^Settings/ }).click();
+    const settings = page.getByRole('heading', { name: 'Workspace settings' });
+    await expect(settings).toBeVisible();
+
+    await page.goBack();
+
+    await expect(settings).toBeHidden();
+    // Still the dashboard: on the phone this is the difference between closing a dialog and
+    // the app disappearing.
+    await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
+  });
+
+  test('handing off from one overlay to another leaves back still working', async ({ page }) => {
+    // Settings closes and onboarding opens in the same click. One shared history entry means
+    // that transition touches history not at all; one entry per overlay used to make the
+    // outgoing overlay's cleanup swallow the incoming one, closing it instantly.
+    await page.getByRole('button', { name: 'Open navigation' }).click();
+    await page.locator('aside.sidebar').getByRole('button', { name: /^Settings/ }).click();
+    await page.getByRole('button', { name: 'Run setup again' }).click();
+    const setup = page.getByRole('dialog', { name: 'Welcome to Open Harness' });
+    await expect(setup).toBeVisible();
+
+    await page.goBack();
+
+    await expect(setup).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
+  });
+});

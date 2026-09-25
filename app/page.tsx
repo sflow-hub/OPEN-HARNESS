@@ -56,8 +56,10 @@ import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import { profileAgent, type ModelChoice } from "../lib/agent-profile";
 import { HubConnect } from "../components/hub-connect";
-import type { DeviceCredential } from "../lib/hub";
+import { parsePairingLink, type DeviceCredential } from "../lib/hub";
 import { PHONE_LAYOUT_QUERY, eventPollIntervalMs, isMobileApp, isPhoneLayout, notificationsGranted, notify, platformFetch, requestNotificationPermission, secureStore } from "../lib/platform";
+import { useBackGuard } from "../lib/back-guard";
+import { hasTauri, loadTauriPlugin, openExternal, saveFile } from "../lib/platform";
 
 const STORAGE_KEY = "open-harness.workspace.v1";
 const SETTINGS_KEY = "open-harness.settings.v1";
@@ -83,14 +85,21 @@ function formatInterval(minutes: number) {
   return minutes === 1 ? "minute" : `${minutes} minutes`;
 }
 const now = () => new Date().toISOString();
-function download(name: string, content: string, type = "text/plain", encoding: "utf8" | "base64" = "utf8") {
+// The phone app cannot download the way a browser does: its WebView ignores <a download> on
+// a blob: URL unless the host registers a DownloadListener, and the Tauri shell registers
+// none, so this used to click into the void. Resolves to where the file went on the phone,
+// and to null in a browser, which saved it itself.
+async function download(name: string, content: string, type = "text/plain", encoding: "utf8" | "base64" = "utf8"): Promise<{ path: string } | null> {
   const data = encoding === "base64" ? Uint8Array.from(atob(content), char => char.charCodeAt(0)) : content;
+  const saved = await saveFile(name, data);
+  if (saved) return saved;
   const url = URL.createObjectURL(new Blob([data], { type }));
   const link = document.createElement("a");
   link.href = url;
   link.download = name;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return null;
 }
 function Avatar({ agent, large = false }: { agent: Agent; large?: boolean }) {
   return (
@@ -108,6 +117,13 @@ const MARKDOWN_COMPONENTS = {
       href={typeof src === "string" ? src : undefined}
       target="_blank"
       rel="noopener noreferrer"
+      // target="_blank" does nothing in an Android WebView, which has no second window and
+      // no onCreateWindow registered, so this tap was silently inert in the app.
+      onClick={event => {
+        if (typeof src !== "string" || !hasTauri()) return;
+        event.preventDefault();
+        void openExternal(src);
+      }}
     >
       {alt || "Open image"}
     </a>
@@ -313,6 +329,33 @@ export default function Home() {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  // A pairing link opened while already connected used to go nowhere: the only deep-link
+  // listener lived inside the pairing screen, which is unmounted once paired. Silently
+  // re-pairing would be worse than ignoring it, so this explains the situation instead.
+  useEffect(() => {
+    if (!device || device === 'unknown') return;
+    let dispose: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      type DeepLink = { onOpenUrl(handler: (urls: string[]) => void): Promise<() => void> };
+      const plugin = await loadTauriPlugin<DeepLink>('deep-link');
+      if (!plugin || cancelled) return;
+      try {
+        dispose = await plugin.onOpenUrl(urls => {
+          for (const url of urls) {
+            const link = parsePairingLink(String(url));
+            if (!link) continue;
+            setNotice(link.hubUrl === device.hubUrl
+              ? `This device is already connected to ${device.hubUrl}.`
+              : `This device is connected to ${device.hubUrl}. Disconnect it in Settings before pairing with ${link.hubUrl}.`);
+            return;
+          }
+        });
+      } catch { /* No deep-link runtime here; the pairing screen handles its own links. */ }
+    })();
+    return () => { cancelled = true; dispose?.(); };
+  }, [device]);
 
   // The screen can change category without a reload: a rotated tablet, a resized desktop
   // window, a foldable opening. Layout follows it; how the client authenticates does not.
@@ -606,6 +649,16 @@ export default function Home() {
   };
 
   const agentNameFor = (id: string) => workspace.agents.find(agent => agent.id === id)?.name || "Your agent";
+  // A browser drops the file in Downloads and shows its own chrome for it. The phone app has
+  // no such chrome, so say where it landed, otherwise a successful save looks like nothing.
+  const saveDownload = async (name: string, content: string, type?: string, encoding?: "utf8" | "base64") => {
+    try {
+      const saved = await download(name, content, type, encoding);
+      if (saved) setNotice(`Saved ${name} to ${saved.path}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : `Could not save ${name}.`);
+    }
+  };
   // Only while nobody is looking at this screen; in the foreground the in-app banner already
   // says it. On the phone this reaches the native notification plugin, which is the only
   // way an approval request gets seen while the app is in the background.
@@ -640,6 +693,18 @@ export default function Home() {
   const requestCloseSettings = () => { if (settingsDirty) setConfirmCloseSettings(true); else closeSettings(); };
   const escapeSettingsRef = useRef<() => void>(() => {});
   escapeSettingsRef.current = () => { if (settingsOpen) requestCloseSettings(); };
+
+  // Android's Back closes whatever is on top, the way it does in every other app. Scoped to
+  // phone-shaped clients: on a desktop browser Back is a navigation control people expect to
+  // leave the page. Ordered outermost-last so the topmost overlay is the one that closes.
+  useBackGuard(phone && mobileOpen, () => setMobileOpen(false));
+  useBackGuard(phone && Boolean(selectedFile), () => setSelectedFile(null));
+  useBackGuard(phone && Boolean(docEditor) && !docBusy, () => setDocEditor(null));
+  useBackGuard(phone && Boolean(routineDraft), () => setRoutineDraft(null));
+  useBackGuard(phone && onboardingOpen, () => setOnboardingOpen(false));
+  // Routed through the same guard the close button uses, so Back asks before discarding an
+  // unsaved model change or a pasted key rather than throwing it away.
+  useBackGuard(phone && settingsOpen, () => requestCloseSettings());
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1980,7 +2045,7 @@ export default function Home() {
                     </span>
                     <button
                       aria-label={`Download ${f.name}`}
-                      onClick={() => download(f.name, f.content, f.mimeType, f.encoding)}
+                      onClick={() => void saveDownload(f.name, f.content, f.mimeType, f.encoding)}
                     >
                       <Download size={16} />
                     </button>
@@ -2425,13 +2490,13 @@ export default function Home() {
                 {notifyWhenDone ? "Notifications on" : "Notify me when tasks finish"}
               </button>
               <button className="subtle-button" onClick={async () => {
-                try { const bundle = await controlRef.current.request<Record<string, unknown>>('/v1/support-bundle'); download(`open-harness-diagnostics-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(bundle, null, 2), 'application/json'); }
+                try { const bundle = await controlRef.current.request<Record<string, unknown>>('/v1/support-bundle'); await saveDownload(`open-harness-diagnostics-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(bundle, null, 2), 'application/json'); }
                 catch (error) { setNotice(error instanceof Error ? error.message : 'Could not create diagnostics.'); }
               }}><Download size={14} /> Download diagnostics</button>
               <button
                 className="subtle-button"
                 onClick={() =>
-                  download(
+                  void saveDownload(
                     "open-harness-backup.json",
                     JSON.stringify(workspace, null, 2),
                     "application/json",
@@ -2531,7 +2596,7 @@ export default function Home() {
               <div className="button-row">
                 <button
                   aria-label="Download file"
-                  onClick={() => download(file.name, file.content, file.mimeType, file.encoding)}
+                  onClick={() => void saveDownload(file.name, file.content, file.mimeType, file.encoding)}
                 >
                   <Download size={17} />
                 </button>

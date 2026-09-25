@@ -38,6 +38,7 @@ export async function loadTauriPlugin<T = Record<string, unknown>>(name: string)
       case 'dialog': return await import('@tauri-apps/plugin-dialog') as T;
       case 'clipboard-manager': return await import('@tauri-apps/plugin-clipboard-manager') as T;
       case 'fs': return await import('@tauri-apps/plugin-fs') as T;
+      case 'opener': return await import('@tauri-apps/plugin-opener') as T;
       default: return null;
     }
   } catch { return null; }
@@ -218,4 +219,36 @@ export function eventPollIntervalMs(hidden: boolean) {
 export function taskPollIntervalMs(active: boolean) {
   if (isPhoneLayout()) return active ? 4000 : 15000;
   return active ? 2000 : 8000;
+}
+
+// An Android WebView has no concept of a second window, and the shell registers no
+// onCreateWindow, so target="_blank" and window.open do exactly nothing — the tap registers
+// and nowhere is any error. Links have to be handed to Rust, which hands them to the
+// system browser. Everywhere else the browser already does the right thing.
+export async function openExternal(url: string): Promise<boolean> {
+  const plugin = await loadTauriPlugin<{ openUrl(url: string): Promise<void> }>('opener');
+  if (plugin) {
+    try { await plugin.openUrl(url); return true; } catch { return false; }
+  }
+  try { return Boolean(window.open(url, '_blank', 'noopener,noreferrer')); } catch { return false; }
+}
+
+// Same story for downloads: the WebView ignores <a download> on a blob: URL unless the host
+// registers a DownloadListener, and the generated shell registers none, so every download
+// button was silently inert. Written through the fs plugin into the app's own data
+// directory, then handed to the system so the viewer can keep or share it.
+//
+// Returns where the file went, or null when this platform did it the ordinary web way.
+export async function saveFile(name: string, contents: string | Uint8Array): Promise<{ path: string } | null> {
+  const fs = await loadTauriPlugin<typeof import('@tauri-apps/plugin-fs')>('fs');
+  if (!fs) return null;
+  const { appDataDir, join } = await import('@tauri-apps/api/path');
+  const path = await join(await appDataDir(), name);
+  if (typeof contents === 'string') await fs.writeTextFile(path, contents);
+  else await fs.writeFile(path, contents);
+  // Best effort: the file is already saved, and failing to open a viewer is not a failure to
+  // download. The caller reports the path either way.
+  const opener = await loadTauriPlugin<{ openPath(path: string): Promise<void> }>('opener');
+  if (opener) { try { await opener.openPath(path); } catch { /* Nothing registered for this type. */ } }
+  return { path };
 }

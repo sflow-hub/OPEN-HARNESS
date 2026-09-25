@@ -4,6 +4,8 @@ import { Check, ChevronDown, Cpu, FileText, LoaderCircle, Plus, RefreshCw, Searc
 import { ControlClient } from '../lib/control-client';
 import { DEFAULT_MODEL, TOOL_GROUPS, draftProfile, type AgentProfile, type MachineInfo, type ModelCatalog, type ModelChoice, type ProfileResponse, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
 import { initialWorkspace, type Agent } from '../lib/types';
+import { useBackGuard } from '../lib/back-guard';
+import { isPhoneLayout } from '../lib/platform';
 
 type Props = { agent: Agent; client: ControlClient; onClose: () => void; onSaved: (profile: AgentProfile) => void; initialTab?: Tab };
 const tabs = [{ id: 'profile', label: 'Profile', icon: UserRound }, { id: 'computer', label: 'Computer', icon: MonitorCog }, { id: 'model', label: 'Model', icon: Cpu }, { id: 'prompt', label: 'System prompt', icon: FileText }, { id: 'tools', label: 'Tools & connections', icon: SlidersHorizontal }] as const;
@@ -66,6 +68,11 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
   function editModel(patch: Partial<AgentProfile['model']>) { setConnection(''); edit({ model: { ...draft.model, ...patch } }); }
   function editComputer(patch: Partial<AgentProfile['computer']>) { setComputerStatus(''); const computer = { ...draft.computer, ...patch }; edit({ computer, ...(computer.desktop === 'none' ? { allowedTools: draft.allowedTools.filter(id => id !== 'computer_use') } : {}) }); }
   function close() { if (saving) return; if (dirty || secretValue) setDiscard(true); else onClose(); }
+  // This panel fills the screen on a phone, so Back is the natural way out of it — and the
+  // only discard guard was bound to Escape, which a phone keyboard does not have. Back now
+  // routes through the same guard: it dismisses the discard prompt if it is up, otherwise it
+  // asks before throwing away an unsaved profile edit.
+  useBackGuard(isPhoneLayout(), () => { if (discard) setDiscard(false); else close(); });
   useEffect(() => {
     let cancelled = false;
     async function load() {
