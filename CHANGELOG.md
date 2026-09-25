@@ -41,6 +41,7 @@ pre-1.0, so breaking changes can still land in a minor version.
 - Hosted dispatch atomically enforces capacity and task ownership, snapshots profiles at start, and supports task stopping, routine editing/history, encrypted inputs, and conversation history. (codex)
 - Runtime stopping waits for tool process cleanup; native process identities survive coordinator restarts, and a second coordinator cannot interrupt the existing owner's work. File transfers reject traversal and symlink paths on Windows and Unix. (codex)
 - Android keyboard insets resize the native content area without cumulative padding. Desktop startup failure and quit clean up the coordinator sidecar. (codex)
+- Compose uses consistent coordinator/agent file ownership, private Unix-socket engine access, explicit browser pairing, and enough shutdown time to finish agent cleanup. Existing root-owned data requires the documented migration. (codex)
 - Steering and Stop acted on whichever run the dashboard happened to be holding, so
   after switching agents they could reach another agent's run. They now act on the open
   conversation's run. (claude)

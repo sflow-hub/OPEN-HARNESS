@@ -25,6 +25,7 @@ function proxyable(path: string[]) {
 // when the dashboard was reached over loopback, unless the operator has explicitly
 // accepted responsibility for authenticating remote access in front of this app.
 function bootstrapAllowed(request: Request) {
+  if (process.env.OPEN_HARNESS_DISABLE_BROWSER_BOOTSTRAP === '1') return false;
   if (process.env.OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD === '1') return true;
   const host = request.headers.get('host');
   return Boolean(host && LOOPBACK_HOST.test(host));
@@ -35,7 +36,9 @@ async function proxy(request: Request, context: Context) {
   if (!proxyable(path)) return Response.json({ error: 'This path is not available through the dashboard.' }, { status: 404 });
   if (path.join('/') === BOOTSTRAP_PATH && !bootstrapAllowed(request)) {
     return Response.json({
-      error: 'Open Harness will not hand the control token to a remote dashboard. Reach it over localhost, or put it behind an authenticated HTTPS reverse proxy and set OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1.',
+      error: process.env.OPEN_HARNESS_DISABLE_BROWSER_BOOTSTRAP === '1'
+        ? 'This dashboard requires device pairing. Create a pairing code on the coordinator, then connect this browser.'
+        : 'Open Harness will not hand the control token to a remote dashboard. Reach it over localhost, or put it behind an authenticated HTTPS reverse proxy and set OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1.',
     }, { status: 403 });
   }
   const incoming = new URL(request.url);

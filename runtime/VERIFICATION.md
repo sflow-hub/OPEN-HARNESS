@@ -4,12 +4,12 @@ Verified on September 25, 2026 in a macOS ARM64 VM using Node 22.23.3,
 Python 3.12, and pinned Hermes `939e45c91d751fadd94dcd1b873ac3cb44846213`
 (`v2026.9.11`). This records completed checks separately from environment limits.
 Claude independently verified the synchronized source on Linux 6.18 with Node
-22.22.2: all 131 Node tests, typecheck, and lint passed, including the real MCP
+22.22.2: all 136 Node tests, typecheck, and lint passed, including the real MCP
 subprocess socket test using the coordinator's explicit PID in its `/proc` path.
 
 ## Automated checks
 
-- Integrated Node suite: 131 tests passed at the latest full checkpoint. It includes
+- Integrated macOS Node suite: 136 tests passed at the latest full checkpoint. It includes
   coordinator persistence, queue admission, profile snapshots, tasks/routines,
   runner pairing, encrypted inputs, hosted D1 handler concurrency, path containment,
   actual coordination subprocess requests, and process-tree termination.
@@ -18,6 +18,13 @@ subprocess socket test using the coordinator's explicit PID in its `/proc` path.
   queued work. A competing coordinator cannot interrupt the existing owner's run.
 - Four state-ownership tests verify exclusive access, clean release, crash release,
   independent state directories, and preservation of underlying database errors.
+- Three supervisor subprocess tests verify delayed graceful cleanup, forced stopping
+  of an unresponsive service, and peer cleanup after unexpected service failure.
+- Two dashboard proxy tests verify deployment-wide browser pairing requirements and
+  authenticated device forwarding. With the actual standalone dashboard and
+  coordinator, browser bootstrap returned 403, one-time pairing returned 201, scoped
+  sessions and authenticated state returned 200, reused codes returned 410, and
+  unauthenticated or runner-only access returned 401. Master tokens were not exposed.
 - The Node suite invokes seven Python policy tests. Denied tools remain denied for
   direct and nested dispatch; missing/empty policy is fail-closed.
 - Production `npm run build`, `npm run typecheck`, `npm run lint`, and `git diff --check` passed.
@@ -78,7 +85,7 @@ socket HTTP client overload. Rebuild existing Hermes containers after this updat
 Docker Desktop cannot start in this VM: its compatibility check reports no CPU
 virtualization support (`kern.hv_support=0`). The pinned image and Compose stack
 therefore have not been rebuilt or executed here. `.github/workflows/runtime.yml`
-adds a Docker-capable, credential-free real-runtime gate for PR checks. Publishing a
+adds Docker-capable, credential-free real-runtime and Compose gates for PR checks. Publishing a
 test branch was blocked by the GitHub integration's write permissions (HTTP 403) and
 the absence of local Git credentials; no PR or remote run was created. Container filesystem isolation,
 container-side model networking, virtual desktops, and container process cleanup
@@ -88,8 +95,18 @@ still need a Docker-capable host:
 npm run harness:setup
 npm run harness:doctor
 OPEN_HARNESS_REAL_CONTAINER=1 node --import tsx tests/real-hermes-smoke.mjs
-docker compose up --build
+OPEN_HARNESS_COMPOSE_SMOKE=1 node --import tsx tests/compose-smoke.mjs
 ```
+
+The Compose gate builds the production coordinator, imports the pinned Hermes image
+into its private engine, and uses a sibling scripted provider to check actual nested
+model routing, mounted file writes, clarification, task MCP, denied tools, conversation
+history, durable state after restart, and cleanup while an agent waits for input.
+It also checks browser authentication, Unix-only Docker access, and runtime file
+ownership, then removes only its disposable project and volumes. These are prepared
+acceptance checks, not completed Docker evidence. The production Compose topology
+and generated test overlay parse with Compose 2.39.4; shell, JavaScript, workflow
+syntax, and provider-fixture checks pass without a daemon.
 
 The packaged desktop WKWebView displayed the dashboard and agent cards; Cmd+Q
 shut down both sidecars cleanly. No physical Android device or hardware emulator

@@ -5,18 +5,25 @@ services:
     privileged: true
     environment:
       DOCKER_TLS_CERTDIR: ""
-    command: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+      DOCKER_HOST: unix:///run/open-harness-docker/docker.sock
+    entrypoint: ["/bin/sh", "/usr/local/bin/open-harness-dind.sh"]
+    # A full dockerd command prevents the upstream entrypoint adding TCP listeners.
+    command: ["dockerd", "--host=unix:///run/open-harness-docker/docker.sock", "--group=1000"]
     volumes:
       - harness-docker:/var/lib/docker
       - harness-data:/data
+      - harness-control:/run/open-harness-docker
+      - ./runtime/dind-entrypoint.sh:/usr/local/bin/open-harness-dind.sh:ro
     healthcheck:
       test: ["CMD", "docker", "info"]
       interval: 3s
       timeout: 5s
       retries: 30
     restart: unless-stopped
+    stop_grace_period: 30s
 
   open-harness:
+    init: true
     build:
       context: .
       dockerfile: Dockerfile.coordinator
@@ -24,11 +31,14 @@ services:
       docker:
         condition: service_healthy
     environment:
-      DOCKER_HOST: tcp://docker:2375
+      DOCKER_HOST: unix:///run/open-harness-docker/docker.sock
       OPEN_HARNESS_STATE_DIR: /data
+      OPEN_HARNESS_DISABLE_BROWSER_BOOTSTRAP: "1"
+      OPEN_HARNESS_ALLOW_LOOPBACK_PAIRING: "1"
       OPEN_HARNESS_PUBLIC_URL: ${OPEN_HARNESS_PUBLIC_URL:-http://localhost:3000/api/local}
     volumes:
       - harness-data:/data
+      - harness-control:/run/open-harness-docker
     ports:
       - "${OPEN_HARNESS_LISTEN_ADDRESS:-127.0.0.1}:3000:3000"
     cap_drop:
@@ -42,7 +52,9 @@ services:
       retries: 20
       start_period: 15s
     restart: unless-stopped
+    stop_grace_period: 30s
 
 volumes:
   harness-data:
   harness-docker:
+  harness-control:

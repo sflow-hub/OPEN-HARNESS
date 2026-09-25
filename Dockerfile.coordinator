@@ -15,6 +15,8 @@ COPY --from=builder /source/runtime/service.mjs /source/runtime/runner.mjs ./run
 COPY --from=builder /source/runtime/hermes ./runtime/hermes
 COPY --from=builder /source/runtime/installers ./runtime/installers
 COPY --from=builder /source/desktop/supervisor.mjs ./supervisor.mjs
+RUN mkdir -p /data && chown node:node /data
 ENV OPEN_HARNESS_STATE_DIR=/data OPEN_HARNESS_INTERNAL_CONTROL_URL=http://127.0.0.1:4317
+USER node
 EXPOSE 3000
 CMD ["node", "/opt/open-harness/supervisor.mjs"]

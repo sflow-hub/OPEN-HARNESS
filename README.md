@@ -40,6 +40,37 @@ docker compose up -d
 
 Open `http://localhost:3000`. Compose starts the dashboard, coordinator, a private Docker engine for agent containers, and persistent data volumes. No host Node or Python installation is required. By default the dashboard listens only on this computer. To expose it, put it behind an authenticated HTTPS reverse proxy, set `OPEN_HARNESS_LISTEN_ADDRESS=0.0.0.0`, and set `OPEN_HARNESS_PUBLIC_URL=https://agents.example.com/api/local`.
 
+Compose requires pairing for every browser, including localhost. Create a one-time code from the operator's terminal and enter it in the dashboard:
+
+```bash
+docker compose exec -T open-harness node --input-type=module <<'NODE'
+const base = 'http://127.0.0.1:4317';
+const bootstrap = await fetch(`${base}/v1/bootstrap`);
+if (!bootstrap.ok) throw new Error(`Coordinator bootstrap failed: ${bootstrap.status}`);
+const { token } = await bootstrap.json();
+const response = await fetch(`${base}/v1/machines`, {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ kind: 'device', platform: 'android', name: 'Browser' }),
+});
+const pairing = await response.json();
+if (!response.ok) throw new Error(pairing.error || 'Pairing failed');
+console.log(`Pairing code: ${pairing.code}\nExpires: ${pairing.expiresAt}`);
+NODE
+```
+
+The code expires after ten minutes and works once. The master token stays inside that process. Local browser pairing uses the default localhost address; remote browsers and phones require `OPEN_HARNESS_PUBLIC_URL` to be the reachable HTTPS address before creating their codes.
+
+The coordinator and agents use UID/GID `1000`, and only the coordinator receives the private engine's control socket. Fresh data volumes are initialized automatically. If upgrading an older root-owned data volume, back it up, stop the stack, and explicitly migrate its ownership before restarting:
+
+```bash
+docker compose down
+docker compose run --rm --no-deps --user 0:0 --entrypoint /bin/sh docker -c 'chown -R 1000:1000 /data'
+docker compose up -d --build
+```
+
+Do not add `--volumes` to `down` when preserving your data. Existing nonempty data is never automatically re-owned. For local models, configure a private/LAN provider URL reachable from both the coordinator and its agent containers. In this nested Docker deployment, `localhost` and `host.docker.internal` do not identify the physical VPS; use its reachable address and configure the model server to listen there.
+
 ### Develop from source
 
 Contributors need Node.js 22.13+ and Docker:
