@@ -18,6 +18,54 @@ Checks: 97 Node tests, 46 Playwright desktop/mobile tests, TypeScript, ESLint, t
 
 Live release acceptance remains blocked on this machine: its selected Docker Desktop socket does not exist, the system Docker socket is not accessible, and `.env` has no configured model credential. Therefore the full coordinator/Hermes builds and Trivy scans, fresh Compose smoke test, authenticated proxy test, real-provider `launch-smoke.md` workflow, process-tree termination, upgrade/restore comparison, and 24-hour soak are not claimed as passed. The release tag and GitHub Release must not be created until those gates and the repository-rule checklist in `docs/BETA_RELEASE.md` are complete.
 
+## Third real-runtime pass — September 25, 2026
+
+First end-to-end pass against a **paid provider**, on Linux with Docker Desktop 29.5.3,
+Node 22.23.2 and the pinned image `open-harness-hermes:2026.9.11`. Provider: OpenRouter,
+model `meta-llama/llama-3.3-70b-instruct`. Total inference spend for the whole pass: $0.0054.
+
+Run from a fresh state directory holding only one credential, on port 4399, so nothing
+touched the operator's own workspace. Verified in order:
+
+- **Readiness.** All five checks report ready, including the Docker bind-mount probe for the
+  state directory.
+- **Credential to provider.** `POST /v1/onboarding/model-test` authenticates against
+  `https://openrouter.ai/api/v1/models` with the stored key and reports ready.
+- **A real task that changes the workspace.** A run asking the agent to write a file
+  completed, and `live-check.md` arrived on the host in `shared/` with exactly the requested
+  contents. `GET /v1/files?scope=shared` lists it.
+- **Event replay.** 26 durable events for that run, including the full tool lifecycle
+  (`tool.generating` → `tool.start` → `tool.complete`) carrying the real `write_file`
+  arguments, replayable from `?after=0`.
+- **Filesystem isolation.** The container has exactly four mounts — `shared` read-write,
+  the agent's own `private` read-write, its profile home read-write, and `managed`
+  read-only. Inside it: the host home is not present, `/var/run/docker.sock` is not present,
+  no other agent's private directory is reachable, `/run/open-harness` is genuinely
+  read-only, and the process runs as `1000:1000` rather than root.
+- **Process-tree termination.** With `managed_entry.py`, a Hermes terminal wrapper and a
+  `sleep 400` child all running inside the container, `POST /v1/runs/:id/stop` returned
+  `{"ok":true,"stopped":1}`, the run became `cancelled`, and the container exited 143 —
+  taking the whole tree with it. No agent process survived on the host.
+- **Crash recovery.** `SIGKILL` to the coordinator mid-run, then restart: the run is
+  `interrupted` with the "not replayed" reason, its 17 events are preserved, the stored
+  credential is intact, and the control token is unchanged.
+- **Container reaping.** The hard kill left a container that the `--restart unless-stopped`
+  policy brought back with no gateway owning it. The next clean shutdown logged
+  "Stopped 1 agent container" and stopped it. The operator's separate Docker Compose stack,
+  running at the same time, was untouched — the reaper matches on the managed label, not on
+  the shared `open-harness-` name prefix.
+
+This pass found one defect that no mocked test could see, now fixed: a new agent was granted
+only `mcp_open_harness_task`, so the first thing anyone asked it to do it truthfully refused,
+saying it could not create files. `DEFAULT_TOOLS` in `lib/agent-profile.ts` now grants the
+working set — files, terminal, code execution, memory, session recall, skills, web and
+clarify — while desktop control, delegation, scheduling and MCP connectors stay off.
+
+Still not exercised live: real MCP servers, Direct Computer Access, native subagent
+restrictions, named-agent handoff, scheduled routines, an approval round trip, a
+from-scratch build of `runtime/hermes/Dockerfile`, and the broader code-repair and browsing
+scenarios.
+
 ## Real-runtime pass — September 21, 2026
 
 First execution against the real, non-mocked runtime (`mode: live`), on Linux with
@@ -91,11 +139,12 @@ coordinator in `mode: live` unless noted.
 
 ## Still pending
 
-Not yet exercised against a real runtime: authentication and inference against a paid
-provider, real MCP servers, filesystem isolation, process-tree termination, Direct
-Computer Access, native subagent restrictions, a full from-scratch build of the reordered
-Dockerfile, and the broader code-repair, browsing, durable skill-use, named-agent
-teamwork and scheduled-run scenarios.
+Superseded in part by the September 25 pass above, which covered paid-provider inference,
+filesystem isolation and process-tree termination. Still not exercised against a real
+runtime: real MCP servers, Direct Computer Access, native subagent restrictions, a full
+from-scratch build of the reordered Dockerfile, an approval round trip, and the broader
+code-repair, browsing, durable skill-use, named-agent teamwork and scheduled-run
+scenarios.
 
 The deterministic control and browser suites still run under `OPEN_HARNESS_MOCK=1` and
 do not by themselves establish live acceptance.

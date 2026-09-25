@@ -144,8 +144,10 @@ dies at startup.
 The automated suite runs against a mocked Hermes runtime (`OPEN_HARNESS_MOCK=1`).
 Real-runtime passes on 2026-09-21/22 covered credential storage, profile preparation, plugin
 loading, gateway startup, authenticated round trips to an OpenAI-compatible endpoint, stale
-image detection, and state-directory choice. Filesystem isolation, process-tree termination,
-paid-provider inference, real MCP servers, and Direct Computer Access remain unverified.
+image detection, and state-directory choice. A third pass on 2026-09-25 added paid-provider
+inference, a real file-writing task, event replay, filesystem isolation, process-tree
+termination, crash recovery, and container reaping. Real MCP servers, Direct Computer Access,
+an approval round trip, and named-agent handoff remain unverified.
 `runtime/VERIFICATION.md` is the record; update it when a real-runtime check is performed.
 `ROADMAP.md` tracks feature maturity — Direct Computer Access is the least mature path, and
 the supported install is a local browser dashboard on Linux.

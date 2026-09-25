@@ -54,10 +54,29 @@ export const TOOL_GROUPS = [
   ['mcp', 'MCP connections', 'Use tools supplied by your configured connections.'],
   ['other', 'Other tools', 'Additional tools discovered in this Hermes runtime.'],
 ] as const;
+// What a new agent can do before anyone opens its settings. A fresh agent used to be granted
+// only the task tool, so the first thing anyone asked it to do -- read something, write a file,
+// run a command -- it truthfully answered that it could not. These are the tools for doing work
+// inside its own container, named against the pinned Hermes catalogue.
+//
+// Deliberately absent, because they reach past that container or cost money on their own:
+// desktop control, delegation, scheduling, MCP connectors, and the third-party integrations.
+// Existing agents keep whatever they were given; an upgrade must not widen their access.
+export const DEFAULT_TOOLS = [
+  'mcp_open_harness_task',
+  'read_file', 'write_file', 'patch', 'search_files',
+  'terminal', 'process_manage',
+  'execute_code',
+  'memory', 'session_search',
+  'skills_list', 'skill_view', 'skill_manage',
+  'web_search', 'web_extract',
+  'clarify',
+];
+
 export function draftProfile(agent: Agent): AgentProfile {
   if (agent.profile) return { ...agent.profile, allowedTools: [...new Set([...(agent.profile.allowedTools || []), 'mcp_open_harness_task'])], board: { ...DEFAULT_BOARD, ...(agent.profile.board || {}) }, computer: agent.profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
   return { id: agent.id, revision: 0, name: agent.name, role: agent.role, description: agent.description, tone: agent.tone,
-    prompt: { enabled: true, text: agent.instructions }, model: { ...DEFAULT_MODEL, inherit: true }, allowedTools: ['mcp_open_harness_task'], board: { ...DEFAULT_BOARD }, connectors: [], computer: { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
+    prompt: { enabled: true, text: agent.instructions }, model: { ...DEFAULT_MODEL, inherit: true }, allowedTools: [...DEFAULT_TOOLS], board: { ...DEFAULT_BOARD }, connectors: [], computer: { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
 }
 export function profileAgent(profile: AgentProfile, memory: string[] = []): Agent {
   return { id: profile.id, name: profile.name, role: profile.role, description: profile.description, tone: profile.tone, instructions: profile.prompt.text, memory, profile };

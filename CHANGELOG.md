@@ -62,6 +62,11 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ### Fixed
 
+- A new agent can actually do work. It was granted only the task tool, so the first thing
+  anyone asked it to do — read a file, write one, run a command — it truthfully refused.
+  New agents now start with files, terminal, code execution, memory, session recall,
+  skills, web, and clarify; desktop control, delegation, scheduling, and MCP connectors
+  stay off, and existing agents keep exactly what they had.
 - Stopping a run tree no longer abandons the rest of the tree when one container
   refuses to stop, and always releases the agent. It rethrew from the middle of the
   loop with the agent still marked stopping, which kept it out of admission until a
