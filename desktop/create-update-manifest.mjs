@@ -2,8 +2,13 @@ import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 const directory = resolve(process.argv[2] || 'release-assets');
-const tag = process.env.GITHUB_REF_NAME || process.argv[3];
-const repository = process.env.GITHUB_REPOSITORY || process.argv[4];
+// An explicit argument wins over the ambient environment. The release workflow passes only
+// the directory and relies on the variables, so this changes nothing there — but with the
+// old precedence any CI job that set GITHUB_REF_NAME overrode what a caller asked for, so
+// tests/release-packaging.test.ts saw its "v0.3.0" become the branch name and failed on
+// every push to a branch.
+const tag = process.argv[3] || process.env.GITHUB_REF_NAME;
+const repository = process.argv[4] || process.env.GITHUB_REPOSITORY;
 if (!tag || !repository) throw new Error('Release tag and GitHub repository are required.');
 
 async function files(root) {
