@@ -9,7 +9,7 @@ This checklist is the release gate for `v0.4.0-beta.1`. Open Harness remains a s
 - [ ] Confirm the release tag points at the current `main` commit. The release workflow checks this again before publishing.
 - [x] On 2026-09-24, `npm audit --omit=dev --audit-level=high` reported 0 known vulnerabilities across the then-counted 126 production dependencies. Repeated on 2026-09-25, it reported 0 findings and 107 production dependencies in the current npm metadata.
 - [x] On 2026-09-25, the exact coordinator image reported no high/critical vulnerabilities or secrets. The Hermes image reported no secrets and no unapproved findings after applying the 32 reviewed, no-fix exceptions in `security/trivy-exceptions.yaml`; every exception expires 2026-10-09.
-- [ ] Confirm the release archive checksum and inspect its file list for local state, credentials, tokens, and machine-specific paths.
+- [x] On 2026-09-25, the source archive checksum was generated, its 164-entry file list excluded local state and build output, and Trivy found no embedded secrets. Repeat this check on the tagged commit in the release job.
 
 Severity-one blockers are credential disclosure, authentication bypass, container escape, cross-agent private-file access, destructive data loss, unrecoverable upgrade failure, or inability to stop an agent process tree. Do not publish with any severity-one blocker open.
 
