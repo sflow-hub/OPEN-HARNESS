@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizePairingCode, pairDevice, parsePairingLink, validateHubUrl } from '../lib/hub';
+import { normalizePairingCode, pairDevice, validateHubUrl } from '../lib/hub';
 
 test('hub addresses must be encrypted unless they cannot leave the device', () => {
   assert.equal(validateHubUrl('https://agents.example.com/'), 'https://agents.example.com');
@@ -10,15 +10,6 @@ test('hub addresses must be encrypted unless they cannot leave the device', () =
   assert.throws(() => validateHubUrl('http://agents.example.com'), /HTTPS/);
   assert.throws(() => validateHubUrl('not a url'), /valid web address/);
   assert.throws(() => validateHubUrl(''), /Enter the address/);
-});
-
-test('pairing links carry the hub and code, and reject anything else', () => {
-  const link = parsePairingLink('openharness://pair?hub=https%3A%2F%2Fagents.example.com&code=K4M27QRT9XBV');
-  assert.deepEqual(link, { hubUrl: 'https://agents.example.com', code: 'K4M27QRT9XBV' });
-  assert.equal(parsePairingLink('openharness://pair?hub=https://agents.example.com')?.code, undefined);
-  assert.equal(parsePairingLink('https://evil.example.com/pair?hub=x&code=y'), null);
-  assert.equal(parsePairingLink(''), null);
-  assert.equal(parsePairingLink('openharness://pair?hub=http%3A%2F%2Fagents.example.com&code=ABC'), null, 'a link may not downgrade the hub to plain HTTP');
 });
 
 test('pairing codes survive being read off a screen and typed', () => {

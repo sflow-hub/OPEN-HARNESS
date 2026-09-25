@@ -46,7 +46,7 @@ download() {
   fi
 }
 download "runtime/runner.mjs"
-for file in Dockerfile NOTICE.md container-init.sh coordination.mjs inspect_runtime.py managed_entry.py extension/open_harness_policy.py extension/pyproject.toml; do
+for file in Dockerfile NOTICE.md container-init.sh coordination.mjs inspect_runtime.py managed_entry.py cua_compat.py extension/open_harness_policy.py extension/pyproject.toml; do
   download "runtime/hermes/$file"
 done
 chmod 700 "$install_dir/runtime/hermes/container-init.sh"

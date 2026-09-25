@@ -1,7 +1,7 @@
 import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);
 
 // runtime/runner.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync4, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync5, writeFileSync as writeFileSync6, chmodSync as chmodSync3, readdirSync as readdirSync3, unlinkSync as unlinkSync2 } from "node:fs";
 import { homedir, hostname, platform as platform2, arch } from "node:os";
 import { join as join3, resolve as resolve2 } from "node:path";
 import { spawn as spawn3, spawnSync as spawnSync4 } from "node:child_process";
@@ -371,8 +371,78 @@ function ensureContainer(agentId, stateRoot2, computer) {
 
 // runtime/profile-runtime.ts
 import { spawn as spawn2, spawnSync as spawnSync2 } from "node:child_process";
-import { mkdirSync, writeFileSync, renameSync, chmodSync } from "node:fs";
+import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, renameSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+
+// runtime/profile-memory.ts
+import { existsSync as existsSync2, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+
+// runtime/path-safety.ts
+import { lstatSync } from "node:fs";
+import path from "node:path";
+function resolveContainedPath(root, name, paths = path) {
+  if (!name || name.includes("\0") || name.includes(":") || path.posix.isAbsolute(name) || path.win32.isAbsolute(name)) throw new Error("Invalid workspace path.");
+  const parts = name.replaceAll("\\", "/").split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) throw new Error("Invalid workspace path.");
+  if (parts.some((part) => /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(part))) throw new Error("Invalid portable workspace path.");
+  const target = paths.resolve(root, parts.join(paths.sep));
+  const relative2 = paths.relative(paths.resolve(root), target);
+  if (!relative2 || relative2 === ".." || relative2.startsWith(`..${paths.sep}`) || paths.isAbsolute(relative2)) throw new Error("Path escaped the workspace.");
+  return target;
+}
+function safeWorkspacePath(root, name) {
+  const target = resolveContainedPath(root, name);
+  const parts = path.relative(path.resolve(root), target).split(path.sep);
+  let current = path.resolve(root);
+  for (let index = 0; index < parts.length; index += 1) {
+    current = path.join(current, parts[index]);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch (error) {
+      if (error.code === "ENOENT") break;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) throw new Error("Workspace paths cannot contain symbolic links.");
+    if (index < parts.length - 1 && !stat.isDirectory()) throw new Error("Workspace parent is not a directory.");
+  }
+  return target;
+}
+
+// runtime/profiles.ts
+var ProfileError = class extends Error {
+  constructor(message, status = 400) {
+    super(message);
+    this.status = status;
+  }
+};
+function validId(id) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new ProfileError("Invalid agent ID.");
+  return id;
+}
+
+// runtime/profile-memory.ts
+function profileMemory(root, agentId) {
+  const profile = `agents/${validId(agentId)}/profile`;
+  const directory = safeWorkspacePath(root, `${profile}/memories`);
+  mkdirSync(directory, { recursive: true });
+  const paths = { memory: "", user: "" };
+  for (const [key, file] of [["memory", "MEMORY.md"], ["user", "USER.md"]]) {
+    const target = safeWorkspacePath(root, `${profile}/memories/${file}`);
+    const legacy = safeWorkspacePath(root, `${profile}/${file}`);
+    if (!existsSync2(target) && existsSync2(legacy)) {
+      try {
+        writeFileSync(target, readFileSync(legacy), { flag: "wx", mode: 384 });
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
+    }
+    paths[key] = target;
+  }
+  return paths;
+}
+
+// runtime/profile-runtime.ts
 var COORDINATION_TOOLS = [
   { id: "mcp_open_harness_task", name: "Task board", group: "other", description: "Read and update assigned board tasks.", available: true },
   { id: "mcp_open_harness_delegate_named_agent", name: "Hand off to another agent", group: "delegation", description: "Assign explicit task context to another named agent.", available: true },
@@ -445,13 +515,14 @@ function nativeRuntimeProbe(profileHome, input) {
   return value;
 }
 function atomic(path2, data) {
-  writeFileSync(`${path2}.tmp`, data, { mode: 384 });
+  writeFileSync2(`${path2}.tmp`, data, { mode: 384 });
   renameSync(`${path2}.tmp`, path2);
   chmodSync(path2, 384);
 }
 function prepareProfile(root, profile, effective, secrets, token, runId, options = {}) {
   const dir = join(root, "agents", profile.id), home = join(dir, "profile"), managed = join(dir, "managed");
-  for (const path2 of [home, managed, join(dir, "private")]) mkdirSync(path2, { recursive: true });
+  for (const path2 of [home, managed, join(dir, "private")]) mkdirSync2(path2, { recursive: true });
+  profileMemory(root, profile.id);
   const mcp = {};
   if (profile.allowedTools.some((id) => COORDINATION_TOOLS.some((t) => t.id === id))) mcp.open_harness = { command: "node", args: [options.coordinationCommand || "/opt/open-harness/coordination.mjs"], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}, ...options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {}, ...options.sitesToken ? { OPEN_HARNESS_SITES_TOKEN: options.sitesToken } : {} } };
   const env = {};
@@ -502,43 +573,10 @@ function normalizeModels(result) {
 
 // runtime/transfer-files.ts
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync2, readdirSync, readFileSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync3, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readdirSync, readFileSync as readFileSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname, join as join2, relative } from "node:path";
-
-// runtime/path-safety.ts
-import { lstatSync } from "node:fs";
-import path from "node:path";
-function resolveContainedPath(root, name, paths = path) {
-  if (!name || name.includes("\0") || name.includes(":") || path.posix.isAbsolute(name) || path.win32.isAbsolute(name)) throw new Error("Invalid workspace path.");
-  const parts = name.replaceAll("\\", "/").split("/");
-  if (parts.some((part) => !part || part === "." || part === "..")) throw new Error("Invalid workspace path.");
-  if (parts.some((part) => /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(part))) throw new Error("Invalid portable workspace path.");
-  const target = paths.resolve(root, parts.join(paths.sep));
-  const relative2 = paths.relative(paths.resolve(root), target);
-  if (!relative2 || relative2 === ".." || relative2.startsWith(`..${paths.sep}`) || paths.isAbsolute(relative2)) throw new Error("Path escaped the workspace.");
-  return target;
-}
-function safeWorkspacePath(root, name) {
-  const target = resolveContainedPath(root, name);
-  const parts = path.relative(path.resolve(root), target).split(path.sep);
-  let current = path.resolve(root);
-  for (let index = 0; index < parts.length; index += 1) {
-    current = path.join(current, parts[index]);
-    let stat;
-    try {
-      stat = lstatSync(current);
-    } catch (error) {
-      if (error.code === "ENOENT") break;
-      throw error;
-    }
-    if (stat.isSymbolicLink()) throw new Error("Workspace paths cannot contain symbolic links.");
-    if (index < parts.length - 1 && !stat.isDirectory()) throw new Error("Workspace parent is not a directory.");
-  }
-  return target;
-}
-
-// runtime/transfer-files.ts
-var allowedRoots = ["private", "profile/MEMORY.md", "profile/USER.md", "profile/skills"];
+var memoryFiles = ["profile/MEMORY.md", "profile/USER.md", "profile/memories/MEMORY.md", "profile/memories/USER.md"];
+var allowedRoots = ["private", ...memoryFiles, "profile/skills"];
 function digest(data) {
   return createHash2("sha256").update(data).digest("hex");
 }
@@ -546,7 +584,7 @@ function exportAgentFiles(stateRoot2, agentId) {
   const agentRoot = safeWorkspacePath(stateRoot2, `agents/${agentId}`), files = [];
   let total = 0;
   const visit = (path2) => {
-    if (!existsSync2(path2)) return;
+    if (!existsSync3(path2)) return;
     const stat = lstatSync2(path2);
     if (stat.isSymbolicLink()) return;
     safeWorkspacePath(stateRoot2, relative(stateRoot2, path2));
@@ -555,7 +593,7 @@ function exportAgentFiles(stateRoot2, agentId) {
       return;
     }
     if (!stat.isFile()) return;
-    const data = readFileSync(path2);
+    const data = readFileSync2(path2);
     total += data.length;
     if (total > 2e7) throw new Error("Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.");
     files.push({ path: relative(agentRoot, path2).replaceAll("\\", "/"), data: Buffer.from(data).toString("base64"), checksum: digest(data) });
@@ -570,7 +608,7 @@ function importAgentFiles(stateRoot2, agentId, bundle) {
   const seen = /* @__PURE__ */ new Set();
   const files = bundle.files.map((file) => {
     const clean = file.path.replaceAll("\\", "/");
-    if (!(clean.startsWith("private/") || clean === "profile/MEMORY.md" || clean === "profile/USER.md" || clean.startsWith("profile/skills/"))) throw new Error("Transfer contains an invalid managed path.");
+    if (!(clean.startsWith("private/") || memoryFiles.includes(clean) || clean.startsWith("profile/skills/"))) throw new Error("Transfer contains an invalid managed path.");
     const name = `agents/${agentId}/${clean}`, target = safeWorkspacePath(stateRoot2, name);
     const key = process.platform === "win32" ? target.toLowerCase() : target;
     if (seen.has(key)) throw new Error("Transfer contains duplicate managed paths.");
@@ -584,14 +622,14 @@ function importAgentFiles(stateRoot2, agentId, bundle) {
   if (checksum !== bundle.checksum) throw new Error("Transfer bundle checksum validation failed.");
   for (const file of files) {
     safeWorkspacePath(stateRoot2, file.name);
-    mkdirSync2(dirname(file.target), { recursive: true });
-    writeFileSync2(safeWorkspacePath(stateRoot2, file.name), file.data, { mode: 384 });
+    mkdirSync3(dirname(file.target), { recursive: true });
+    writeFileSync3(safeWorkspacePath(stateRoot2, file.name), file.data, { mode: 384 });
   }
   return { checksum, files: bundle.files.length };
 }
 
 // runtime/secrets.ts
-import { chmodSync as chmodSync2, existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname2 } from "node:path";
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
@@ -639,10 +677,10 @@ var SecretStore = class {
   constructor(path2) {
     this.path = path2;
     this.backend = "restricted local file";
-    mkdirSync3(dirname2(path2), { recursive: true });
+    mkdirSync4(dirname2(path2), { recursive: true });
     const vaulted = loadVault(path2);
     try {
-      this.values = vaulted?.value ? JSON.parse(vaulted.value) : existsSync3(path2) ? JSON.parse(readFileSync2(path2, "utf8")) : {};
+      this.values = vaulted?.value ? JSON.parse(vaulted.value) : existsSync4(path2) ? JSON.parse(readFileSync3(path2, "utf8")) : {};
     } catch {
       this.values = {};
     }
@@ -660,7 +698,7 @@ var SecretStore = class {
       }
     }
     if (changed) this.save();
-    if (existsSync3(path2)) chmodSync2(path2, 384);
+    if (existsSync4(path2)) chmodSync2(path2, 384);
   }
   get token() {
     return this.values.controlToken;
@@ -684,11 +722,11 @@ var SecretStore = class {
     const backend = saveVault(this.path, serialized);
     if (backend) {
       this.backend = backend;
-      if (existsSync3(this.path)) unlinkSync(this.path);
+      if (existsSync4(this.path)) unlinkSync(this.path);
       return;
     }
     this.backend = "restricted local file";
-    writeFileSync3(this.path, JSON.stringify(this.values, null, 2), { mode: 384 });
+    writeFileSync4(this.path, JSON.stringify(this.values, null, 2), { mode: 384 });
     chmodSync2(this.path, 384);
   }
 };
@@ -782,13 +820,55 @@ async function testModelConnection(model, apiKey) {
   }
 }
 
+// runtime/agent-context.ts
+import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync4, readdirSync as readdirSync2, renameSync as renameSync2, rmSync, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname3 } from "node:path";
+import { randomUUID } from "node:crypto";
+function write(path2, content) {
+  mkdirSync5(dirname3(path2), { recursive: true });
+  const temporary = `${path2}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync5(temporary, content, { mode: 384, flag: "wx" });
+    renameSync2(temporary, path2);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+function agentContext(root, agentId, input) {
+  const profile = `agents/${validId(agentId)}/profile`;
+  const skills = safeWorkspacePath(root, `${profile}/skills`);
+  if (input.operation === "get" || input.operation === "set-memory") {
+    const paths = profileMemory(root, agentId);
+    if (input.operation === "set-memory") {
+      const memory = String(input.memory || "");
+      if (memory.length > 5e4) throw new ProfileError("Memory is limited to 50 KB.", 413);
+      write(paths.memory, memory);
+      return { status: 200, value: { ok: true } };
+    }
+    return { status: 200, value: {
+      memory: existsSync5(paths.memory) ? readFileSync4(paths.memory, "utf8") : "",
+      user: existsSync5(paths.user) ? readFileSync4(paths.user, "utf8") : "",
+      skills: existsSync5(skills) ? readdirSync2(skills, { withFileTypes: true }).filter((item) => item.isDirectory()).map((item) => item.name).slice(0, 200) : []
+    } };
+  }
+  if (!["get-skill", "put-skill", "delete-skill"].includes(input.operation)) throw new ProfileError("Invalid context operation.");
+  const name = String(input.name || "");
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(name)) throw new ProfileError("Invalid skill name.");
+  const directory = safeWorkspacePath(root, `${profile}/skills/${name}`);
+  const file = safeWorkspacePath(root, `${profile}/skills/${name}/SKILL.md`);
+  if (input.operation === "get-skill") return existsSync5(file) ? { status: 200, value: { name, content: readFileSync4(file, "utf8") } } : { status: 404, value: { error: "Skill not found." } };
+  if (input.operation === "put-skill") write(file, String(input.content || ""));
+  else if (existsSync5(directory)) rmSync(directory, { recursive: true });
+  return { status: 200, value: { ok: true } };
+}
+
 // runtime/runner.ts
 var args = /* @__PURE__ */ new Map();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith("--")) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith("--") ? "" : process.argv[++i] || "");
 var stateRoot = resolve2(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join3(homedir(), ".open-harness-runner"));
 var credentialPath = join3(stateRoot, "connection.json");
 var spool = join3(stateRoot, "spool");
-mkdirSync4(spool, { recursive: true });
+mkdirSync6(spool, { recursive: true });
 var runnerSecrets = new SecretStore(join3(stateRoot, "secrets.json"));
 var pythons = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean);
 function exitCode(command2, args2, timeout) {
@@ -829,15 +909,15 @@ async function pair() {
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || "Pairing failed.");
   const saved = { coordinator, machineId: value.machineId, token: value.token, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey, ...sitesToken ? { sitesToken } : {} };
-  writeFileSync4(credentialPath, JSON.stringify(saved, null, 2), { mode: 384 });
+  writeFileSync6(credentialPath, JSON.stringify(saved, null, 2), { mode: 384 });
   chmodSync3(credentialPath, 384);
   return saved;
 }
-var credentials = args.has("pairing-code") ? await pair() : existsSync4(credentialPath) ? JSON.parse(readFileSync3(credentialPath, "utf8")) : await pair();
+var credentials = args.has("pairing-code") ? await pair() : existsSync6(credentialPath) ? JSON.parse(readFileSync5(credentialPath, "utf8")) : await pair();
 if (!credentials.encryptionPrivateKey || !credentials.encryptionPublicKey) {
   const encryption = await generateRunnerKeyPair();
   credentials = { ...credentials, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey };
-  writeFileSync4(credentialPath, JSON.stringify(credentials, null, 2), { mode: 384 });
+  writeFileSync6(credentialPath, JSON.stringify(credentials, null, 2), { mode: 384 });
   chmodSync3(credentialPath, 384);
 }
 var savedTarget = new URL(credentials.coordinator);
@@ -868,14 +948,14 @@ var blockedAgents = /* @__PURE__ */ new Set();
 var admittedRuns = /* @__PURE__ */ new Map();
 async function deliver(record) {
   const file = join3(spool, `${record.id}.json`);
-  if (!existsSync4(file)) writeFileSync4(file, JSON.stringify(record), { mode: 384 });
+  if (!existsSync6(file)) writeFileSync6(file, JSON.stringify(record), { mode: 384 });
   await request(record.path, { method: "POST", body: JSON.stringify(record.body) }, true);
-  if (existsSync4(file)) unlinkSync2(file);
+  if (existsSync6(file)) unlinkSync2(file);
 }
 async function flushSpool() {
-  for (const name of readdirSync2(spool).filter((name2) => name2.endsWith(".json"))) {
+  for (const name of readdirSync3(spool).filter((name2) => name2.endsWith(".json"))) {
     try {
-      await deliver(JSON.parse(readFileSync3(join3(spool, name), "utf8")));
+      await deliver(JSON.parse(readFileSync5(join3(spool, name), "utf8")));
     } catch {
     }
   }
@@ -893,7 +973,7 @@ async function run(command2) {
   let gateway, result, failure2;
   try {
     const agentRoot = join3(stateRoot, "agents", profile.id), shared = join3(stateRoot, "shared");
-    mkdirSync4(shared, { recursive: true });
+    mkdirSync6(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean);
     const availableSecrets = { ...runnerSecrets.environment(), ...process.env };
     const localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]]));
@@ -910,6 +990,7 @@ async function run(command2) {
     const sessionId = String(session?.session_id || session?.id || "");
     if (!sessionId) throw new Error("Hermes did not return a session ID.");
     live.sessionId = sessionId;
+    await emit(command2, { type: "session.started", session_id: sessionId, payload: { session_id: sessionId } });
     if (live.stopping) throw new Error("Run stopped before its prompt started.");
     result = await gateway.submitPrompt(sessionId, payload.prompt);
   } catch (error) {
@@ -926,6 +1007,10 @@ async function run(command2) {
 }
 async function control(command2) {
   try {
+    if (command2.kind === "agent-context") {
+      await finish(command2, agentContext(stateRoot, command2.agentId, command2.payload));
+      return;
+    }
     if (command2.kind === "store-secret") {
       const name = String(command2.payload.name || ""), value = await decryptRunnerSecret(credentials.encryptionPrivateKey, command2.payload.encrypted);
       runnerSecrets.set(name, value);
@@ -951,7 +1036,7 @@ async function control(command2) {
     }
     if (command2.kind.startsWith("probe-")) {
       const profile = command2.payload.profile, direct = profile.computer.access === "direct", shared = join3(stateRoot, "shared"), agentRoot = join3(stateRoot, "agents", profile.id);
-      mkdirSync4(shared, { recursive: true });
+      mkdirSync6(shared, { recursive: true });
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env }, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]])), secretSource = { environment: () => ({ ...localSecrets, ...command2.payload.secrets || {} }) };
       if (command2.kind === "probe-runtime" && command2.payload.input?.action === "model-test") {
         const model = command2.payload.input.model;
@@ -1034,7 +1119,7 @@ async function control(command2) {
   }
 }
 async function executeCommand(command2) {
-  const usesProfile = command2.kind === "run" || command2.kind.startsWith("probe-") || command2.kind === "import-agent" || command2.kind === "export-agent";
+  const usesProfile = command2.kind === "run" || command2.kind.startsWith("probe-") || command2.kind === "import-agent" || command2.kind === "export-agent" || command2.kind === "agent-context";
   if (!usesProfile) return control(command2);
   const agentId = String(command2.kind === "run" ? command2.payload.snapshot?.id : command2.payload.profile?.id || command2.agentId);
   const previous = agentOperations.get(agentId);

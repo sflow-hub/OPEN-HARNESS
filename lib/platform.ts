@@ -1,10 +1,4 @@
-// Everything the dashboard needs from the device it is running on, behind one interface.
-//
-// The same React code ships three ways: a desktop webview pointed at a loopback server, a
-// browser against a self-hosted or hosted coordinator, and a phone app with no server of its
-// own. Only the phone has Tauri plugins available, and importing them at module scope would
-// break the other two. So every native capability is loaded lazily and falls back to a web
-// equivalent, which also lets the Playwright mobile project exercise these paths in Chromium.
+// Browser capabilities shared by the dashboard and the desktop webview.
 
 export type KeyValueStore = {
   get<T>(key: string): Promise<T | null>;
@@ -12,77 +6,15 @@ export type KeyValueStore = {
   remove(key: string): Promise<void>;
 };
 
-declare global {
-  interface Window { __TAURI_INTERNALS__?: unknown }
-}
-
-export function hasTauri() {
-  return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__);
-}
-
-// Tauri plugins are imported normally so the bundler includes them. Importing is harmless
-// outside the phone app; only calling into one without a Tauri runtime fails, which is why
-// every call below is behind hasTauri(). An earlier version assembled the specifier at
-// runtime to keep the bundler out of it, which silently produced an app whose imports could
-// never resolve, so the phone fell back to the webview's fetch and was blocked by CSP.
-export async function loadTauriPlugin<T = Record<string, unknown>>(name: string): Promise<T | null> {
-  if (!hasTauri()) return null;
-  try {
-    switch (name) {
-      case 'http': return await import('@tauri-apps/plugin-http') as T;
-      case 'notification': return await import('@tauri-apps/plugin-notification') as T;
-      case 'store': return await import('@tauri-apps/plugin-store') as T;
-      case 'stronghold': return await import('@tauri-apps/plugin-stronghold') as T;
-      case 'deep-link': return await import('@tauri-apps/plugin-deep-link') as T;
-      case 'barcode-scanner': return await import('@tauri-apps/plugin-barcode-scanner') as T;
-      case 'dialog': return await import('@tauri-apps/plugin-dialog') as T;
-      case 'clipboard-manager': return await import('@tauri-apps/plugin-clipboard-manager') as T;
-      case 'fs': return await import('@tauri-apps/plugin-fs') as T;
-      case 'opener': return await import('@tauri-apps/plugin-opener') as T;
-      default: return null;
-    }
-  } catch { return null; }
-}
-
-// Playwright drives the phone layouts in a desktop browser, and a developer may want to try
-// the hub flow without building the app. Both need a way in that does not fake Tauri itself.
-function forcedMobile() {
-  if (typeof window === 'undefined') return false;
-  try {
-    if (window.localStorage.getItem('open-harness.force-mobile') === '1') return true;
-  } catch { /* Private mode and blocked site data both throw here; treat as not forced. */ }
-  return new URLSearchParams(window.location.search).get('mobile') === '1';
-}
-
-// Two questions that used to be one, and conflating them is why the phone-shaped UI never
-// appeared in a phone browser. "Am I on a phone?" decides layout, polling and which surfaces
-// make sense; "do I have native plugins?" decides how a capability is reached. The Android
-// app answers yes to both. Chrome on a phone, pointed at a self-hosted coordinator, answers
-// yes to the first and no to the second, and is a first-class way to use Open Harness.
-export function isMobileApp() {
-  return (hasTauri() && process.env.NEXT_PUBLIC_OPEN_HARNESS_TARGET === 'mobile') || forcedMobile();
-}
-
-// The same 760px the stylesheet uses, plus a coarse pointer so a narrow desktop window keeps
-// its mouse-sized controls. Callers must resolve this after mount: deciding it during the
-// first render would disagree with the prerendered HTML and throw the hydrated markup away.
+// Resolve after mount so the initial render agrees with the server.
 export const PHONE_LAYOUT_QUERY = '(max-width: 760px), (pointer: coarse) and (max-width: 1024px)';
 export function isPhoneLayout() {
-  if (isMobileApp()) return true;
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
   try { return window.matchMedia(PHONE_LAYOUT_QUERY).matches; } catch { return false; }
 }
 
-// The phone talks to a hub on a different origin. The browser's fetch would need CORS and
-// would attach an Origin header the coordinator rejects; Tauri's HTTP plugin makes the
-// request from Rust instead, so neither applies.
-let cachedFetch: typeof fetch | null = null;
 export async function platformFetch(): Promise<typeof fetch> {
-  if (cachedFetch) return cachedFetch;
-  const plugin = await loadTauriPlugin<{ fetch: typeof fetch }>('http');
-  // Outside the phone app window.fetch is the right answer, not a fallback.
-  cachedFetch = plugin?.fetch || globalThis.fetch.bind(globalThis);
-  return cachedFetch;
+  return globalThis.fetch.bind(globalThis);
 }
 
 function webStore(prefix: string): KeyValueStore {
@@ -102,113 +34,27 @@ function webStore(prefix: string): KeyValueStore {
 
 export const settingsStore: KeyValueStore = webStore('open-harness.settings.');
 
-const legacySecureStore = webStore('open-harness.secure.');
-let nativeSecureStore: Promise<KeyValueStore> | null = null;
-async function encryptedNativeStore(): Promise<KeyValueStore> {
-  if (!hasTauri()) return legacySecureStore;
-  if (nativeSecureStore) return nativeSecureStore;
-  nativeSecureStore = (async () => {
-    const stronghold = await loadTauriPlugin<typeof import('@tauri-apps/plugin-stronghold')>('stronghold');
-    const storePlugin = await loadTauriPlugin<typeof import('@tauri-apps/plugin-store')>('store');
-    if (!stronghold || !storePlugin) throw new Error('The encrypted device credential vault is unavailable. Update or reinstall Open Harness.');
-    const { appDataDir, join } = await import('@tauri-apps/api/path');
-    const metadata = await storePlugin.load('device-vault.json', { autoSave: false });
-    let vaultKey = await metadata.get<string>('vault-key.v1');
-    if (!vaultKey) {
-      const bytes = crypto.getRandomValues(new Uint8Array(32));
-      vaultKey = btoa(String.fromCharCode(...bytes));
-      await metadata.set('vault-key.v1', vaultKey);
-      await metadata.save();
-    }
-    const hold = await stronghold.Stronghold.load(await join(await appDataDir(), 'open-harness-device.hold'), vaultKey);
-    let client: InstanceType<typeof stronghold.Client>;
-    try { client = await hold.loadClient('open-harness-device'); }
-    catch { client = await hold.createClient('open-harness-device'); }
-    const store = client.getStore();
-    return {
-      async get<T>(key: string) {
-        const data = await store.get(key);
-        if (!data) return null;
-        try { return JSON.parse(new TextDecoder().decode(data)) as T; }
-        catch { return null; }
-      },
-      async set(key: string, value: unknown) {
-        await store.insert(key, [...new TextEncoder().encode(JSON.stringify(value))]);
-        await hold.save();
-      },
-      async remove(key: string) {
-        await store.remove(key);
-        await hold.save();
-      },
-    };
-  })();
-  return nativeSecureStore;
-}
+// Keep the existing origin-storage key so paired browsers stay connected.
+export const secureStore: KeyValueStore = webStore('open-harness.secure.');
 
-// Browser previews use origin storage. The packaged phone uses Stronghold's encrypted
-// snapshot in the application-private data directory and migrates the former web value once.
-export const secureStore: KeyValueStore = {
-  async get<T>(key: string) {
-    const store = await encryptedNativeStore();
-    const value = await store.get<T>(key);
-    if (value !== null || !hasTauri()) return value;
-    const legacy = await legacySecureStore.get<T>(key);
-    if (legacy !== null) { await store.set(key, legacy); await legacySecureStore.remove(key); }
-    return legacy;
-  },
-  async set(key, value) { await (await encryptedNativeStore()).set(key, value); if (hasTauri()) await legacySecureStore.remove(key); },
-  async remove(key) { await (await encryptedNativeStore()).remove(key); await legacySecureStore.remove(key); },
-};
-
-type NotificationPlugin = {
-  isPermissionGranted(): Promise<boolean>;
-  requestPermission(): Promise<string>;
-  sendNotification(options: { title: string; body: string }): void;
-};
-
-// The Android WebView has no web Notification API at all, so every notification decision
-// goes through here: the plugin on the phone, the web API in a browser, and "no" anywhere
-// that has neither. Restoring a saved preference on launch uses this rather than reading
-// Notification.permission, which is undefined on the phone.
 export async function notificationsGranted(): Promise<boolean> {
-  const plugin = await loadTauriPlugin<NotificationPlugin>('notification');
-  if (plugin) {
-    try { return await plugin.isPermissionGranted(); } catch { return false; }
-  }
   return typeof Notification !== 'undefined' && Notification.permission === 'granted';
 }
 
-// Asks once, from a user gesture. False means the platform has no notifications or the
-// person declined; the caller words the follow-up for its platform.
 export async function requestNotificationPermission(): Promise<boolean> {
-  const plugin = await loadTauriPlugin<NotificationPlugin>('notification');
-  if (plugin) {
-    try { return (await plugin.isPermissionGranted()) || (await plugin.requestPermission()) === 'granted'; }
-    catch { return false; }
-  }
   if (typeof Notification === 'undefined') return false;
   if (Notification.permission === 'granted') return true;
   try { return (await Notification.requestPermission()) === 'granted'; } catch { return false; }
 }
 
-// Sending never prompts: permission is a decision the person makes in Settings, and a
-// prompt appearing while a run finishes in the background would be answered blind.
+// Sending never prompts: permission is requested from Settings.
 export async function notify(title: string, body: string, tag?: string) {
-  const plugin = await loadTauriPlugin<NotificationPlugin>('notification');
-  if (plugin) {
-    try {
-      if (!(await plugin.isPermissionGranted())) return;
-      plugin.sendNotification({ title, body });
-      return;
-    } catch { /* Falls through to the web Notification API. */ }
-  }
   try {
     if (typeof Notification !== 'undefined' && Notification.permission === 'granted') new Notification(title, { body, ...(tag ? { tag } : {}) });
-  } catch { /* Notifications are a courtesy; never let one break a run. */ }
+  } catch { /* Notifications must never interrupt a run. */ }
 }
 
-// A phone radio and a locked screen make a twice-a-second poll wasteful. The event cursor
-// already makes a slower poll safe: nothing is missed, it just arrives a little later.
+// Reduce polling on small screens and while the page is hidden.
 export function eventPollIntervalMs(hidden: boolean) {
   if (isPhoneLayout()) return hidden ? 6000 : 1500;
   return hidden ? 4000 : 500;
@@ -221,54 +67,7 @@ export function taskPollIntervalMs(active: boolean) {
   return active ? 2000 : 8000;
 }
 
-// An Android WebView has no concept of a second window, and the shell registers no
-// onCreateWindow, so target="_blank" and window.open do exactly nothing — the tap registers
-// and nowhere is any error. Links have to be handed to Rust, which hands them to the
-// system browser. Everywhere else the browser already does the right thing.
-export async function openExternal(url: string): Promise<boolean> {
-  const plugin = await loadTauriPlugin<{ openUrl(url: string): Promise<void> }>('opener');
-  if (plugin) {
-    try { await plugin.openUrl(url); return true; } catch { return false; }
-  }
-  try { return Boolean(window.open(url, '_blank', 'noopener,noreferrer')); } catch { return false; }
-}
-
-// Same story for downloads: the WebView ignores <a download> on a blob: URL unless the host
-// registers a DownloadListener, and the generated shell registers none, so every download
-// button was silently inert. Written through the fs plugin into the app's own data
-// directory, then handed to the system so the viewer can keep or share it.
-//
-// Returns where the file went, or null when this platform did it the ordinary web way.
-export async function saveFile(name: string, contents: string | Uint8Array): Promise<{ path: string } | null> {
-  const fs = await loadTauriPlugin<typeof import('@tauri-apps/plugin-fs')>('fs');
-  if (!fs) return null;
-  const { appDataDir, join } = await import('@tauri-apps/api/path');
-  const path = await join(await appDataDir(), name);
-  if (typeof contents === 'string') await fs.writeTextFile(path, contents);
-  else await fs.writeFile(path, contents);
-  // Best effort: the file is already saved, and failing to open a viewer is not a failure to
-  // download. The caller reports the path either way.
-  const opener = await loadTauriPlugin<{ openPath(path: string): Promise<void> }>('opener');
-  if (opener) { try { await opener.openPath(path); } catch { /* Nothing registered for this type. */ } }
-  return { path };
-}
-
-// How much of the layout viewport the soft keyboard is covering, published as a CSS variable
-// so layouts can subtract it.
-//
-// `interactive-widget=resizes-content` is the declarative way to ask for this and is set on
-// the viewport; measuring is the reliable way, because a browser reports the keyboard through
-// the visual viewport whether or not it honours that hint.
-//
-// Known limitation, measured on the emulator: inside the packaged Android app this always
-// reports 0. With the keyboard shown and the composer focused, visualViewport.height equals
-// window.innerHeight exactly — the shell draws edge to edge and never applies the IME window
-// insets to the webview, so the web layer is told nothing. Neither the viewport hint nor
-// android:windowSoftInputMode="adjustResize" changes that; the fix belongs in the Android
-// activity, which Tauri generates. This still does its job in a phone browser, which is a
-// first-class way to reach a coordinator.
-//
-// Returns a cleanup function.
+// Keep the composer above a browser's soft keyboard using the visual viewport.
 export function trackKeyboardInset(): () => void {
   if (typeof window === 'undefined') return () => {};
   const viewport = window.visualViewport;

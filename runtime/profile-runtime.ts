@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentProfile, ModelChoice, ToolCatalog, ToolInfo } from '../lib/agent-profile';
 import { dockerStatusCached, ensureContainer, HermesGateway } from './hermes';
+import { profileMemory } from './profile-memory';
 
 export const COORDINATION_TOOLS: ToolInfo[] = [
   { id: 'mcp_open_harness_task', name: 'Task board', group: 'other', description: 'Read and update assigned board tasks.', available: true },
@@ -52,6 +53,7 @@ export type PrepareProfileOptions = { cwd?: string; coordinationCommand?: string
 export function prepareProfile(root: string, profile: AgentProfile, effective: ModelChoice, secrets: { environment(): Record<string,string> }, token: string, runId: string, options: PrepareProfileOptions = {}) {
   const dir = join(root, 'agents', profile.id), home = join(dir, 'profile'), managed = join(dir, 'managed');
   for (const path of [home, managed, join(dir, 'private')]) mkdirSync(path, { recursive: true });
+  profileMemory(root, profile.id);
   const mcp: Record<string, unknown> = {};
   if (profile.allowedTools.some(id => COORDINATION_TOOLS.some(t => t.id === id))) mcp.open_harness = { command: 'node', args: [options.coordinationCommand || '/opt/open-harness/coordination.mjs'], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...(options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}), ...(options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {}), ...(options.sitesToken ? { OPEN_HARNESS_SITES_TOKEN: options.sitesToken } : {}) } };
   const env: Record<string, string> = {};

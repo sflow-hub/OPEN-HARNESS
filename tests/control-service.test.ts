@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
@@ -65,8 +65,27 @@ test("authenticates local clients, migrates once, and protects its secret file",
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).migrated, true);
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).reason, "already_migrated");
   assert.equal(readFileSync(join(stateDir, "shared", "notes.md"), "utf8"), "Shared context");
-  assert.match(readFileSync(join(stateDir, "agents", "atlas", "profile", "MEMORY.md"), "utf8"), /concise reports/);
+  assert.match(readFileSync(join(stateDir, "agents", "atlas", "profile", "memories", "MEMORY.md"), "utf8"), /concise reports/);
   assert.equal(statSync(join(stateDir, "secrets.json")).mode & 0o777, 0o600);
+});
+
+test('context edits share Hermes memory files and legacy notes cannot overwrite runtime updates', async () => {
+  const home = join(stateDir, 'agents', 'legacy-memory', 'profile');
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, 'MEMORY.md'), 'Dashboard notes from an older version.');
+  writeFileSync(join(home, 'USER.md'), 'Legacy user notes.');
+  const path = '/v1/agents/legacy-memory/context';
+  assert.equal((await request(path)).memory, 'Dashboard notes from an older version.');
+  assert.equal((await request(path)).user, 'Legacy user notes.');
+  await request(path, { method: 'PUT', body: JSON.stringify({ memory: 'Dashboard notes for the next Hermes session.' }) });
+  assert.equal(readFileSync(join(home, 'memories', 'MEMORY.md'), 'utf8'), 'Dashboard notes for the next Hermes session.');
+  writeFileSync(join(home, 'memories', 'MEMORY.md'), 'Updated by the Hermes memory tool.');
+  writeFileSync(join(home, 'memories', 'USER.md'), 'Updated by Hermes user memory.');
+  assert.equal((await request(path)).memory, 'Updated by the Hermes memory tool.');
+  assert.equal((await request(path)).user, 'Updated by Hermes user memory.');
+  await request(path, { method: 'PUT', body: JSON.stringify({ memory: '' }) });
+  assert.equal((await request(path)).memory, '', 'Cleared memory must not resurrect legacy notes.');
+  assert.equal(readFileSync(join(home, 'MEMORY.md'), 'utf8'), 'Dashboard notes from an older version.');
 });
 
 test("runs independently of event polling and replays stable events", async () => {

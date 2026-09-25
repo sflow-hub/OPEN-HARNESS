@@ -1,12 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
-// Without this the build carries Next's default viewport, and two things silently break on
-// Android. The shell draws edge to edge, so content sits under the status and gesture bars
-// unless viewport-fit=cover is set; without it Chromium reports every env(safe-area-inset-*)
-// as 0px, which made the safe-area rules already in globals.css dead code. And the layout
-// viewport does not shrink for the soft keyboard unless interactive-widget says so, so the
-// keyboard covered the chat composer inside its 100dvh column.
+// Respect display safe areas and resize the layout when a browser keyboard opens.
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,

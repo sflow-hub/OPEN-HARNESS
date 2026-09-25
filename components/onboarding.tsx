@@ -6,19 +6,9 @@ import type { ModelChoice } from '../lib/agent-profile';
 import { ControlClient } from '../lib/control-client';
 import type { OnboardingStatus, ReadinessCheck } from '../lib/onboarding';
 import { PROVIDERS, type Provider } from '../lib/provider';
-import { hasTauri, openExternal } from '../lib/platform';
-
-// An Android WebView has no second window and the shell registers no onCreateWindow, so a
-// target="_blank" anchor does nothing at all there. In the app the link goes to Rust, which
-// hands it to the system browser; everywhere else the anchor already works.
-const externalLink = (url: string) => (event: React.MouseEvent) => {
-  if (!hasTauri()) return;
-  event.preventDefault();
-  void openExternal(url);
-};
-
 type Props = {
   client: ControlClient;
+  remote?: boolean;
   model: ModelChoice;
   revision: number;
   onModelSaved: (model: ModelChoice, revision: number) => void;
@@ -34,11 +24,11 @@ function CheckRow({ check, busy, onAction }: { check: ReadinessCheck; busy: bool
     <span className="onboarding-check-icon" aria-hidden="true">{check.state === 'ready' ? <Check size={17} /> : check.state === 'unavailable' ? <span>—</span> : <CircleAlert size={17} />}</span>
     <div><strong>{check.label}</strong><small>{check.detail}</small></div>
     {check.action && <button type="button" className="subtle-button" disabled={busy} onClick={() => onAction(check.action!)}>{busy ? <LoaderCircle className="spin" size={14} /> : null}{check.actionLabel}</button>}
-    {check.helpUrl && <a className="subtle-button" href={check.helpUrl} target="_blank" rel="noreferrer" onClick={externalLink(check.helpUrl)}>Install <ExternalLink size={13} /></a>}
+    {check.helpUrl && <a className="subtle-button" href={check.helpUrl} target="_blank" rel="noreferrer">Install <ExternalLink size={13} /></a>}
   </div>;
 }
 
-export default function Onboarding({ client, model, revision, onModelSaved, onComputerSettings, onFinished }: Props) {
+export default function Onboarding({ client, remote = false, model, revision, onModelSaved, onComputerSettings, onFinished }: Props) {
   const [step, setStep] = useState(0);
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
   const [busy, setBusy] = useState('');
@@ -98,17 +88,17 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
 
   return <div className="modal-backdrop onboarding-backdrop">
     <section className="onboarding" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
-      <header><div><div className="eyebrow">FIRST-RUN SETUP</div><h2 id="onboarding-title">{['Welcome to Open Harness', 'Check this computer', 'Connect your model', 'You’re ready'][step]}</h2></div><button type="button" aria-label="Set up later" onClick={onFinished}><X size={19} /></button></header>
+      <header><div><div className="eyebrow">FIRST-RUN SETUP</div><h2 id="onboarding-title">{['Welcome to Open Harness', remote ? 'Check connected computer' : 'Check this computer', 'Connect your model', 'You’re ready'][step]}</h2></div><button type="button" aria-label="Set up later" onClick={onFinished}><X size={19} /></button></header>
       <div className="onboarding-progress" aria-label={`Step ${step + 1} of 4`}>{[0,1,2,3].map(item => <span className={item <= step ? 'active' : ''} key={item} />)}</div>
 
       {step === 0 && <div className="onboarding-step">
-        <div className="onboarding-hero"><span><Sparkles size={26} /></span><h3>Your agents can keep working on a computer you control.</h3><p>Open Harness stores its data here. You can add a server or another computer whenever you want.</p></div>
-        <button type="button" className="onboarding-choice" onClick={() => setStep(1)}><MonitorCog size={23} /><span><strong>Use this computer</strong><small>Recommended for your first agent. We’ll check everything for you.</small></span><ArrowRight size={18} /></button>
+        <div className="onboarding-hero"><span><Sparkles size={26} /></span><h3>Your agents can keep working on a computer you control.</h3><p>{remote ? 'Open Harness stores its data on your connected computer.' : 'Open Harness stores its data here.'} You can add a server or another computer whenever you want.</p></div>
+        <button type="button" className="onboarding-choice" onClick={() => setStep(1)}><MonitorCog size={23} /><span><strong>{remote ? 'Use connected computer' : 'Use this computer'}</strong><small>Recommended for your first agent. We’ll check everything for you.</small></span><ArrowRight size={18} /></button>
         <button type="button" className="onboarding-choice" onClick={onComputerSettings}><Server size={23} /><span><strong>Connect another computer</strong><small>Pair a VPS, home server, Mac, Windows PC, or Linux machine.</small></span><ArrowRight size={18} /></button>
       </div>}
 
       {step === 1 && <div className="onboarding-step">
-        <p className="onboarding-lead">These checks stay on your computer. Open Harness will tell you what it can fix and give you a direct link for anything you need to install.</p>
+        <p className="onboarding-lead">{remote ? 'These checks run on the computer hosting Open Harness, not this browser.' : 'These checks stay on your computer.'} Open Harness will tell you what it can fix and give you a direct link for anything you need to install.</p>
         <div className="onboarding-checks">{status?.checks.map(check => <CheckRow key={check.id} check={check} busy={Boolean(busy)} onAction={action} />)}</div>
         {!status && !message && <p className="onboarding-working"><LoaderCircle className="spin" size={17} /> Checking this computer…</p>}
         {message && <p className="onboarding-message" role="status">{message}</p>}
@@ -120,13 +110,13 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
         <p className="onboarding-lead">Use an API key from a model provider, or connect a compatible model server running on your network.</p>
         <label>Provider<select value={provider} onChange={event => { const next = event.target.value as Provider; setProvider(next); setModelId(PROVIDERS[next].model); setBaseUrl(''); setMessage(''); }}>{Object.entries(PROVIDERS).map(([id, value]) => <option key={id} value={id}>{value.label}</option>)}</select></label>
         <label>Model<input value={modelId} onChange={event => setModelId(event.target.value)} placeholder="Model ID" /></label>
-        {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="http://127.0.0.1:11434/v1" /><small>Enter the OpenAI-compatible API address shown by your model app.</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(savedKeyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer" onClick={externalLink(providerHelp[provider])}>Get a key <ExternalLink size={11} /></a></small></label>}
+        {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="http://127.0.0.1:11434/v1" /><small>Enter the OpenAI-compatible API address shown by your model app.</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(savedKeyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a></small></label>}
         {message && <p className={`onboarding-message ${modelReady ? 'success' : ''}`} role="status">{message}</p>}
         <div className="onboarding-actions"><button type="button" className="subtle-button" onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</button><button type="button" className="light-button" disabled={busy === 'model'} onClick={saveModel}>{busy === 'model' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Save and test</button></div>
       </div>}
 
       {step === 3 && <div className="onboarding-step onboarding-done">
-        <span><Check size={34} /></span><h3>Open Harness is set up.</h3><p>Your first agent uses a private workspace on this computer. You can change its computer, access, desktop, and limits from Agent settings at any time.</p>
+        <span><Check size={34} /></span><h3>Open Harness is set up.</h3><p>New agents use a private workspace {remote ? 'on your connected computer' : 'on this computer'} by default. Create an agent when you are ready; you can change its computer, access, desktop, and limits from Agent settings.</p>
         <button type="button" className="light-button" onClick={onFinished}>Start using Open Harness <ArrowRight size={15} /></button>
         <button type="button" className="subtle-button" onClick={onComputerSettings}>Review computer settings</button>
       </div>}

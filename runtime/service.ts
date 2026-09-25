@@ -1,7 +1,7 @@
 import { processIdentity, recoverNativeProcess } from './process-identity';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdirSync, writeFileSync, readdirSync, readFileSync, statSync, unlinkSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync, readFileSync, statSync, unlinkSync, existsSync } from "node:fs";
 import { resolve, join, relative } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
@@ -22,6 +22,8 @@ import { conversationHistory } from './conversation-history';
 import { testModelConnection } from './model-validation';
 import { encryptRunnerSecret } from '../lib/runner-crypto';
 import { acquireCoordinatorLock } from './coordinator-lock';
+import { profileMemory } from './profile-memory';
+import { agentContext, type ContextOperation, type ContextResult } from './agent-context';
 
 const root = resolve(process.env.OPEN_HARNESS_STATE_DIR || ".open-harness");
 mkdirSync(root, { recursive: true });
@@ -282,6 +284,10 @@ function mapHermesEvent(run: RunRow, value: any) {
   const type = String(value?.type || value?.event || 'runtime.event');
   const payload = value?.payload ?? value?.data ?? value;
   const current = store.getRun(run.id);
+  const sessionId = value?.session_id || payload?.session_id;
+  // Runner delivery is authenticated and pinned to this run's command. Session
+  // metadata may arrive after completion when a buffered event is replayed.
+  if (current && !current.session_id && ['session.started', 'session.info'].includes(type) && typeof sessionId === 'string' && sessionId.length <= 512 && sessionId) store.setRun(run.id, { session_id: sessionId });
   // Buffered runner events can arrive after their completion receipt. Preserve the
   // transcript, but never turn terminal work back into a waiting run.
   if (!current || terminalStates.has(current.state)) { event(run.id, type, payload); return; }
@@ -512,7 +518,7 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/v1/install/file') {
       const requested = String(url.searchParams.get('path') || '').replaceAll('\\', '/');
-      const allowed = new Set(['runtime/runner.mjs', 'runtime/hermes/Dockerfile', 'runtime/hermes/NOTICE.md', 'runtime/hermes/container-init.sh', 'runtime/hermes/coordination.mjs', 'runtime/hermes/inspect_runtime.py', 'runtime/hermes/managed_entry.py', 'runtime/hermes/extension/open_harness_policy.py', 'runtime/hermes/extension/pyproject.toml']);
+      const allowed = new Set(['runtime/runner.mjs', 'runtime/hermes/Dockerfile', 'runtime/hermes/NOTICE.md', 'runtime/hermes/container-init.sh', 'runtime/hermes/coordination.mjs', 'runtime/hermes/inspect_runtime.py', 'runtime/hermes/managed_entry.py', 'runtime/hermes/cua_compat.py', 'runtime/hermes/extension/open_harness_policy.py', 'runtime/hermes/extension/pyproject.toml']);
       if (!allowed.has(requested)) return json(res, 404, { error: 'Runner file not found.' });
       const target = requested === 'runtime/runner.mjs' ? join(import.meta.dirname, 'runner.mjs') : join(import.meta.dirname, requested.slice('runtime/'.length));
       if (!existsSync(target)) return json(res, 503, { error: 'The standalone runner bundle is unavailable. Run npm run runner:bundle on this source installation.' });
@@ -658,6 +664,7 @@ const server = createServer(async (req, res) => {
         const input = await body(req); if (input.id !== id) throw new ProfileError('Profile ID does not match the selected agent.');
         const current = profiles.get(id), desired = validateProfile(input); if (machines.transferring(id)) throw new MachineError('This agent is already transferring. Wait for it to finish before editing its computer.', 409); machines.canAssign(desired.computer.machineId, id);
         const moving = Boolean(current && current.computer.machineId !== desired.computer.machineId);
+        if (moving && probingAgents.has(id)) throw new ProfileError('This agent is busy. Wait for its settings operation to finish before changing computers.', 409);
         // Changing an agent's computer normally starts a file transfer so its memory and
         // skills travel with it. Phones cannot take part in that yet. An agent that has not
         // written anything has nothing to carry, so it can simply be reassigned; one that has
@@ -731,21 +738,30 @@ const server = createServer(async (req, res) => {
         } catch { return json(res, 200, { status: 'failed', error: 'MCP initialize/tools-list handshake failed. Check the executable, arguments, and credentials.', tools: [] }); }
       }
     }
-    const skillMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/context\/skills\/([^/]+)$/);
-    if (skillMatch) {
-      const safe = skillMatch[1].replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
-      const skill = decodeURIComponent(skillMatch[2]);
-      if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(skill)) return json(res, 400, { error: "Invalid skill name." });
-      const skillDir = join(root, "agents", safe, "profile", "skills", skill), skillFile = join(skillDir, "SKILL.md");
-      if (req.method === "GET") { if (!existsSync(skillFile)) return json(res, 404, { error: "Skill not found." }); return json(res, 200, { name: skill, content: readFileSync(skillFile, "utf8") }); }
-      if (req.method === "PUT") { const input = await body(req); mkdirSync(skillDir, { recursive: true }); writeFileSync(skillFile, String(input.content || ""), { mode: 0o600 }); return json(res, 200, { ok: true }); }
-      if (req.method === "DELETE") { if (existsSync(skillDir)) rmSync(skillDir, { recursive: true }); return json(res, 200, { ok: true }); }
-    }
-    const contextMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/context$/);
+    const contextMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/context(?:\/skills\/([^/]+))?$/);
     if (contextMatch) {
-      const safe = contextMatch[1].replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48), profile = join(root, "agents", safe, "profile"), memoryPath = join(profile, "MEMORY.md"), userPath = join(profile, "USER.md"), skillsPath = join(profile, "skills"); mkdirSync(profile, { recursive: true });
-      if (req.method === "PUT") { const input = await body(req); if (String(input.memory || "").length > 50_000) return json(res, 413, { error: "Memory is limited to 50 KB." }); writeFileSync(memoryPath, String(input.memory || ""), { mode: 0o600 }); return json(res, 200, { ok: true }); }
-      if (req.method === "GET") { const skills = existsSync(skillsPath) ? readdirSync(skillsPath, { withFileTypes: true }).filter(item => item.isDirectory()).map(item => item.name).slice(0, 200) : [], available = (await dockerStatusCached()).available; return json(res, 200, { memory: existsSync(memoryPath) ? readFileSync(memoryPath, "utf8") : "", user: existsSync(userPath) ? readFileSync(userPath, "utf8") : "", skills, capabilities: { terminal: available, process: available, code: available, files: available, web: available, browser: available, memory: available, skills: available, mcp: available, delegation: available, schedules: true } }); }
+      const id = validId(decodeURIComponent(contextMatch[1])), name = contextMatch[2] === undefined ? undefined : decodeURIComponent(contextMatch[2]);
+      if (!['GET', 'PUT', ...(name ? ['DELETE'] : [])].includes(req.method || '')) return json(res, 405, { error: 'Unsupported context method.' });
+      if (name !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(name)) throw new ProfileError('Invalid skill name.');
+      if (machines.transferring(id)) throw new ProfileError('This agent is transferring. Wait for it to finish before editing its context.', 409);
+      reserveProbe(id);
+      const input = req.method === 'PUT' ? await body(req) : {};
+      const operation: ContextOperation = name === undefined ? { operation: req.method === 'GET' ? 'get' : 'set-memory', memory: String(input.memory || '') }
+        : { operation: req.method === 'GET' ? 'get-skill' : req.method === 'PUT' ? 'put-skill' : 'delete-skill', name, content: String(input.content || '') };
+      if (operation.operation === 'set-memory' && operation.memory!.length > 50_000) throw new ProfileError('Memory is limited to 50 KB.', 413);
+      const profile = profiles.get(id), machineId = profile?.computer.machineId || 'local';
+      let result: ContextResult;
+      if (machineId === 'local') result = agentContext(root, id, operation);
+      else {
+        const machine = machines.canAssign(machineId, id);
+        if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before editing context.`, 409);
+        result = await waitRunnerCommand(machines.enqueue(machineId, id, 'agent-context', operation).id) as ContextResult;
+      }
+      if (operation.operation === 'get' && result.status === 200) {
+        const machine = machines.get(machineId), available = machineId === 'local' ? (await dockerStatusCached()).available : machine.capabilities.container || machine.capabilities.direct;
+        result.value.capabilities = { terminal: available, process: available, code: available, files: available, web: available, browser: available, memory: available, skills: available, mcp: available, delegation: available, schedules: true };
+      }
+      return json(res, result.status, result.value);
     }
     if (req.method === "POST" && url.pathname === "/v1/migrate") {
       const input = await body(req); const found = store.db.prepare("SELECT 1 FROM migrations WHERE key='browser-v1'").get();
@@ -753,9 +769,8 @@ const server = createServer(async (req, res) => {
       store.db.prepare("INSERT INTO migrations(key,payload_json,created_at) VALUES(?,?,?)").run("browser-v1", JSON.stringify(input), new Date().toISOString());
       for (const agent of input.agents || []) {
         profiles.import(agent);
-        const safe = String(agent.id).replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48), profile = join(root, "agents", safe, "profile");
-        mkdirSync(profile, { recursive: true });
-        if (Array.isArray(agent.memory) && agent.memory.length) writeFileSync(join(profile, "MEMORY.md"), agent.memory.map((item: unknown) => `- ${String(item)}`).join("\n") + "\n", { mode: 0o600 });
+        const { memory } = profileMemory(root, String(agent.id));
+        if (Array.isArray(agent.memory) && agent.memory.length && !existsSync(memory)) writeFileSync(memory, agent.memory.map((item: unknown) => `- ${String(item)}`).join("\n") + "\n", { mode: 0o600 });
       }
       for (const conversation of input.conversations || []) store.db.prepare("INSERT OR IGNORE INTO conversations(id,agent_id,title,legacy_json,created_at,updated_at) VALUES(?,?,?,?,?,?)").run(conversation.id, conversation.agentId, conversation.title, JSON.stringify(conversation), conversation.updatedAt || new Date().toISOString(), conversation.updatedAt || new Date().toISOString());
       for (const file of input.files || []) { const target = join(root, "shared", String(file.name).replace(/[^a-zA-Z0-9._ -]/g, "_")); writeFileSync(target, String(file.content).slice(0, 1_000_000)); }

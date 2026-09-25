@@ -8,10 +8,7 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ### Added
 
-- The dashboard is now mobile-first on both paths to a remote coordinator: the
-  Android app and a phone browser pointed at a self-hosted deployment. Phone
-  layout is decided by the screen rather than by the presence of Tauri, so a
-  phone browser stops being served the desktop layout.
+- The dashboard adapts to desktop and phone browsers pointed at a self-hosted deployment.
 - A remote browser can pair for its own scoped, revocable device credential
   instead of being handed the master control token.
   `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` becomes a legacy opt-out rather than
@@ -35,12 +32,24 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ### Fixed
 
+- A freshly paired workspace — a Compose install, where every browser pairs and the
+  coordinator starts with no agents — showed "No agents yet" with nothing to do about it:
+  the empty screen returned before the agent editor and setup guide were mounted, and a
+  paired browser could not reopen setup. It now offers "Create your first agent" and "Set
+  up connected computer", paired operators can run setup again from Workspace settings,
+  and joining an established hub still seeds nothing. (claude, from a Codex-prepared patch)
+- First-time runtime builds no longer block on unread subprocess output or hit the dashboard proxy's five-minute response deadline. Paired setup builds a missing Hermes image from bundled sources. (codex)
+- Private Linux desktops now start and recover after container restart under the coordinator's UID. Browser screenshots, typing, pixel clicks and accessibility clicks work with the pinned CUA driver while stale targets remain rejected. (codex)
+- Memory and skills now follow the agent's selected computer and use Hermes's canonical memory files. Existing dashboard notes migrate without overwriting newer runtime notes, transfers carry those files, and remote runs retain their session IDs. (codex)
+- Docker images built from shared-folder checkouts now make startup scripts and application assets readable by their non-root runtime users, preventing permission-denied startup failures. (codex)
+- A newly paired browser immediately uses its scoped device session and reads the coordinator workspace, including an empty workspace, without importing local starter agents. (codex)
+
 - Follow-up runs keep prior conversation text, and remote work remains attached after a coordinator restart. Pending approvals and input requests recover across client reloads; failed runner replies remain retryable. (codex)
 - Model setup validates draft credentials before committing a new reference, preserving the working configuration after failed tests or stale saves. (codex)
 - Pinned Hermes now loads the policy extension, exposes granted MCP task tools, and connects to the coordinator over native Unix sockets. Native probes use the selected runtime, container model URLs resolve host loopback addresses, and the browser binary installs in a location readable by the container's runtime user. (codex)
 - Hosted dispatch atomically enforces capacity and task ownership, snapshots profiles at start, and supports task stopping, routine editing/history, encrypted inputs, and conversation history. (codex)
 - Runtime stopping waits for tool process cleanup; native process identities survive coordinator restarts, and a second coordinator cannot interrupt the existing owner's work. File transfers reject traversal and symlink paths on Windows and Unix. (codex)
-- Android keyboard insets resize the native content area without cumulative padding. Desktop startup failure and quit clean up the coordinator sidecar. (codex)
+- Desktop startup failure and quit clean up the coordinator sidecar. (codex)
 - Compose uses consistent coordinator/agent file ownership, private Unix-socket engine access, explicit browser pairing, and enough shutdown time to finish agent cleanup. Existing root-owned data requires the documented migration. (codex)
 - Steering and Stop acted on whichever run the dashboard happened to be holding, so
   after switching agents they could reach another agent's run. They now act on the open
@@ -66,27 +75,10 @@ pre-1.0, so breaking changes can still land in a minor version.
 - Tool activity from the real Hermes gateway (`tool_id`, object `context` and `result`)
   is shown the same way as the mock's, and MCP tool ids read as words. (claude)
 
-- Android: Back closed the app from any modal, destroying unsaved profile edits,
-  because the static export gave the webview no history to go back to.
-- Android: downloads and external links silently did nothing. The WebView needs
-  a download listener and a second-window handler, and the shell registers
-  neither, so files and links now go through the `fs` and `opener` plugins.
-- Android: content drew under the status and gesture bars, and the safe-area CSS
-  that was meant to prevent it was dead because the build carried no
-  `viewport-fit=cover`.
 - Pairing with a coordinator that has no agents crashed the dashboard instead of
   saying so.
 - The task board forced roughly 1300px of horizontal panning on a phone, and the
   only touch control for moving a task was about 21px.
-
-- An Android companion app. It is the same dashboard shipped as static files in a
-  Tauri 2 shell, paired to a coordinator over HTTPS with a typable 12-character code
-  or an `openharness://` link. The phone gets its own revocable device credential,
-  kept in a native Stronghold vault, that reaches dashboard routes only; runner
-  command endpoints reject it. Phones send tasks, follow runs, and answer approvals;
-  execution stays on a connected computer. See [ANDROID.md](ANDROID.md).
-- `Verify` builds a debug ARM64 APK on every push; tagged releases build a signed
-  APK and AAB when the four `ANDROID_*` repository secrets are present.
 
 ### Security
 
@@ -117,6 +109,8 @@ pre-1.0, so breaking changes can still land in a minor version.
   previously surfaced as a wall of unrelated-looking test failures.
 
 ### Changed
+
+- Removed the native mobile app, build/release tooling, native dashboard adapters, mobile-only dependencies, and app-specific documentation from this repository. Mobile development continues in a separate repository; shared pairing APIs and responsive browser support remain. (codex)
 
 - Hardened the self-hosted `compose.yaml`: the `open-harness` service now
   drops all Linux capabilities, disables privilege escalation, and has its

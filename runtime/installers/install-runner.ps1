@@ -29,7 +29,7 @@ function Get-RunnerFile([string]$Path) {
   Invoke-WebRequest "$Coordinator/v1/install/file?path=$([uri]::EscapeDataString($Path))" -Headers $Headers -OutFile $Destination
 }
 Get-RunnerFile "runtime/runner.mjs"
-@("Dockerfile", "NOTICE.md", "container-init.sh", "coordination.mjs", "inspect_runtime.py", "managed_entry.py", "extension/open_harness_policy.py", "extension/pyproject.toml") | ForEach-Object { Get-RunnerFile "runtime/hermes/$_" }
+@("Dockerfile", "NOTICE.md", "container-init.sh", "coordination.mjs", "inspect_runtime.py", "managed_entry.py", "cua_compat.py", "extension/open_harness_policy.py", "extension/pyproject.toml") | ForEach-Object { Get-RunnerFile "runtime/hermes/$_" }
 
 function Test-DockerCommand([string[]]$DockerArguments) {
   if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return $false }

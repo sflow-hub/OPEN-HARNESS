@@ -99,7 +99,7 @@ async function waitForDocker(timeout = 120_000) {
 
 function runStreaming(name: string, args: string[], cwd?: string) {
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(name, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(name, args, { cwd, env: process.env, stdio: ['ignore', 'ignore', 'pipe'] });
     let error = '';
     child.stderr.on('data', chunk => { error = (error + String(chunk)).slice(-8_000); });
     child.once('error', reject);

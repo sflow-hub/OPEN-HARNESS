@@ -59,10 +59,10 @@ import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import { profileAgent, type ModelChoice } from "../lib/agent-profile";
 import { HubConnect } from "../components/hub-connect";
-import { parsePairingLink, type DeviceCredential } from "../lib/hub";
-import { PHONE_LAYOUT_QUERY, eventPollIntervalMs, isMobileApp, isPhoneLayout, notificationsGranted, notify, platformFetch, requestNotificationPermission, secureStore } from "../lib/platform";
+import { type DeviceCredential } from "../lib/hub";
+import { PHONE_LAYOUT_QUERY, eventPollIntervalMs, isPhoneLayout, notificationsGranted, notify, platformFetch, requestNotificationPermission, secureStore } from "../lib/platform";
 import { useBackGuard } from "../lib/back-guard";
-import { hasTauri, loadTauriPlugin, openExternal, saveFile, trackKeyboardInset } from "../lib/platform";
+import { trackKeyboardInset } from "../lib/platform";
 
 const STORAGE_KEY = "open-harness.workspace.v1";
 const SETTINGS_KEY = "open-harness.settings.v1";
@@ -115,21 +115,14 @@ function formatInterval(minutes: number) {
   return minutes === 1 ? "minute" : `${minutes} minutes`;
 }
 const now = () => new Date().toISOString();
-// The phone app cannot download the way a browser does: its WebView ignores <a download> on
-// a blob: URL unless the host registers a DownloadListener, and the Tauri shell registers
-// none, so this used to click into the void. Resolves to where the file went on the phone,
-// and to null in a browser, which saved it itself.
-async function download(name: string, content: string, type = "text/plain", encoding: "utf8" | "base64" = "utf8"): Promise<{ path: string } | null> {
+async function download(name: string, content: string, type = "text/plain", encoding: "utf8" | "base64" = "utf8"): Promise<void> {
   const data = encoding === "base64" ? Uint8Array.from(atob(content), char => char.charCodeAt(0)) : content;
-  const saved = await saveFile(name, data);
-  if (saved) return saved;
   const url = URL.createObjectURL(new Blob([data], { type }));
   const link = document.createElement("a");
   link.href = url;
   link.download = name;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  return null;
 }
 function Avatar({ agent, large = false }: { agent: Agent; large?: boolean }) {
   return (
@@ -147,13 +140,7 @@ const MARKDOWN_COMPONENTS = {
       href={typeof src === "string" ? src : undefined}
       target="_blank"
       rel="noopener noreferrer"
-      // target="_blank" does nothing in an Android WebView, which has no second window and
-      // no onCreateWindow registered, so this tap was silently inert in the app.
-      onClick={event => {
-        if (typeof src !== "string" || !hasTauri()) return;
-        event.preventDefault();
-        void openExternal(src);
-      }}
+
     >
       {alt || "Open image"}
     </a>
@@ -178,11 +165,9 @@ export default function Home() {
   // effect after mount. Deciding any of them during the first render instead would make the
   // client disagree with the server and throw away the hydrated markup.
   //
-  // `phone` is a question about the screen, `app` about the Tauri runtime, and `pairs` about
-  // how this client authenticates. They used to be one flag, which is why a phone browser
-  // pointed at a self-hosted coordinator got the desktop layout.
+  // Layout and authentication are independent: a narrow local browser can bootstrap,
+  // while a remote browser pairs for its own credential.
   const [phone, setPhone] = useState(false);
-  const [app, setApp] = useState(false);
   const [pairs, setPairs] = useState(false);
   // A remote browser is allowed to try the control token first, because an operator may have
   // accepted responsibility for authenticating in front of it. This flips when that is
@@ -332,8 +317,6 @@ export default function Home() {
         });
         setSelectedAgent(parsed.agents[0].id);
       }
-      // Checked through the platform layer: the phone has no web Notification API, and
-      // reading Notification.permission there would silently forget the saved preference.
       if (localStorage.getItem(NOTIFY_KEY) === "on") void notificationsGranted().then(granted => { if (granted) setNotifyWhenDone(true); });
       const prefs = localStorage.getItem(SETTINGS_KEY);
       if (prefs) {
@@ -363,17 +346,11 @@ export default function Home() {
     // Deliberately after mount rather than in initial state: all of these read window, and
     // deciding them during the first render would make the client disagree with the
     // prerendered HTML and throw it away.
-    const isApp = isMobileApp();
-    // The app has no control token to fall back on, and a browser that reached this page over
-    // the network will not be given one. Both pair; a dashboard opened on the coordinator's
-    // own machine does not. Decided synchronously so the app never flashes a starter
-    // workspace on its way to the pairing screen.
-    const mayPair = isApp || isRemoteOrigin();
+    const mayPair = isRemoteOrigin();
     // Reading the screen and the runtime is exactly the "subscribe to an external system"
     // case the rule carves out; it cannot happen before mount without breaking hydration.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPhone(isPhoneLayout());
-    setApp(isApp);
     setPairs(mayPair);
     // Below 1000px the workspace panel is a fixed overlay on the right (see globals.css),
     // 270px wide over a 390px phone. Open by default, it sat on top of the composer's send
@@ -401,36 +378,7 @@ export default function Home() {
     return () => { cancelled = true; };
   }, []);
 
-  // A pairing link opened while already connected used to go nowhere: the only deep-link
-  // listener lived inside the pairing screen, which is unmounted once paired. Silently
-  // re-pairing would be worse than ignoring it, so this explains the situation instead.
-  useEffect(() => {
-    if (!device || device === 'unknown') return;
-    let dispose: (() => void) | undefined;
-    let cancelled = false;
-    void (async () => {
-      type DeepLink = { onOpenUrl(handler: (urls: string[]) => void): Promise<() => void> };
-      const plugin = await loadTauriPlugin<DeepLink>('deep-link');
-      if (!plugin || cancelled) return;
-      try {
-        dispose = await plugin.onOpenUrl(urls => {
-          for (const url of urls) {
-            const link = parsePairingLink(String(url));
-            if (!link) continue;
-            setNotice(link.hubUrl === device.hubUrl
-              ? `This device is already connected to ${device.hubUrl}.`
-              : `This device is connected to ${device.hubUrl}. Disconnect it in Settings before pairing with ${link.hubUrl}.`);
-            return;
-          }
-        });
-      } catch { /* No deep-link runtime here; the pairing screen handles its own links. */ }
-    })();
-    return () => { cancelled = true; dispose?.(); };
-  }, [device]);
-
-  // Publishes how much of the screen the soft keyboard is covering, so the composer can stay
-  // above it. Measured rather than declared: the viewport's interactive-widget hint is set
-  // but the Android WebView ignored it.
+  // Keep the composer above a browser's soft keyboard.
   useEffect(() => trackKeyboardInset(), []);
 
   // The screen can change category without a reload: a rotated tablet, a resized desktop
@@ -446,6 +394,7 @@ export default function Home() {
   const onPaired = async (credential: DeviceCredential) => {
     await secureStore.set('device.v1', credential);
     controlRef.current.useDevice(credential, await platformFetch());
+    setPairs(true);
     setDevice(credential);
   };
   const onUnpaired = async () => {
@@ -607,10 +556,7 @@ export default function Home() {
     if (!ready) return;
     // Still looking for a stored credential; either answer changes where this goes.
     if (device === 'unknown') return;
-    // The app has no control token to fall back on, so with no pairing there is nothing to
-    // talk to. A remote browser still tries, because the operator may have authenticated in
-    // front of the coordinator; if that is refused, the catch below offers pairing.
-    if (app && !device) return;
+    // Try bootstrap first; a refused control token opens the pairing screen.
     let cancelled = false;
     const connect = async () => {
       try {
@@ -644,8 +590,8 @@ export default function Home() {
               });
           setSettings(modelSettings(defaults.model));
           setWorkspaceModelRevision(defaults.revision);
-          // First-run setup belongs on the computer that hosts the coordinator; the phone
-          // has no Docker to check and no model runtime to install.
+          // Joining an existing hub must not force setup on a paired browser.
+          // Paired operators can open coordinator setup from the empty state or settings.
           if (!paired && localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
         }
         const [{ routines: savedRoutines }, { conversations: remembered }] = await Promise.all([
@@ -695,7 +641,7 @@ export default function Home() {
     // device and pairs are listed so pairing connects immediately; without them the client
     // would sit on its starter workspace until the next launch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, pairs, app, device]);
+  }, [ready, pairs, device]);
   useEffect(() => {
     if (!runtime || !selectedAgent) return;
     let cancelled = false;
@@ -787,19 +733,14 @@ export default function Home() {
   };
 
   const agentNameFor = (id: string) => workspace.agents.find(agent => agent.id === id)?.name || "Your agent";
-  // A browser drops the file in Downloads and shows its own chrome for it. The phone app has
-  // no such chrome, so say where it landed, otherwise a successful save looks like nothing.
   const saveDownload = async (name: string, content: string, type?: string, encoding?: "utf8" | "base64") => {
     try {
-      const saved = await download(name, content, type, encoding);
-      if (saved) setNotice(`Saved ${name} to ${saved.path}`);
+      await download(name, content, type, encoding);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : `Could not save ${name}.`);
     }
   };
-  // Only while nobody is looking at this screen; in the foreground the in-app banner already
-  // says it. On the phone this reaches the native notification plugin, which is the only
-  // way an approval request gets seen while the app is in the background.
+  // Notify only while the page is hidden; the foreground already shows a banner.
   const notifyDone = (title: string, body: string) => {
     if (!notifyWhenDone || !document.hidden) return;
     void notify(title, body, "open-harness-run");
@@ -807,9 +748,7 @@ export default function Home() {
   const toggleNotifications = async () => {
     if (notifyWhenDone) { setNotifyWhenDone(false); localStorage.setItem(NOTIFY_KEY, "off"); return; }
     if (!(await requestNotificationPermission())) {
-      setNotice(phone
-        ? "Notifications are turned off for Open Harness. Allow them in your phone's app settings to turn this on."
-        : typeof Notification === "undefined"
+      setNotice(typeof Notification === "undefined"
           ? "This browser cannot show desktop notifications."
           : "Your browser blocked notifications for Open Harness. Allow them in its site settings to turn this on.");
       return;
@@ -832,7 +771,7 @@ export default function Home() {
   const escapeSettingsRef = useRef<() => void>(() => {});
   useEffect(() => { escapeSettingsRef.current = () => { if (settingsOpen) requestCloseSettings(); }; });
 
-  // Android's Back closes whatever is on top, the way it does in every other app. Scoped to
+  // Browser Back closes the top overlay on small screens. Scoped to
   // phone-shaped clients: on a desktop browser Back is a navigation control people expect to
   // leave the page. Ordered outermost-last so the topmost overlay is the one that closes.
   useBackGuard(phone && mobileOpen, () => setMobileOpen(false));
@@ -1510,27 +1449,43 @@ export default function Home() {
     )
     .slice(0, 12);
 
+  const agentDialogs = <>
+      {onboardingOpen && runtime && <Onboarding remote={pairs} client={controlRef.current} model={modelChoice(settings)} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
+        const adopted = modelSettings(model);
+        setSettings(adopted);
+        setWorkspaceModelRevision(revision);
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(adopted));
+      }} onComputerSettings={() => {
+        localStorage.setItem(ONBOARDING_KEY, 'done');
+        setOnboardingOpen(false);
+        if (agent) { setEditingAgentTab('computer'); setEditingAgent(agent); }
+        else { setEditingAgentTab('computer'); newAgent(); }
+      }} onFinished={() => {
+        localStorage.setItem(ONBOARDING_KEY, 'done');
+        setOnboardingOpen(false);
+      }} />}
+      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} agent={editingAgent} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={profile => {
+        setWorkspace(current => ({ ...current, agents: current.agents.some(a => a.id === profile.id)
+          ? current.agents.map(a => a.id === profile.id ? profileAgent(profile, a.memory) : a)
+          : [...current.agents, profileAgent(profile)] }));
+      }} />}
+  </>;
+
   // A client that is not paired yet has no workspace to show. Until the stored credential has
   // been looked for, show nothing rather than flashing the pairing screen at someone who is
-  // already connected. The app pairs unconditionally; a remote browser only once the
-  // coordinator has actually refused it the control token.
+  // already connected. Pair only after the coordinator refuses the control token.
   if (pairs && device === 'unknown') return <div className="app-shell" aria-busy="true" />;
-  if (!device && (app || pairingRequired)) {
+  if (!device && pairingRequired) {
     return (
       <HubConnect
-        // A browser is already looking at the hub, so there is nothing for it to type. The
-        // app has no such context and asks.
-        fixedHubUrl={app ? undefined : selfHostedHubUrl()}
+        fixedHubUrl={selfHostedHubUrl()}
         onConnected={credential => { setPairingRequired(false); void onPaired(credential); }}
       />
     );
   }
 
-  // A paired client reads the coordinator's agents instead of pushing its own starter set, so
-  // it can legitimately land on a workspace with none — a coordinator nobody has created an
-  // agent on yet. Everything below dereferences `agent`, so without this the dashboard threw
-  // "Cannot read properties of undefined (reading 'name')" the moment a phone paired with a
-  // fresh coordinator. Only the emulator showed it: the browser suite always seeds agents.
+  // A paired client reads the coordinator's agents without seeding an existing hub.
+  // A fresh hub still needs its setup and first-agent editor on this empty screen.
   if (!agent) {
     return (
       <div className="hub-connect">
@@ -1539,17 +1494,22 @@ export default function Home() {
             <Bot size={26} aria-hidden="true" />
             <h1>No agents yet</h1>
             <p>
-              Agents live on the computer running Open Harness, and this workspace does not
-              have any. Create one there and it will appear here.
+              Create your first agent here. Its workspace and tasks will live on the computer
+              running Open Harness. Set up that computer and connect a model when you are ready.
             </p>
           </div>
           {device && device !== 'unknown' && (
             <p className="hub-connect-footnote">Connected to {device.hubUrl} as {device.name}.</p>
           )}
-          <button type="button" className="light-button" onClick={() => window.location.reload()}>
+          <div className="button-row">
+            <button type="button" className="light-button" onClick={newAgent}>Create your first agent</button>
+            <button type="button" className="subtle-button" disabled={!runtime} onClick={() => setOnboardingOpen(true)}>Set up connected computer</button>
+          </div>
+          <button type="button" className="subtle-button" onClick={() => window.location.reload()}>
             Check again
           </button>
         </div>
+        {agentDialogs}
       </div>
     );
   }
@@ -2640,7 +2600,7 @@ export default function Home() {
                 <X size={19} />
               </button>
             </div>
-            {phone && device && device !== 'unknown' && (
+            {device && device !== 'unknown' && (
               <div className="hub-summary">
                 <div>
                   <strong>Connected to your hub</strong>
@@ -2659,7 +2619,7 @@ export default function Home() {
                     setSettingsOpen(false);
                   }}
                 >
-                  Disconnect this phone
+                  Disconnect this device
                 </button>
               </div>
             )}
@@ -2737,17 +2697,12 @@ export default function Home() {
               closes.
             </p>
             <div className="button-row">
-              {/* First-run setup checks Docker and the Hermes runtime on the machine hosting
-                  the coordinator. A paired client is not that machine, and the auto-open path
-                  is already gated the same way. */}
-              {!pairs && (
-                <button
-                  className="subtle-button"
-                  onClick={() => { closeSettings(); setOnboardingOpen(true); }}
-                >
-                  <Sparkles size={14} /> Run setup again
-                </button>
-              )}
+              <button
+                className="subtle-button"
+                onClick={() => { closeSettings(); setOnboardingOpen(true); }}
+              >
+                <Sparkles size={14} /> Run setup again
+              </button>
               <button
                 className="subtle-button"
                 aria-pressed={notifyWhenDone}
@@ -2826,25 +2781,7 @@ export default function Home() {
           </section>
         </div>
       )}
-      {onboardingOpen && runtime && <Onboarding client={controlRef.current} model={modelChoice(settings)} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
-        const adopted = modelSettings(model);
-        setSettings(adopted);
-        setWorkspaceModelRevision(revision);
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify(adopted));
-      }} onComputerSettings={() => {
-        localStorage.setItem(ONBOARDING_KEY, 'done');
-        setOnboardingOpen(false);
-        setEditingAgentTab('computer');
-        setEditingAgent(agent);
-      }} onFinished={() => {
-        localStorage.setItem(ONBOARDING_KEY, 'done');
-        setOnboardingOpen(false);
-      }} />}
-      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} agent={editingAgent} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={profile => {
-        setWorkspace(current => ({ ...current, agents: current.agents.some(a => a.id === profile.id)
-          ? current.agents.map(a => a.id === profile.id ? profileAgent(profile, a.memory) : a)
-          : [...current.agents, profileAgent(profile)] }));
-      }} />}
+      {agentDialogs}
       {file && (
         <div className="modal-backdrop" onClick={() => setSelectedFile(null)}>
           <section

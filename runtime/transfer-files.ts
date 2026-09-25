@@ -4,7 +4,8 @@ import { dirname, join, relative } from 'node:path';
 import { safeWorkspacePath } from './path-safety';
 
 export type TransferBundle = { files: Array<{ path: string; data: string; checksum: string }>; checksum: string };
-const allowedRoots = ['private', 'profile/MEMORY.md', 'profile/USER.md', 'profile/skills'];
+const memoryFiles = ['profile/MEMORY.md', 'profile/USER.md', 'profile/memories/MEMORY.md', 'profile/memories/USER.md'];
+const allowedRoots = ['private', ...memoryFiles, 'profile/skills'];
 function digest(data: Buffer | string) { return createHash('sha256').update(data).digest('hex'); }
 export function exportAgentFiles(stateRoot: string, agentId: string): TransferBundle {
   const agentRoot = safeWorkspacePath(stateRoot, `agents/${agentId}`), files: TransferBundle['files'] = []; let total = 0;
@@ -25,7 +26,7 @@ export function importAgentFiles(stateRoot: string, agentId: string, bundle: Tra
   // particular, a bad final checksum must not leave a partly imported profile.
   const files = bundle.files.map(file => {
     const clean = file.path.replaceAll('\\', '/');
-    if (!(clean.startsWith('private/') || clean === 'profile/MEMORY.md' || clean === 'profile/USER.md' || clean.startsWith('profile/skills/'))) throw new Error('Transfer contains an invalid managed path.');
+    if (!(clean.startsWith('private/') || memoryFiles.includes(clean) || clean.startsWith('profile/skills/'))) throw new Error('Transfer contains an invalid managed path.');
     const name = `agents/${agentId}/${clean}`, target = safeWorkspacePath(stateRoot, name);
     const key = process.platform === 'win32' ? target.toLowerCase() : target;
     if (seen.has(key)) throw new Error('Transfer contains duplicate managed paths.');

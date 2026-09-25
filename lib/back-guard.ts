@@ -2,30 +2,9 @@
 
 import { useEffect, useRef } from 'react';
 
-// Android's Back button, and the gesture that stands in for it, is the system-wide "go back
-// one step". The Tauri shell asks the webview first and finishes the activity when the
-// webview reports it has nowhere to go back to.
-//
-// The dashboard is a static export with no router: every overlay is a piece of useState, so
-// the webview genuinely had no history and Back always quit the app — from a modal, from the
-// full-screen agent editor, from the task drawer. Worse, the only discard guard for unsaved
-// profile edits was bound to Escape, which a phone does not have, so Back destroyed work.
-//
-// The rule here is one history entry per open overlay, kept true after every render. Two
-// earlier shapes were tried on the device and both failed:
-//
-//   - Pushing and popping per overlay, eagerly. Closing one overlay while opening another
-//     (Settings → "Run setup again") queued a history.back() that swallowed the entry the
-//     incoming overlay had just pushed, and the arriving popstate closed it instantly.
-//   - One shared entry, re-pushed from inside the popstate handler. The re-push did not
-//     survive the navigation that delivered the event, so with two overlays open the second
-//     Back left the app instead of closing the one underneath.
-//
-// Reconciling a count after commit avoids both: a handoff leaves the count unchanged and so
-// touches history not at all, and nothing is ever pushed mid-navigation.
-//
-// The entries carry no URL change, which matters for a static export: a different path would
-// 404 on reload.
+// Keep one browser-history entry per open overlay so Back can dismiss it safely.
+// Reconcile after render: switching overlays leaves the count unchanged, and
+// nothing is pushed during a navigation event. URLs stay unchanged on reload.
 
 type Entry = { onBack: () => void };
 

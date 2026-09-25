@@ -1,7 +1,4 @@
 //! The desktop application: a supervisor for two Node processes with a webview attached.
-//!
-//! None of this exists on a phone. There is no Node runtime to spawn, no tray to live in,
-//! and no loopback server to point a window at, so the whole module is compiled out there.
 
 use std::{collections::HashMap, net::{TcpListener, TcpStream}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, thread, time::{Duration, Instant}};
 use tauri::{menu::{Menu, MenuItem}, tray::TrayIconBuilder, webview::NewWindowResponse, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};

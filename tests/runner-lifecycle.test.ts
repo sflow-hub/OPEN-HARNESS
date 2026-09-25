@@ -10,7 +10,7 @@ import { encryptRunnerSecret, generateRunnerKeyPair } from '../lib/runner-crypto
 import { assertProcessStopped } from './helpers/process-state';
 
 type Command = { id: string; agentId: string; kind: string; payload: Record<string, unknown> };
-type Delivery = { result?: { final_response?: string; text?: string; ok?: boolean }; error?: string };
+type Delivery = { result?: { final_response?: string; text?: string; ok?: boolean; status?: number; value?: { memory?: string; user?: string; skills?: string[]; content?: string } }; error?: string };
 const pause = () => new Promise(resolve => setTimeout(resolve, 25));
 async function until<T>(get: () => T | undefined, label: string) {
   const deadline = Date.now() + 12_000;
@@ -79,6 +79,21 @@ setInterval(() => {}, 1000);
   const run = (id: string, prompt: string, extra: Record<string, unknown> = {}): Command => ({ id, agentId: 'atlas', kind: 'run', payload: { runId: id, prompt, snapshot: profile, secrets: {}, coordinationToken: '', ...extra } });
   const completion = (id: string) => until(() => completions.get(id), `completion of ${id}; ${runnerOutput}`);
 
+  const context = async (id: string, payload: Record<string, unknown>) => {
+    batches.push([{ id, agentId: 'atlas', kind: 'agent-context', payload }]);
+    return completion(id);
+  };
+  assert.equal((await context('memory-save', { operation: 'set-memory', memory: 'Runner memory survives runs.' })).result?.status, 200);
+  assert.equal(readFileSync(join(dir, 'agents/atlas/profile/memories/MEMORY.md'), 'utf8'), 'Runner memory survives runs.');
+  assert.equal((await context('skill-save', { operation: 'put-skill', name: 'reporter', content: '# Report skill' })).result?.status, 200);
+  const savedContext = await context('context-read', { operation: 'get' });
+  assert.equal(savedContext.result?.value?.memory, 'Runner memory survives runs.');
+  assert.deepEqual(savedContext.result?.value?.skills, ['reporter']);
+  assert.equal((await context('skill-read', { operation: 'get-skill', name: 'reporter' })).result?.value?.content, '# Report skill');
+  assert.equal((await context('skill-delete', { operation: 'delete-skill', name: 'reporter' })).result?.status, 200);
+  assert.equal((await context('skill-missing', { operation: 'get-skill', name: 'reporter' })).result?.status, 404);
+  assert.equal(records().length, 0, 'Context operations do not start or recompile an agent runtime.');
+
   const history = [{ role: 'user', content: 'The project color is blue.' }, { role: 'assistant', content: 'Remembered.' }];
   batches.push([run('success', 'SUCCESS', { history })]);
   assert.equal((await completion('success')).result?.final_response, 'Completed fake task');
@@ -94,6 +109,8 @@ setInterval(() => {}, 1000);
   batches.push([run('holding', 'HOLD'), probe]);
   assert.match((await completion(probe.id)).error || '', /busy/);
   await until(() => events.some(item => item.runId === 'holding' && item.event.type === 'secret.request') ? true : undefined, 'live input request');
+  assert.match((await context('memory-while-running', { operation: 'set-memory', memory: 'Must not replace active memory.' })).error || '', /busy/);
+  assert.equal(readFileSync(join(dir, 'agents/atlas/profile/memories/MEMORY.md'), 'utf8'), 'Runner memory survives runs.');
   assert.equal(JSON.parse(readFileSync(join(dir, 'agents/atlas/managed/policy.json'), 'utf8')).runId, 'holding');
   const heldPid = records().filter(row => row.type === 'started').at(-1)!.pid!;
   process.kill(heldPid, 0);

@@ -47,19 +47,21 @@ test('filesystem containment accepts new directories but rejects existing and da
 
 test('transfers restore private files, memory, user notes and nested skills', t => {
   const root = fixture(t), source = path.join(root, 'source'), destination = path.join(root, 'destination');
-  const original = bundle([['private/report.md', 'report'], ['profile/MEMORY.md', 'memory'], ['profile/USER.md', 'user'], ['profile/skills/writer/SKILL.md', 'skill']]);
-  assert.deepEqual(importAgentFiles(source, 'atlas', original), { checksum: original.checksum, files: 4 });
+  const original = bundle([['private/report.md', 'report'], ['profile/MEMORY.md', 'legacy memory'], ['profile/USER.md', 'legacy user'], ['profile/memories/MEMORY.md', 'runtime memory'], ['profile/memories/USER.md', 'runtime user'], ['profile/skills/writer/SKILL.md', 'skill']]);
+  assert.deepEqual(importAgentFiles(source, 'atlas', original), { checksum: original.checksum, files: 6 });
   const exported = exportAgentFiles(source, 'atlas');
   assert.equal(exported.checksum, original.checksum);
   importAgentFiles(destination, 'atlas', exported);
   assert.equal(readFileSync(path.join(destination, 'agents/atlas/profile/skills/writer/SKILL.md'), 'utf8'), 'skill');
   assert.equal(readFileSync(path.join(destination, 'agents/atlas/private/report.md'), 'utf8'), 'report');
+  assert.equal(readFileSync(path.join(destination, 'agents/atlas/profile/memories/MEMORY.md'), 'utf8'), 'runtime memory');
+  assert.equal(readFileSync(path.join(destination, 'agents/atlas/profile/memories/USER.md'), 'utf8'), 'runtime user');
 });
 
 test('invalid entries or checksums reject the entire import before overwriting files', t => {
   const root = fixture(t), file = path.join(root, 'agents/atlas/private/report.md');
   mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, 'original');
-  for (const name of ['private/../profile/MEMORY.md', 'private\\..\\profile\\MEMORY.md', 'private/../../../../outside.md', 'profile/MEMORY.md/child', 'profile/.env', 'private']) {
+  for (const name of ['private/../profile/MEMORY.md', 'private\\..\\profile\\MEMORY.md', 'private/../../../../outside.md', 'profile/MEMORY.md/child', 'profile/memories/.env', 'profile/memories/MEMORY.md/child', 'profile/.env', 'private']) {
     assert.throws(() => importAgentFiles(root, 'atlas', bundle([['private/report.md', 'changed'], [name, 'invalid']])));
     assert.equal(readFileSync(file, 'utf8'), 'original');
   }

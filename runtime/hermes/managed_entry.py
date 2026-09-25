@@ -5,6 +5,9 @@ from pathlib import Path
 import yaml
 from hermes_cli.plugins import discover_plugins
 import open_harness_policy
+from cua_compat import install as install_cua_compat
+
+install_cua_compat()
 
 # Saved profiles use Open Harness's original MCP IDs. The pinned Hermes registry
 # uses mcp__server__tool. Translate once at the managed boundary, preserving the

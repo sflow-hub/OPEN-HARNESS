@@ -2059,7 +2059,6 @@ h1 span {
 .hub-connect-panel label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .hub-connect-panel input { min-height: 46px; font-size: 16px; }
 .hub-connect-panel small { color: var(--muted); font-size: 12px; line-height: 1.45; }
-.hub-connect .hub-scan { min-height: 46px; justify-content: center; }
 .hub-connect .new-button { min-height: 50px; justify-content: center; font-size: 15px; }
 .hub-connect-error { display: flex; align-items: flex-start; gap: 8px; margin: 0; font-size: 13px; line-height: 1.45; color: #e8a5a5; }
 .hub-connect-footnote { margin: 0; font-size: 12px; line-height: 1.45; opacity: 0.6; text-align: center; }
@@ -2078,9 +2077,7 @@ h1 span {
   .file-row-actions button, .task-icon-button { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
 }
 
-/* The Android shell draws edge to edge, so anything pinned to an edge sits under the status
-   bar or the gesture bar unless it says otherwise. These insets are 0px everywhere else, so
-   the rules are harmless on desktop and in a browser without a notch. */
+/* Keep edge-pinned content clear of display cutouts and browser safe areas. */
 header {
   padding-top: env(safe-area-inset-top);
   height: calc(79px + env(safe-area-inset-top));
@@ -2106,8 +2103,7 @@ header {
 
 /* The soft keyboard covers the bottom of the screen without resizing anything, so the
    composer has to be lifted out from under it. --keyboard-inset is published by
-   trackKeyboardInset() and is 0px whenever no keyboard is up — which, on the packaged
-   Android app, is always: see the note on that function. */
+   trackKeyboardInset() and is 0px whenever the keyboard does not overlap the layout. */
 .chat-layout {
   height: calc(100dvh - 65px - var(--keyboard-inset, 0px));
 }

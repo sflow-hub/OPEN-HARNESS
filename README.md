@@ -14,25 +14,26 @@ This is independent software and is not affiliated with xAI or Nous Research.
 - Two concurrent top-level runs and four total executions, including delegated subagents
 - Durable routines, approvals, memories, skills, sessions, handoffs, and crash recovery
 - Persistent project boards with editable stages, agent-owned tasks, collaborators, filters, checklists, comments, and linked run history
-- An Android companion for sending tasks, following runs, and handling approvals; execution remains on a connected computer
 
 The host home directory, Docker socket, and other agents' private directories are not mounted. Containers provide the filesystem boundary; Hermes execution guards still apply inside it.
 
 ## Install for everyday use
 
-Open the repository’s **Releases** page and download the installer for your computer:
+Open Harness is currently available from source; no installers have been published on the [Releases page](https://github.com/sflow-hub/OPEN-HARNESS/releases). Use [Docker Compose](#self-host-with-docker-compose) or [run from a source checkout](#develop-from-source).
+
+The desktop release workflow is configured to build these installers when a release is published:
 
 - Windows: the `.exe` installer
 - macOS: the `.dmg` for Apple silicon or Intel
 - Linux: the `.AppImage`, `.deb`, or `.rpm`
 
-Install [Docker Desktop](https://docs.docker.com/get-started/get-docker/) if you want private agent workspaces. Then open Open Harness. The first-run guide checks the computer, starts Docker when possible, prepares the pinned Hermes runtime, connects a model, and creates the first private workspace. It gives a direct installation link and a plain-language explanation when it cannot complete a step itself.
+Install [Docker Desktop](https://docs.docker.com/get-started/get-docker/) if you want private agent workspaces. In desktop builds, the first-run guide checks the computer, starts Docker when possible, prepares the pinned Hermes runtime, connects a model, and creates the first private workspace. It gives a direct installation link and a plain-language explanation when it cannot complete a step itself.
 
-The desktop app includes Node, the dashboard, coordinator, and runner. Users do not need Git, npm, a source checkout, or terminal commands. Closing the window keeps active work running in the tray. Signed release builds check for signed updates at startup.
+Packaged desktop builds include Node, the dashboard, coordinator, and runner, so running an installer build does not require Git, npm, or a source checkout. Closing the window keeps active work running in the tray. Signed release builds check for signed updates at startup.
 
 ### Self-host with Docker Compose
 
-Download and unzip the source release, install Docker, then run this command from that folder:
+Clone the [repository](https://github.com/sflow-hub/OPEN-HARNESS) or download its source ZIP from **Code → Download ZIP**, install Docker, then run this command from that folder:
 
 ```bash
 docker compose up -d
@@ -84,7 +85,7 @@ npm run dev
 
 Open `http://localhost:3000`. Development mode starts the UI and persistent control service. Run `npm run harness:doctor` whenever runtime health is unclear. Set `OPEN_HARNESS_SKIP_DOCKER_START=1` only when another process manages the Docker daemon.
 
-For automatic startup:
+For automatic coordinator startup on Linux with systemd:
 
 ```bash
 npm run harness:install-service
@@ -93,7 +94,7 @@ npm run harness -- status
 npm run harness:stop
 ```
 
-The installed user service owns background work. The UI and control service bind to loopback. Sleeping or shutting down the computer stops execution; schedules catch up once after downtime rather than building a backlog.
+The installed Linux user service owns coordinator background work. Start the dashboard separately with `npm run dev:app`; the dashboard and control service use loopback addresses. Sleeping or shutting down the computer stops execution; schedules catch up once after downtime rather than building a backlog.
 
 ## Models and secrets
 
@@ -107,14 +108,11 @@ The **Try a guided run** action remains an explicitly scripted demonstration. No
 
 Use the settings icon on any agent card, or **Agent settings** in a conversation header. The tabs cover identity, computer assignment, model selection, custom instructions, and expandable tool/connection switches. The panel fills the screen on phones and supports keyboard navigation.
 
-### Use Open Harness from a phone
+### Remote dashboard access
 
-A phone is a companion dashboard, not an agent host: it sends tasks, follows runs, and answers approvals while agents keep running on a connected computer. There are two ways in, and they share the same mobile-first interface and the same security model.
+A browser pointed at a self-hosted deployment sends tasks, follows runs, and answers approvals while agents keep running on a connected computer. The dashboard adapts to desktop and small screens.
 
-- **The Android app.** See [ANDROID.md](ANDROID.md) for builds and release signing.
-- **A phone browser**, pointed at a self-hosted deployment. Nothing to install.
-
-Either way the phone pairs for its own revocable device credential, which reaches dashboard routes only and is rejected by runner command endpoints. The app keeps it in a native Stronghold encrypted vault. A browser that reached the dashboard over the network pairs too, rather than being handed the control token that authorizes run creation, host-path mounts and direct OS execution; `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` remains as an opt-out for operators who authenticate in front of the dashboard themselves.
+Remote browsers pair for their own revocable device credentials, which reach dashboard routes only and are rejected by runner command endpoints. The browser keeps its credential in origin storage; `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` remains as an opt-out for operators who authenticate in front of the dashboard themselves.
 
 Pair from **Agent settings → Computer → Add computer**, choosing iPhone or Android. A coordinator listening only on loopback cannot be reached by a phone at all, so that screen says so and offers the two ways to fix it: serve it on a tailnet, which needs no open port and no certificate, or put it behind your own authenticated HTTPS address. It detects an existing tailnet and offers that address directly. Codes expire after ten minutes and work once.
 
@@ -127,8 +125,8 @@ Remote coordinators must use HTTPS; plain HTTP is accepted only on loopback. On 
 For a self-hosted coordinator, enter its public HTTPS address in the connection wizard. The address can come from Tailscale Serve or an authenticated reverse proxy. Source installations can also set it before starting:
 
 ```bash
-OPEN_HARNESS_BIND=0.0.0.0
-OPEN_HARNESS_PUBLIC_URL=https://agents.example.com
+export OPEN_HARNESS_BIND=0.0.0.0
+export OPEN_HARNESS_PUBLIC_URL=https://agents.example.com
 npm run harness:serve
 ```
 
@@ -217,7 +215,7 @@ npm run test:browser
 
 The browser suite starts an isolated mock control service and the production app, and tests desktop and mobile editors. To use an existing Chromium install, set `OPEN_HARNESS_TEST_CHROMIUM` to its executable path. Python 3 is used for the policy middleware tests.
 
-The deterministic service tests set `OPEN_HARNESS_MOCK=1` and use no paid inference. The opt-in `tests/real-hermes-smoke.mjs` exercises the pinned native Hermes runtime with a local fixture provider; see [runtime/VERIFICATION.md](runtime/VERIFICATION.md) for commands and the checks actually completed. Full acceptance additionally requires a running Docker daemon and model credentials configured in Settings. Verify real code repair, Chromium navigation and screenshots, cross-agent isolation, named handoffs, memory/skill reuse, background routines, steering, process-tree stopping, and approval behavior before relying on a new Hermes release or provider model.
+The deterministic service tests set `OPEN_HARNESS_MOCK=1` and use no paid inference. Opt-in acceptance checks exercise real Hermes, production Compose, the installed Linux runner, memory/skill persistence, named handoffs, actual scheduled dispatch, and Chromium/private-desktop control. These gates pass on Ubuntu ARM64 using local scripted providers or direct browser actions; they establish integration behavior, not model reasoning quality. See [runtime/VERIFICATION.md](runtime/VERIFICATION.md) for commands, evidence, known optional-backend limits, and remaining provider/platform checks. Verify real code repair and task quality with your chosen model before relying on a new Hermes release or provider.
 
 ## Troubleshooting
 

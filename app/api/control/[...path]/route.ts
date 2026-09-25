@@ -15,6 +15,7 @@ import hermesInit from '../../../../runtime/hermes/container-init.sh?raw';
 import hermesCoordination from '../../../../runtime/hermes/coordination.mjs?raw';
 import hermesInspect from '../../../../runtime/hermes/inspect_runtime.py?raw';
 import hermesEntry from '../../../../runtime/hermes/managed_entry.py?raw';
+import hermesCuaCompat from '../../../../runtime/hermes/cua_compat.py?raw';
 import policyExtension from '../../../../runtime/hermes/extension/open_harness_policy.py?raw';
 import policyProject from '../../../../runtime/hermes/extension/pyproject.toml?raw';
 
@@ -26,7 +27,7 @@ const categories: WorkflowCategory[] = ["backlog", "ready", "in_progress", "revi
 const priorities = new Set(["low", "normal", "high", "urgent"]);
 const stamp = () => new Date().toISOString();
 const id = () => crypto.randomUUID();
-const runnerFiles: Record<string,string> = { 'runtime/runner.mjs': runnerBundle, 'runtime/hermes/Dockerfile': hermesDockerfile, 'runtime/hermes/NOTICE.md': hermesNotice, 'runtime/hermes/container-init.sh': hermesInit, 'runtime/hermes/coordination.mjs': hermesCoordination, 'runtime/hermes/inspect_runtime.py': hermesInspect, 'runtime/hermes/managed_entry.py': hermesEntry, 'runtime/hermes/extension/open_harness_policy.py': policyExtension, 'runtime/hermes/extension/pyproject.toml': policyProject };
+const runnerFiles: Record<string,string> = { 'runtime/runner.mjs': runnerBundle, 'runtime/hermes/Dockerfile': hermesDockerfile, 'runtime/hermes/NOTICE.md': hermesNotice, 'runtime/hermes/container-init.sh': hermesInit, 'runtime/hermes/coordination.mjs': hermesCoordination, 'runtime/hermes/inspect_runtime.py': hermesInspect, 'runtime/hermes/managed_entry.py': hermesEntry, 'runtime/hermes/cua_compat.py': hermesCuaCompat, 'runtime/hermes/extension/open_harness_policy.py': policyExtension, 'runtime/hermes/extension/pyproject.toml': policyProject };
 
 function database() {
   const db = (env as unknown as { DB?: D1Database }).DB;

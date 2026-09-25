@@ -1,12 +1,7 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 
-// The phone app is the same dashboard behind a pairing screen. Playwright cannot run the
-// Android build, but lib/platform.ts has a forced-mobile mode for exactly this: the pairing
-// screen, the stored device credential, and the hub-backed dashboard all run in Chromium
-// with their web fallbacks, against the same mock coordinator the desktop suite uses. What
-// this cannot cover is the Tauri side (Stronghold, the native HTTP client, the QR scanner);
-// ANDROID.md describes the emulator run for that.
+// Exercise responsive browser layouts and scoped dashboard pairing.
 const control = `http://127.0.0.1:${process.env.OPEN_HARNESS_TEST_PORT || 4317}`;
 
 async function operator(request: APIRequestContext) {
@@ -14,8 +9,8 @@ async function operator(request: APIRequestContext) {
   return { Authorization: `Bearer ${token}` };
 }
 
-test.describe('phone companion', () => {
-  test.skip(({ isMobile }) => !isMobile, 'the pairing screen only exists on phones');
+test.describe('paired browser', () => {
+  test.skip(({ isMobile }) => !isMobile, 'this suite exercises a small-screen browser');
 
   test.beforeEach(async ({ request, page }) => {
     const headers = await operator(request);
@@ -23,7 +18,6 @@ test.describe('phone companion', () => {
     await request.post(control + '/v1/agents/sync', { headers, data: { agents: initialWorkspace.agents } });
     await page.addInitScript(() => {
       localStorage.setItem('open-harness.onboarding.v1', 'done');
-      localStorage.setItem('open-harness.force-mobile', '1');
     });
   });
 
@@ -35,12 +29,12 @@ test.describe('phone companion', () => {
     expect(pairing.code).toMatch(/^[0-9A-Z]{12}$/);
     expect(pairing.pairingUri).toContain('openharness://pair?');
 
-    await page.goto('/');
-    await expect(page.getByRole('heading', { name: 'Connect this phone' })).toBeVisible();
+    await page.route('**/v1/bootstrap', route => route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'Pair this browser to connect.' }) }));
+    await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+    await expect(page.getByRole('heading', { name: 'Connect this device' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Connect' })).toBeDisabled();
 
     // A wrong code is explained in words, and the form stays put.
-    await page.getByRole('textbox', { name: /^Hub address/ }).fill(pairing.hubUrl);
     await page.getByLabel('Pairing code', { exact: true }).fill('AAAA AAAA AAAA');
     await page.getByRole('button', { name: 'Connect' }).click();
     await expect(page.getByRole('alert')).toContainText(/expired or was already used/);
@@ -57,14 +51,14 @@ test.describe('phone companion', () => {
     const { machines } = await (await request.get(control + '/v1/machines', { headers })).json();
     const phone = machines.find((machine: { kind: string }) => machine.kind === 'device');
     expect(phone).toMatchObject({ name: 'Test phone', status: 'online' });
-    expect(['ios', 'android']).toContain(phone.platform);
+    expect(['ios', 'android', 'unknown']).toContain(phone.platform);
     // Companion only: the coordinator must never treat this row as somewhere agents can run.
     expect(phone.capabilities).toMatchObject({ mobile: true, container: false, direct: false });
 
     // The credential lives on the device, so a relaunch goes straight to the dashboard.
     await page.reload();
     await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByRole('heading', { name: 'Connect this phone' })).toBeHidden();
+    await expect(page.getByRole('heading', { name: 'Connect this device' })).toBeHidden();
 
     await page.getByRole('button', { name: 'Open navigation' }).click();
     await page.locator('aside.sidebar').getByRole('button', { name: /^Settings/ }).click();
@@ -72,10 +66,10 @@ test.describe('phone companion', () => {
     await expect(summary).toContainText('Connected to your hub');
     await expect(summary).toContainText(pairing.hubUrl);
     await expect(summary).toContainText('Paired as Test phone');
-    await page.getByRole('button', { name: 'Disconnect this phone' }).click();
+    await page.getByRole('button', { name: 'Disconnect this device' }).click();
 
     // Back to the pairing screen here, and the credential is dead on the hub too.
-    await expect(page.getByRole('heading', { name: 'Connect this phone' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Connect this device' })).toBeVisible();
     const after = await (await request.get(control + '/v1/machines', { headers })).json();
     expect(after.machines.some((machine: { kind: string }) => machine.kind === 'device')).toBe(false);
   });
@@ -83,8 +77,8 @@ test.describe('phone companion', () => {
   test('a revoked phone is sent back to pairing instead of showing a broken dashboard', async ({ page, request }) => {
     const headers = await operator(request);
     const pairing = await (await request.post(control + '/v1/machines', { headers, data: { name: 'Old phone', platform: 'android', kind: 'device', coordinatorUrl: control } })).json();
-    await page.goto('/');
-    await page.getByRole('textbox', { name: /^Hub address/ }).fill(pairing.hubUrl);
+    await page.route('**/v1/bootstrap', route => route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'Pair this browser to connect.' }) }));
+    await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
     await page.getByLabel('Pairing code', { exact: true }).fill(pairing.code);
     await page.getByRole('button', { name: 'Connect' }).click();
     await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible({ timeout: 10_000 });
@@ -96,14 +90,11 @@ test.describe('phone companion', () => {
     await request.post(control + `/v1/machines/${phone.id}/revoke`, { headers });
 
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'Connect this phone' })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('heading', { name: 'Connect this device' })).toBeVisible({ timeout: 10_000 });
   });
 });
 
-// A phone browser pointed at a self-hosted coordinator is the other way to reach a remote
-// server, and it must not be handed the master control token. Deliberately no forced-mobile
-// flag here: this is a browser, not the app, so isMobileApp() must stay false and the phone
-// layout has to come from the viewport alone.
+// A small-screen browser pairs when its coordinator refuses bootstrap.
 test.describe('phone browser against a self-hosted coordinator', () => {
   test.skip(({ isMobile }) => !isMobile, 'this is the phone-sized browser case');
 
@@ -131,7 +122,7 @@ test.describe('phone browser against a self-hosted coordinator', () => {
     // Refusing the token is not an outage, so it offers pairing rather than an error.
     await expect(page.getByRole('heading', { name: 'Connect this device' })).toBeVisible();
     // The browser is already looking at the hub, so there is nothing to type and nothing to
-    // get wrong. This is the difference from the app's pairing screen.
+    // get wrong.
     await expect(page.getByRole('textbox', { name: /^Hub address/ })).toHaveCount(0);
 
     await page.getByLabel('Pairing code', { exact: true }).fill(pairing.code);
@@ -198,10 +189,7 @@ test.describe('phone layout', () => {
   });
 });
 
-// Android's Back is delivered to the webview as ordinary history navigation, so Chromium can
-// exercise the mechanism even though the physical button needs the emulator. What Chromium
-// cannot show is the consequence of getting this wrong: with no history entry the Tauri shell
-// finishes the activity, so Back quit the app from any modal.
+// Browser history closes overlays without navigating away from the dashboard.
 test.describe('back closes overlays instead of leaving', () => {
   test.skip(({ isMobile }) => !isMobile, 'Back is a phone gesture');
 
@@ -213,7 +201,7 @@ test.describe('back closes overlays instead of leaving', () => {
     await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
   });
 
-  test('back closes an open dialog and stays in the app', async ({ page }) => {
+  test('back closes an open dialog and stays in the dashboard', async ({ page }) => {
     await page.getByRole('button', { name: 'Open navigation' }).click();
     await page.locator('aside.sidebar').getByRole('button', { name: /^Settings/ }).click();
     const settings = page.getByRole('heading', { name: 'Workspace settings' });
@@ -223,14 +211,14 @@ test.describe('back closes overlays instead of leaving', () => {
 
     await expect(settings).toBeHidden();
     // Still the dashboard: on the phone this is the difference between closing a dialog and
-    // the app disappearing.
+    // the dashboard disappearing.
     await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
   });
 
   test('back unwinds stacked overlays one at a time', async ({ page }) => {
     // The sidebar stays open behind the settings dialog, so two overlays are live at once.
     // On the device this was the case that got it wrong: the first Back closed the dialog and
-    // the second left the app entirely instead of closing the sidebar.
+    // the second left the dashboard entirely instead of closing the sidebar.
     await page.getByRole('button', { name: 'Open navigation' }).click();
     const sidebar = page.locator('aside.sidebar.open');
     await expect(sidebar).toBeVisible();
@@ -265,11 +253,7 @@ test.describe('back closes overlays instead of leaving', () => {
   });
 });
 
-// Found by running the app on the emulator, not by any test: pairing a phone with a
-// coordinator that has no agents crashed the dashboard outright. Every existing spec seeds
-// agents first, so the empty workspace never occurred. The coordinator is shared across this
-// suite and cannot be emptied without breaking its neighbours, so the empty read is served
-// here instead — which is the client-side guard this covers anyway.
+// A newly paired browser can legitimately reach a coordinator with no agents.
 test.describe('a coordinator with no agents', () => {
   test.skip(({ isMobile }) => !isMobile, 'the paired client is the one that reads instead of seeding');
 
@@ -284,10 +268,9 @@ test.describe('a coordinator with no agents', () => {
 
     await page.addInitScript(() => {
       localStorage.setItem('open-harness.onboarding.v1', 'done');
-      localStorage.setItem('open-harness.force-mobile', '1');
     });
-    await page.goto('/');
-    await page.getByRole('textbox', { name: /^Hub address/ }).fill(pairing.hubUrl);
+    await page.route('**/v1/bootstrap', route => route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'Pair this browser to connect.' }) }));
+    await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
     await page.getByLabel('Pairing code', { exact: true }).fill(pairing.code);
     await page.getByRole('button', { name: 'Connect' }).click();
 

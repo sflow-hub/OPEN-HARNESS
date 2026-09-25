@@ -3,7 +3,7 @@
 MIT-licensed, local named-agent workspace. Each named agent runs as a persistent
 [Hermes](https://hermes-agent.nousresearch.com) worker behind a loopback-only Node.js control
 service; the browser is just a client, so closing it does not cancel work. Ships as a Next.js
-dashboard, a Tauri desktop app, an Android companion, and a self-hosted Compose stack.
+dashboard, a Tauri desktop app, and a self-hosted Compose stack.
 Version `0.3.0`, pre-1.0 — see [ROADMAP.md](ROADMAP.md) for what is and isn't mature.
 
 Not affiliated with xAI or Nous Research.
@@ -17,9 +17,8 @@ Not affiliated with xAI or Nous Research.
 | [components/](components/) | `agent-settings.tsx` (5-tab profile/computer editor), `onboarding.tsx`, `task-manager.tsx`, `hub-connect.tsx` |
 | [lib/](lib/) | Shared browser/server code: `control-client.ts`, `agent-profile.ts`, `types.ts` (shipped default agents), `harness.ts`, `runner-crypto.ts` |
 | [db/](db/), [drizzle/](drizzle/) | Hosted (Cloudflare D1) schema and migrations — separate from the local `node:sqlite` state |
-| [src-tauri/](src-tauri/) | Desktop and Android shell. Has its own CLAUDE.md. |
+| [src-tauri/](src-tauri/) | Desktop shell. Has its own CLAUDE.md. |
 | [desktop/](desktop/) | Build/packaging scripts for the desktop bundle, runner bundle, and release staging |
-| [mobile/](mobile/) | Android signing config plus the `cloudflare:workers` stub used by the mobile build |
 | [tests/](tests/) | `node --test` suites (mocked runtime) and `tests/browser/` Playwright specs |
 
 Local coordinator state lives in `.open-harness/` (gitignored): `state.db`, `secrets.json`,
@@ -89,7 +88,9 @@ and credential storage (`runtime/secrets.ts`, OS vaults, `.open-harness/secrets.
 
 Core native Hermes runs, local-model inference, conversation recovery, and task MCP have
 real integration evidence. The packaged macOS dashboard renders with its HTTP CSP and
-cleans up sidecars on quit. Container acceptance still requires a Docker-capable host;
-Android keyboard behavior still needs a physical-device check. See
+cleans up sidecars on quit. Real container and Compose acceptance pass on Ubuntu ARM64,
+including mount isolation, restart persistence, scoped pairing, and graceful cleanup.
+The installed Linux runner, cross-computer memory/skills, named handoffs, real timer
+dispatch, Chromium, and private virtual desktops also have integration evidence. See
 [runtime/VERIFICATION.md](runtime/VERIFICATION.md) for exact checks and limits, and
 [CHANGELOG.md](CHANGELOG.md) `[Unreleased]` for the running change summary.

@@ -46,19 +46,6 @@ export default defineConfig(async () => {
     ? { watch: { useFsEvents: false, usePolling: true } }
     : undefined;
 
-  // The mobile bundle is a plain static site. Loading the Cloudflare plugin here would pull
-  // in Worker bindings and a D1 database the phone has no use for and cannot reach.
-  if (process.env.OPEN_HARNESS_TARGET === 'mobile') {
-    return {
-      css,
-      server,
-      // The coordinator route handlers are skipped by the static export but still compiled,
-      // so their Worker-only import has to resolve to something.
-      resolve: { alias: { 'cloudflare:workers': '/mobile/stubs/cloudflare-workers.ts' } },
-      plugins: [vinext()],
-    };
-  }
-
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import('@cloudflare/vite-plugin');
 

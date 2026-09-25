@@ -12,9 +12,10 @@ import { SecretStore } from './secrets';
 import { decryptRunnerSecret, generateRunnerKeyPair, type EncryptedRunnerSecret } from '../lib/runner-crypto';
 import { validateComputerTarget } from './computer-validation';
 import { testModelConnection } from './model-validation';
+import { agentContext } from './agent-context';
 
 type Credentials = { coordinator: string; machineId: string; token: string; sitesToken?: string; encryptionPublicKey: string; encryptionPrivateKey: string };
-type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'input' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'store-secret'; payload: any };
+type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'input' | 'export-agent' | 'import-agent' | 'agent-context' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'store-secret'; payload: any };
 const args = new Map<string,string>();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith('--')) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith('--') ? '' : process.argv[++i] || '');
 const stateRoot = resolve(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join(homedir(), '.open-harness-runner'));
@@ -100,6 +101,7 @@ async function run(command: RunnerCommand) {
     const session = await gateway.request('session.create', { cwd: direct ? shared : '/workspace/shared', profile: 'default', messages: payload.history || [] });
     const sessionId = String(session?.session_id || session?.id || ''); if (!sessionId) throw new Error('Hermes did not return a session ID.');
     live.sessionId = sessionId;
+    await emit(command, { type: 'session.started', session_id: sessionId, payload: { session_id: sessionId } });
     if (live.stopping) throw new Error('Run stopped before its prompt started.');
     result = await gateway.submitPrompt(sessionId, payload.prompt);
   } catch (error) { failure = error; }
@@ -114,6 +116,7 @@ async function run(command: RunnerCommand) {
 }
 async function control(command: RunnerCommand) {
   try {
+    if (command.kind === 'agent-context') { await finish(command, agentContext(stateRoot, command.agentId, command.payload)); return; }
     if (command.kind === 'store-secret') { const name = String(command.payload.name || ''), value = await decryptRunnerSecret(credentials.encryptionPrivateKey, command.payload.encrypted as EncryptedRunnerSecret); runnerSecrets.set(name, value); await finish(command, { stored: true, name, backend: runnerSecrets.backend }); return; }
     if (command.kind === 'export-agent') { await finish(command, exportAgentFiles(stateRoot, command.agentId)); return; }
     if (command.kind === 'import-agent') {
@@ -177,7 +180,7 @@ async function control(command: RunnerCommand) {
 }
 
 async function executeCommand(command: RunnerCommand) {
-  const usesProfile = command.kind === 'run' || command.kind.startsWith('probe-') || command.kind === 'import-agent' || command.kind === 'export-agent';
+  const usesProfile = command.kind === 'run' || command.kind.startsWith('probe-') || command.kind === 'import-agent' || command.kind === 'export-agent' || command.kind === 'agent-context';
   if (!usesProfile) return control(command);
   const agentId = String(command.kind === 'run' ? command.payload.snapshot?.id : command.payload.profile?.id || command.agentId);
   const previous = agentOperations.get(agentId);

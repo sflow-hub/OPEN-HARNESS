@@ -20,13 +20,16 @@ const server = createServer(async (req, res) => {
     const main = hasTools && prompt.includes('COMPOSE_SMOKE');
     const shutdown = hasTools && prompt.includes('COMPOSE_SHUTDOWN');
     const followup = hasTools && prompt.includes('COMPOSE_FOLLOWUP');
-    const tool = shutdown ? { name: 'clarify', arguments: { question: 'Keep this run waiting until the stack shuts down.' } }
+    const context = hasTools && prompt.includes('RUNNER_CONTEXT');
+    const tool = context && !called.includes('memory') ? { name: 'memory', arguments: { target: 'memory', action: 'add', content: 'The remote tool memory marker is RUNNER_TOOL_MEMORY_527.' } }
+      : context && !called.includes('skill_view') ? { name: 'skill_view', arguments: { name: 'runner-verification' } }
+      : shutdown ? { name: 'clarify', arguments: { question: 'Keep this run waiting until the stack shuts down.' } }
       : main && !called.includes('write_file') ? { name: 'write_file', arguments: { path: '/workspace/shared/compose-verified.txt', content: 'Written through the real Compose Hermes tool loop.\n' } }
       : main && !called.includes('clarify') ? { name: 'clarify', arguments: { question: 'Which acceptance marker should I use?' } }
       : main && !called.includes('mcp__open_harness__task') ? { name: 'mcp__open_harness__task', arguments: { action: 'list' } }
       : main && !called.includes('terminal') ? { name: 'terminal', arguments: { command: 'touch /workspace/shared/compose-forbidden.txt' } }
       : null;
-    const content = followup ? (messages.some(message => String(message.content).includes('COMPOSE_SEED_729')) ? 'FOLLOWUP_COMPOSE_SEED_729' : 'FOLLOWUP_CONTEXT_MISSING') : main ? 'COMPOSE_SMOKE_COMPLETE' : 'Compose acceptance';
+    const content = context ? 'RUNNER_CONTEXT_COMPLETE' : followup ? (messages.some(message => String(message.content).includes('COMPOSE_SEED_729')) ? 'FOLLOWUP_COMPOSE_SEED_729' : 'FOLLOWUP_CONTEXT_MISSING') : main ? 'COMPOSE_SMOKE_COMPLETE' : 'Compose acceptance';
     const message = tool ? { role: 'assistant', content: null, tool_calls: [{ id: `compose-${tool.name}`, type: 'function', function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } }] } : { role: 'assistant', content };
     const common = { id: `compose-${requests.length}`, created: Math.floor(Date.now() / 1000), model: 'compose-fixture' };
     if (body.stream) {

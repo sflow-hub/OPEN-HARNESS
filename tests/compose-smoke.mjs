@@ -1,11 +1,14 @@
 // Opt in after npm run harness:setup: OPEN_HARNESS_COMPOSE_SMOKE=1
 // node --import tsx tests/compose-smoke.mjs
+// Add OPEN_HARNESS_COMPOSE_BUILD_RUNTIME=1 to build through paired first-run setup
+// instead of loading a prebuilt host image. This requires network access and extra time.
 // --config-only validates the generated overlay without building or starting Docker.
 // Real pinned Hermes uses a disposable scripted provider, not paid/model inference.
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { isIP } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -15,6 +18,7 @@ import { HERMES_IMAGE } from '../runtime/readiness.ts';
 import { generateRunnerKeyPair } from '../lib/runner-crypto.ts';
 
 const configOnly = process.argv.includes('--config-only');
+const buildRuntime = process.env.OPEN_HARNESS_COMPOSE_BUILD_RUNTIME === '1';
 assert.ok(configOnly || process.env.OPEN_HARNESS_COMPOSE_SMOKE === '1', 'Set OPEN_HARNESS_COMPOSE_SMOKE=1 to build and run the isolated Compose stack.');
 assert.notEqual(process.env.OPEN_HARNESS_MOCK, '1', 'Compose acceptance must exercise real Hermes.');
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -99,12 +103,36 @@ async function loadNestedImage() {
 
 let started = false, token, deviceHeaders, endpoint, firstSnapshot, followupSnapshot, evidence;
 const snapshots = [];
+const publishedEndpoints = [];
+async function refreshEndpoint() {
+  const published = await dc(['port', 'open-harness', '3000']);
+  assert.match(published, /^127\.0\.0\.1:\d+$/);
+  endpoint = `http://${published}`;
+  publishedEndpoints.push(endpoint);
+}
 const api = async (path, method = 'GET', data) => {
   const response = await fetch(endpoint + '/api/local' + path, { method, signal: AbortSignal.timeout(15_000), headers: { ...(deviceHeaders || { Authorization: `Bearer ${token}` }), 'Content-Type': 'application/json' }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   const value = await response.json();
   assert.ok(response.ok, `${method} ${path}: ${JSON.stringify(value)}`);
   return value;
 };
+// Node fetch itself stops waiting for response headers after five minutes. Give
+// this client a build-sized deadline while still testing the actual dashboard proxy.
+const prepareRuntime = () => new Promise((resolve, reject) => {
+  const body = JSON.stringify({ action: 'prepare-runtime' });
+  const request = httpRequest(endpoint + '/api/local/v1/onboarding/action', { method: 'POST', signal: AbortSignal.timeout(20 * 60_000), headers: { ...deviceHeaders, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, response => {
+    let output = '';
+    response.setEncoding('utf8');
+    response.on('data', chunk => { output += chunk; });
+    response.once('error', reject);
+    response.once('end', () => {
+      try { assert.equal(response.statusCode, 200, `Paired runtime setup failed: ${output}`); resolve(JSON.parse(output)); }
+      catch (error) { reject(error); }
+    });
+  });
+  request.once('error', reject);
+  request.end(body);
+});
 const operatorToken = async () => (await nodeIn('open-harness', `const r = await fetch('http://127.0.0.1:4317/v1/bootstrap'); if (!r.ok) throw new Error('Operator bootstrap failed: '+r.status); console.log(JSON.stringify({token:(await r.json()).token}));`)).token;
 async function waitRun(run, { waitForInput = false } = {}) {
   const deadline = Date.now() + 120_000, answered = new Set();
@@ -126,14 +154,17 @@ async function waitRun(run, { waitForInput = false } = {}) {
 }
 const nestedRunning = async () => (await dc(['exec', '-T', 'docker', 'docker', 'inspect', '-f', '{{.State.Running}}', 'open-harness-compose-smoke'])) === 'true';
 let failure;
+let runtimeSetup = { mode: buildRuntime ? 'paired-api-build' : 'prebuilt-image-transfer' };
 try {
-  await command(docker, ['image', 'inspect', HERMES_IMAGE]);
+  if (!buildRuntime) await command(docker, ['image', 'inspect', HERMES_IMAGE]);
   console.log('Building the production coordinator image.');
   await dc(['build', 'open-harness'], 12 * 60_000);
   started = true;
   await dc(['up', '-d', '--wait', '--wait-timeout', '180', 'docker', 'open-harness', 'fixture'], 210_000);
-  console.log('Loading the pinned Hermes image into the private nested daemon.');
-  await loadNestedImage();
+  if (!buildRuntime) {
+    console.log('Loading the pinned Hermes image into the private nested daemon.');
+    await loadNestedImage();
+  }
   const fixtureId = await dc(['ps', '-q', 'fixture']);
   const fixture = JSON.parse(await command(docker, ['inspect', fixtureId]))[0];
   const providerIp = fixture.NetworkSettings.Networks[`${project}_default`]?.IPAddress;
@@ -142,9 +173,7 @@ try {
   assert.equal(fixture.Config.User, 'node');
   assert.ok(fixture.Mounts.every(mount => mount.Destination !== '/run/open-harness-docker' && mount.Destination !== '/data'));
   const baseUrl = `http://${providerIp}:3131/v1`;
-  const published = await dc(['port', 'open-harness', '3000']);
-  assert.match(published, /^127\.0\.0\.1:\d+$/);
-  endpoint = `http://${published}`;
+  await refreshEndpoint();
   const dashboard = await fetch(endpoint, { signal: AbortSignal.timeout(15_000) });
   assert.equal(dashboard.status, 200);
   assert.match(dashboard.headers.get('content-security-policy') || '', /default-src 'self'/);
@@ -174,6 +203,24 @@ try {
   assert.equal((await pairRequest()).status, 410, 'A browser pairing code must be single-use.');
   assert.equal((await fetch(endpoint + '/api/local/v1/runner/commands', { headers: deviceHeaders, signal: AbortSignal.timeout(15_000) })).status, 401, 'A browser credential must not lease runner work.');
   // All remaining dashboard operations use the paired device credential.
+  if (buildRuntime) {
+    const before = await api('/v1/onboarding/status');
+    assert.equal(before.executionReady, false, 'A fresh Compose stack must report its missing runtime.');
+    assert.equal(before.checks.find(check => check.id === 'agent-runtime')?.action, 'prepare-runtime');
+    assert.equal(await dc(['exec', '-T', 'docker', 'docker', 'image', 'ls', '-q', HERMES_IMAGE]), '', 'The fresh daemon must not contain a preloaded Hermes image.');
+    runtimeSetup = { ...runtimeSetup, before, startedAt: new Date().toISOString() };
+    save('runtime-setup.json', runtimeSetup);
+    console.log('Building the missing Hermes runtime through paired dashboard setup.');
+    const startedAt = Date.now();
+    const result = await prepareRuntime();
+    assert.equal(result.executionReady, true, JSON.stringify(result));
+    const after = await api('/v1/onboarding/status');
+    assert.equal(after.executionReady, true);
+    assert.equal(after.checks.find(check => check.id === 'agent-runtime')?.state, 'ready');
+    await dc(['exec', '-T', 'docker', 'docker', 'image', 'inspect', HERMES_IMAGE]);
+    runtimeSetup = { ...runtimeSetup, after, durationMs: Date.now() - startedAt, pairedSetupSucceeded: true };
+    save('runtime-setup.json', runtimeSetup);
+  }
   const agentId = 'compose-smoke', conversationId = 'compose-continuity';
   await api('/v1/secrets', 'POST', { name: 'COMPOSE_FIXTURE_KEY', value: 'local-scripted-provider-only' });
   await api('/v1/agents/sync', 'POST', { agents: [{ id: agentId, name: 'Compose smoke', role: 'Integration verification', instructions: 'Work only on this isolated acceptance task.', memory: [] }] });
@@ -210,9 +257,11 @@ try {
   assert.ok(mainRequests.some(body => body.messages.some(message => message.role === 'tool' && message.tool_call_id === 'compose-terminal' && /tool_disabled|does not exist/.test(String(message.content)))), 'Ungrantable fixture tool calls must be rejected by the real dispatch policy.');
   console.log('Restarting the coordinator and checking durable state.');
   await dc(['restart', 'open-harness'], 45_000);
-  let ready = false;
-  for (let attempt = 0; attempt < 100; attempt += 1) { try { await api('/v1/agents'); ready = true; break; } catch { await pause(300); } }
-  assert.ok(ready, 'Coordinator must recover after restart.');
+  // Docker may allocate a different ephemeral host port when the container restarts.
+  await refreshEndpoint();
+  let ready = false, readinessError;
+  for (let attempt = 0; attempt < 100; attempt += 1) { try { await api('/v1/agents'); ready = true; break; } catch (error) { readinessError = error; await pause(300); } }
+  assert.ok(ready, `Coordinator must recover after restart: ${readinessError}`);
   assert.equal(await operatorToken(), token, 'Control token must survive restart.');
   assert.equal((await api('/v1/device/session')).token, '', 'The paired browser session must survive restart without exposing the master token.');
   assert.deepEqual((await api(`/v1/agents/${agentId}/profile`)).profile, saved.profile);
@@ -244,7 +293,7 @@ try {
   evidence = { ok: true, mode: 'real Compose stack and pinned Hermes with scripted completion fixture; not model reasoning', project, root, image: HERMES_IMAGE, providerIp, dashboardCsp: true, authenticatedApi: true, devicePairing: true, singleUsePairing: true, deviceRunnerScopeDenied: true, remoteBootstrapDenied: bootstrap, privateDockerTcp: tcp, identity, agentMounts, fileTool: true, clarification: true, taskMcp: true, deniedTerminal: true, freshSessionContext: true, replayStable: true, restartPersistence: true, gracefulAgentCleanup: true, firstRun: first.id, followupRun: second.id };
 } catch (error) { failure = error; }
 finally {
-  save('diagnostics.json', { error: failure ? String(failure.stack || failure) : null, snapshots });
+  save('diagnostics.json', { error: failure ? String(failure.stack || failure) : null, runtimeSetup, publishedEndpoints, snapshots });
   if (started) {
     try { writeFileSync(join(root, 'compose.log'), await dc(['logs', '--no-color'], 20_000)); } catch (error) { console.error('Could not collect Compose logs:', String(error)); }
     try {
@@ -258,5 +307,6 @@ finally {
   try { await command(docker, ['image', 'rm', coordinatorImage]); } catch { /* build may not have completed */ }
 }
 if (failure) { console.error(`Compose smoke failed; diagnostics: ${root}`); throw failure; }
+evidence.runtimeSetup = runtimeSetup;
 save('evidence.json', evidence);
 console.log(JSON.stringify(evidence, null, 2));

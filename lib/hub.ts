@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// Pairing a phone to a coordinator ("the hub"), and the credential that results.
+// Pairing a dashboard browser to a coordinator, and the credential that results.
 //
 // This mirrors the authenticated part of computer pairing and deliberately reuses the same
 // enrollment endpoint and key exchange. The issued device credential is dashboard-only; the
@@ -17,13 +17,10 @@ export type DeviceCredential = {
   pairedAt: string;
 };
 
-export type PairingLink = { hubUrl: string; code: string; sitesToken?: string };
-
 const LOOPBACK = ['localhost', '127.0.0.1', '::1'];
 
 // The same rule the runner enforces before it will save a coordinator address. Plain HTTP is
-// tolerable only when it cannot leave the machine, which on a phone means a development
-// emulator reaching the host through a forwarded port.
+// tolerable only when it cannot leave the machine.
 export function validateHubUrl(input: string) {
   const trimmed = String(input || '').trim().replace(/\/$/, '');
   if (!trimmed) throw new Error('Enter the address of your Open Harness coordinator.');
@@ -33,21 +30,6 @@ export function validateHubUrl(input: string) {
     throw new Error('The hub address must use HTTPS so your work is encrypted on the way there.');
   }
   return trimmed;
-}
-
-// The desktop shows a code to type and a link to scan. Both carry the same two facts.
-export function parsePairingLink(input: string): PairingLink | null {
-  const raw = String(input || '').trim();
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== 'openharness:') return null;
-    const hub = url.searchParams.get('hub') || '';
-    const code = url.searchParams.get('code') || '';
-    if (!hub || !code) return null;
-    const sites = url.searchParams.get('sites') || '';
-    return { hubUrl: validateHubUrl(hub), code, ...(sites ? { sitesToken: sites } : {}) };
-  } catch { return null; }
 }
 
 export function normalizePairingCode(input: string) {
@@ -91,7 +73,7 @@ export async function pairDevice(input: {
     if (response.status === 404) throw new Error('No Open Harness coordinator answered at that address. Check the address and try again.');
     throw new Error(value.error || `The coordinator returned HTTP ${response.status}.`);
   }
-  if (!value.token || !value.machineId) throw new Error('The coordinator did not return a credential for this phone.');
+  if (!value.token || !value.machineId) throw new Error('The coordinator did not return a credential for this device.');
   return {
     hubUrl,
     machineId: String(value.machineId),
@@ -105,9 +87,9 @@ export async function pairDevice(input: {
 }
 
 export function devicePlatform(): { platform: string; name: string } {
-  if (typeof navigator === 'undefined') return { platform: 'unknown', name: 'Phone' };
+  if (typeof navigator === 'undefined') return { platform: 'unknown', name: 'Browser' };
   const agent = navigator.userAgent || '';
   if (/android/i.test(agent)) return { platform: 'android', name: 'Android phone' };
   if (/iphone|ipad|ipod/i.test(agent) || (/Mac/.test(agent) && 'ontouchend' in document)) return { platform: 'ios', name: 'iPhone' };
-  return { platform: 'unknown', name: 'Phone' };
+  return { platform: 'unknown', name: 'Browser' };
 }
