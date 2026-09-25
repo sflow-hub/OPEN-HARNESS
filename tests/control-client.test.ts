@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ControlClient } from '../lib/control-client';
+import { ControlClient, PairingRequiredError, isRemoteOrigin, selfHostedHubUrl } from '../lib/control-client';
 import type { DeviceCredential } from '../lib/hub';
 
 const credential: DeviceCredential = {
@@ -70,4 +70,54 @@ test('clearing the pairing stops the phone addressing that hub', async () => {
   await client.request('/v1/health').catch(() => {});
   assert.equal(calls[0].url.startsWith('https://agents.example.com'), false);
   assert.equal(client.pairedMachineId, '');
+});
+
+// isRemoteOrigin decides whether this client may be handed the master control token, so its
+// answer is a security boundary rather than a convenience. These run without a DOM, so the
+// window it reads is supplied here.
+function withLocation(href: string, search = '', run: () => void) {
+  const url = new URL(href);
+  const previous = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = { location: { hostname: url.hostname, origin: url.origin, search } };
+  try { run(); } finally {
+    if (previous === undefined) delete (globalThis as { window?: unknown }).window;
+    else (globalThis as { window?: unknown }).window = previous;
+  }
+}
+
+test('only a dashboard opened on the coordinator\'s own machine counts as local', () => {
+  withLocation('http://localhost:3000', '', () => assert.equal(isRemoteOrigin(), false));
+  withLocation('http://127.0.0.1:3000', '', () => assert.equal(isRemoteOrigin(), false));
+  // Reached over the network: this one pairs instead of receiving the control token.
+  withLocation('https://agents.example.com', '', () => assert.equal(isRemoteOrigin(), true));
+  // A LAN address is remote too, even though it never leaves the building.
+  withLocation('http://192.168.1.10:3000', '', () => assert.equal(isRemoteOrigin(), true));
+  // The browser suite points a loopback page at a loopback coordinator on another port.
+  withLocation('http://127.0.0.1:3107', '?controlPort=4317', () => assert.equal(isRemoteOrigin(), false));
+});
+
+test('a remote browser pairs against the origin it is already looking at', () => {
+  // Nothing for the person to type, which is the whole difference from the phone app.
+  withLocation('https://agents.example.com', '', () => assert.equal(selfHostedHubUrl(), 'https://agents.example.com/api/control'));
+});
+
+test('a refused control token is reported as needing pairing, not as an outage', async () => {
+  const client = new ControlClient();
+  const { fetchImpl } = recorder({ error: 'Open Harness will not hand the control token to a remote dashboard.' }, 403);
+  client.useDevice(null, fetchImpl);
+  await assert.rejects(() => client.bootstrap(), (error: Error) => {
+    assert.ok(error instanceof PairingRequiredError, 'the caller offers pairing only when it can tell this apart');
+    assert.match(error.message, /will not hand the control token/);
+    return true;
+  });
+});
+
+test('an unreachable coordinator is still an outage', async () => {
+  const client = new ControlClient();
+  const { fetchImpl } = recorder({}, 500);
+  client.useDevice(null, fetchImpl);
+  await assert.rejects(() => client.bootstrap(), (error: Error) => {
+    assert.equal(error instanceof PairingRequiredError, false);
+    return true;
+  });
 });

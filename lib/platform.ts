@@ -53,8 +53,23 @@ function forcedMobile() {
   return new URLSearchParams(window.location.search).get('mobile') === '1';
 }
 
+// Two questions that used to be one, and conflating them is why the phone-shaped UI never
+// appeared in a phone browser. "Am I on a phone?" decides layout, polling and which surfaces
+// make sense; "do I have native plugins?" decides how a capability is reached. The Android
+// app answers yes to both. Chrome on a phone, pointed at a self-hosted coordinator, answers
+// yes to the first and no to the second, and is a first-class way to use Open Harness.
 export function isMobileApp() {
   return (hasTauri() && process.env.NEXT_PUBLIC_OPEN_HARNESS_TARGET === 'mobile') || forcedMobile();
+}
+
+// The same 760px the stylesheet uses, plus a coarse pointer so a narrow desktop window keeps
+// its mouse-sized controls. Callers must resolve this after mount: deciding it during the
+// first render would disagree with the prerendered HTML and throw the hydrated markup away.
+export const PHONE_LAYOUT_QUERY = '(max-width: 760px), (pointer: coarse) and (max-width: 1024px)';
+export function isPhoneLayout() {
+  if (isMobileApp()) return true;
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+  try { return window.matchMedia(PHONE_LAYOUT_QUERY).matches; } catch { return false; }
 }
 
 // The phone talks to a hub on a different origin. The browser's fetch would need CORS and
@@ -194,13 +209,13 @@ export async function notify(title: string, body: string, tag?: string) {
 // A phone radio and a locked screen make a twice-a-second poll wasteful. The event cursor
 // already makes a slower poll safe: nothing is missed, it just arrives a little later.
 export function eventPollIntervalMs(hidden: boolean) {
-  if (isMobileApp()) return hidden ? 6000 : 1500;
+  if (isPhoneLayout()) return hidden ? 6000 : 1500;
   return hidden ? 4000 : 500;
 }
 
 // The task board refreshes on its own clock: quickly while something is moving, slowly
 // otherwise. Same reasoning as above for the phone.
 export function taskPollIntervalMs(active: boolean) {
-  if (isMobileApp()) return active ? 4000 : 15000;
+  if (isPhoneLayout()) return active ? 4000 : 15000;
   return active ? 2000 : 8000;
 }

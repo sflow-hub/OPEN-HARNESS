@@ -49,8 +49,8 @@ test.describe('phone companion', () => {
     await page.getByLabel('Pairing code', { exact: true }).fill(pairing.code.replace(/(.{4})/g, '$1 ').trim().toLowerCase());
     // The phone names itself; the name the operator typed on the computer is only a label
     // for the pairing code until the device reports what it actually is.
-    await page.getByText('This phone’s name and hosted access').click();
-    await page.getByLabel('Phone name').fill('Test phone');
+    await page.getByText('This device’s name and hosted access').click();
+    await page.getByLabel('Device name').fill('Test phone');
     await page.getByRole('button', { name: 'Connect' }).click();
 
     await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible({ timeout: 10_000 });
@@ -97,5 +97,56 @@ test.describe('phone companion', () => {
 
     await page.reload();
     await expect(page.getByRole('heading', { name: 'Connect this phone' })).toBeVisible({ timeout: 10_000 });
+  });
+});
+
+// A phone browser pointed at a self-hosted coordinator is the other way to reach a remote
+// server, and it must not be handed the master control token. Deliberately no forced-mobile
+// flag here: this is a browser, not the app, so isMobileApp() must stay false and the phone
+// layout has to come from the viewport alone.
+test.describe('phone browser against a self-hosted coordinator', () => {
+  test.skip(({ isMobile }) => !isMobile, 'this is the phone-sized browser case');
+
+  test.beforeEach(async ({ request, page }) => {
+    const headers = await operator(request);
+    await request.post(control + '/v1/agents/sync', { headers, data: { agents: initialWorkspace.agents } });
+    await page.addInitScript(() => localStorage.setItem('open-harness.onboarding.v1', 'done'));
+  });
+
+  test('a browser refused the control token pairs for its own scoped credential', async ({ page, request }) => {
+    const headers = await operator(request);
+    const pairing = await (await request.post(control + '/v1/machines', { headers, data: { name: 'Kitchen tablet', platform: 'android', kind: 'device', coordinatorUrl: control } })).json();
+
+    // What the proxy does for real when the dashboard was reached over the network: refuse
+    // the token that authorizes run creation, host-path mounts and direct OS execution.
+    // Chromium cannot be given a non-loopback hostname here, so the refusal is injected.
+    await page.route('**/v1/bootstrap', route => route.fulfill({
+      status: 403,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'Open Harness will not hand the control token to a remote dashboard.' }),
+    }));
+
+    await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+
+    // Refusing the token is not an outage, so it offers pairing rather than an error.
+    await expect(page.getByRole('heading', { name: 'Connect this device' })).toBeVisible();
+    // The browser is already looking at the hub, so there is nothing to type and nothing to
+    // get wrong. This is the difference from the app's pairing screen.
+    await expect(page.getByRole('textbox', { name: /^Hub address/ })).toHaveCount(0);
+
+    await page.getByLabel('Pairing code', { exact: true }).fill(pairing.code);
+    await page.getByRole('button', { name: 'Connect' }).click();
+
+    // Paired, and reading the hub's agents rather than pushing its own starter set.
+    await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible({ timeout: 10_000 });
+    const { machines } = await (await request.get(control + '/v1/machines', { headers })).json();
+    const paired = machines.find((machine: { kind: string }) => machine.kind === 'device');
+    expect(paired.capabilities).toMatchObject({ mobile: true, container: false, direct: false });
+
+    // The credential outlives the refusal: a reload goes straight back to the dashboard
+    // through /v1/device/session, which the 403 above never touched.
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('heading', { name: 'Connect this device' })).toBeHidden();
   });
 });

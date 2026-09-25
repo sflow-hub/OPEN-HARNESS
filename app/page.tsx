@@ -44,6 +44,9 @@ import {
 import { PROVIDERS, type Provider } from "../lib/provider";
 import {
   ControlClient,
+  PairingRequiredError,
+  isRemoteOrigin,
+  selfHostedHubUrl,
   type PersistentRun,
   type RuntimeStatus,
 } from "../lib/control-client";
@@ -54,7 +57,7 @@ import TaskManager from "../components/task-manager";
 import { profileAgent, type ModelChoice } from "../lib/agent-profile";
 import { HubConnect } from "../components/hub-connect";
 import type { DeviceCredential } from "../lib/hub";
-import { eventPollIntervalMs, isMobileApp, notificationsGranted, notify, platformFetch, requestNotificationPermission, secureStore } from "../lib/platform";
+import { PHONE_LAYOUT_QUERY, eventPollIntervalMs, isMobileApp, isPhoneLayout, notificationsGranted, notify, platformFetch, requestNotificationPermission, secureStore } from "../lib/platform";
 
 const STORAGE_KEY = "open-harness.workspace.v1";
 const SETTINGS_KEY = "open-harness.settings.v1";
@@ -125,13 +128,27 @@ const Markdown = memo(function Markdown({ children }: { children: string }) {
 export default function Home() {
   const [workspace, setWorkspace] = useState<Workspace>(initialWorkspace);
   const [ready, setReady] = useState(false);
-  // Both of these start in the state the prerendered HTML was built with, and are corrected
-  // in an effect after mount. Reading isMobileApp() during the first render instead would
-  // make the client disagree with the server and throw away the hydrated markup.
+  // These all start in the state the prerendered HTML was built with, and are corrected in an
+  // effect after mount. Deciding any of them during the first render instead would make the
+  // client disagree with the server and throw away the hydrated markup.
+  //
+  // `phone` is a question about the screen, `app` about the Tauri runtime, and `pairs` about
+  // how this client authenticates. They used to be one flag, which is why a phone browser
+  // pointed at a self-hosted coordinator got the desktop layout.
   const [phone, setPhone] = useState(false);
+  const [app, setApp] = useState(false);
+  const [pairs, setPairs] = useState(false);
+  // A remote browser is allowed to try the control token first, because an operator may have
+  // accepted responsibility for authenticating in front of it. This flips when that is
+  // refused, which is the coordinator telling us to pair instead.
+  const [pairingRequired, setPairingRequired] = useState(false);
   // 'unknown' means "still looking for a stored pairing", which keeps the pairing screen from
-  // flashing at someone who is already connected.
-  const [device, setDevice] = useState<DeviceCredential | null | 'unknown'>(null);
+  // flashing at someone who is already connected. It is also the *initial* value on purpose:
+  // effects run in declaration order but each one sees the state of the render it was created
+  // in, so starting at null let the connect effect below ask for a control token in the same
+  // pass that this one began looking for a credential. A stored pairing then lost a race with
+  // its own restore.
+  const [device, setDevice] = useState<DeviceCredential | null | 'unknown'>('unknown');
   const [view, setView] = useState<View>("home");
   const lastWorkspaceView = useRef<View>("home");
   const [selectedAgent, setSelectedAgent] = useState("atlas");
@@ -256,25 +273,55 @@ export default function Home() {
         ),
       );
   }, []);
-  // Restore the pairing from a previous launch. Until this resolves the phone shows nothing,
-  // because either answer leads somewhere different: the dashboard or the pairing screen.
+  // Resolve what kind of client this is, and restore any pairing from a previous visit. Until
+  // that resolves a pairing client shows nothing, because either answer leads somewhere
+  // different: the dashboard or the pairing screen.
   useEffect(() => {
-    if (!isMobileApp()) return;
+    // Deliberately after mount rather than in initial state: all of these read window, and
+    // deciding them during the first render would make the client disagree with the
+    // prerendered HTML and throw it away.
+    const isApp = isMobileApp();
+    // The app has no control token to fall back on, and a browser that reached this page over
+    // the network will not be given one. Both pair; a dashboard opened on the coordinator's
+    // own machine does not. Decided synchronously so the app never flashes a starter
+    // workspace on its way to the pairing screen.
+    const mayPair = isApp || isRemoteOrigin();
+    // Reading the screen and the runtime is exactly the "subscribe to an external system"
+    // case the rule carves out; it cannot happen before mount without breaking hydration.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPhone(isPhoneLayout());
+    setApp(isApp);
+    setPairs(mayPair);
+    // Every client resolves this before connecting, so a credential from a previous visit
+    // always wins over asking for the control token.
+    setDevice('unknown');
     let cancelled = false;
     void (async () => {
-      // Deliberately after mount rather than in initial state: isMobileApp() reads window,
-      // and deciding this during the first render would make the client disagree with the
-      // prerendered HTML and throw it away.
-      setPhone(true);
-      setDevice('unknown');
       const saved = await secureStore.get<DeviceCredential>('device.v1');
-      const transport = await platformFetch();
       if (cancelled) return;
       const paired = saved?.token && saved.hubUrl ? saved : null;
-      controlRef.current.useDevice(paired, transport);
+      // A stored credential is authoritative even when this load does not look remote. It
+      // was issued to this device and is scoped far more tightly than the control token,
+      // so there is never a reason to prefer the token once one exists.
+      if (paired || mayPair) {
+        if (paired) { setPairs(true); setPairingRequired(false); }
+        const transport = await platformFetch();
+        if (cancelled) return;
+        controlRef.current.useDevice(paired, transport);
+      }
       setDevice(paired);
     })();
     return () => { cancelled = true; };
+  }, []);
+
+  // The screen can change category without a reload: a rotated tablet, a resized desktop
+  // window, a foldable opening. Layout follows it; how the client authenticates does not.
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia(PHONE_LAYOUT_QUERY);
+    const sync = () => setPhone(isPhoneLayout());
+    query.addEventListener('change', sync);
+    return () => query.removeEventListener('change', sync);
   }, []);
 
   const onPaired = async (credential: DeviceCredential) => {
@@ -290,9 +337,9 @@ export default function Home() {
   };
 
   // Keep the revocable device session alive while the companion is open. This is a status
-  // heartbeat only: phones never poll runner commands or execute agent work.
+  // heartbeat only: paired clients never poll runner commands or execute agent work.
   useEffect(() => {
-    if (!phone || !device || device === 'unknown') return;
+    if (!pairs || !device || device === 'unknown') return;
     let cancelled = false;
     const refreshSession = async () => {
       try {
@@ -304,7 +351,7 @@ export default function Home() {
         if (message.includes('no longer paired')) {
           await secureStore.remove('device.v1');
           controlRef.current.useDevice(null, await platformFetch());
-          setDevice(null); setRuntime(null);
+          setDevice(null); setRuntime(null); setPairingRequired(true);
         }
         setNotice(message);
       }
@@ -313,12 +360,16 @@ export default function Home() {
     const timer = window.setInterval(() => void refreshSession(), 30_000);
     document.addEventListener('visibilitychange', onVisible);
     return () => { cancelled = true; window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
-  }, [phone, device]);
+  }, [pairs, device]);
 
   useEffect(() => {
     if (!ready) return;
-    // A phone with no pairing has no coordinator to talk to yet.
-    if (phone && (device === 'unknown' || !device)) return;
+    // Still looking for a stored credential; either answer changes where this goes.
+    if (device === 'unknown') return;
+    // The app has no control token to fall back on, so with no pairing there is nothing to
+    // talk to. A remote browser still tries, because the operator may have authenticated in
+    // front of the coordinator; if that is refused, the catch below offers pairing.
+    if (app && !device) return;
     let cancelled = false;
     const connect = async () => {
       try {
@@ -326,10 +377,10 @@ export default function Home() {
         const status = await client.bootstrap();
         if (cancelled) return;
         setRuntime(status);
-        // A phone joins a workspace that already exists. Syncing its local starter agents
-        // the way a first-run desktop does would push them into someone's established hub
-        // and migrate a browser workspace that was never theirs, so it reads instead.
-        const paired = phone;
+        // A remote client joins a workspace that already exists. Syncing its local starter
+        // agents the way a first-run desktop does would push them into someone's established
+        // hub and migrate a browser workspace that was never theirs, so it reads instead.
+        const paired = pairs;
         const synced = paired
           ? await client.request<{ agents: Agent[] }>("/v1/agents")
           : await client.request<{ agents: Agent[] }>("/v1/agents/sync", {
@@ -441,11 +492,14 @@ export default function Home() {
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : "";
-        if (phone) {
+        // The coordinator declined to hand this browser the control token. That is a healthy
+        // service refusing an unsafe thing, so offer the pairing screen rather than an error.
+        if (error instanceof PairingRequiredError) { setPairingRequired(true); return; }
+        if (pairs) {
           // A credential the hub has revoked is not coming back. Forgetting it here is what
-          // returns the phone to the pairing screen; otherwise it would sit on a dashboard
+          // returns the client to the pairing screen; otherwise it would sit on a dashboard
           // of starter agents with a notice about npm commands it cannot run.
-          if (message.includes("no longer paired")) { await onUnpaired(); setNotice("This phone is no longer paired. Connect it to your hub again."); }
+          if (message.includes("no longer paired")) { await onUnpaired(); setPairingRequired(true); setNotice("This device is no longer paired. Connect it to your hub again."); }
           else setNotice(message || "Could not reach your Open Harness hub.");
           return;
         }
@@ -457,10 +511,10 @@ export default function Home() {
       cancelled = true;
     };
     // The one-time migration intentionally snapshots the hydrated browser workspace.
-    // device and phone are listed so pairing a phone connects it immediately; without them
-    // the app would sit on its starter workspace until the next launch.
+    // device and pairs are listed so pairing connects immediately; without them the client
+    // would sit on its starter workspace until the next launch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, phone, device]);
+  }, [ready, pairs, app, device]);
   useEffect(() => {
     if (!runtime || !selectedAgent) return;
     let cancelled = false;
@@ -1187,11 +1241,21 @@ export default function Home() {
     )
     .slice(0, 12);
 
-  // A phone that is not paired yet has no workspace to show. Until the stored credential has
+  // A client that is not paired yet has no workspace to show. Until the stored credential has
   // been looked for, show nothing rather than flashing the pairing screen at someone who is
-  // already connected.
-  if (phone && device === 'unknown') return <div className="app-shell" aria-busy="true" />;
-  if (phone && !device) return <HubConnect onConnected={credential => void onPaired(credential)} />;
+  // already connected. The app pairs unconditionally; a remote browser only once the
+  // coordinator has actually refused it the control token.
+  if (pairs && device === 'unknown') return <div className="app-shell" aria-busy="true" />;
+  if (!device && (app || pairingRequired)) {
+    return (
+      <HubConnect
+        // A browser is already looking at the hub, so there is nothing for it to type. The
+        // app has no such context and asks.
+        fixedHubUrl={app ? undefined : selfHostedHubUrl()}
+        onConnected={credential => { setPairingRequired(false); void onPaired(credential); }}
+      />
+    );
+  }
 
   return (
     <div className="app-shell">

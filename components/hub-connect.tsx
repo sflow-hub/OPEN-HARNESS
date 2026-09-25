@@ -5,16 +5,23 @@ import { CircleAlert, LoaderCircle, QrCode, Smartphone } from 'lucide-react';
 import { devicePlatform, normalizePairingCode, pairDevice, parsePairingLink, validateHubUrl, type DeviceCredential } from '../lib/hub';
 import { hasTauri, loadTauriPlugin, platformFetch } from '../lib/platform';
 
-type Props = { onConnected: (credential: DeviceCredential) => void };
+type Props = {
+  onConnected: (credential: DeviceCredential) => void;
+  // Set when the client is already being served by the hub, which is the case for a browser
+  // opened at a self-hosted coordinator. There is then nothing to type and nothing to get
+  // wrong, so the field is not shown at all.
+  fixedHubUrl?: string;
+};
 
-// The first thing someone sees on a phone. It has one job: get this device paired to a
+// The first thing someone sees on a phone, and now also the first thing a browser sees when
+// it reached the dashboard over the network. It has one job: get this device paired to a
 // coordinator. Everything it asks for is on the screen of the computer running that
 // coordinator, so the wording points back there rather than explaining the architecture.
-export function HubConnect({ onConnected }: Props) {
+export function HubConnect({ onConnected, fixedHubUrl }: Props) {
   // Read once at first render: the answer cannot change while the screen is open, and
   // seeding state from it avoids writing state from an effect.
   const [device] = useState(devicePlatform);
-  const [hubUrl, setHubUrl] = useState('');
+  const [hubUrl, setHubUrl] = useState(fixedHubUrl || '');
   const [code, setCode] = useState('');
   const [sitesToken, setSitesToken] = useState('');
   const [name, setName] = useState(() => device.name);
@@ -90,14 +97,18 @@ export function HubConnect({ onConnected }: Props) {
       <div className="hub-connect-panel">
         <div className="hub-connect-heading">
           <Smartphone size={26} aria-hidden="true" />
-          <h1>Connect this phone</h1>
-          <p>Open Harness runs your agents on a computer you control. Pair this phone with it to follow agents, send tasks, and approve their work.</p>
+          <h1>{fixedHubUrl ? 'Connect this device' : 'Connect this phone'}</h1>
+          <p>
+            Open Harness runs your agents on a computer you control. Pair this device with it
+            to follow agents, send tasks, and approve their work.
+            {fixedHubUrl ? ' Your agents stay on that computer; nothing runs here.' : ''}
+          </p>
         </div>
 
         <ol className="hub-connect-steps">
           <li>On that computer, open Open Harness and go to Agent settings, then Computer.</li>
           <li>Choose Add computer, pick {device.platform === 'ios' ? 'iPhone or iPad' : 'Android'}, and create a pairing code.</li>
-          <li>Enter the address and code it shows you.</li>
+          <li>{fixedHubUrl ? 'Enter the code it shows you.' : 'Enter the address and code it shows you.'}</li>
         </ol>
 
         {hasTauri() && (
@@ -106,18 +117,20 @@ export function HubConnect({ onConnected }: Props) {
           </button>
         )}
 
-        <label>Hub address
-          <input inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={hubUrl} onChange={event => setHubUrl(event.target.value)} placeholder="https://agents.example.com" />
-          <small>The HTTPS address of your coordinator, shown with the pairing code.</small>
-        </label>
+        {!fixedHubUrl && (
+          <label>Hub address
+            <input inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={hubUrl} onChange={event => setHubUrl(event.target.value)} placeholder="https://agents.example.com" />
+            <small>The HTTPS address of your coordinator, shown with the pairing code.</small>
+          </label>
+        )}
 
         <label>Pairing code
           <input className="computer-pairing-code" autoCapitalize="characters" autoCorrect="off" spellCheck={false} value={code} onChange={event => setCode(event.target.value.toUpperCase())} placeholder="K4M2 7QRT 9XBV" />
         </label>
 
         <details className="profile-advanced">
-          <summary>This phone&rsquo;s name and hosted access</summary>
-          <label>Phone name<input value={name} onChange={event => setName(event.target.value)} placeholder={device.name} /></label>
+          <summary>This device&rsquo;s name and hosted access</summary>
+          <label>Device name<input value={name} onChange={event => setName(event.target.value)} placeholder={device.name} /></label>
           <label>Hosted access token <span className="profile-optional">hosted dashboards only</span>
             <input autoCapitalize="none" autoCorrect="off" spellCheck={false} value={sitesToken} onChange={event => setSitesToken(event.target.value)} />
             <small>Only needed when your hub is a hosted Open Harness site. The pairing link fills this in for you.</small>
@@ -129,7 +142,7 @@ export function HubConnect({ onConnected }: Props) {
         <button type="button" className="new-button" disabled={!ready || busy} onClick={() => void connect()}>
           {busy ? <><LoaderCircle className="spin" size={15} /> Connecting…</> : 'Connect'}
         </button>
-        <p className="hub-connect-footnote">This phone gets its own credential. You can disconnect it from either end at any time.</p>
+        <p className="hub-connect-footnote">This device gets its own credential, which only reaches the dashboard and never your agents&rsquo; computers. You can disconnect it from either end at any time.</p>
       </div>
     </div>
   );

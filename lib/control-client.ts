@@ -22,14 +22,41 @@ export type PersistentRun = {
   machine_connection?: "online" | "suspended" | "offline" | "revoked" | null;
 };
 
+const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "::1"];
+
 function base() {
   if (typeof window !== "undefined") {
     const testPort = new URLSearchParams(window.location.search).get("controlPort");
     if (testPort && /^\d{2,5}$/.test(testPort)) return `http://127.0.0.1:${testPort}`;
     if (process.env.NEXT_PUBLIC_OPEN_HARNESS_SELF_HOSTED === '1') return `${window.location.origin}/api/local`;
-    if (!["localhost", "127.0.0.1", "::1"].includes(window.location.hostname)) return `${window.location.origin}/api/control`;
+    if (!LOOPBACK_HOSTS.includes(window.location.hostname)) return `${window.location.origin}/api/control`;
   }
   return "http://127.0.0.1:4317";
+}
+
+// A browser that reached this page over the network, rather than from the machine running
+// the coordinator. It cannot be handed the master control token — that authorizes arbitrary
+// run creation, host-path mounts and direct OS execution — so it pairs for its own scoped,
+// revocable credential exactly as the phone app does. Mirrors base()'s precedence: the
+// Playwright control-port override is a loopback coordinator and never counts as remote.
+export function isRemoteOrigin() {
+  if (typeof window === "undefined") return false;
+  const testPort = new URLSearchParams(window.location.search).get("controlPort");
+  if (testPort && /^\d{2,5}$/.test(testPort)) return false;
+  return !LOOPBACK_HOSTS.includes(window.location.hostname);
+}
+
+// The address a remote browser pairs against: the origin it is already on. Unlike the phone
+// app, there is nothing for the person to type, because they are looking at the hub.
+export function selfHostedHubUrl() {
+  if (typeof window === "undefined") return "";
+  return base();
+}
+
+// Thrown when the coordinator refuses to hand this client the control token. It is not an
+// outage: it means "pair instead", and the caller shows the pairing screen.
+export class PairingRequiredError extends Error {
+  constructor(message: string) { super(message); this.name = "PairingRequiredError"; }
 }
 
 export class ControlClient {
@@ -69,6 +96,12 @@ export class ControlClient {
       return (await response.json()) as RuntimeStatus;
     }
     const response = await this.fetchImpl(`${base()}/v1/bootstrap`);
+    // 403 here is the deliberate refusal to expose the control token off-machine. Saying so
+    // lets the caller offer pairing instead of reporting a service that is in fact healthy.
+    if (response.status === 403) {
+      const detail = await response.json().catch(() => ({})) as { error?: string };
+      throw new PairingRequiredError(detail.error || "This dashboard needs to be paired before it can reach your coordinator.");
+    }
     if (!response.ok) throw new Error("Open Harness control service is unavailable.");
     const status = (await response.json()) as RuntimeStatus; this.token = status.token; return status;
   }
