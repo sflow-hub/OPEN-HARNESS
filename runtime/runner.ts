@@ -123,7 +123,9 @@ async function control(command: RunnerCommand) {
     if (command.kind === 'import-agent') {
       const profile = command.payload.profile as AgentProfile | undefined;
       if (profile) validateComputerTarget(profile, await capabilities(), Array.isArray(command.payload.requiredSecrets) ? command.payload.requiredSecrets.map(String) : [], name => runnerSecrets.has(name) || Boolean(process.env[name]));
-      const bundle = command.payload.bundle || (await request(`/v1/runner/transfers/${encodeURIComponent(command.payload.transferId)}`)).bundle;
+      // The coordinator always inlines the bundle with the command; there is no separate fetch.
+      const bundle = command.payload.bundle;
+      if (!bundle) throw new Error('This transfer arrived without its file bundle. Start the move again from Agent settings.');
       const imported = importAgentFiles(stateRoot, command.agentId, bundle);
       if (profile?.computer.desktop !== 'none' && profile) {
         const check = { action: 'computer', desktop: profile.computer.desktop };

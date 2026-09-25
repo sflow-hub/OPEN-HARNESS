@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdirSync, writeFileSync, readdirSync, readFileSync, statSync, unlinkSync, existsSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, existsSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
@@ -11,7 +11,7 @@ import { SecretStore, SecretsUnavailableError } from "./secrets";
 import { Credentials, CredentialError } from "./credentials";
 import type { CredentialRecord, CredentialUsage, CredentialUse } from "../lib/credentials";
 import { validateComputerTarget } from './computer-validation';
-import { HermesGateway, dockerStatusCached, ensureContainer } from "./hermes";
+import { HermesGateway, dockerStatusCached, ensureContainer, stopManagedContainers } from "./hermes";
 import { coordinationSocket } from "./coordination-socket";
 import { TaskError, TaskStore } from "./tasks";
 import { TeamError, TeamStore } from "./teams";
@@ -97,6 +97,18 @@ function authenticatedAgent(req: IncomingMessage) {
   return Boolean(id && supplied.length === expected.length && timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) ? id : null;
 }
 function event(runId: string, type: string, payload: unknown) { return store.appendEvent(runId, type, payload); }
+// Kept outside the agent's own workspace: it is the record of what the runtime said when a
+// run failed, and the agent should not be able to read or rewrite it. Bounded so a chatty
+// runtime cannot fill the disk.
+const logDir = join(root, 'logs');
+function appendAgentLog(agentId: string, entry: { level?: string; message?: string }) {
+  try {
+    mkdirSync(logDir, { recursive: true });
+    const file = join(logDir, `${validId(agentId)}.log`);
+    if (existsSync(file) && statSync(file).size > 2_000_000) renameSync(file, `${file}.1`);
+    appendFileSync(file, `${new Date().toISOString()} ${entry.level || 'info'} ${String(entry.message || '').slice(0, 1000)}\n`, { mode: 0o600 });
+  } catch { /* logging must never take down a run */ }
+}
 function profileResponse(profile: AgentProfile) {
   const live = store.listRuns().find(run => run.agent_id === profile.id && ["running", "waiting_approval", "waiting_input"].includes(run.state));
   const snapshot = live ? profiles.runSnapshot(live.id) : null;
@@ -218,6 +230,7 @@ async function gatewayFor(agentId: string, allowedTools: string[] | null = null,
   } else {
     gateway = new HermesGateway(ensureContainer(agentId, root, computer), allowedTools);
   }
+  gateway.on('log', (entry: { level?: string; message?: string }) => appendAgentLog(agentId, entry));
   gateways.set(agentId, gateway);
   try { await gateway.start(); return gateway; }
   catch (error) { gateways.delete(agentId); throw error; }
@@ -868,6 +881,10 @@ async function shutdown(signal: string) {
     ...[...gateways.values()].map(gateway => gateway.stop()),
     ...[...coordinationSockets.values()].map(socket => socket.then(s => s.close())),
   ]);
+  // Gateways stop the containers they own. Anything else this coordinator started, including
+  // containers created by a settings probe, is stopped here so it does not come back.
+  try { const reaped = stopManagedContainers(); if (reaped.length) console.log(`Stopped ${reaped.length} agent container${reaped.length === 1 ? '' : 's'}.`); }
+  catch (error) { console.error(`Some agent containers may still be running: ${error instanceof Error ? error.message : 'unknown error'}`); }
   clearTimeout(deadline);
   process.exit(0);
 }

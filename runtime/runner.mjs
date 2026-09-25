@@ -250,6 +250,7 @@ function currentImageId() {
   imageIdCache = { id: result.status === 0 ? result.stdout.trim() : "", at: Date.now() };
   return imageIdCache.id;
 }
+var MANAGED_LABEL = "open-harness.managed";
 function ensureContainer(agentId, stateRoot2, computer) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
   const sharing = stateSharing(stateRoot2);
@@ -289,6 +290,8 @@ function ensureContainer(agentId, stateRoot2, computer) {
     "unless-stopped",
     "--label",
     `open-harness.config=${signature}`,
+    "--label",
+    `${MANAGED_LABEL}=1`,
     "--security-opt",
     "no-new-privileges",
     "--cap-drop",
@@ -867,7 +870,8 @@ async function control(command3) {
     if (command3.kind === "import-agent") {
       const profile = command3.payload.profile;
       if (profile) validateComputerTarget(profile, await capabilities(), Array.isArray(command3.payload.requiredSecrets) ? command3.payload.requiredSecrets.map(String) : [], (name) => runnerSecrets.has(name) || Boolean(process.env[name]));
-      const bundle = command3.payload.bundle || (await request(`/v1/runner/transfers/${encodeURIComponent(command3.payload.transferId)}`)).bundle;
+      const bundle = command3.payload.bundle;
+      if (!bundle) throw new Error("This transfer arrived without its file bundle. Start the move again from Agent settings.");
       const imported = importAgentFiles(stateRoot, command3.agentId, bundle);
       if (profile?.computer.desktop !== "none" && profile) {
         const check = { action: "computer", desktop: profile.computer.desktop };

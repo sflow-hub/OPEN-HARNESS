@@ -248,6 +248,21 @@ function currentImageId() {
   return imageIdCache.id;
 }
 
+export const MANAGED_LABEL = 'open-harness.managed';
+
+// Agent containers run with --restart unless-stopped so a run survives a Docker hiccup, which
+// means anything left behind comes back on every Docker start and holds its CPU and memory
+// reservation for good. Stopping only the containers with a live gateway was not enough:
+// opening Agent settings creates one through a probe and never registers a gateway for it.
+// Reaping by label also covers containers orphaned by an earlier hard kill.
+export function stopManagedContainers() {
+  const listed = spawnSync('docker', ['ps', '-q', '--filter', `label=${MANAGED_LABEL}=1`], { encoding: 'utf8', timeout: 15_000 });
+  if (listed.status !== 0) return [];
+  const ids = listed.stdout.split('\n').map(id => id.trim()).filter(Boolean);
+  if (ids.length) spawnSync('docker', ['stop', '--time', '2', ...ids], { stdio: 'ignore', timeout: 60_000 });
+  return ids;
+}
+
 export function ensureContainer(agentId: string, stateRoot: string, computer?: ComputerConfig) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
   const sharing = stateSharing(stateRoot);
@@ -280,7 +295,7 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
     if (!existsSync(source)) throw new Error(`Shared folder does not exist on this computer: ${folder.path}`);
     mounts.push('-v', `${source}:/workspace/mounts/folder-${index + 1}${folder.mode === 'read' ? ':ro' : ''}`);
   });
-  const run = spawnSync("docker", ["run", "-d", "--name", name, "--restart", "unless-stopped", '--label', `open-harness.config=${signature}`, "--security-opt", "no-new-privileges",
+  const run = spawnSync("docker", ["run", "-d", "--name", name, "--restart", "unless-stopped", '--label', `open-harness.config=${signature}`, '--label', `${MANAGED_LABEL}=1`, "--security-opt", "no-new-privileges",
     "--cap-drop", "ALL", "--pids-limit", "512", "--memory", `${Math.round(selected.resources.memoryMb)}m`, "--cpus", String(selected.resources.cpu), "--add-host", "host.docker.internal:host-gateway",
     "--user", `${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "-e", "HOME=/workspace/private",
     ...(selected.desktop === 'virtual' ? ['-e', 'DISPLAY=:99', '-e', 'OPEN_HARNESS_VIRTUAL_DESKTOP=1'] : []),
