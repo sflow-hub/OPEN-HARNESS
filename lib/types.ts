@@ -51,9 +51,7 @@ export type Workspace = {
 export type RunEvent =
   | { type: "text"; text: string }
   | { type: "activity"; activity: Activity }
-  | { type: "file"; file: Artifact }
   | { type: "memory"; memory: string[] }
-  | { type: "done" }
   | { type: "error"; message: string };
 export const initialWorkspace: Workspace = {
   version: 2,

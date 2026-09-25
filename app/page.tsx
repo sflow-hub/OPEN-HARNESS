@@ -27,7 +27,6 @@ import {
   LoaderCircle,
   Brain,
   Paperclip,
-  Play,
   Cable,
   CalendarClock,
   ShieldCheck,
@@ -65,6 +64,7 @@ const LEGACY_STORAGE_KEY = "open-harness.workspace.v1";
 const SETTINGS_KEY = "open-harness.settings.v1";
 const ONBOARDING_KEY = "open-harness.onboarding.v1";
 const ADVANCED_KEY = "open-harness.advanced.v1";
+const MIGRATED_KEY = "open-harness.migrated.v1";
 // Kept apart from SETTINGS_KEY on purpose: the onboarding save rewrites that whole
 // blob, which would silently drop anything else stored alongside it.
 const NOTIFY_KEY = "open-harness.notify.v1";
@@ -139,13 +139,6 @@ export default function Home() {
   const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
   const [credentialsOpen, setCredentialsOpen] = useState(false);
   const [workspaceModelRevision, setWorkspaceModelRevision] = useState(0);
-  const [server, setServer] = useState({
-    xai: false,
-    openai: false,
-    openrouter: false,
-    local: false,
-    localModel: "",
-  });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [advancedFeatures, setAdvancedFeatures] = useState(false);
   // Snapshot of the settings when the dialog opened, so dismissing it can tell an
@@ -190,7 +183,6 @@ export default function Home() {
   const [notifyWhenDone, setNotifyWhenDone] = useState(false);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [inspector, setInspector] = useState(true);
-  const abortRef = useRef<AbortController | null>(null);
   const controlRef = useRef(new ControlClient());
   const runLock = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -240,14 +232,6 @@ export default function Home() {
       );
     }
     setReady(true);
-    fetch("/api/status")
-      .then((r) => r.json())
-      .then((data) => setServer(data as typeof server))
-      .catch(() =>
-        setNotice(
-          "Could not reach the model server. You can still explore your workspace.",
-        ),
-      );
     return () => {
       window.clearTimeout(layoutTimer);
       narrow.removeEventListener("change", matchLayout);
@@ -266,10 +250,10 @@ export default function Home() {
           method: "POST",
           body: JSON.stringify({ agents: workspace.agents }),
         });
-        await client.request("/v1/migrate", {
-          method: "POST",
-          body: JSON.stringify(workspace),
-        });
+        if (localStorage.getItem(MIGRATED_KEY) !== 'done') {
+          await client.request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) });
+          localStorage.setItem(MIGRATED_KEY, 'done');
+        }
         if (workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspace.teams }) });
         const teamResult = await client.request<{ teams: Team[] }>("/v1/teams?includeRetired=1");
         if (!cancelled) {
@@ -645,12 +629,7 @@ export default function Home() {
     mid: string,
     agentId: string,
   ) {
-    if (event.type === "file")
-      setWorkspace((w) => ({
-        ...w,
-        files: [...w.files.filter((f) => f.id !== event.file.id), event.file],
-      }));
-    else if (event.type === "memory")
+    if (event.type === "memory")
       setWorkspace((w) => ({
         ...w,
         agents: w.agents.map((a) =>
@@ -860,13 +839,13 @@ export default function Home() {
       await new Promise((resolve) => setTimeout(resolve, document.hidden ? 4000 : 500));
     }
   }
-  async function send(text = input, guided = false) {
+  async function send(text = input) {
     if (!text.trim() || !ready) return;
-    if (!guided && testMode) {
+    if (testMode) {
       setNotice("Agent chat is disabled in automated test mode. Open the installed desktop app to run a real agent.");
       return;
     }
-    if (running && !guided && persistentRun) {
+    if (running && persistentRun) {
       try {
         if (inputMode === "steer") {
           await controlRef.current.request(`/v1/runs/${persistentRun.id}/steer`, {
@@ -889,7 +868,7 @@ export default function Home() {
       return;
     }
     if (runLock.current) return;
-    if (!guided && !connected) {
+    if (!connected) {
       setNotice(
         runtime?.runtime.message ||
           "Start the local Hermes runtime before sending a task.",
@@ -935,87 +914,30 @@ export default function Home() {
         ],
         updatedAt: now(),
       }));
-    const controller = new AbortController();
-    abortRef.current = controller;
     const emit = (event: RunEvent) => handleEvent(event, cid, mid, agentId);
     try {
-      if (guided) {
-        const wait = async () => {
-          await new Promise((r) => setTimeout(r, 450));
-          controller.signal.throwIfAborted();
-        };
-        emit({
-          type: "text",
-          text: "This is a **guided run**, using a fixed example without a model call. I’ll create a real file in your workspace so you can try the full handoff.\n\n",
-        });
-        const activityId = uid();
-        emit({
-          type: "activity",
-          activity: {
-            id: activityId,
-            name: "write_file",
-            detail: "Creating your first deliverable…",
-            status: "running",
-          },
-        });
-        await wait();
-        const existing = workspace.files.find(
-          (f) => f.name === "first-handoff.md",
-        );
-        emit({
-          type: "file",
-          file: {
-            id: existing?.id || uid(),
-            name: "first-handoff.md",
-            agentId,
-            updatedAt: now(),
-            content:
-              "# Your first handoff\n\n## A useful first task\nGive your agent a clear outcome and the relevant source material.\n\nExample: “Read my notes and turn them into a one-page project brief. Save the result as project-brief.md.”\n\n## Make the agent yours\n1. Edit its name, role, and instructions.\n2. Connect an xAI, OpenRouter, or local model in Settings.\n3. Attach a text or Markdown file for context.\n4. Send a task and watch the tool activity.\n5. Download the result from Files.\n\n## What persists\nAgent profiles, runs, memories, skills, and shared files persist in the local control service. Closing this page does not stop a task. Credentials are stored only on the server with restricted permissions and are excluded from normal exports. Use Agent settings to choose each agent’s model, instructions, and tools.\n\nThis file was created by the guided example. No AI model was called.\n",
-          },
-        });
-        emit({
-          type: "activity",
-          activity: {
-            id: activityId,
-            name: "write_file",
-            detail: "Saved first-handoff.md",
-            status: "done",
-          },
-        });
-        await wait();
-        emit({
-          type: "text",
-          text: "**Your first file is ready.** Open `first-handoff.md` in the workspace panel, or find it in **Files**.\n\nTo run your own task, connect a model in **Settings**. You can also edit my instructions with the settings button above.",
-        });
-      } else {
-        const run = await controlRef.current.createRun({
-          agentId,
-          conversationId: cid,
-          prompt: text.trim(),
-        });
-        setPersistentRun(run);
-        updateConversation(cid, (c) => ({
-          ...c,
-          messages: c.messages.map((message) =>
-            message.id === mid ? { ...message, runId: run.id } : message,
-          ),
-        }));
-        await followRun(run, cid, mid, agentId);
-      }
+      const run = await controlRef.current.createRun({
+        agentId,
+        conversationId: cid,
+        prompt: text.trim(),
+      });
+      setPersistentRun(run);
+      updateConversation(cid, (c) => ({
+        ...c,
+        messages: c.messages.map((message) =>
+          message.id === mid ? { ...message, runId: run.id } : message,
+        ),
+      }));
+      await followRun(run, cid, mid, agentId);
     } catch (error) {
       emit({
         type: "error",
-        message: controller.signal.aborted
-          ? "Stopped. Your completed work is saved."
-          : error instanceof Error
-            ? error.message
-            : "Something went wrong.",
+        message: error instanceof Error ? error.message : "Something went wrong.",
       });
     } finally {
       runLock.current = false;
       setRunning(false);
       setPersistentRun(null);
-      abortRef.current = null;
     }
   }
   async function upload(files: FileList | null) {
@@ -1450,14 +1372,6 @@ export default function Home() {
                         </button>
                       ))}
                     </div>
-                    {advancedFeatures && <button
-                      className="guided-button"
-                      disabled={running}
-                      onClick={() => send("Show me how a handoff works", true)}
-                    >
-                      <Play size={12} /> Try a guided run{" "}
-                      <span>No API key needed</span>
-                    </button>}
                   </div>
                 ) : (
                   conversation.messages.map((m) => (
@@ -2226,7 +2140,7 @@ export default function Home() {
                       provider,
                       model:
                         provider === "local"
-                          ? server.localModel
+                          ? ""
                           : PROVIDERS[provider].model,
                       credentialRef: credentials.some((item) => item.ref === s.credentialRef && fitsProvider(item, provider))
                         ? s.credentialRef

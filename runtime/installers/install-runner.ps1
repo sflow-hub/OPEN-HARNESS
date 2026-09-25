@@ -1,7 +1,6 @@
 $ErrorActionPreference = "Stop"
 $Coordinator = $env:OPEN_HARNESS_COORDINATOR
 $PairingCode = $env:OPEN_HARNESS_PAIRING_CODE
-$SitesToken = $env:OPEN_HARNESS_SITES_TOKEN
 if (-not $Coordinator -or -not $PairingCode) { throw "The coordinator address and pairing code are required." }
 
 $InstallDir = if ($env:OPEN_HARNESS_RUNNER_DIR) { $env:OPEN_HARNESS_RUNNER_DIR } else { Join-Path $env:LOCALAPPDATA "OpenHarnessRunner" }
@@ -50,7 +49,6 @@ foreach ($Python in @("python", "python3")) { if (Get-Command $Python -ErrorActi
 if (-not $DockerReady -and -not $PythonReady) { throw "Docker is required for private agent workspaces. Install and start Docker Desktop, then run this pairing command again: https://docs.docker.com/desktop/setup/install/windows-install/" }
 
 $Arguments = @((Join-Path $InstallDir "runtime\runner.mjs"), "--coordinator", $Coordinator, "--pairing-code", $PairingCode, "--once", "1")
-if ($SitesToken) { $Arguments += @("--sites-token", $SitesToken) }
 $env:OPEN_HARNESS_RUNNER_STATE_DIR = $StateDir
 & $Node @Arguments
 if ($LASTEXITCODE -ne 0) { throw "Runner pairing failed." }

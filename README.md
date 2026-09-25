@@ -79,8 +79,6 @@ Configure xAI, OpenAI, OpenRouter, or another model in **Settings**. The desktop
 
 Switch an agent between credentials from the chip on its card or in its conversation header, or from **Agent settings → Model**. A switch is a profile edit: a task already running finishes on the credential it started with, and the change applies to that agent’s next task.
 
-The **Try a guided run** action remains an explicitly scripted demonstration. Normal tasks always enter the persistent Hermes queue; there is no silent fallback to the old four-tool loop.
-
 ## Agent settings
 
 Use the settings icon on any agent card, or **Agent settings** in a conversation header. The tabs cover identity, computer assignment, model selection, custom instructions, and expandable tool/connection switches. The panel fills the screen on phones and supports keyboard navigation.
@@ -105,7 +103,7 @@ OPEN_HARNESS_PUBLIC_URL=https://agents.example.com
 npm run harness:serve
 ```
 
-The dashboard token remains available only from the coordinator machine. Public runner endpoints accept scoped runner credentials or one-time pairing codes. A hosted Open Harness Site stores profiles, machines, runs, commands, and replayable events in D1. Model credentials entered in the hosted dashboard are encrypted to the selected runner’s public key; the coordinator keeps ciphertext only, and the runner saves the decrypted value in its OS credential vault.
+The dashboard token remains available only from the coordinator machine. Public runner endpoints accept scoped runner credentials or one-time pairing codes.
 
 Each agent starts with a private container. **Selected folders** mounts only the named host folders and preserves their read-only or read-write setting. **Direct computer access** runs Hermes under the runner's OS account; install the pinned host runtime and policy extension before selecting it:
 

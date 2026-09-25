@@ -3,12 +3,10 @@ set -eu
 
 coordinator="${OPEN_HARNESS_COORDINATOR:-}"
 pairing_code="${OPEN_HARNESS_PAIRING_CODE:-}"
-sites_token="${OPEN_HARNESS_SITES_TOKEN:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --coordinator) coordinator="$2"; shift 2 ;;
     --pairing-code) pairing_code="$2"; shift 2 ;;
-    --sites-token) sites_token="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -39,11 +37,7 @@ if [ ! -x "$node_bin" ]; then
 fi
 
 download() {
-  if [ -n "$sites_token" ]; then
-    curl -fL --retry 3 -H "OAI-Sites-Authorization: Bearer $sites_token" "$coordinator/v1/install/file?path=$1" -o "$install_dir/$1"
-  else
-    curl -fL --retry 3 "$coordinator/v1/install/file?path=$1" -o "$install_dir/$1"
-  fi
+  curl -fL --retry 3 "$coordinator/v1/install/file?path=$1" -o "$install_dir/$1"
 }
 download "runtime/runner.mjs"
 for file in Dockerfile NOTICE.md container-init.sh coordination.mjs inspect_runtime.py managed_entry.py extension/open_harness_policy.py extension/pyproject.toml; do
@@ -60,11 +54,7 @@ if ! docker image inspect open-harness-hermes:2026.9.11 >/dev/null 2>&1 && ! (py
   exit 1
 fi
 
-if [ -n "$sites_token" ]; then
-  OPEN_HARNESS_RUNNER_STATE_DIR="$state_dir" "$node_bin" "$install_dir/runtime/runner.mjs" --coordinator "$coordinator" --pairing-code "$pairing_code" --sites-token "$sites_token" --once 1
-else
-  OPEN_HARNESS_RUNNER_STATE_DIR="$state_dir" "$node_bin" "$install_dir/runtime/runner.mjs" --coordinator "$coordinator" --pairing-code "$pairing_code" --once 1
-fi
+OPEN_HARNESS_RUNNER_STATE_DIR="$state_dir" "$node_bin" "$install_dir/runtime/runner.mjs" --coordinator "$coordinator" --pairing-code "$pairing_code" --once 1
 
 if [ "$os_name" = "Linux" ] && command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"

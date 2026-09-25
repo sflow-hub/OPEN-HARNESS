@@ -43,9 +43,9 @@ npm run build     # vinext build + desktop/fix-standalone.mjs
 npx playwright install chromium && npm run test:browser
 ```
 
-`.github/workflows/ci.yml` runs test/typecheck/lint plus a Tauri debug build across
-Ubuntu 24.04, macOS 14, and Windows 2025, and the Playwright suite on Ubuntu. Playwright
-coverage is expected for changes under `components/` or `app/`.
+`.github/workflows/ci.yml` runs test/typecheck/lint plus a Tauri debug build and the
+Playwright suite, on Ubuntu 24.04 only. Playwright coverage is expected for changes under
+`components/` or `app/`. macOS and Windows are deferred — see `ROADMAP.md` for why.
 
 Service lifecycle: `harness:install-service`, `harness:start`, `harness:stop`,
 `npm run harness -- status`. Desktop: `desktop:prepare`, `desktop:dev`, `desktop:build`.
@@ -69,11 +69,9 @@ Service lifecycle: `harness:install-service`, `harness:start`, `harness:stop`,
 | `runtime/hermes/extension/` | Managed Hermes tool-allowlist middleware (Python) |
 | `runtime/hermes/coordination.mjs` | Agent-scoped named handoff and scheduling MCP tools |
 | `app/page.tsx` | The whole workspace UI — runtime, skills, memory, files, routines (~2.5k lines) |
-| `app/api/control/[...path]/route.ts` | Control API surface the browser talks to |
-| `app/api/local/[...path]/route.ts` | Proxy to the local coordinator |
+| `app/api/local/[...path]/route.ts` | The dashboard's proxy to the local coordinator; the only transport besides a direct loopback call |
 | `components/` | `agent-settings`, `onboarding`, `credential-manager`, `task-manager`, `team-manager` |
 | `lib/` | Shared types and browser-side client (`control-client.ts`), profile/provider/crypto helpers |
-| `db/schema.ts` + `drizzle/` | Hosted Cloudflare D1 surface only, not the local SQLite state |
 | `src-tauri/` | Desktop shell, tray, sidecar, signed updater |
 | `desktop/*.mjs` | Build and packaging scripts for the desktop bundle |
 | `compose.yaml` | No-Node self-hosted dashboard, coordinator, private container engine |
@@ -103,7 +101,7 @@ Consequences:
 - `runtime/runner.mjs` is committed but esbuild output; regenerate with `npm run runner:bundle`.
   ESLint ignores it.
 - `src-tauri/resources/bundle/` is produced by `desktop/prepare-runtime.mjs`.
-- `dist/`, `.next/`, `.vinext/`, `.wrangler/`, `src-tauri/gen/`, `src-tauri/binaries/`,
+- `dist/`, `.next/`, `.vinext/`, `src-tauri/gen/`, `src-tauri/binaries/`,
   `.open-harness*/`, `test-results/`, `tsconfig.tsbuildinfo`.
 
 ## Conventions
@@ -113,8 +111,8 @@ Consequences:
   you are editing rather than introducing a new convention.
 - Keep changes minimal and scoped. Comments explain *why*, never *what*.
 - TypeScript strict, ESM (`"type": "module"`), `@/*` maps to the repo root.
-- The build runs through `vinext` (a Vite-based Next 16 runner) plus the Cloudflare and
-  OpenAI Sites Vite plugins, not the Next CLI. `next.config.ts` still supplies
+- The build runs through `vinext` (a Vite-based Next 16 runner), not the Next CLI. `next`
+  itself is a devDependency for one type import. `next.config.ts` still supplies
   `output: "standalone"` because the desktop installer embeds that server output.
 - User-facing strings are plain-language and non-blaming; failed saves preserve the user's
   draft and name the conflicting revision.
@@ -149,8 +147,8 @@ loading, gateway startup, authenticated round trips to an OpenAI-compatible endp
 image detection, and state-directory choice. Filesystem isolation, process-tree termination,
 paid-provider inference, real MCP servers, and Direct Computer Access remain unverified.
 `runtime/VERIFICATION.md` is the record; update it when a real-runtime check is performed.
-`ROADMAP.md` tracks feature maturity — Direct Computer Access and the hosted Cloudflare/D1
-surface are the least mature paths.
+`ROADMAP.md` tracks feature maturity — Direct Computer Access is the least mature path, and
+the supported install is a local browser dashboard on Linux.
 
 ## Gotchas
 

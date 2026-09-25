@@ -12,7 +12,7 @@ import { SecretStore } from './secrets';
 import { decryptRunnerSecret, generateRunnerKeyPair, type EncryptedRunnerSecret } from '../lib/runner-crypto';
 import { validateComputerTarget } from './computer-validation';
 
-type Credentials = { coordinator: string; machineId: string; token: string; sitesToken?: string; encryptionPublicKey: string; encryptionPrivateKey: string };
+type Credentials = { coordinator: string; machineId: string; token: string; encryptionPublicKey: string; encryptionPrivateKey: string };
 type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'store-secret'; payload: any };
 const args = new Map<string,string>();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith('--')) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith('--') ? '' : process.argv[++i] || '');
@@ -55,20 +55,20 @@ async function probeCapabilities(): Promise<Capabilities> {
 let known: Capabilities | null = null, probing: Promise<Capabilities> | null = null;
 function capabilities() { return probing ??= probeCapabilities().then(value => (known = value)).finally(() => { probing = null; }); }
 async function pair(): Promise<Credentials> {
-  const coordinator = String(args.get('coordinator') || '').replace(/\/$/, ''), code = String(args.get('pairing-code') || ''), sitesToken = String(args.get('sites-token') || '');
+  const coordinator = String(args.get('coordinator') || '').replace(/\/$/, ''), code = String(args.get('pairing-code') || '');
   if (!coordinator || !code) throw new Error('Use --coordinator URL and --pairing-code CODE, or keep an existing runner connection.');
   const target = new URL(coordinator), loopback = ['localhost', '127.0.0.1', '::1'].includes(target.hostname); if (target.protocol !== 'https:' && !(target.protocol === 'http:' && loopback)) throw new Error('Remote coordinators must use HTTPS. Plain HTTP is accepted only for a coordinator on this computer.');
   const encryption = await generateRunnerKeyPair();
-  const response = await fetch(`${coordinator}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(sitesToken ? { 'OAI-Sites-Authorization': `Bearer ${sitesToken}` } : {}) }, body: JSON.stringify({ code, name: hostname(), platform: platform(), arch: arch(), capabilities: await capabilities(), encryptionPublicKey: encryption.publicKey }) });
+  const response = await fetch(`${coordinator}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, name: hostname(), platform: platform(), arch: arch(), capabilities: await capabilities(), encryptionPublicKey: encryption.publicKey }) });
   const value = await response.json() as any; if (!response.ok) throw new Error(value.error || 'Pairing failed.');
-  const saved: Credentials = { coordinator, machineId: value.machineId, token: value.token, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey, ...(sitesToken ? { sitesToken } : {}) };
+  const saved: Credentials = { coordinator, machineId: value.machineId, token: value.token, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey };
   writeFileSync(credentialPath, JSON.stringify(saved, null, 2), { mode: 0o600 }); chmodSync(credentialPath, 0o600); return saved;
 }
 let credentials = args.has('pairing-code') ? await pair() : existsSync(credentialPath) ? JSON.parse(readFileSync(credentialPath, 'utf8')) as Credentials : await pair();
 if (!credentials.encryptionPrivateKey || !credentials.encryptionPublicKey) { const encryption = await generateRunnerKeyPair(); credentials = { ...credentials, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey }; writeFileSync(credentialPath, JSON.stringify(credentials, null, 2), { mode: 0o600 }); chmodSync(credentialPath, 0o600); }
 const savedTarget = new URL(credentials.coordinator), savedLoopback = ['localhost', '127.0.0.1', '::1'].includes(savedTarget.hostname); if (savedTarget.protocol !== 'https:' && !(savedTarget.protocol === 'http:' && savedLoopback)) throw new Error('The saved remote coordinator URL is not HTTPS. Pair this runner again using a secure URL.');
 if (args.has('once')) { console.log(`Paired ${credentials.machineId}.`); process.exit(0); }
-const headers = { Authorization: `Bearer ${credentials.token}`, 'X-Open-Harness-Machine': credentials.machineId, 'Content-Type': 'application/json', ...(credentials.sitesToken ? { 'OAI-Sites-Authorization': `Bearer ${credentials.sitesToken}` } : {}) };
+const headers = { Authorization: `Bearer ${credentials.token}`, 'X-Open-Harness-Machine': credentials.machineId, 'Content-Type': 'application/json' };
 async function request(path: string, init: RequestInit = {}, retry = false): Promise<any> {
   for (;;) {
     try { const response = await fetch(credentials.coordinator + path, { ...init, headers: { ...headers, ...init.headers } }); const value = await response.json() as any; if (!response.ok) throw new Error(value.error || `Coordinator returned HTTP ${response.status}.`); return value; }
@@ -94,7 +94,7 @@ async function run(command: RunnerCommand) {
     const localSecrets = Object.fromEntries(needed.filter(name => availableSecrets[name]).map(name => [name, availableSecrets[name]]));
     const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...payload.secrets }) };
     const coordinatorForContainer = credentials.coordinator.replace('://localhost', '://host.docker.internal').replace('://127.0.0.1', '://host.docker.internal');
-    prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { controlUrl: coordinatorForContainer, sitesToken: credentials.sitesToken });
+    prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator } : { controlUrl: coordinatorForContainer });
     const gateway = direct
       ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } })
       : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
@@ -126,7 +126,7 @@ async function control(command: RunnerCommand) {
     if (command.kind.startsWith('probe-')) {
       const profile = command.payload.profile as AgentProfile & { effectiveModel: any }, direct = profile.computer.access === 'direct', shared = join(stateRoot, 'shared'), agentRoot = join(stateRoot, 'agents', profile.id); mkdirSync(shared, { recursive: true });
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env } as Record<string,string>, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter(name => availableSecrets[name]).map(name => [name, availableSecrets[name]])), secretSource = { environment: () => ({ ...localSecrets, ...(command.payload.secrets || {}) }) };
-      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command.payload.coordinationToken || '', `probe-${command.id}`, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { sitesToken: credentials.sitesToken });
+      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command.payload.coordinationToken || '', `probe-${command.id}`, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator } : {});
       if (command.kind === 'probe-runtime') {
         const probeInput = { ...(command.payload.input || {}) } as any;
         if (probeInput.action === 'computer') probeInput.desktop = profile.computer.desktop;

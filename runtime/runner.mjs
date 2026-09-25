@@ -399,7 +399,7 @@ function prepareProfile(root, profile, effective, secrets, token, runId, options
   const dir = join2(root, "agents", profile.id), home = join2(dir, "profile"), managed = join2(dir, "managed");
   for (const path of [home, managed, join2(dir, "private")]) mkdirSync2(path, { recursive: true });
   const mcp = {};
-  if (profile.allowedTools.some((id) => COORDINATION_TOOLS.some((t) => t.id === id))) mcp.open_harness = { command: "node", args: [options.coordinationCommand || "/opt/open-harness/coordination.mjs"], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}, ...options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {}, ...options.sitesToken ? { OPEN_HARNESS_SITES_TOKEN: options.sitesToken } : {} } };
+  if (profile.allowedTools.some((id) => COORDINATION_TOOLS.some((t) => t.id === id))) mcp.open_harness = { command: "node", args: [options.coordinationCommand || "/opt/open-harness/coordination.mjs"], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}, ...options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {} } };
   const env = {};
   const secretValues = secrets.environment();
   const customEndpoint = Boolean(effective.baseUrl);
@@ -699,15 +699,15 @@ function capabilities() {
   });
 }
 async function pair() {
-  const coordinator = String(args.get("coordinator") || "").replace(/\/$/, ""), code = String(args.get("pairing-code") || ""), sitesToken = String(args.get("sites-token") || "");
+  const coordinator = String(args.get("coordinator") || "").replace(/\/$/, ""), code = String(args.get("pairing-code") || "");
   if (!coordinator || !code) throw new Error("Use --coordinator URL and --pairing-code CODE, or keep an existing runner connection.");
   const target = new URL(coordinator), loopback = ["localhost", "127.0.0.1", "::1"].includes(target.hostname);
   if (target.protocol !== "https:" && !(target.protocol === "http:" && loopback)) throw new Error("Remote coordinators must use HTTPS. Plain HTTP is accepted only for a coordinator on this computer.");
   const encryption = await generateRunnerKeyPair();
-  const response = await fetch(`${coordinator}/v1/runner/pair`, { method: "POST", headers: { "Content-Type": "application/json", ...sitesToken ? { "OAI-Sites-Authorization": `Bearer ${sitesToken}` } : {} }, body: JSON.stringify({ code, name: hostname(), platform: platform2(), arch: arch(), capabilities: await capabilities(), encryptionPublicKey: encryption.publicKey }) });
+  const response = await fetch(`${coordinator}/v1/runner/pair`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, name: hostname(), platform: platform2(), arch: arch(), capabilities: await capabilities(), encryptionPublicKey: encryption.publicKey }) });
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || "Pairing failed.");
-  const saved = { coordinator, machineId: value.machineId, token: value.token, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey, ...sitesToken ? { sitesToken } : {} };
+  const saved = { coordinator, machineId: value.machineId, token: value.token, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey };
   writeFileSync5(credentialPath, JSON.stringify(saved, null, 2), { mode: 384 });
   chmodSync3(credentialPath, 384);
   return saved;
@@ -726,7 +726,7 @@ if (args.has("once")) {
   console.log(`Paired ${credentials.machineId}.`);
   process.exit(0);
 }
-var headers = { Authorization: `Bearer ${credentials.token}`, "X-Open-Harness-Machine": credentials.machineId, "Content-Type": "application/json", ...credentials.sitesToken ? { "OAI-Sites-Authorization": `Bearer ${credentials.sitesToken}` } : {} };
+var headers = { Authorization: `Bearer ${credentials.token}`, "X-Open-Harness-Machine": credentials.machineId, "Content-Type": "application/json" };
 async function request(path, init = {}, retry = false) {
   for (; ; ) {
     try {
@@ -774,7 +774,7 @@ async function run(command3) {
     const localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]]));
     const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...payload.secrets }) };
     const coordinatorForContainer = credentials.coordinator.replace("://localhost", "://host.docker.internal").replace("://127.0.0.1", "://host.docker.internal");
-    prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { controlUrl: coordinatorForContainer, sitesToken: credentials.sitesToken });
+    prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : { controlUrl: coordinatorForContainer });
     const gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join4(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile"), HERMES_TUI: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join4(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
     gateway.on("event", (event) => void emit(command3, event));
     await gateway.start();
@@ -819,7 +819,7 @@ async function control(command3) {
       const profile = command3.payload.profile, direct = profile.computer.access === "direct", shared = join4(stateRoot, "shared"), agentRoot = join4(stateRoot, "agents", profile.id);
       mkdirSync5(shared, { recursive: true });
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env }, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]])), secretSource = { environment: () => ({ ...localSecrets, ...command3.payload.secrets || {} }) };
-      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command3.payload.coordinationToken || "", `probe-${command3.id}`, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator, sitesToken: credentials.sitesToken } : { sitesToken: credentials.sitesToken });
+      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command3.payload.coordinationToken || "", `probe-${command3.id}`, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : {});
       if (command3.kind === "probe-runtime") {
         const probeInput = { ...command3.payload.input || {} };
         if (probeInput.action === "computer") probeInput.desktop = profile.computer.desktop;

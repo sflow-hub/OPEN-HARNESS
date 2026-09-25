@@ -42,7 +42,7 @@ async function proxy(request: Request, context: Context) {
   const base = String(process.env.OPEN_HARNESS_INTERNAL_CONTROL_URL || 'http://127.0.0.1:4317').replace(/\/$/, '');
   const target = `${base}/${path.map(encodeURIComponent).join('/')}${incoming.search}`;
   const headers = new Headers();
-  for (const name of ['authorization', 'content-type', 'x-open-harness-machine', 'x-open-harness-agent', 'x-open-harness-run', 'oai-sites-authorization']) {
+  for (const name of ['authorization', 'content-type', 'x-open-harness-machine', 'x-open-harness-agent', 'x-open-harness-run']) {
     const value = request.headers.get(name); if (value) headers.set(name, value);
   }
   try {

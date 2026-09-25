@@ -6,7 +6,6 @@ const agentId = process.env.OPEN_HARNESS_AGENT_ID;
 const token = process.env.OPEN_HARNESS_AGENT_TOKEN;
 const socketPath = process.env.OPEN_HARNESS_CONTROL_SOCKET || "/run/open-harness/coord.sock";
 const controlUrl = process.env.OPEN_HARNESS_CONTROL_URL;
-const sitesToken = process.env.OPEN_HARNESS_SITES_TOKEN;
 const tools = [
   {
     name: "task",
@@ -28,7 +27,7 @@ async function call(path, input) {
   return new Promise((resolve, reject) => {
     const target = controlUrl ? new URL(`${controlUrl.replace(/\/$/, '')}${path}`) : null;
     const send = target?.protocol === 'https:' ? httpsRequest : httpRequest;
-    const req = send(target || { socketPath, path }, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, "X-Open-Harness-Agent": agentId, "X-Open-Harness-Run": process.env.OPEN_HARNESS_RUN_ID || "", ...(sitesToken ? { "OAI-Sites-Authorization": `Bearer ${sitesToken}` } : {}) } }, response => {
+    const req = send(target || { socketPath, path }, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, "X-Open-Harness-Agent": agentId, "X-Open-Harness-Run": process.env.OPEN_HARNESS_RUN_ID || "" } }, response => {
       let body = "";
       response.on("data", chunk => { body += chunk; });
       response.on("end", () => { try { const value = JSON.parse(body); if ((response.statusCode || 500) >= 400) reject(new Error(value.error || "Coordination request failed.")); else resolve(value); } catch { reject(new Error("Invalid coordination response.")); } });

@@ -11,8 +11,7 @@ maturity and what's outstanding before a 1.0, not a scheduled feature list.
 | Selected folders | Mature. Mounts named host folders with their configured read-only/read-write setting. |
 | Direct computer access | Least mature. Deliberately trades container isolation for host-native capability (screen, accessibility, an existing desktop session). Has the least real-world testing of the three modes — see [`runtime/VERIFICATION.md`](runtime/VERIFICATION.md). |
 | Self-hosted Docker Compose stack | Focused single-operator MVP implemented: combined dashboard/coordinator health, explicit remote-dashboard opt-in, graceful shutdown, and operations guidance. A clean live Compose pass remains a release gate. |
-| Desktop app (Windows/macOS/Linux) | Functional; signed-release infrastructure exists but depends on release secrets being provisioned per platform. |
-| Hosted "Open Harness Site" (Cloudflare/D1) | Earliest-stage surface. Currently authenticates via a single bearer control token, not per-user login — not yet suited to serving multiple independent operators. |
+| Desktop app (Windows/macOS/Linux) | Deferred. Builds from source and the signed-release workflow exists, but no release secrets are provisioned and it is not part of the beta. |
 
 ## Before 1.0
 
@@ -22,6 +21,23 @@ maturity and what's outstanding before a 1.0, not a scheduled feature list.
 - **Desktop CSP validation.** A Content-Security-Policy was recently defined for the Tauri webview; it needs a real `npm run desktop:dev` smoke test to confirm it doesn't break the dashboard before it ships in a signed release.
 - **Release secret provisioning.** Signed desktop builds require code-signing and notarization secrets to be present in GitHub Actions; unverified from a source checkout.
 
-## Out of scope for now
+## Deferred
 
-- Multi-tenant auth/isolation for the hosted site. Open Harness's trust model (see [SECURITY.md](SECURITY.md)) assumes a single trusted operator; making the hosted surface safe for independent, mutually-untrusted operators is a separate, larger effort than anything tracked here.
+The supported install is a local browser dashboard on Linux, run from source or through
+Docker Compose. These are understood but deliberately not part of the beta:
+
+- **macOS and Windows.** Three known blockers, none of them small: Node has no AF_UNIX on
+  Windows, so the agent coordination socket needs a named pipe or the HTTP control path;
+  Docker Desktop does not forward a Unix socket through a bind mount, so container agents on
+  either platform cannot reach the coordinator that way; and the test harness reaches for the
+  real Keychain on macOS. `.github/workflows/ci.yml` builds Linux only until these are fixed.
+- **Desktop installers and signed updates.** No code-signing, notarization, or updater keys
+  exist. `desktop-release.yml` is `workflow_dispatch`-only and unverified.
+- **A hosted multi-operator service.** The Cloudflare/D1 surface was removed in `0.4.0`: its
+  authentication was a single spoofable header with no per-user scoping, and it shipped inside
+  the local build. Open Harness's trust model (see [SECURITY.md](SECURITY.md)) assumes one
+  trusted operator; serving mutually-untrusted operators is a larger effort than anything here.
+- **Reproducible agent image.** `runtime/hermes/Dockerfile` pins the Hermes commit but floats
+  its apt and pip dependencies.
+- **Retention.** `events`, `runs`, and `runner_commands` grow without bound; there is no
+  pruning and no agent-deletion path that removes a container, profile, and history.
