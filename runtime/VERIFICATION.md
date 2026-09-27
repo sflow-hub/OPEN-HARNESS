@@ -44,6 +44,38 @@ credential-bearing raw backup was deleted after exporting safe evidence. Archive
 This restores a final-version installation; older-version upgrade/rollback and the
 24-hour soak remain separate release requirements.
 
+A supplementary **v0.3.0 data upgrade and backup rollback** check passes 128
+assertions. The unchanged historical backend at `cafc0a4` created its state through
+ordinary APIs; all 42 captured historical source hashes match that commit. Final6
+preserved 37 original rows across 15 populated tables, profiles/revisions, events,
+routines, task data, memory, skills, private/shared files, credentials and the operator
+token. The current entrypoint refused existing root-owned data without changing it;
+the documented application-volume ownership migration enabled startup. Restoring the
+pre-upgrade backup into a separate empty volume recovered schema 0 and original root
+ownership, excluded post-upgrade changes, and allowed the old backend to work again.
+All owned containers/volumes were removed. Safe evidence:
+`/private/tmp/open-harness-upgrade-v030-evidence-20260926.tar.gz`, SHA256
+`7ed52ca4fbe6694f2a38954b0fb8aa4d4c4700aca23ba70b150ec634c24bec39`.
+
+This is data/API/credential/backup compatibility evidence with **mocked run execution**.
+It does not exercise a historical Hermes image, old dashboard/installer, real inference
+or a desktop-runtime upgrade. Final6's service was invoked directly because its
+production supervisor correctly forces live mode. The full historical-upgrade release
+checkbox remains open; actual current-runtime/Compose evidence is recorded separately.
+
+The reviewed soak fixture also passes a **368.33-second rehearsal** on these exact
+final images: six actual core-tool runs and six conversation follow-ups, six pending
+approval browser reconnects (three approvals and three denials with file-mode checks),
+one coordinator restart with persistence, and actual desktop click/type at start,
+after restart and at end. Seven disk/health samples show at least 9.55 GB free and at
+most 129.1 MB application-data growth. All owned containers, volumes and networks were
+removed. Safe evidence:
+`/private/tmp/open-harness-soak-rehearsal-evidence-20260927.tar.gz`, SHA256
+`20b39b9265ca34dfad3439f6f1a758d35c710f04c0b334c285a35fb87bf4fcee`.
+This short run explicitly reports `twentyFourHoursCompleted:false`. The full
+86,400-second run was subsequently launched with 900-second task intervals;
+**24-hour acceptance remains pending** until its final result and cleanup pass.
+
 The final real-Hermes protocol fixture also passes tools, clarification, task MCP,
 approval/denial side effects and conversation continuity. Its exact-image evidence is
 `/private/tmp/open-harness-final6-evidence-20260926-UdSjwSPu/`. The image identities are:
@@ -76,6 +108,21 @@ normalization across two versioned extraction folders confirms the same applicat
 volume; environment and CLI project-name overrides still take precedence. The strict
 Ubuntu packaging checks pass 12/12. Evidence:
 `/private/tmp/open-harness-project-name-evidence-20260926-E6KX03ih/`.
+
+Local source checkpoint `550f765906b7451899a8b23e9b149f84f9f6d374` is committed
+in the isolated release-candidate worktree. Its actual Git-HEAD source archive contains
+**189** matching tracked files, preserves executable launcher modes, and excludes local
+state, conflict copies and collaboration artifacts. The original working tree and its
+index were preserved. Archive:
+`/private/tmp/open-harness-source-candidate-20260926-dlfh2zos/open-harness-self-hosted-0.4.0-beta.1.tar.gz`,
+SHA256 `bf4c77e871570b5757a139bc62e25672ac23aea23393223e18912016d65679b1`.
+Verified Trivy 0.74.0 scanned that exact extracted source for secrets at **all severities**
+with an empty ignore file: exit 0, zero detections. Evidence:
+`/private/tmp/open-harness-source-secret-evidence-20260926-3XulSe4t/evidence.tar.gz`, SHA256
+`57c87754cbf85b831bdc1abd0a77923d5f0003a206811939cd77aabb96ec5f05`.
+This source scan does not clear the separate image vulnerability gates. The pre-existing
+local images have source-hash evidence; a published candidate must still be rebuilt and
+validated from its final tagged source with matching image revision labels.
 
 **Release remains blocked:** resolve the image scan findings, validate native AMD64
 images, run Docker Desktop acceptance on Apple Silicon Mac, Intel Mac and Windows,

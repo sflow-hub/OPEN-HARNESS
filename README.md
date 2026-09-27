@@ -52,7 +52,7 @@ The workspace shows agents, conversations, files, credentials, runtime status, r
 
 Mac and Windows browser launchers and Docker Desktop requirements are documented in [Local browser installation](docs/LOCAL_BROWSER.md). Prebuilt release publication and native platform acceptance are still pending.
 
-See [Self-hosting operations](docs/SELF_HOSTING.md) for a complete authenticated reverse-proxy example, health checks, updates, diagnostics, and stopped-stack backup and restore.
+See [Self-hosting operations](docs/SELF_HOSTING.md) for remote-access requirements, health checks, updates, diagnostics, and stopped-stack backup and restore.
 Release candidates must also pass the [self-hosted beta checklist](docs/BETA_RELEASE.md).
 
 ### Develop from source
