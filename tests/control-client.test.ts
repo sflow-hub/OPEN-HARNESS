@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ControlClient } from '../lib/control-client';
+import { ControlClient, PairingRequiredError } from '../lib/control-client';
 
 function stubFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
   const original = globalThis.fetch;
@@ -80,3 +80,79 @@ test('every request carries a deadline so a silent coordinator cannot hang the p
     assert.equal(signal.aborted, false);
   } finally { stub.restore(); }
 });
+
+// Browser pairing: the Docker-backed install refuses an unpaired browser's bootstrap with
+// 401 + pairingRequired and hands the operator token only to a one-use code. The client
+// keeps that token per coordinator base and never retries without credentials.
+function withStorage<T>(run: (store: Map<string, string>) => Promise<T>) {
+  const store = new Map<string, string>();
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value); }, removeItem: (key: string) => { store.delete(key); } } });
+  return run(store).finally(() => { if (previous) Object.defineProperty(globalThis, 'localStorage', previous); else delete (globalThis as { localStorage?: unknown }).localStorage; });
+}
+const PAIR_KEY = 'open-harness.pair.v1:http://127.0.0.1:4317';
+const refused = () => Response.json({ error: 'Open Open Harness with its launcher to connect this browser.', pairingRequired: true }, { status: 401 });
+
+test('an unpaired bootstrap is a typed refusal with no unauthenticated retry', () => withStorage(async store => {
+  const stub = stubFetch(() => refused());
+  try {
+    const client = new ControlClient();
+    await assert.rejects(client.bootstrap(), (error: unknown) => error instanceof PairingRequiredError && /launcher/.test(error.message));
+    assert.equal(stub.calls.length, 1);
+    assert.equal(stub.calls[0].authorization, '', 'a browser with nothing stored sends no credential');
+    assert.equal(store.size, 0);
+  } finally { stub.restore(); }
+}));
+
+test('pairing exchanges the code on this coordinator only, keeps the token, and later bootstraps present it', () => withStorage(async store => {
+  const stub = stubFetch((url, init) => {
+    if (url.endsWith('/v1/browser/pair')) {
+      assert.equal(init?.method, 'POST');
+      assert.deepEqual(JSON.parse(String(init?.body)), { code: 'one-use-code' });
+      return ok({ token: 'paired-token', mode: 'live' });
+    }
+    if (url.endsWith('/v1/bootstrap')) return String(new Headers(init?.headers).get('authorization') || '') === 'Bearer paired-token' ? ok({ token: 'paired-token', mode: 'live' }) : refused();
+    return ok({});
+  });
+  try {
+    const client = new ControlClient();
+    const status = await client.pair('one-use-code');
+    assert.equal(status.token, 'paired-token');
+    assert.equal(client.token, 'paired-token');
+    assert.equal(store.get(PAIR_KEY), 'paired-token', 'stored under the coordinator base, for reopening');
+    const again = new ControlClient();
+    assert.equal((await again.bootstrap()).token, 'paired-token');
+    assert.equal(stub.calls.at(-1)?.authorization, 'Bearer paired-token');
+    assert.ok(stub.calls.every(call => call.url.startsWith('http://127.0.0.1:4317/')), 'the code never leaves this base');
+  } finally { stub.restore(); }
+}));
+
+test('a used or expired code is reported with the coordinator’s words and stores nothing', () => withStorage(async store => {
+  const stub = stubFetch(() => Response.json({ error: 'This browser connection link is invalid or expired. Open Open Harness with its launcher to get a new link.', pairingRequired: true }, { status: 401 }));
+  try {
+    await assert.rejects(new ControlClient().pair('stale-code'), /invalid or expired/);
+    assert.equal(store.size, 0);
+  } finally { stub.restore(); }
+}));
+
+test('a stored token the coordinator no longer accepts is dropped and the refusal surfaces through request()', () => withStorage(async store => {
+  store.set(PAIR_KEY, 'old-token');
+  const stub = stubFetch(url => url.endsWith('/v1/bootstrap') ? refused() : Response.json({ error: 'Invalid local control token.' }, { status: 401 }));
+  try {
+    const client = new ControlClient();
+    client.token = 'old-token';
+    await assert.rejects(client.request('/v1/runs'), (error: unknown) => error instanceof PairingRequiredError);
+    assert.equal(store.has(PAIR_KEY), false);
+    // The one re-bootstrap carried the stored token; nothing was tried without it.
+    assert.deepEqual(stub.calls.map(call => [call.url.replace(/^https?:\/\/[^/]+/, ''), call.authorization]), [['/v1/runs', 'Bearer old-token'], ['/v1/bootstrap', 'Bearer old-token']]);
+  } finally { stub.restore(); }
+}));
+
+test('a plain source dashboard is unchanged: no stored token, no header, and nothing stored afterwards', () => withStorage(async store => {
+  const stub = stubFetch(() => ok({ token: 'dev-token', mode: 'live' }));
+  try {
+    assert.equal((await new ControlClient().bootstrap()).token, 'dev-token');
+    assert.equal(stub.calls[0].authorization, '');
+    assert.equal(store.size, 0);
+  } finally { stub.restore(); }
+}));

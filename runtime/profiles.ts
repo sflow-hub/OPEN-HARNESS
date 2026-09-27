@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { DEFAULT_BOARD, DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, normalizeToolIds, runToolGrants, TASK_TOOL, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
 import type { Agent } from '../lib/types';
+import { isSandboxedComputer, UNSANDBOXED_COMPUTER_MESSAGE } from '../lib/agent-profile';
 
 export class ProfileError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
 export function validId(id: string) { if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new ProfileError('Invalid agent ID.'); return id; }
@@ -30,8 +31,7 @@ export function validateProfile(value: AgentProfile): AgentProfile {
   });
   const computerInput = (value.computer || DEFAULT_COMPUTER) as ComputerConfig;
   if (!['private', 'folders', 'direct'].includes(computerInput.access) || !['none', 'virtual', 'existing'].includes(computerInput.desktop)) throw new ProfileError('Choose a valid computer access and desktop mode.');
-  if (computerInput.desktop === 'existing' && computerInput.access !== 'direct') throw new ProfileError('Existing desktop control requires direct computer access.');
-  if (computerInput.desktop === 'virtual' && computerInput.access === 'direct') throw new ProfileError('A private virtual desktop requires an isolated workspace.');
+  if (!isSandboxedComputer(computerInput)) throw new ProfileError(UNSANDBOXED_COMPUTER_MESSAGE);
   const resources = computerInput.resources || DEFAULT_COMPUTER.resources;
   if (![resources.cpu, resources.memoryMb, resources.concurrency].every(Number.isFinite) || resources.cpu < .25 || resources.cpu > 64 || resources.memoryMb < 256 || resources.memoryMb > 262144 || !Number.isInteger(resources.concurrency) || resources.concurrency < 1 || resources.concurrency > 32) throw new ProfileError('Computer resource limits are outside the supported range.');
   const folders = (computerInput.folders || []).slice(0, 50).map(folder => {
@@ -56,9 +56,12 @@ export class Profiles {
   defaults(): { model: ModelChoice; revision: number } { const row = this.db.prepare('SELECT revision,json FROM workspace_settings WHERE id=1').get() as { revision: number; json: string } | undefined; return row ? { model: JSON.parse(row.json), revision: row.revision } : { model: DEFAULT_MODEL, revision: 0 }; }
   setDefaults(model: ModelChoice, revision: number) { const current = this.defaults(); if (revision !== current.revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409); this.db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(revision + 1, JSON.stringify(validateModel(model))); return this.defaults(); }
   effective(profile: AgentProfile): ModelChoice { const source = profile.model.inherit ? this.defaults().model : profile.model; return { provider: source.provider, model: source.model, credentialRef: source.credentialRef, baseUrl: source.baseUrl }; }
-  save(input: AgentProfile) {
+  save(input: AgentProfile, deferComputer = false) {
     const profile = validateProfile(input), current = this.get(profile.id);
     if (profile.revision !== (current?.revision || 0)) throw new ProfileError('This profile was changed elsewhere. Reload the saved profile before saving again; your draft is still here.', 409);
+    // A transfer validates the destination now but keeps the current assignment until verification.
+    // This also preserves a blocked legacy profile if conversion to a remote sandbox fails.
+    if (deferComputer && current) profile.computer = current.computer;
     profile.revision++;
     this.db.exec('BEGIN IMMEDIATE');
     try { this.db.prepare('INSERT INTO agent_profiles VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(profile.id, profile.revision, JSON.stringify(profile)); this.db.prepare('INSERT INTO profile_revisions VALUES(?,?,?)').run(profile.id, profile.revision, JSON.stringify(profile)); this.db.prepare(`INSERT INTO agents(id,name,role,instructions,config_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role=excluded.role,instructions=excluded.instructions,updated_at=excluded.updated_at`).run(profile.id, profile.name, profile.role, profile.prompt.text, '{}', new Date().toISOString()); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; }

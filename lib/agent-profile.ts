@@ -5,6 +5,9 @@ export type ModelChoice = { provider: string; model: string; credentialRef: stri
 export type ConnectorConfig = { id: string; name: string; command: string; args: string[]; secretRef: string; enabled: boolean };
 export type ComputerAccess = 'private' | 'folders' | 'direct';
 export type DesktopMode = 'none' | 'virtual' | 'existing';
+// Legacy values stay readable so operators can repair saved profiles without losing drafts.
+export const UNSANDBOXED_COMPUTER_MESSAGE = 'Direct access to the signed-in computer is not sandboxed and is disabled. Open Agent settings → Computer and choose a private workspace or private agent desktop.';
+export function isSandboxedComputer(computer: ComputerConfig) { return ['private', 'folders'].includes(computer.access) && ['none', 'virtual'].includes(computer.desktop); }
 export type FolderGrant = { id: string; path: string; mode: 'read' | 'write' };
 export type ComputerConfig = {
   machineId: string;
@@ -15,6 +18,7 @@ export type ComputerConfig = {
   resources: { cpu: number; memoryMb: number; concurrency: number };
 };
 export type MachineInfo = {
+  folderExports?: Array<{ path: string; mode: 'read' | 'write' }>;
   id: string; name: string; platform: 'linux' | 'darwin' | 'win32' | 'unknown'; arch: string;
   status: 'online' | 'offline' | 'pairing' | 'revoked'; lastSeenAt: string | null;
   local: boolean; reservedAgentId: string | null; assignedAgents: number;
@@ -119,7 +123,7 @@ export function profileAgent(profile: AgentProfile, memory: string[] = []): Agen
 export function runToolGrants(profile: AgentProfile): string[] {
   const servers = new Set([COORDINATION_SERVER, ...profile.connectors.filter(connector => connector.enabled).map(connector => connector.name)]);
   return normalizeToolIds(profile.allowedTools, profile.connectors.map(connector => connector.name)).filter(id =>
-    (profile.computer.desktop !== 'none' || id !== 'computer_use') &&
+    ((isSandboxedComputer(profile.computer) && profile.computer.desktop === 'virtual') || id !== 'computer_use') &&
     (!id.startsWith('mcp_') || servers.has(mcpServerOf(id) || ''))
   );
 }

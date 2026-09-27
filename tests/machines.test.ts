@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { Machines, MachineError } from '../runtime/machines';
 import { generateRunnerKeyPair } from '../lib/runner-crypto';
+import { draftProfile } from '../lib/agent-profile';
 
 // The Machines constructor probes dockerStatus() for the 'local' machine's capabilities
 // (machines.ts:48-50); on a host with a wedged Docker daemon that costs 5s per instance and
@@ -10,6 +11,20 @@ import { generateRunnerKeyPair } from '../lib/runner-crypto';
 process.env.OPEN_HARNESS_MOCK ??= '1';
 
 function database() { const db = new DatabaseSync(':memory:'); db.exec('CREATE TABLE agent_profiles(id TEXT PRIMARY KEY,json TEXT NOT NULL)'); return db; }
+
+test('computer readiness requires Docker for both sandboxed access modes', () => {
+  const db = database(), machines = new Machines(db);
+  try {
+    const paired = machines.pair({ code: machines.createPairing({ name: 'Host only', platform: 'linux' }, 'https://coordinator.example').code, capabilities: { container: false, direct: true, desktop: false, virtualDesktop: false } });
+    const profile = draftProfile({ id: 'atlas', name: 'Atlas', role: 'Assistant', description: '', tone: 0, instructions: '', memory: [] });
+    for (const access of ['private', 'folders', 'direct'] as const) {
+      const result = machines.test(paired.machineId, { ...profile, computer: { ...profile.computer, access } });
+      assert.equal(result.ok, false);
+      if (access === 'direct') assert.match(result.message, /not sandboxed and is disabled/);
+      if (access !== 'direct') assert.match(result.message, /Container execution is unavailable/);
+    }
+  } finally { db.close(); }
+});
 
 test('pairing codes expire and remain single use', () => {
   const db = database(), machines = new Machines(db), pairing = machines.createPairing({ name: 'VPS', platform: 'linux' }, 'https://coordinator.example');
@@ -74,4 +89,23 @@ test('a finished command stops carrying the credentials it was dispatched with',
   assert.doesNotMatch(stored.payload_json, /encryptedSecrets|ATLAS_KEY/);
   // What a later lookup still needs is kept, so a trailing event can still be matched to its run.
   assert.equal(machines.command(command.id)?.runId, 'run-1');
+});
+
+test('old runners cannot advertise native access or receive a persisted unsafe command', () => {
+  const db = database(), machines = new Machines(db);
+  try {
+    const paired = machines.pair({ code: machines.createPairing({ platform: 'linux' }, 'https://example.test').code, capabilities: { container: true, direct: true, desktop: true, virtualDesktop: true } });
+    assert.equal(machines.get(paired.machineId).capabilities.direct, false);
+    assert.equal(machines.get(paired.machineId).capabilities.desktop, false);
+    const profile = draftProfile({ id: 'atlas', name: 'Atlas', role: 'Assistant', description: '', tone: 0, instructions: '', memory: [] });
+    const legacy = { ...profile, computer: { ...profile.computer, access: 'direct' as const, desktop: 'existing' as const } };
+    for (const kind of ['run', 'probe-tools', 'probe-models', 'probe-runtime', 'import-agent']) {
+      const payload = kind === 'run' ? { snapshot: legacy } : { profile: legacy };
+      assert.throws(() => machines.enqueue(paired.machineId, 'atlas', kind, payload), /not sandboxed and is disabled/);
+      const command = machines.enqueue(paired.machineId, 'atlas', kind, {});
+      db.prepare('UPDATE runner_commands SET payload_json=? WHERE id=?').run(JSON.stringify(payload), command.id);
+      assert.deepEqual(machines.poll(paired.machineId), []);
+      assert.equal(machines.command(command.id)?.state, 'failed');
+    }
+  } finally { db.close(); }
 });

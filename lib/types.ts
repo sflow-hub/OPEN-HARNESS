@@ -29,6 +29,7 @@ export type Message = {
   id: string;
   runId?: string;
   eventCursor?: number;
+  settled?: boolean;
   role: "user" | "assistant";
   content: string;
   activities?: Activity[];

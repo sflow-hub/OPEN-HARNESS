@@ -1,0 +1,53 @@
+# Isolated security remediation candidate
+
+This is an evaluation candidate, not a released or scan-approved runtime. It keeps
+Hermes at `939e45c91d751fadd94dcd1b873ac3cb44846213` and runtime protocol contract 5.
+No reasoning-loop source is modified.
+
+The original contract-5 ARM64 image reported 363 HIGH and 23 CRITICAL vulnerability
+occurrences with Trivy 0.74.0 on September 26, 2026. The release gate remains unchanged;
+no findings are ignored, and a new scan plus real tool/desktop acceptance is required.
+
+- Base: Python 3.12.14 on Debian Trixie, using the recorded multiarch index digest.
+  The previous base was Python 3.12 on Bookworm. Trixie's GLib
+  `2.84.4-3~deb13u5` fixes the seven scanned GLib advisories. Other runtime libraries,
+  including Trixie's current libxml2, may still fail the gate.
+- Node: official Node 24.21.0 Linux distribution, copied from its digest-pinned
+  Trixie image. The Debian Node/npm bootstrap and NodeSource installer are omitted.
+  This avoids keeping the replaced distribution's older JavaScript dependencies
+  and does not introduce a second distro Python through NodeSource.
+- npm: 11.20.0 replaces 11.19.0. Its verified official archive bundles
+  `brace-expansion` 5.0.9, `ip-address` 10.5.0 and `tar` 7.5.22, which meet the fixes
+  listed by the baseline scan. Whole-package installation preserves npm consistency.
+- Python: `httpx2` 2.7.0 and its matching `httpcore2` 2.7.0 become 2.12.0.
+  `httpx2` 2.12.0 requires `httpcore2==2.12.0`; MCP 2.0.0 permits `httpx2>=2.5.0`.
+  CVE-2026-84381 is fixed in 2.10.0; CVE-2026-84382 requires httpx2 2.12.0.
+  The patch checks the original manifest SHA256 and replaces only its three
+  `httpx2==2.7.0` declarations (dev, MCP, computer-use extras). A separate original
+  SHA256 check covers the one matching requirement in `tools/lazy_deps.py`;
+  otherwise real computer-use startup attempts to restore the vulnerable pin.
+  Both files are verified before either is written. No control flow changes.
+  Constraints enforce the matching pair during installation, and `pip check`
+  plus real protocol and desktop fixtures must pass.
+- Compiler/header packages are transient build dependencies for the browser native
+  addon installation and are purged in the same layer. The MVP runtime retains
+  Python, Node, shell, git, curl and ripgrep; it does not promise an installed C/C++
+  development environment or an unchanged inventory of OS utilities. Browser
+  installer outputs stay intact. Chromium, agent-browser 0.37.1, Camofox 1.16.0,
+  Xvfb, Openbox, DBus and CUA driver 0.28.2 remain installed.
+- Native-library inspection found that the slim Python base ships `_tkinter`
+  without its Tcl/Tk shared libraries. `libtk8.6` is explicitly retained for that
+  shipped extension. The npm browser package also ships a separate musl prebuild;
+  the glibc runtime selects its glibc addon, which must pass a real SQLite check.
+- Trixie creates `/home/hermes` with mode `0700`; production containers run as the
+  coordinator's UID and cannot traverse that image-owned parent. Its mode is
+  explicitly `0755`, as in the original Bookworm image. Per-agent profile and
+  private mounts retain their separate restricted permissions. Real protocol and
+  desktop fixtures must exercise the mounted profile as the coordinator UID.
+
+References: [Debian GLib tracker](https://security-tracker.debian.org/tracker/source-package/glib2.0),
+[Debian libxml2 tracker](https://security-tracker.debian.org/tracker/source-package/libxml2),
+[pinned Hermes manifest](https://github.com/NousResearch/hermes-agent/blob/939e45c91d751fadd94dcd1b873ac3cb44846213/pyproject.toml),
+[httpx2 2.12.0 metadata](https://pypi.org/pypi/httpx2/2.12.0/json),
+[MCP 2.0.0 metadata](https://pypi.org/pypi/mcp/2.0.0/json),
+[npm 11.20.0 metadata](https://registry.npmjs.org/npm/11.20.0).

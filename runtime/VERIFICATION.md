@@ -1,5 +1,262 @@
 # Runtime verification
 
+## Local browser deployment — September 26, 2026 (integration checkpoint)
+
+The Docker browser work is **not yet a published or platform-accepted Mac/Windows
+release**. The following evidence is from Ubuntu 24.04 ARM64, Node 22.23.3, Docker
+Engine 29.8.1 and Compose 5.5.1. It exercises source Compose with already-built images
+transferred into the private engine, not an anonymous registry pull or downloaded
+browser archive. The scripted local model fixture verifies transport/tools/state;
+no paid provider or model-reasoning acceptance was performed here.
+
+Current source changes include mandatory one-use CLI/browser pairing for Compose,
+minimal public readiness separate from authenticated diagnostics, digest-pinned runtime
+setup without a source-build fallback, and host-folder grants restricted to exact
+explicitly exported outer mount roots with a read-only ceiling. Subfolders require
+their own export. Compose rejects localhost-only host model URLs before provider
+requests or profile writes; a host-model relay is not implemented. Claude delivered the
+browser client, host-folder editor and launchers. The original delivery passes the
+production build and all **110** desktop/mobile browser tests in the Ubuntu integration
+copy (`/private/tmp/oh-browser-claude1717.log`). Pairing UI coverage uses mocked routes;
+actual launcher/pairing acceptance and review corrections remain in progress.
+
+Actual `tests/compose-smoke.mjs` acceptance passed against runtime contract **4**:
+
+- Unauthorized, expired and replayed pairing attempts fail; authenticated control,
+  forged-Host refusal and nested-agent operator-token denial pass. The private engine
+  exposes no TCP listener, and the coordinator/data use UID 1000.
+- Actual Hermes file, clarification, task MCP, denied-tool and prior-conversation flows
+  work. A saved credential is rotated, then used successfully by subsequent real requests.
+- Physical exported folders with spaces preserve read-only/read-write grants for the
+  selected agent. Ungranted peers, `/data`, and unexported descendant paths are denied.
+- Browser-first accessibility clicks, typing with DOM readback and PNG screenshots work
+  in the private desktop. Two agents have separate private files and windows; Shared
+  files remain intentionally shared. Graceful stop terminates active work.
+- A stopped data archive restores into an independently named **empty** application
+  volume. All **6,725** file/directory entries match hashes, ownership and permissions
+  before reopening. Profiles, rotated credentials, private/shared files, memory, skills,
+  tasks and history survive. A real conversation uses the restored credential, uncertain
+  interrupted work is not replayed, and actual desktop input works again after restore
+  with a fresh private-engine cache.
+
+This gate exposed and fixed an unauthenticated-bootstrap health probe and a private
+accessibility startup-order defect. The session now enables accessibility before any
+application launches; old images require a full contract-4 rebuild or the matching
+release image, not a policy-only patch. The permanent fixture launches Chromium before
+its first computer-driver call so doctor initialization cannot mask this regression.
+
+The full Node checkpoint passes **183/183**, typecheck and full lint. Subsequent release-packaging checks pass **11/11**, scoped lint and actionlint, including Docker 29 containerd index/configuration-digest separation reproduced from real BuildKit history. No registry mutation was performed. Test output is
+`/private/tmp/oh-browser-local-runtime-checks-4.log`. Exact runtime/helper hashes and
+Docker image IDs plus their separate BuildKit configuration digests are in
+`/private/tmp/open-harness-browser-acceptance-evidence-20260926.tar.gz`. It contains
+safe evidence/logs/screenshots only; the credential-bearing backup and raw state are
+excluded. All acceptance containers, volumes and networks were removed. Isolated test
+image tags are retained for final integration; prior installation tags are unchanged.
+
+Production dependency audit on September 26 reports **0** known vulnerabilities.
+
+Outstanding before release: finish launcher review corrections and actual browser pairing acceptance;
+package the final committed source; run native AMD64/ARM64 build/scan/publish and
+anonymous downloaded ZIP/tar/launcher acceptance; make the release image packages
+public; and test Docker Desktop on Apple Silicon Mac, Intel Mac and Windows. Current
+Mac access is a VM without hypervisor support (`kern.hv_support=0`), so it cannot serve
+as Docker Desktop acceptance. Signed native desktop installers remain separate. The
+release workflow implementation is preparation, not evidence that those gates ran.
+
+## Sandboxed computer control — September 26, 2026
+
+This follow-up supersedes the native Direct Computer Access availability described in
+older entries. Computer control uses the existing per-agent Docker boundary and a
+private Linux Xvfb/Openbox desktop. Shared workspace files remain shared. Native
+Direct / Existing desktop profiles stay readable for explicit conversion but are
+rejected at save, run creation/start, discovery/probes, transfer, runner execution and
+persisted command polling. No host Python or desktop-session fallback remains in the
+coordinator, runner or installers. Saved local native PID identities still receive
+upgrade cleanup. Already admitted work on older remote runner binaries requires
+stopping and updating those runners.
+
+Codex and Claude Desktop agreed this contract after reviewing native process sandboxing:
+controlling the operator's existing desktop can drive applications outside a process
+sandbox. A sandbox-exec prototype denied an ungranted file, but does not establish desktop
+isolation; it was not shipped. No new sandbox dependency or system-wide security bypass
+was added. These changes alter container-isolation enforcement and legacy execution
+compatibility, not the single-trusted-operator authentication model.
+
+Actual Ubuntu 24.04 ARM64 checks used Node 22.23.3, Docker 29.8.1, the source snapshot at
+`/home/developer/src/open-harness-desktop-sandbox-20260926`, and the already rebuilt,
+pinned `open-harness-hermes:sandbox-20260926` image. No image source changed in this pass.
+
+- `tests/real-desktop-smoke.mjs` now uses the production `ensureContainer` factory:
+  real Chromium screenshot, coordinate click, accessibility-token click and typing
+  verified by DOM readback; stale-token refusal; two agents' separate X11/D-Bus desktop
+  sessions and windows; host/other-agent private sentinel denial; own credential access;
+  Shared read/write; private-desktop restart; disabling desktop access replaces the
+  container and removes its display while preserving private files. Evidence:
+  `/tmp/open-harness-desktop-smoke-byhrfI/evidence.json`.
+- The real filesystem sandbox gate still passes all eight check groups, including kernel
+  limits and folder-grant revocation. Evidence:
+  `/tmp/open-harness-sandbox-XoPa0o/evidence.json`.
+- The real pinned Hermes gateway passes file, clarification, task MCP, context continuity,
+  denied/approved terminal actions, and cleanup with a scripted provider. Evidence:
+  `/tmp/open-harness-real-smoke-6rbP5t/evidence.json`.
+- The actual standalone installed Linux runner passes pairing, user service, encrypted
+  credential dispatch/rotation, transfer, remote file/input/MCP/memory/skills, restart,
+  event replay, revocation and cleanup. Evidence:
+  `/tmp/open-harness-runner-smoke-YUkS6p/evidence.json`.
+
+Runtime Node tests: 165/165, including legacy native-process recovery, rejection before
+spawn, blocked old-runner capabilities and persisted commands, direct runner rejection,
+and safe staging of legacy-profile conversion to a remote sandbox. The final combined
+tree passes typecheck, full lint, production build and all 94 desktop/mobile browser
+cases on Ubuntu ARM64. Claude independently passes the same Node165/browser94 gates on
+Ubuntu x86-64. The seven delivered UI files match Claude's SHA-256 hashes; all 160 files
+in the final source snapshot match the Ubuntu checkout.
+
+Computer settings are available without Advanced features. The UI offers a private
+agent desktop only on a capable Linux machine, explains unsupported machines, and
+preserves legacy settings until explicit conversion. Desktop control remains a separate
+tool grant: the browser acceptance enables it through the guidance beside the desktop
+switch and verifies both saved settings. No permission is granted automatically.
+
+Evidence, screenshots and final logs are collected locally in
+`/private/tmp/open-harness-desktop-sandbox-evidence-20260926.tar.gz`; the source snapshot
+and manifest are `/private/tmp/open-harness-desktop-sandbox-source-20260926.tar.gz` and
+`/private/tmp/open-harness-desktop-sandbox-source-20260926.tar.sha256.json`.
+All fixture containers and the temporary installed-runner service were removed.
+These scripted fixtures verify enforcement and transport, not model reasoning or paid
+provider behavior. macOS/Windows host-desktop isolation is not offered or claimed.
+
+## Per-agent sandbox follow-up — September 26, 2026
+
+Checked the current working tree with Claude's delivered UI in place. The requested
+boundary keeps Shared files available to all agents while isolating private files and
+ungranted host paths. Validation used a separate Ubuntu 24.04 ARM64 checkout at
+`/home/developer/src/open-harness-sandbox-20260926`, Node 22.23.3 and Docker 29.8.1.
+`npm run harness:setup` rebuilt the pinned runtime under the separate
+`open-harness-hermes:sandbox-20260926` tag; existing installation images were preserved.
+
+Fixed host-side profile temporary writes that could follow agent-planted links, hardened
+workspace imports/uploads and file previews (including a link swap at open time), and
+regenerated the standalone runner. Both sandboxed access modes now require Docker in
+readiness and transfer validation. Folder mounts reject files, sockets and linked paths
+before replacing a container. These are container-boundary and host-file-access changes;
+At this earlier checkpoint Direct Computer Access remained an explicit unsandboxed mode; the subsequent computer-control follow-up above disables it.
+
+The new `tests/real-sandbox-smoke.mjs` passed eight groups of checks with real production
+containers and no model calls: separate private/profile mounts and selected credentials;
+refusal of individual files, Unix sockets and links planted by an agent as folder grants;
+intentional shared read/write files; non-root UID, zero effective capabilities, seccomp,
+no-new-privileges and kernel CPU/memory/PID limits; immutable managed policy; resistance
+to profile temporary-link writes; read-only/read-write folder enforcement; replacement
+and mount revocation on return to Private workspace; and shutdown cleanup. Related checks
+share groups. No agent received a Docker socket or could see the host sentinel or the
+other agent's private paths. The real sandbox smoke is included in the runtime CI workflow.
+
+The final Node suite passes **163/163**, with typecheck, full lint, production build and
+diff checks passing. The unchanged UI passes **86/86** desktop/mobile browser cases with
+the mock runtime. The rebuilt image also passes the real Hermes gateway smoke: allowed
+file tools, denied Terminal dispatch, clarification, authenticated task MCP, distinct
+sessions, prior context, explicit approval deny/approve and container shutdown. No paid
+provider was used. Test containers were removed by their exact IDs.
+
+Evidence: `/tmp/open-harness-sandbox-l9ASyy/evidence.json` and
+`/tmp/open-harness-real-smoke-b4GgFl/evidence.json` on the VM, plus
+`/private/tmp/open-harness-sandbox-evidence-20260926.tar.gz` locally. This establishes the
+tested Linux filesystem/process boundary, not a kernel security certification or new
+macOS/Windows Docker acceptance. Shared files and outbound networking (including reachable
+host services) remain available. Saved permissions apply to the next task; stop active
+work first when tightening access must be immediate. See `SECURITY.md` for these limits.
+
+## Recent-commit integration — September 25, 2026
+
+This pass starts at `main@3415d71` on `codex/recent-commit-integration`. It keeps the
+new saved Credentials, teams/projects, canonical MCP tool names, encrypted runner dispatch,
+Hermes pin and approval protocol. Removed hosted/native-mobile surfaces stay removed.
+Earlier acceptance on the separate `codex/mvp-readiness` branch is not evidence for this tree.
+The VM uses the isolated image tag `open-harness-hermes:integration-20260925`; its existing
+default image is preserved. Updated installations must prepare runtime contract 3.
+
+Validation ran on the separate Ubuntu 24.04 ARM64 VM with Node 22 and Docker, using isolated
+source checkouts and disposable state. The untouched incoming tree passed 111 Node tests,
+52 browser tests, typecheck, lint and build; new regression cases then exposed failures that
+those suites did not cover. The integrated backend passes 158 Node tests, typecheck, full lint
+and production build. Workflow actionlint, shell/Python syntax and diff checks also pass.
+With the UI patch applied (below), the same tree also passes 86 production browser cases.
+
+Current real integration evidence uses the pinned Hermes runtime and scripted local
+OpenAI-compatible providers. No paid provider was called during this pass; these results
+establish tool/transport/state behavior, not model reasoning:
+
+- **Actual Docker gateway:** file tools, clarification, canonical task-board MCP dispatch,
+  denied tools, distinct session IDs and prior-conversation context work. An explicitly manual
+  approval test denies and then approves a flagged chmod; the file stays 0600 until approval,
+  then changes to 0666. The shipped `smart` guardian policy remains unchanged.
+- **Cold production Compose:** fresh private engine storage starts without a Hermes image;
+  setup builds runtime contract 3 through the dashboard proxy in 227846 ms. The coordinator
+  and data run as UID 1000. Saved credentials authenticate actual requests, rotate between runs
+  and preserve metadata. Team-scoped tasks, file/input/context/history, restart persistence
+  and graceful shutdown pass. The engine has no TCP listener. Actual nested agents cannot
+  reach dashboard bootstrap through its container address or published port, even with a
+  loopback Host header. Production CSP and forged-Host checks pass.
+- **Installed runner:** the downloaded standalone runner and its Node runtime run as a
+  disposable Linux user service. Encrypted command delivery, credential authentication and
+  rotation, remote memory/skill edits and tool reads, transfer, sessions, replay, restart and
+  revocation pass. The installer persists the selected image and replaces stale contracts.
+- **Persistent workflows:** Hermes writes canonical memory and a skill, then reads both in a
+  new session and after a coordinator restart. Shared-team named delegation returns the child
+  artifact/result. A persisted one-minute routine dispatches on its timer after restart.
+- **Private virtual desktop:** actual Chromium navigation, accessibility snapshots, PNG
+  screenshots, window capture, pixel/AX clicks with confirmed DOM effects, typing, stale-token
+  refusal and restart pass with pinned CUA 0.28.2. This is the container's virtual desktop,
+  not host-native Direct Computer Access.
+- **Container ownership:** admission and crash recovery verify state ownership before reuse, replacement or stop. Same-name agents in separate workspaces get distinct container names, and long IDs retain distinct names and profile paths; legacy containers are adopted only when their private mounts prove ownership. Cleanup failures exit nonzero. The final actual gateway/approval gate passed after these checks were added.
+- **Runtime updates:** full images write a contract marker. A policy-only rebuild succeeds on
+  that base and refuses an old markerless image instead of relabeling outdated dependencies.
+
+The tested UI/client patch under `work/current-ui-review/` **was applied to the shared
+checkout by the UI owner on September 25 at 17:45 MDT**, on the user's explicit instruction
+and under the ownership protocol. Before anything ran, all nine shared originals matched
+`original-hashes.json`, the patch matched the SHA-256 in `checks.json`, `git apply --check`
+was clean, and all eleven results matched `updated-hashes.json` byte for byte. Three new
+regressions had first failed on unchanged main: a rejected model draft overwrote workspace
+settings, inherited credentials filtered by the wrong provider, and long setup requests used
+the ordinary 30-second deadline. The patch also covers clarification replies, concurrent
+conversations and complete history/event recovery.
+
+The applied tree was then validated on Linux (Ubuntu 24.04 x86-64 sandbox, Node 22.22.2,
+Playwright 1.63.0 with its Chromium): 158/158 Node tests, typecheck, full lint, the production
+build, and `npm run test:browser` **86/86** desktop+mobile cases — three consecutive full
+runs, two of them under concurrent CPU load from the Node suite. That load surfaced three
+races the reviewed candidate did not cover, fixed in UI-owned files and covered by the suite:
+Workspace settings compared the form against a snapshot taken when the dialog opened, so the
+coordinator's model import landing afterwards flagged an untouched form as edited (a spurious
+"Discard unsaved settings?") and overwrote an edit in progress — the baseline now tracks the
+saved model, a late import keeps an in-progress edit, and Discard restores the saved values;
+the workspace was only written to browser storage 800 ms after its last change, so leaving
+during a streaming run lost that conversation locally until the coordinator rebuilt it — it
+is now also flushed on `pagehide`; and the task label field re-rendered its parsed labels and
+swallowed each comma as it was typed, a fix lost in the 0.4.0 rebase — it now keeps what is
+typed, with the regression carried into `integration-regressions.spec.ts`. The legacy-reply
+recovery spec seeds storage from a one-shot init script so the previous document's pending
+save cannot land on top of the seed. Twelve files were delivered (the eleven patch paths plus
+`components/task-manager.tsx`); every one was re-read from the shared folder and matched its
+SHA-256, recorded in `work/current-ui-review/checks.json` under `applied`. Docker-backed and
+paid-provider checks were not part of this UI validation.
+
+Evidence is retained on the VM under `/home/developer/open-harness-evidence/` and in local
+`/private/tmp/open-harness-integration-{root,docker,runner}-evidence-20260925.tar.gz` archives.
+The opt-in scripts are `tests/{real-hermes,compose,real-runner,real-desktop,real-workflows}-smoke.mjs`;
+`.github/workflows/runtime.yml` runs the container/Compose/workflow/desktop gates in CI. The
+installed-runner gate intentionally requires a disposable Linux user session. Test resources
+are cleaned up by their exact IDs/projects; no global Docker prune is used.
+
+Packaged-release acceptance, image vulnerability scans, backup/restore and soak testing,
+paid-provider reasoning, third-party MCP servers, host-native desktop access and signed
+macOS/Windows installers are separate gates and are not claimed here. The Intel release job
+now uses `macos-15-intel`, following the [GitHub runner documentation](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+
+The entries below are historical reports with their original scope and limitations.
+
 ## Public beta release-candidate implementation pass — September 24, 2026
 
 Implemented and verified without paid inference:
@@ -267,3 +524,28 @@ Verified with Node 22 and the pinned Hermes source interface (`v2026.9.11`,
   switches, tool grants, inline MCP configuration, failed-save retry, reload
   persistence, stale-save recovery and keyboard navigation.
 - `npm run lint`, `npm run typecheck`, `npm run build` and `git diff --check`: passed.
+
+
+## Independent integrated-change review — September 26, 2026
+
+A fresh isolated Ubuntu ARM64 review used Node 22.23.3 and Docker 29.8.1. Captured
+source passed 162 Node tests, typecheck and full lint. The production build and
+86 desktop/mobile browser cases passed on an earlier phase with identical UI source.
+Actual pinned Hermes container acceptance passed clarification, task MCP, context,
+tool policy, manual approval denial/approval and cleanup; the supplemental actual
+sandbox gate passed eight checks, including folder access and revocation. These
+checks used scripted local providers or no model calls, not paid inference.
+
+Two additional reproductions found remaining integration defects: model validation
+can outlast the client's 30-second deadline and commit after the UI reports failure;
+and a run finishing between the bootstrap history and run-list reads can leave an
+empty reply with no follower. No application fixes were made by this review.
+
+The shared checkout changed during verification. Runtime fixes and runner
+regeneration were incorporated into successive snapshots. After the last passing
+supplemental snapshot, further changes arrived in runtime/computer-validation.ts
+and runtime/hermes.ts; those later bytes are not covered by this review's final
+results. Exact manifests, source archives, reproducers, logs and the review are in
+work/integration-review-20260926/. Two unreadable duplicate local filenames were
+excluded and preserved. Compose, installed-runner, private-desktop and scheduled
+workflow gates were not repeated; their earlier evidence retains its original scope.

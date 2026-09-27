@@ -4,7 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createConnection } from "node:net";
 import { dockerStatus, stateSharing } from "./hermes";
-import { onboardingStatus, imageContract, HERMES_IMAGE } from "./readiness";
+import { onboardingStatus, imageContract, HERMES_IMAGE, prepareRuntime } from "./readiness";
 import { chooseStateDir, withEnvValue } from "./state-dir";
 
 const argv = process.argv.slice(2);
@@ -112,7 +112,7 @@ if (command === "help") {
 } else if (command === "setup") {
   const docker = dockerStatus(false); if (!docker.available) { console.error(docker.message); process.exitCode = 1; }
   else {
-    run("docker", ["build", "-f", "runtime/hermes/Dockerfile", "-t", HERMES_IMAGE, "."]);
+    try { await prepareRuntime(); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
     if (!process.exitCode) {
       // The sharing probe runs a container from the image, so it has to come after the build.
       const choice = chooseStateDir({
@@ -144,10 +144,9 @@ if (command === "help") {
 } else if (command === 'runner-install') {
   const docker = dockerStatus(false);
   if (docker.available && imageContract() !== 'current') {
-    const built = spawnSync('docker', ['build', '-f', 'runtime/hermes/Dockerfile', '-t', HERMES_IMAGE, '.'], { cwd: project, stdio: 'inherit' }); if (built.status !== 0) process.exit(built.status || 1);
+    try { await prepareRuntime(); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); }
   }
-  const nativeReady = spawnSync(process.env.HERMES_PYTHON || 'python3', ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore', timeout: 8_000 }).status === 0;
-  if (!docker.available && !nativeReady) { console.error('This machine needs Docker for isolated agents or a local Hermes installation for direct access.'); process.exit(1); }
+  if (!docker.available) { console.error('This machine needs Docker for sandboxed agents. Install and start Docker, then retry.'); process.exit(1); }
   const forwarded = process.argv.slice(3), paired = spawnSync(process.execPath, ['--import', 'tsx', 'runtime/runner.ts', ...forwarded, '--once', '1'], { cwd: project, stdio: 'inherit' });
   if (paired.status !== 0) process.exitCode = paired.status || 1;
   else if (process.platform === 'linux') {

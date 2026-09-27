@@ -16,6 +16,8 @@ async function seed(request: APIRequestContext) {
   // Leave no credentials behind; specs run in one shared control service.
   const { credentials } = await (await request.get(control + '/v1/credentials', { headers })).json();
   for (const item of credentials as Array<{ ref: string }>) await request.delete(control + `/v1/credentials/${item.ref}?force=1`, { headers });
+  const defaults = await (await request.get(control + '/v1/workspace/model', { headers })).json();
+  await request.put(control + '/v1/workspace/model', { headers, data: { revision: defaults.revision, model: { provider: 'xai', model: 'grok-4.6', credentialRef: '', baseUrl: '' } } });
 }
 
 type Page = import('@playwright/test').Page;
