@@ -3,7 +3,7 @@ name: Verify
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, codex/browser-release-candidate]
 
 permissions:
   contents: read

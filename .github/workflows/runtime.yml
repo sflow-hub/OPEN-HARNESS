@@ -3,7 +3,7 @@ name: Real container runtime
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, codex/browser-release-candidate]
   workflow_dispatch:
 
 permissions:
@@ -26,6 +26,21 @@ jobs:
       - run: npm ci
       - name: Check Docker daemon
         run: docker info
+      - name: Check disk capacity for real runtime acceptance
+        shell: bash
+        run: |
+          df -h / "$RUNNER_TEMP"
+          docker system df
+          node --input-type=module <<'NODE'
+          import { statfsSync } from 'node:fs';
+          const { bavail, bsize } = statfsSync('/');
+          const available = bavail * bsize;
+          console.log(`Free disk before runtime build: ${(available / 1024 ** 3).toFixed(2)} GiB`);
+          if (available < 20 * 1024 ** 3) {
+            console.error('Runtime acceptance needs at least 20 GiB free before building. This runner has insufficient capacity; acceptance has not run.');
+            process.exit(1);
+          }
+          NODE
       - name: Build the pinned production Hermes image
         timeout-minutes: 55
         run: npm run harness:setup
