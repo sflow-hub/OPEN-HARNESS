@@ -4,7 +4,7 @@
 #   docker build -f runtime/hermes/extension/Dockerfile.patch -t open-harness-hermes:2026.9.11 runtime/hermes/extension
 ARG BASE_IMAGE=open-harness-hermes:2026.9.11
 FROM ${BASE_IMAGE}
-ARG OPEN_HARNESS_RUNTIME=5
+ARG OPEN_HARNESS_RUNTIME=6
 USER root
 RUN test "$(cat /opt/open-harness/runtime-contract 2>/dev/null)" = "$OPEN_HARNESS_RUNTIME" \
   || { echo 'This image requires a full runtime rebuild before updating managed policy.' >&2; exit 1; }

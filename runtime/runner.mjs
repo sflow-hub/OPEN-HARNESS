@@ -23,7 +23,7 @@ var HERMES_IMAGE_TAG = HERMES_RELEASE.replace(/^v/, "");
 
 // runtime/readiness.ts
 var HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`;
-var RUNTIME_CONTRACT = 5;
+var RUNTIME_CONTRACT = 6;
 var RUNTIME_LABEL = "dev.openharness.runtime";
 function classifyContract(result) {
   if (result.status !== 0) return "missing";

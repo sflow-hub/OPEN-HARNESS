@@ -1,13 +1,107 @@
 # Runtime verification
 
-## Local browser deployment — September 26, 2026 (integration checkpoint)
+## Final local browser checkpoint — September 26, 2026
+
+The final unreleased runtime-contract-6 source passes **218 Node tests**, with one
+expected platform skip, **120 desktop/mobile browser tests**, typecheck, full lint,
+and the production build on Ubuntu 24.04 ARM64. PowerShell 7.6.6 was on PATH for the
+Node suite, so both launcher implementations ran. The final run corrected two test
+assumptions: the Dockerfile layer check now distinguishes early dependency constraints
+from the late managed-policy copy, and the Compose environment fixture preserves the
+required `ProcessEnv` type. The affected contract/packaging tests pass **21/21**.
+Application, runtime and image-build source remained unchanged after the image freeze.
+Logs: `/private/tmp/oh-browser-contract6-integrated-checks-final.log` and
+`/private/tmp/oh-browser-contract6-static-browser.log`.
+
+The **actual downloaded ZIP/tar rehearsal passes** with the final coordinator, Hermes
+and official Docker 29.8.1 engine. It verifies an empty-engine anonymous digest pull
+from a disposable loopback registry (34.35 seconds), launcher pairing and replay
+refusal, manual same-document pairing without reload, and immediate guide dismissal
+after setup. A real cached `available:false` response was observed, followed by the
+sidebar becoming ready without reloading. Chromium opened before the first computer
+driver call supports real clicking and typing with DOM readback before and after
+launcher stop/restart. Closing the browser preserves active work; profiles, tasks,
+private/shared files, the data volume and the paired browser credential survive.
+All 23 captured source hashes match. The final and failed locator-only fixture
+resources were cleaned. Safe evidence:
+`/private/tmp/open-harness-local-package-contract6-evidence-20260926.tar.gz`, SHA256
+`05d828fea907265a546ff5fcb17c68591bdf8e28463088a64152370912147aa9`.
+This is a Linux ARM64 local-registry rehearsal, not published GHCR acceptance or the
+production validator's two-architecture gate.
+
+A subsequent full `tests/compose-smoke.mjs` run against these **same final images**
+also passes stopped-backup/empty-volume restore. All **6,873** entries match content
+hashes, ownership and permissions. Restored profiles, rotated credentials used by an
+actual follow-up run, private/shared files, memory, skills, tasks and history survive;
+uncertain interrupted work is not replayed. A fresh engine cache and actual desktop
+click/type after restore pass, along with pairing/authorization, explicit folder
+grants and two-agent desktop isolation. This fixture streams the prebuilt runtime
+image into its private engines; it complements the separate real digest-pull rehearsal
+above. Both disposable projects and their volumes/networks were removed, and the
+credential-bearing raw backup was deleted after exporting safe evidence. Archive:
+`/private/tmp/open-harness-final6-backup-restore-evidence-20260926.tar.gz`, SHA256
+`a644aa47c2b46f06752a216fb3037d823e20626fe4d3749812f6e8a3104981b0`.
+This restores a final-version installation; older-version upgrade/rollback and the
+24-hour soak remain separate release requirements.
+
+The final real-Hermes protocol fixture also passes tools, clarification, task MCP,
+approval/denial side effects and conversation continuity. Its exact-image evidence is
+`/private/tmp/open-harness-final6-evidence-20260926-UdSjwSPu/`. The image identities are:
+
+| Image | Immutable Docker index ID | Separate BuildKit configuration digest |
+| --- | --- | --- |
+| Coordinator | `sha256:cd1085b10dc3576c7522e3c03ddc3cd478c411bd8d13cd401c05980a913ba8c9` | `sha256:4240e454cb76603b7b2cf061e91227f5de369eef3e83cd834de28bbf0b9a242d` |
+| Hermes | `sha256:d81b01ed79d179a028a712831e89415aee0d4b629d238bf567435dd230782bb2` | `sha256:3bcb755402cec22e13a4de0a23c393e78a33f6aec80d0911898c2bd843f9cd36` |
+
+The unchanged strict Trivy 0.74.0 HIGH/CRITICAL vulnerability and secret gate **still
+fails all three images**. No unfixed finding is suppressed. Occurrence counts are not
+an exploitability assessment; zero HIGH/CRITICAL secret findings is not an all-secrets
+guarantee.
+
+| Image | HIGH | CRITICAL | Distinct vulnerability IDs |
+| --- | ---: | ---: | ---: |
+| Final coordinator | 54 | 0 | 15 |
+| Final Hermes | 94 | 1 | 36 |
+| Exact official Docker 29.8.1 engine | 28 | 0 | 16 |
+
+Final coordinator evidence is
+`/private/tmp/open-harness-coordinator6-final-evidence-20260926.tar.gz`, SHA256
+`e01a6dc951c303c326f081ce67eacf7696565774f7807306daa8725489c04fdf`.
+The engine reference is
+`docker:29.8.1-dind@sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0`;
+its earlier exact-image scan and full Compose restore evidence remain applicable.
+
+Packaging now writes the stable default project name `open-harness`. Actual Compose
+normalization across two versioned extraction folders confirms the same application
+volume; environment and CLI project-name overrides still take precedence. The strict
+Ubuntu packaging checks pass 12/12. Evidence:
+`/private/tmp/open-harness-project-name-evidence-20260926-E6KX03ih/`.
+
+**Release remains blocked:** resolve the image scan findings, validate native AMD64
+images, run Docker Desktop acceptance on Apple Silicon Mac, Intel Mac and Windows,
+and publish/verify the committed-source multiarch packages. No image, tag, release or
+PR has been published during this work. The current Mac VM has no hypervisor support;
+its Bash launcher tests cannot establish Docker Desktop support. Signed native
+installers remain a separate acceptance path.
+
+Claude Desktop's separate Ubuntu AMD64 microVM was checked as a possible builder.
+Its installed Docker 29.4.3 engine started on a temporary private Unix socket and
+ran a minimal local container, but the normal Docker Hub image pull failed with
+`403 Forbidden` from the environment's mandatory proxy. GHCR CONNECT was also
+denied. No Open Harness AMD64 image was built or pulled, no registry relay or proxy
+workaround was used, and no global trust configuration changed. Claude reported
+verified cleanup of its temporary daemon, containers, networking and data roots.
+This establishes an environment access blocker, not AMD64 product acceptance.
+
+## Earlier local browser integration checkpoints — September 26, 2026
 
 The Docker browser work is **not yet a published or platform-accepted Mac/Windows
 release**. The following evidence is from Ubuntu 24.04 ARM64, Node 22.23.3, Docker
-Engine 29.8.1 and Compose 5.5.1. It exercises source Compose with already-built images
-transferred into the private engine, not an anonymous registry pull or downloaded
-browser archive. The scripted local model fixture verifies transport/tools/state;
-no paid provider or model-reasoning acceptance was performed here.
+Engine 29.8.1 and Compose 5.5.1. Source Compose/restore and a separate downloaded-archive
+rehearsal are recorded below. The latter pulls anonymously from a disposable loopback
+registry; it is not a published GHCR release or a production image-lock validation.
+The scripted local model fixture verifies transport/tools/state; no paid provider or
+model-reasoning acceptance was performed here.
 
 Current source changes include mandatory one-use CLI/browser pairing for Compose,
 minimal public readiness separate from authenticated diagnostics, digest-pinned runtime
@@ -15,10 +109,20 @@ setup without a source-build fallback, and host-folder grants restricted to exac
 explicitly exported outer mount roots with a read-only ceiling. Subfolders require
 their own export. Compose rejects localhost-only host model URLs before provider
 requests or profile writes; a host-model relay is not implemented. Claude delivered the
-browser client, host-folder editor and launchers. The original delivery passes the
-production build and all **110** desktop/mobile browser tests in the Ubuntu integration
-copy (`/private/tmp/oh-browser-claude1717.log`). Pairing UI coverage uses mocked routes;
-actual launcher/pairing acceptance and review corrections remain in progress.
+browser client, host-folder editor and launchers; the final reviewed delivery passes
+**214** Node tests (three expected skips), typecheck, full lint, production build, and
+all **110** desktop/mobile browser tests in the Ubuntu integration copy
+(`/private/tmp/oh-browser-final-integrated.log`). A separate run with verified official
+PowerShell **7.6.6** on Linux passes all **17** launcher cases, including both previously
+skipped PowerShell cases (`/private/tmp/oh-browser-final-powershell.log`). The Mac VM
+presents Bash **3.2** and passes **26** launcher/packaging checks with two expected
+PowerShell skips (`/private/tmp/oh-browser-final-mac-launchers.log`). The subsequent
+packaging-only change bundles the backup/restore guide alongside the installation guide;
+ZIP/tar checks pass **11/11** (`/private/tmp/oh-browser-final-package-tests.log`). These
+launcher cases use fake Docker responses. Pairing UI coverage uses mocked routes;
+the completed real package rehearsal below covers the original full-page pairing path.
+It exposed two UI follow-ups still being integrated: manual pairing after a same-document
+fragment change, and an outdated sidebar runtime label after successful setup.
 
 Actual `tests/compose-smoke.mjs` acceptance passed against runtime contract **4**:
 
@@ -53,9 +157,83 @@ safe evidence/logs/screenshots only; the credential-bearing backup and raw state
 excluded. All acceptance containers, volumes and networks were removed. Isolated test
 image tags are retained for final integration; prior installation tags are unchanged.
 
-Production dependency audit on September 26 reports **0** known vulnerabilities.
+A subsequent **contract-5** image adds synchronous desktop-initialization completion
+for native Linux selected-folder startup. Actual ordinary Docker checks verify pinned
+folder admission, read-only write refusal, read/write persistence, immediate X11/D-Bus
+and desktop-driver readiness, inert manual restart, and fresh containers on new
+admission. Focused Linux checks pass 27 tests with one expected platform skip; scoped
+TypeScript and lint pass. Safe evidence is
+`/private/tmp/open-harness-native-folder-evidence-20260926.tar.gz`. This is separate from
+the contract-4 Compose/restore evidence above; final contract-5 integration is in progress.
 
-Outstanding before release: finish launcher review corrections and actual browser pairing acceptance;
+A **contract-5 downloaded-package rehearsal** now passes on Linux ARM64. Both ZIP and
+tar extract into a path with spaces with matching contents/modes and the offline
+backup/restore guide. The actual launcher starts the stack, mints a one-use code, and
+the real browser exchanges it; plain unpaired access and replay are refused. First-run
+setup anonymously pulls the exact runtime digest into an initially empty private
+engine (55 seconds in this run). Chromium is opened before the first computer-driver
+call; accessibility click/type with DOM readback works before and after launcher
+stop/relaunch. Work waiting for input remains active while the browser is closed.
+Profiles, tasks, private/shared files and the browser credential persist across restart.
+All fixture resources are cleaned, without touching earlier image tags. Safe evidence:
+`/private/tmp/open-harness-local-package-evidence-20260926.tar.gz`, SHA256
+`22b253bfb5309a62dde8edbc602f83ce7ad9b0b8c79364d5f398a555ce3ce593`. This uses a
+fixture-only ARM64 lock/local registry; the production validator remains unchanged and
+requires both architectures, official image repositories, and the release revision.
+
+Production dependency audit on September 26 reports **0** known vulnerabilities. That
+result covers npm production dependencies, not the agent image. The actual contract-5
+Hermes image **fails** the required Trivy 0.74.0 release gate: 363 HIGH and 23 CRITICAL
+occurrences, representing 287 distinct vulnerability IDs. The exact scanned Docker ID is
+`sha256:df5c74e123e2a01537466f2a894a79d9da5e3f28b0c01ef4efbf6507f8873d6a`.
+No HIGH/CRITICAL secret findings were reported. The scan uses the September 26 database,
+no ignore file and no suppression of unfixed issues. Most findings are Debian package
+families (including development headers); npm's bundled libraries and pinned Python
+HTTP dependencies also require review. Occurrence counts do not establish exploitability.
+Safe provenance and the private report are under
+`/private/tmp/open-harness-release-scan-20260926-pFenT5hv/`. Publication is blocked while
+an isolated dependency/base-image remediation candidate is evaluated. The release scan
+gate remains unchanged.
+
+The rebuilt functional coordinator also fails the unchanged image gate: **84 HIGH**
+and **5 CRITICAL** occurrences, **45** distinct IDs. Its Docker image ID is
+`sha256:5af91d089d6bd2c96886ec4543e7760c42dc3a51ad9d1cd2b5a09f1c5016f43c`;
+its separate BuildKit configuration digest is
+`sha256:ab5eb5c698061a800f47d9bbec88b5be730b174af5d5d72bb11e851568ab287e`.
+An isolated Hermes packaging candidate updates the supported Debian base, Node/npm and
+matching Python HTTP dependencies without changing Hermes's pinned reasoning source.
+The final packaging candidate passes the full real Hermes protocol and private-desktop
+fixtures, 920 native-library checks, and ordinary selected-folder/recreation checks.
+The tests caught and corrected Trixie's restrictive `/home/hermes` parent mode and a
+second HTTP dependency pin in Hermes's lazy installer. Both dependency metadata files
+are hash-checked before the narrow version override; reasoning control flow is unchanged.
+The image still fails the same scan with **94 HIGH** and **1 CRITICAL** occurrences,
+**36** distinct IDs, all from Debian packages. Safe evidence is under
+`/private/tmp/open-harness-hermes-candidate4-evidence-20260926-hlYjEK0A/`.
+The verified packaging changes are now integrated into unreleased source with runtime
+contract **6**; its separate final image rebuild and combined acceptance are in progress.
+Neither image is approved for publication. No HIGH/CRITICAL secret findings were
+reported in either scan. Scanner counts do not establish exploitability.
+
+The revised coordinator packaging uses pinned Node 24/Trixie, verified npm 11.20
+and the official Docker CLI/Buildx, retaining the curl health probe and removing the
+unused coordinator daemon stack. It passes the full ordinary Compose agent, desktop,
+restart and stopped-backup/restore fixture, plus a benign source-build transport check.
+Its strict scan still fails with **54 HIGH**, **0 CRITICAL** findings (15 distinct IDs).
+Safe evidence is `/private/tmp/open-harness-coordinator-candidate-evidence-20260926.tar.gz`.
+The release workflow now also scans the exact private-engine manifest for each native
+architecture; the previously cached Engine 28.5.2 image fails with **348 HIGH** and
+**15 CRITICAL** findings. A current official Engine 29.8.1 candidate reduces these to
+**28 HIGH**, **0 CRITICAL**, but still fails the gate. Its full ordinary Compose
+fixture passes engine API/source-build transport, Unix-socket-only isolation, browser
+pairing, agent/desktop/folder behavior, restart and empty-volume restore. Both native
+architecture manifests exist; execution here is ARM64 only. Safe evidence is
+`/private/tmp/open-harness-dind29-candidate-evidence-20260926.tar.gz`. Source Compose and
+release resolution now use the tested official 29.8.1 multiarch digest
+`sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0`.
+No findings are suppressed.
+
+Outstanding before release: verify the two observed UI corrections against a rebuilt downloaded package;
 package the final committed source; run native AMD64/ARM64 build/scan/publish and
 anonymous downloaded ZIP/tar/launcher acceptance; make the release image packages
 public; and test Docker Desktop on Apple Silicon Mac, Intel Mac and Windows. Current

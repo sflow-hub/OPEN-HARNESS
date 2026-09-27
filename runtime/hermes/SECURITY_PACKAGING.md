@@ -1,12 +1,16 @@
-# Isolated security remediation candidate
+# Runtime dependency packaging
 
-This is an evaluation candidate, not a released or scan-approved runtime. It keeps
-Hermes at `939e45c91d751fadd94dcd1b873ac3cb44846213` and runtime protocol contract 5.
+These dependency updates are integrated into unreleased source under runtime
+contract 6. They are not a released or scan-approved image. Hermes stays pinned to
+`939e45c91d751fadd94dcd1b873ac3cb44846213`.
 No reasoning-loop source is modified.
 
 The original contract-5 ARM64 image reported 363 HIGH and 23 CRITICAL vulnerability
 occurrences with Trivy 0.74.0 on September 26, 2026. The release gate remains unchanged;
-no findings are ignored, and a new scan plus real tool/desktop acceptance is required.
+no findings are ignored. The final contract-5 packaging candidate passes real
+protocol, desktop, selected-folder and native-library checks, but still reports
+94 HIGH and 1 CRITICAL occurrences (36 distinct IDs). Publication remains blocked;
+contract-6 image evidence is recorded separately in `runtime/VERIFICATION.md`.
 
 - Base: Python 3.12.14 on Debian Trixie, using the recorded multiarch index digest.
   The previous base was Python 3.12 on Bookworm. Trixie's GLib

@@ -12,7 +12,7 @@ export const HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harne
 // a fix keeps the bug while its tag never changes. The image carries this number as a
 // label. Anything else means "rebuild", including no label at all: contract 1 is the set
 // of images built before the label existed. Bump it whenever runtime/hermes/ changes.
-export const RUNTIME_CONTRACT = 5;
+export const RUNTIME_CONTRACT = 6;
 export const RUNTIME_LABEL = 'dev.openharness.runtime';
 export type ImageContract = 'missing' | 'stale' | 'current';
 export function classifyContract(result: { status: number | null; stdout: string }): ImageContract {

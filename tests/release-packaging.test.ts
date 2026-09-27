@@ -53,7 +53,10 @@ test('self-hosted publication stays gated by verification and image scanning', (
   assert.match(release, /aquasecurity\/trivy-action@v0\.36\.0/g);
   assert.match(release, /publish:\s+needs: \[verify, images, package, browser-acceptance\]/);
   for (const required of ['ubuntu-24.04-arm', 'architecture: amd64', 'architecture: arm64', 'tests/real-hermes-smoke.mjs', 'tests/real-sandbox-smoke.mjs', 'tests/real-desktop-smoke.mjs', 'tests/compose-smoke.mjs', 'publish-architecture', 'publish-manifests', 'OPEN_HARNESS_COMPOSE_PACKAGE_DIR', "OPEN_HARNESS_COMPOSE_PULL_RUNTIME: '1'", 'anonymous-docker', 'capture-scan-inputs', 'steps.build-coordinator.outputs.metadata', 'steps.build-hermes.outputs.metadata', 'promote-release', 'sudo apt-get install -y zip unzip', "OPEN_HARNESS_REQUIRE_RELEASE_TOOLS: '1'", 'diff -r extracted-tar extracted-zip', 'Exercise the downloaded launcher against real Docker', 'export COMPOSE_PROJECT_NAME=', 'start.sh\" --no-open', 'start.sh\" --stop', 'timeout --foreground 360', 'launcher-proof.txt', 'restart_preserves_data=passed', 'down --volumes --remove-orphans --timeout 30']) assert.ok(release.includes(required), required);
-  assert.equal((release.match(/scanners: vuln,secret/g) || []).length, 2);
+  assert.equal((release.match(/scanners: vuln,secret/g) || []).length, 3);
+  assert.match(release, /name: Scan the exact private engine architecture[\s\S]*?image-ref: \$\{\{ env\.OPEN_HARNESS_ENGINE_SCAN_IMAGE \}\}/);
+  assert.ok(release.includes('image.platforms[`linux/${process.env.RELEASE_ARCHITECTURE}`]'));
+  assert.ok(release.indexOf('Scan the exact private engine architecture') < release.indexOf('Publish only the scanned'));
   assert.doesNotMatch(release, /ignore-unfixed: true|exit-code: '0'/);
   assert.ok(release.indexOf('Publish only the scanned') > release.indexOf('Exercise the exact scanned'));
   assert.match(release, /npm run release:package/);
@@ -76,8 +79,8 @@ const releaseLock = () => ({ schemaVersion: 1, version: APP_VERSION, revision: '
 const releaseCompose = () => ({
   name: 'builder-project',
   services: {
-    docker: { image: 'docker:28-dind', volumes: [{ type: 'bind', source: './runtime/dind-entrypoint.sh', target: '/usr/local/bin/open-harness-dind.sh', read_only: true }], networks: { runtime: null } },
-    'open-harness': { image: 'coordinator:local', build: { context: '.' }, environment: { OPEN_HARNESS_REQUIRE_BROWSER_PAIRING: '1', OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD: '${OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD:-0}' }, ports: ['${OPEN_HARNESS_LISTEN_ADDRESS:-127.0.0.1}:3000:3000'], networks: { default: null } },
+    docker: { image: 'docker:29.8.1-dind', volumes: [{ type: 'bind', source: './runtime/dind-entrypoint.sh', target: '/usr/local/bin/open-harness-dind.sh', read_only: true }], networks: { runtime: null } },
+    'open-harness': { image: 'coordinator:local', build: { context: '.' }, environment: { OPEN_HARNESS_REQUIRE_BROWSER_PAIRING: '1', OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD: '${OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD:-0}' }, ports: ['${OPEN_HARNESS_LISTEN_ADDRESS:-127.0.0.1}:3000:3000'], volumes: [{ type: 'volume', source: 'harness-data', target: '/data' }], networks: { default: null } },
   },
   volumes: { 'harness-data': { name: 'builder-project_harness-data' } },
   networks: { default: { name: 'builder-project_default' }, runtime: { name: 'builder-project_runtime' } },
@@ -109,11 +112,36 @@ test('browser Compose pins all images, preserves pairing and isolates projects w
   assert.equal(config.services['open-harness'].environment.OPEN_HARNESS_HERMES_PULL, '1');
   assert.equal(config.services['open-harness'].environment.OPEN_HARNESS_REQUIRE_BROWSER_PAIRING, '1');
   assert.deepEqual(config.services['open-harness'].ports, source.services['open-harness'].ports);
-  assert.equal(config.name, undefined); assert.equal(config.volumes['harness-data'].name, undefined); assert.equal(config.networks.runtime.name, undefined);
+  assert.equal(config.name, 'open-harness'); assert.equal(source.name, 'builder-project');
+  assert.equal(config.volumes['harness-data'].name, undefined); assert.equal(config.networks.runtime.name, undefined);
   const unpaired = releaseCompose(); unpaired.services['open-harness'].environment.OPEN_HARNESS_REQUIRE_BROWSER_PAIRING = '0';
   assert.throws(() => browserCompose(unpaired, lock), /require local browser pairing/);
   const bind = releaseCompose(); bind.services.docker.volumes[0].source = '/Users/operator';
   assert.throws(() => browserCompose(bind, lock), /Unexpected host bind/);
+});
+
+test('packaged Compose retains its workspace across release directories and respects explicit projects', t => {
+  const available = spawnSync('docker', ['compose', 'version', '--short'], { encoding: 'utf8', timeout: 10_000 });
+  if (available.status !== 0 && process.env.OPEN_HARNESS_REQUIRE_RELEASE_TOOLS !== '1') { t.skip('Compose project precedence needs the Docker Compose CLI; the package-name and archive assertions still run.'); return; }
+  assert.equal(available.status, 0, available.stderr || available.error?.message || 'Release verification requires Docker Compose.');
+  const root = mkdtempSync(join(tmpdir(), 'open-harness-compose-projects-'));
+  try {
+    const emptyEnv = join(root, 'empty.env'); writeFileSync(emptyEnv, '');
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const name of Object.keys(env)) if (name.startsWith('COMPOSE_') || name.startsWith('OPEN_HARNESS_')) delete env[name];
+    for (const directory of ['open-harness-browser-before-update', 'open-harness-browser-after-update']) {
+      const folder = join(root, directory); mkdirSync(folder);
+      const file = join(folder, 'compose.yaml'); writeFileSync(file, JSON.stringify(browserCompose(releaseCompose(), releaseLock())));
+      for (const [override, explicit, expected] of [[undefined, undefined, 'open-harness'], ['operator-workspace', undefined, 'operator-workspace'], ['operator-workspace', 'cli-workspace', 'cli-workspace']]) {
+        const result = spawnSync('docker', ['compose', '--env-file', emptyEnv, ...(explicit ? ['--project-name', explicit] : []), '-f', file, 'config', '--format', 'json'], { cwd: folder, env: { ...env, ...(override ? { COMPOSE_PROJECT_NAME: override } : {}) }, encoding: 'utf8', timeout: 15_000 });
+        assert.equal(result.status, 0, result.stderr || result.error?.message);
+        const config = JSON.parse(result.stdout);
+        assert.equal(config.name, expected);
+        assert.equal(config.volumes['harness-data'].name, `${expected}_harness-data`);
+        assert.equal(config.networks.runtime.name, `${expected}_runtime`);
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('source packaging excludes collaboration files and refuses tracked credentials or generated state', () => {
@@ -130,14 +158,14 @@ test('browser ZIP and tar contain only relocatable launch assets and pinned imag
   const root = mkdtempSync(join(tmpdir(), 'open-harness-browser-release-test-'));
   try {
     const sourceRoot = join(root, 'source'), destination = join(root, 'artifacts');
-    for (const file of ['runtime/dind-entrypoint.sh', 'compose.host-folders.example.yaml', 'docs/LOCAL_BROWSER.md', 'LICENSE', 'Start Open Harness.command', 'Start Open Harness.cmd', 'launchers/start.sh', 'launchers/start.ps1']) {
+    for (const file of ['runtime/dind-entrypoint.sh', 'compose.host-folders.example.yaml', 'docs/LOCAL_BROWSER.md', 'docs/SELF_HOSTING.md', 'LICENSE', 'Start Open Harness.command', 'Start Open Harness.cmd', 'launchers/start.sh', 'launchers/start.ps1']) {
       mkdirSync(join(sourceRoot, file, '..'), { recursive: true }); writeFileSync(join(sourceRoot, file), `fixture for ${file}\n`);
     }
     mkdirSync(join(sourceRoot, 'runtime/hermes')); writeFileSync(join(sourceRoot, 'runtime/hermes/private.txt'), 'not a browser asset');
     const names = packageBrowser({ sourceRoot, destination, version: APP_VERSION, lock: releaseLock(), compose: releaseCompose() });
     assert.equal(names.length, 2); for (const name of names) assert.ok(existsSync(join(destination, name)));
     const listing = spawnSync('tar', ['-tzf', join(destination, names[0])], { encoding: 'utf8' }); assert.equal(listing.status, 0, listing.stderr);
-    assert.match(listing.stdout, /image-lock.json/); assert.match(listing.stdout, /Start Open Harness.command/); assert.doesNotMatch(listing.stdout, /private.txt|Dockerfile|package.json/);
+    assert.match(listing.stdout, /docs\/SELF_HOSTING.md/); assert.match(listing.stdout, /image-lock.json/); assert.match(listing.stdout, /Start Open Harness.command/); assert.doesNotMatch(listing.stdout, /private.txt|Dockerfile|package.json/);
     const zip = spawnSync('unzip', ['-t', join(destination, names[1])], { encoding: 'utf8' }); assert.equal(zip.status, 0, zip.stderr || zip.stdout);
     const extract = join(root, 'extracted'); mkdirSync(extract);
     const result = spawnSync('tar', ['-xzf', join(destination, names[0]), '-C', extract], { encoding: 'utf8' }); assert.equal(result.status, 0, result.stderr);
@@ -146,7 +174,9 @@ test('browser ZIP and tar contain only relocatable launch assets and pinned imag
       assert.ok(statSync(join(packageRoot, 'Start Open Harness.command')).mode & 0o111);
       assert.ok(statSync(join(packageRoot, 'launchers/start.sh')).mode & 0o111);
     }
-    assert.equal(JSON.parse(readFileSync(join(packageRoot, 'compose.yaml'), 'utf8')).services['open-harness'].build, undefined);
+    const packaged = JSON.parse(readFileSync(join(packageRoot, 'compose.yaml'), 'utf8'));
+    assert.equal(packaged.services['open-harness'].build, undefined);
+    assert.equal(packaged.name, 'open-harness');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

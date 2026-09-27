@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -33,8 +33,14 @@ type Scenario = {
   /** `curl`/health fails this many times before answering 200. */
   healthFailures?: number;
   pairFails?: boolean;
+  /** What the pairing helper prints instead of a well-formed code. */
+  pairOutput?: string;
   desktopApp?: boolean;
 };
+
+// 32 random bytes as base64url, the helper's real shape (43 characters, [A-Za-z0-9_-]).
+const CODE = 'Ab-cD_eF0123456789abcdefghijklmnopqrstuvwxy';
+const ENCODED = CODE;
 
 // A release directory with a space in its name, the contract files, and a fake bin.
 function release(scenario: Scenario = {}) {
@@ -54,7 +60,7 @@ function release(scenario: Scenario = {}) {
   // and answers the few subcommands the launcher depends on.
   writeFileSync(join(dir, 'bin', 'docker'), `#!/bin/sh
 printf '%s\\n' "docker $*" >> "${state}/calls"
-printf 'HERMES_PULL=%s HERMES_IMAGE=%s\\n' "\${OPEN_HARNESS_HERMES_PULL-unset}" "\${OPEN_HARNESS_HERMES_IMAGE-unset}" >> "${state}/env"
+printf 'HERMES_PULL=%s HERMES_IMAGE=%s PROJECT=%s\\n' "\${OPEN_HARNESS_HERMES_PULL-unset}" "\${OPEN_HARNESS_HERMES_IMAGE-unset}" "\${COMPOSE_PROJECT_NAME-unset}" >> "${state}/env"
 case "$1" in
   info)
     ${counter('info')}
@@ -64,7 +70,7 @@ case "$1" in
   compose)
     ${scenario.composeMissing ? 'echo "docker: unknown command: compose" >&2; exit 1' : ''}
     if [ "$2" = "version" ]; then echo "Docker Compose version v2.29.0"; exit 0; fi
-    for arg in "$@"; do if [ "$arg" = "exec" ]; then ${scenario.pairFails ? 'exit 1' : 'printf \'{"code":"secret-code-XYZ/=+","expiresAt":"2030-01-01T00:00:00.000Z"}\\n\''}; exit 0; fi; done
+    for arg in "$@"; do if [ "$arg" = "exec" ]; then ${scenario.pairFails ? 'echo "Could not create a browser connection link." >&2; exit 1' : `printf '%s\\n' '${scenario.pairOutput ?? `{"code":"${CODE}","expiresAt":"2030-01-01T00:00:00.000Z"}`}'`}; exit 0; fi; done
     exit 0 ;;
 esac
 exit 0
@@ -84,20 +90,31 @@ printf '%s\\n' "open $*" >> "${state}/calls"
 `);
   for (const name of ['docker', 'curl', 'browser', 'open']) chmodSync(join(dir, 'bin', name), 0o755);
   if (scenario.dockerMissing) rmSync(join(dir, 'bin', 'docker'));
+  // The launcher's PATH holds the fakes plus links to just the system tools the scripts use,
+  // never a whole system directory: a real docker installed on the machine running the
+  // suite (this sandbox has one, a developer's Mac has Docker Desktop's) must stay out of reach.
+  const sysbin = join(dir, 'sysbin');
+  mkdirSync(sysbin);
+  for (const tool of ['sh', 'bash', 'sed', 'tr', 'date', 'dirname', 'uname', 'sleep', 'cat', 'pwd', 'env']) {
+    const found = ['/usr/bin', '/bin'].map(directory => join(directory, tool)).find(candidate => existsSync(candidate));
+    if (found) symlinkSync(found, join(sysbin, tool));
+  }
   return {
     dir,
     calls: () => existsSync(join(state, 'calls')) ? readFileSync(join(state, 'calls'), 'utf8').trim().split('\n') : [],
     env: () => existsSync(join(state, 'env')) ? readFileSync(join(state, 'env'), 'utf8') : '',
     log: () => existsSync(join(dir, 'open-harness-launcher.log')) ? readFileSync(join(dir, 'open-harness-launcher.log'), 'utf8') : '',
-    // Only the fake bin and the system directories the scripts need for sed/tr/date.
-    path: `${join(dir, 'bin')}:/usr/bin:/bin`,
+    path: `${join(dir, 'bin')}:${sysbin}`,
   };
 }
 function run(fixture: ReturnType<typeof release>, args: string[], env: Record<string, string> = {}, viaWrapper = false) {
   const command = viaWrapper ? join(fixture.dir, 'Start Open Harness.command') : join(fixture.dir, 'launchers', 'start.sh');
   return spawnSync('/bin/bash', [command, ...args], {
     encoding: 'utf8', timeout: 60_000,
-    env: { NODE_ENV: 'test', PATH: fixture.path, HOME: fixture.dir, OPEN_HARNESS_LAUNCHER_PLATFORM: 'darwin', OPEN_HARNESS_BROWSER_COMMAND: join(fixture.dir, 'bin', 'browser'), ...env },
+    // HOME and the Docker Desktop location both point inside the fixture: on a Mac that has
+    // the real /Applications/Docker.app or ~/.docker/bin, the launcher's fallbacks must never
+    // reach real Docker from a fake-driven case. A case that wants a fake app sets its own.
+    env: { NODE_ENV: 'test', PATH: fixture.path, HOME: fixture.dir, OPEN_HARNESS_LAUNCHER_PLATFORM: 'darwin', OPEN_HARNESS_DOCKER_APP: join(fixture.dir, 'no-such-Docker.app'), OPEN_HARNESS_BROWSER_COMMAND: join(fixture.dir, 'bin', 'browser'), ...env },
   });
 }
 // The PowerShell launcher checks health with Invoke-WebRequest rather than curl, so it gets a
@@ -111,7 +128,7 @@ async function runPs(fixture: ReturnType<typeof release>, args: string[], health
   try {
     return await new Promise<{ status: number | null; stdout: string; stderr: string }>(resolve => {
       const child = spawn(pwshBinary!, ['-NoProfile', '-File', join(fixture.dir, 'launchers', 'start.ps1'), ...args], {
-        env: { NODE_ENV: 'test', PATH: fixture.path, HOME: fixture.dir, OPEN_HARNESS_LAUNCHER_PLATFORM: 'other', OPEN_HARNESS_BROWSER_COMMAND: join(fixture.dir, 'bin', 'browser'), OPEN_HARNESS_HEALTH_URL: `http://127.0.0.1:${port}/api/health`, ...env },
+        env: { NODE_ENV: 'test', PATH: fixture.path, HOME: fixture.dir, OPEN_HARNESS_LAUNCHER_PLATFORM: 'other', OPEN_HARNESS_DOCKER_APP: join(fixture.dir, 'no-such-DockerDesktop'), OPEN_HARNESS_BROWSER_COMMAND: join(fixture.dir, 'bin', 'browser'), OPEN_HARNESS_HEALTH_URL: `http://127.0.0.1:${port}/api/health`, ...env },
       });
       let stdout = '', stderr = '';
       child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; });
@@ -120,8 +137,6 @@ async function runPs(fixture: ReturnType<typeof release>, args: string[], health
     });
   } finally { server.close(); }
 }
-const CODE = 'secret-code-XYZ/=+';
-const ENCODED = 'secret-code-XYZ%2F%3D%2B';
 
 posixTest('start.sh: a computer without Docker is told what to install, and nothing else runs', () => {
   const fixture = release({ dockerMissing: true });
@@ -131,6 +146,37 @@ posixTest('start.sh: a computer without Docker is told what to install, and noth
   assert.match(result.stderr, /docker compose logs --tail=100 open-harness/);
   assert.deepEqual(fixture.calls(), []);
   assert.match(fixture.log(), /Docker Desktop is not installed/);
+  // Docker Desktop present but with no CLI anywhere: named, with what to do, and still nothing run.
+  const noCli = release({ dockerMissing: true });
+  mkdirSync(join(noCli.dir, 'Docker.app', 'Contents', 'Resources', 'bin'), { recursive: true });
+  const partial = run(noCli, ['--no-open'], { OPEN_HARNESS_DOCKER_APP: join(noCli.dir, 'Docker.app') });
+  assert.equal(partial.status, 2);
+  assert.match(partial.stderr, /Docker Desktop is installed at .*Docker\.app but no docker command was found/);
+  assert.deepEqual(noCli.calls(), []);
+});
+
+posixTest('start.sh: a Mac whose PATH has no docker uses the one inside Docker.app, and a docker already on PATH keeps priority', () => {
+  // The CLI only inside the application bundle, as on a fresh Docker Desktop install: the
+  // fake docker is moved there and renamed in its own records so the route is unmistakable.
+  const bundled = release();
+  const bin = join(bundled.dir, 'Docker.app', 'Contents', 'Resources', 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'docker'), readFileSync(join(bundled.dir, 'bin', 'docker'), 'utf8').replace('"docker $*"', '"bundled-docker $*"'));
+  chmodSync(join(bin, 'docker'), 0o755);
+  rmSync(join(bundled.dir, 'bin', 'docker'));
+  const result = run(bundled, ['--no-open'], { OPEN_HARNESS_DOCKER_APP: join(bundled.dir, 'Docker.app') });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(bundled.calls().includes('bundled-docker compose -f compose.yaml up -d --no-build'), bundled.calls().join('\n'));
+  assert.ok(!bundled.calls().some(call => call.startsWith('docker ')));
+  // With a docker on PATH as well, the bundle is never consulted: the caller's PATH stays first.
+  const both = release();
+  const bothBin = join(both.dir, 'Docker.app', 'Contents', 'Resources', 'bin');
+  mkdirSync(bothBin, { recursive: true });
+  writeFileSync(join(bothBin, 'docker'), `#!/bin/sh\necho bundled >> "${join(both.dir, 'state', 'bundled')}"\nexit 1\n`);
+  chmodSync(join(bothBin, 'docker'), 0o755);
+  const viaPath = run(both, ['--no-open'], { OPEN_HARNESS_DOCKER_APP: join(both.dir, 'Docker.app') });
+  assert.equal(viaPath.status, 0, viaPath.stderr);
+  assert.ok(!existsSync(join(both.dir, 'state', 'bundled')));
 });
 
 posixTest('start.sh: a Docker engine in Windows-containers mode is refused before Compose runs', () => {
@@ -166,8 +212,15 @@ posixTest('start.sh: pulls the pinned images, starts without building, waits for
   assert.ok(!result.stdout.includes(CODE) && !result.stderr.includes(CODE) && !fixture.log().includes(CODE));
   assert.ok(!result.stdout.includes(ENCODED) && !fixture.log().includes(ENCODED));
   assert.match(result.stdout, /Open Harness is running at http:\/\/localhost:3000/);
-  // Release mode leaves the image variables to the shipped compose.yaml.
-  assert.match(fixture.env(), /HERMES_PULL=unset HERMES_IMAGE=unset/);
+  // Release mode leaves the image variables to the shipped compose.yaml, and never picks a
+  // project name of its own: a caller's COMPOSE_PROJECT_NAME reaches Compose unchanged.
+  assert.match(fixture.env(), /HERMES_PULL=unset HERMES_IMAGE=unset PROJECT=unset/);
+  assert.ok(!calls.some(call => / -p |--project-name/.test(call)));
+  const named = release();
+  const namedRun = run(named, ['--no-open'], { COMPOSE_PROJECT_NAME: 'oh-acceptance-42' });
+  assert.equal(namedRun.status, 0, namedRun.stderr);
+  assert.match(named.env(), /PROJECT=oh-acceptance-42/);
+  assert.ok(!named.calls().some(call => / -p |--project-name/.test(call)));
 });
 
 posixTest('start.sh: --no-open neither mints a code nor opens anything, and says how to pair', () => {
@@ -182,13 +235,22 @@ posixTest('start.sh: --no-open neither mints a code nor opens anything, and says
 });
 
 posixTest('start.sh: --build is the only way to build, and it switches Hermes pulling off; a release without the source tree refuses it', () => {
+  // A source checkout has no image-lock.json — --build is what starts one, and it needs the
+  // coordinator Dockerfile instead of the lock.
   const fixture = release();
+  rmSync(join(fixture.dir, 'image-lock.json'));
   writeFileSync(join(fixture.dir, 'Dockerfile.coordinator'), 'FROM scratch\n');
   const result = run(fixture, ['--build', '--no-open']);
   assert.equal(result.status, 0, result.stderr);
   const compose = fixture.calls().filter(call => call.startsWith('docker compose -f'));
   assert.deepEqual(compose, ['docker compose -f compose.yaml up -d --build']);
   assert.match(fixture.env(), /HERMES_PULL=0/);
+  // --stop, --status and --logs stay usable in that checkout when --build says which mode it is.
+  for (const [flag, call] of [['--stop', 'docker compose -f compose.yaml stop'], ['--status', 'docker compose -f compose.yaml ps'], ['--logs', 'docker compose -f compose.yaml logs --tail=200']]) {
+    const action = run(fixture, ['--build', flag]);
+    assert.equal(action.status, 0, action.stderr);
+    assert.ok(fixture.calls().includes(call), `${flag}: ${fixture.calls().join('\n')}`);
+  }
   const plain = release();
   const refused = run(plain, ['--build', '--no-open']);
   assert.equal(refused.status, 64);
@@ -244,17 +306,31 @@ posixTest('start.sh: Docker Desktop that is installed but stopped is started and
   assert.match(result.stdout, /Docker is ready/);
 });
 
-posixTest('start.sh: when the pairing helper is unavailable the plain URL opens with a warning, and a failed opener is exit 5', () => {
-  const fixture = release({ pairFails: true });
-  const result = run(fixture, []);
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stderr, /Could not mint a browser pairing code/);
-  assert.deepEqual(fixture.calls().filter(call => call.startsWith('browser')), ['browser http://localhost:3000']);
+posixTest('start.sh: a link that cannot be minted is exit 5 with nothing opened, and so is a browser that cannot be opened', () => {
+  // The helper failing, printing nothing, or printing a code in another shape: the stack is
+  // up, but no paired window can be produced, and a plain dashboard would only ask for
+  // pairing — so none is opened and the exit code says what happened.
+  const failing = release({ pairFails: true });
+  const failed = run(failing, []);
+  assert.equal(failed.status, 5, failed.stderr);
+  assert.match(failed.stderr, /no browser connection link could be created \(the pairing helper in the coordinator container exited with status 1\)/);
+  assert.match(failed.stderr, /No browser was opened/);
+  assert.match(failed.stderr, /--logs/);
+  assert.deepEqual(failing.calls().filter(call => call.startsWith('browser')), []);
+  assert.match(failing.log(), /Could not create a browser connection link\./, 'the helper\'s own message goes to the log');
+  for (const [output, reason] of [['', 'printed no code'], ['{"code":"secret-code-XYZ/=+","expiresAt":"2030-01-01T00:00:00.000Z"}', 'unexpected form'], ['{"code":"short","expiresAt":"2030-01-01T00:00:00.000Z"}', 'unexpected length'], ['not json at all', 'printed no code']]) {
+    const odd = release({ pairOutput: output });
+    const result = run(odd, []);
+    assert.equal(result.status, 5, `${output}: ${result.stderr}`);
+    assert.match(result.stderr, new RegExp(reason));
+    assert.deepEqual(odd.calls().filter(call => call.startsWith('browser')), []);
+    assert.ok(!result.stdout.includes('secret-code') && !result.stderr.includes('secret-code'));
+  }
   const noBrowser = release();
   writeFileSync(join(noBrowser.dir, 'bin', 'browser'), '#!/bin/sh\nexit 1\n');
-  const failed = run(noBrowser, []);
-  assert.equal(failed.status, 5);
-  assert.match(failed.stderr, /no browser could be opened/);
+  const unopened = run(noBrowser, []);
+  assert.equal(unopened.status, 5);
+  assert.match(unopened.stderr, /no browser could be opened/);
 });
 
 posixTest('start.sh: the double-click wrapper finds the release directory with spaces and usage errors are exit 64', () => {
@@ -268,12 +344,22 @@ posixTest('start.sh: the double-click wrapper finds the release directory with s
 });
 
 posixTest('start.sh: a directory that is not a full release is refused before Docker is touched', () => {
+  // Without --build the lock is part of the contract, whatever the action.
   const fixture = release();
   rmSync(join(fixture.dir, 'image-lock.json'));
-  const result = run(fixture, ['--no-open']);
-  assert.equal(result.status, 64);
-  assert.match(result.stderr, /image-lock\.json is missing/);
+  for (const args of [['--no-open'], ['--stop'], ['--status']]) {
+    const result = run(fixture, args);
+    assert.equal(result.status, 64, args.join(' '));
+    assert.match(result.stderr, /image-lock\.json is missing/);
+    assert.match(result.stderr, /started with --build/);
+  }
   assert.deepEqual(fixture.calls(), []);
+  const noEntrypoint = release();
+  rmSync(join(noEntrypoint.dir, 'runtime', 'dind-entrypoint.sh'));
+  const result = run(noEntrypoint, ['--no-open']);
+  assert.equal(result.status, 64);
+  assert.match(result.stderr, /runtime\/dind-entrypoint\.sh is missing/);
+  assert.deepEqual(noEntrypoint.calls(), []);
 });
 
 test('start.ps1: the same contract holds for the PowerShell launcher', { skip: posixOnly || (pwshBinary ? false : 'PowerShell is not installed here; the PowerShell launcher is exercised where pwsh is available (GitHub-hosted runners have it).') }, async () => {
@@ -311,10 +397,91 @@ test('start.ps1: the same contract holds for the PowerShell launcher', { skip: p
   const stopped = await runPs(release(), ['--stop']);
   assert.equal(stopped.status, 0, stopped.stderr + stopped.stdout);
   assert.equal((await runPs(release(), ['--bogus'])).status, 64);
+  // A source checkout: no image-lock.json, a Dockerfile instead; --build starts it and
+  // --build --stop works there too, while the release path still insists on the lock.
   const source = release();
+  rmSync(join(source.dir, 'image-lock.json'));
   writeFileSync(join(source.dir, 'Dockerfile.coordinator'), 'FROM scratch\n');
   const built = await runPs(source, ['--build', '--no-open']);
   assert.equal(built.status, 0, built.stderr + built.stdout);
   assert.deepEqual(source.calls().filter(call => call.startsWith('docker compose -f')), ['docker compose -f compose.yaml up -d --build']);
   assert.match(source.env(), /HERMES_PULL=0/);
+  const sourceStop = await runPs(source, ['-Build', '-Stop']);
+  assert.equal(sourceStop.status, 0, sourceStop.stderr + sourceStop.stdout);
+  assert.ok(source.calls().includes('docker compose -f compose.yaml stop'));
+  const noLock = await runPs(source, ['--no-open']);
+  assert.equal(noLock.status, 64, noLock.stderr + noLock.stdout);
+  assert.match(noLock.stderr, /image-lock\.json is missing/);
+
+  // A pairing helper that fails, or prints a code in another shape, is exit 5 with nothing opened.
+  const unmintable = release({ pairFails: true });
+  const notMinted = await runPs(unmintable, []);
+  assert.equal(notMinted.status, 5, notMinted.stderr + notMinted.stdout);
+  assert.match(notMinted.stderr, /no browser connection link could be created \(the pairing helper in the coordinator container exited with status 1\)/);
+  assert.deepEqual(unmintable.calls().filter(call => call.startsWith('browser')), []);
+  const odd = release({ pairOutput: '{"code":"secret-code-XYZ/=+","expiresAt":"2030-01-01T00:00:00.000Z"}' });
+  const oddResult = await runPs(odd, []);
+  assert.equal(oddResult.status, 5, oddResult.stderr + oddResult.stdout);
+  assert.match(oddResult.stderr, /unexpected form/);
+  assert.deepEqual(odd.calls().filter(call => call.startsWith('browser')), []);
+  assert.ok(!oddResult.stdout.includes('secret-code') && !oddResult.stderr.includes('secret-code'));
+
+  // The project name is the caller's: COMPOSE_PROJECT_NAME passes through and no -p is added.
+  const named = release();
+  const namedRun = await runPs(named, ['--no-open'], 0, { COMPOSE_PROJECT_NAME: 'oh-acceptance-42' });
+  assert.equal(namedRun.status, 0, namedRun.stderr + namedRun.stdout);
+  assert.match(named.env(), /PROJECT=oh-acceptance-42/);
+  assert.ok(!named.calls().some(call => / -p |--project-name/.test(call)));
+});
+
+test('start.ps1: Docker Desktop is found in its per-user and all-users Windows locations', { skip: posixOnly || (pwshBinary ? false : 'PowerShell is not installed here; the PowerShell launcher is exercised where pwsh is available (GitHub-hosted runners have it).') }, async () => {
+  // Docker Desktop installs per user by default (%LOCALAPPDATA%\Programs\DockerDesktop) or
+  // for all users (%ProgramFiles%\Docker\Docker). Each fake install root carries a
+  // "Docker Desktop.exe" that records having been started, and a resources\bin with the
+  // CLI. The Windows platform is selected explicitly; only the discovery runs on Linux.
+  const install = (fixture: ReturnType<typeof release>, root: string, prefix: string) => {
+    mkdirSync(join(root, 'resources', 'bin'), { recursive: true });
+    writeFileSync(join(root, 'Docker Desktop.exe'), `#!/bin/sh\necho started >> "${join(fixture.dir, 'state', prefix + '-started')}"\n`);
+    chmodSync(join(root, 'Docker Desktop.exe'), 0o755);
+    // On Windows the CLI is docker.exe; pwsh on Linux resolves "docker", so both are placed.
+    const cli = readFileSync(join(fixture.dir, 'bin', 'docker'), 'utf8').replace('"docker $*"', `"${prefix}-docker $*"`);
+    for (const name of ['docker.exe', 'docker']) { writeFileSync(join(root, 'resources', 'bin', name), cli); chmodSync(join(root, 'resources', 'bin', name), 0o755); }
+  };
+  // Per-user install, no docker on PATH, daemon not running yet: found, started, waited for, used.
+  const perUser = release({ infoFailures: 2 });
+  const localAppData = join(perUser.dir, 'localappdata');
+  install(perUser, join(localAppData, 'Programs', 'DockerDesktop'), 'peruser');
+  rmSync(join(perUser.dir, 'bin', 'docker'));
+  const started = await runPs(perUser, ['--no-open', '--timeout', '30'], 0, { OPEN_HARNESS_LAUNCHER_PLATFORM: 'windows', OPEN_HARNESS_DOCKER_APP: '', LOCALAPPDATA: localAppData, ProgramFiles: join(perUser.dir, 'no-program-files') });
+  assert.equal(started.status, 0, started.stderr + started.stdout);
+  assert.match(started.stdout, /Docker Desktop is not running\. Starting it/);
+  assert.ok(existsSync(join(perUser.dir, 'state', 'peruser-started')), 'the per-user Docker Desktop.exe was started');
+  assert.ok(perUser.calls().includes('peruser-docker compose -f compose.yaml up -d --no-build'), perUser.calls().join('\n'));
+  // Legacy all-users install only: the same, from Program Files.
+  const allUsers = release({ infoFailures: 1 });
+  const programFiles = join(allUsers.dir, 'program files');
+  install(allUsers, join(programFiles, 'Docker', 'Docker'), 'allusers');
+  rmSync(join(allUsers.dir, 'bin', 'docker'));
+  const legacy = await runPs(allUsers, ['--no-open', '--timeout', '30'], 0, { OPEN_HARNESS_LAUNCHER_PLATFORM: 'windows', OPEN_HARNESS_DOCKER_APP: '', LOCALAPPDATA: join(allUsers.dir, 'no-localappdata'), ProgramFiles: programFiles });
+  assert.equal(legacy.status, 0, legacy.stderr + legacy.stdout);
+  assert.ok(existsSync(join(allUsers.dir, 'state', 'allusers-started')));
+  assert.ok(allUsers.calls().includes('allusers-docker compose -f compose.yaml up -d --no-build'), allUsers.calls().join('\n'));
+  // Neither location, no CLI: told to install, nothing started.
+  const none = release({ dockerMissing: true });
+  const missing = await runPs(none, ['--no-open'], 0, { OPEN_HARNESS_LAUNCHER_PLATFORM: 'windows', OPEN_HARNESS_DOCKER_APP: '', LOCALAPPDATA: join(none.dir, 'no-localappdata'), ProgramFiles: join(none.dir, 'no-program-files') });
+  assert.equal(missing.status, 2, missing.stderr + missing.stdout);
+  assert.match(missing.stderr, /Docker Desktop is not installed/);
+  assert.deepEqual(none.calls(), []);
+});
+
+// Windows PowerShell reads a BOM-less script in the ANSI code page, where an em dash or a
+// curly quote can decode into a stray quote character and break parsing. The Windows launcher
+// and its wrapper stay pure ASCII; this check runs on every platform, fakes or not.
+test('start.ps1 and the .cmd wrapper contain only ASCII', () => {
+  for (const file of ['launchers/start.ps1', 'Start Open Harness.cmd']) {
+    const text = readFileSync(join(root, file), 'latin1');
+    const offenders = [...text].map((character, index) => ({ character, index })).filter(({ character }) => character.charCodeAt(0) > 0x7e || (character.charCodeAt(0) < 0x20 && !'\r\n\t'.includes(character)));
+    assert.deepEqual(offenders.slice(0, 5), [], `${file} has non-ASCII or control characters at ${offenders.slice(0, 5).map(item => item.index).join(', ')}`);
+    assert.ok(!text.startsWith('\uFEFF') && !text.startsWith('\xEF\xBB\xBF'), `${file} should not need a byte-order mark`);
+  }
 });

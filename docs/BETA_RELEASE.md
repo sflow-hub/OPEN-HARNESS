@@ -8,7 +8,7 @@ This checklist is the release gate for `v0.4.0-beta.1`. Open Harness remains a s
 - [ ] In GitHub repository rules, protect tags matching `v*-beta.*` so only maintainers can create or update them.
 - [ ] Confirm the release tag points at the current `main` commit. The release workflow checks this again before publishing.
 - [x] On 2026-09-26, `npm audit --omit=dev --audit-level=high` reported 0 known vulnerabilities.
-- [ ] Confirm Trivy reports no unapproved high or critical findings in the coordinator and Hermes images.
+- [ ] Confirm Trivy reports no unapproved high or critical findings in the coordinator, Hermes and exact pinned private-engine images.
 - [ ] Confirm the release archive checksum and inspect its file list for local state, credentials, tokens, and machine-specific paths.
 
 Severity-one blockers are credential disclosure, authentication bypass, container escape, cross-agent private-file access, destructive data loss, unrecoverable upgrade failure, or inability to stop an agent process tree. Do not publish with any severity-one blocker open.
@@ -52,6 +52,7 @@ Allow at least 20 GB of free disk before the first runtime build. Agent files, S
 
 ## Release notes and support
 
+- [ ] Finalize `docs/RELEASE_NOTES.md` against the exact tagged source, image and platform evidence. Replace its dated unreleased-draft status only after the gates pass, and review the generated changelog appended to the prepared notes before publication.
 - [ ] State that the beta supports one trusted operator and that advanced features remain experimental.
 - [ ] State that model-provider calls may incur provider charges and that Open Harness has no telemetry.
 - [ ] Link `SECURITY.md`, `docs/SELF_HOSTING.md`, the backup/rollback procedure, and the GitHub issue tracker.

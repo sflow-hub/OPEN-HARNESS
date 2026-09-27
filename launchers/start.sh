@@ -11,7 +11,8 @@
 #
 # Exit codes: 0 ok · 2 Docker missing, not startable or not a Linux engine ·
 # 3 Compose failed · 4 the app did not become healthy in time · 5 the stack is
-# up but the paired browser window could not be opened · 64 usage.
+# up and healthy but no paired browser window could be produced (no connection
+# link could be minted, or no browser could be opened) · 64 usage.
 set -u
 
 # ---------------------------------------------------------------- locate ----
@@ -88,14 +89,20 @@ cd "$release_dir" || fail 64 "Could not enter the release directory: $release_di
 say "Open Harness launcher starting in: $release_dir"
 
 # ------------------------------------------------------- release contract ----
-for required in "$compose_file" "$lock_file" "runtime/dind-entrypoint.sh"; do
+# A downloaded release carries compose.yaml, image-lock.json and the engine
+# entrypoint; a source checkout has no lock and is used only through --build,
+# which needs the coordinator Dockerfile instead. The check follows the mode,
+# not the action, so --build --stop works in a source tree too.
+for required in "$compose_file" "runtime/dind-entrypoint.sh"; do
   [ -f "$required" ] || fail 64 "This does not look like a complete Open Harness release: $required is missing from $release_dir. Extract the whole archive and run the launcher from inside it."
 done
+if [ "$build" = "1" ]; then
+  [ -f "Dockerfile.coordinator" ] || fail 64 "--build needs the source tree (Dockerfile.coordinator) next to compose.yaml. A downloaded browser release uses the pinned images and does not need it."
+else
+  [ -f "$lock_file" ] || fail 64 "This does not look like a complete Open Harness release: $lock_file is missing from $release_dir. Extract the whole archive and run the launcher from inside it (a source checkout is started with --build)."
+fi
 if [ -n "$override_file" ]; then
   [ -f "$override_file" ] || fail 64 "The folder override file does not exist: $override_file"
-fi
-if [ "$build" = "1" ] && [ ! -f "Dockerfile.coordinator" ]; then
-  fail 64 "--build needs the source tree (Dockerfile.coordinator) next to compose.yaml. A downloaded browser release uses the pinned images and does not need it."
 fi
 
 # A downloaded release ships compose.yaml with every image pinned by digest and
@@ -109,12 +116,27 @@ if [ "$build" = "1" ]; then export OPEN_HARNESS_HERMES_PULL=0; fi
 platform=${OPEN_HARNESS_LAUNCHER_PLATFORM:-$(uname -s 2>/dev/null || echo unknown)}
 case "$platform" in Darwin|darwin) platform=darwin ;; Linux|linux) platform=linux ;; *) platform=other ;; esac
 
-docker_app=${OPEN_HARNESS_DOCKER_APP:-/Applications/Docker.app}
-docker_desktop_installed() { [ "$platform" = darwin ] && [ -d "$docker_app" ]; }
+# Docker Desktop for Mac keeps its own copy of the CLI inside the app bundle. A
+# fresh install, or a user-mode one, may not have put anything on PATH yet, so
+# after the caller's PATH the bundle's bin directory (and ~/.docker/bin, where
+# the user-mode install links the tools) is tried before Docker is declared
+# missing. Appended, never prepended: whatever the operator has first stays first.
+docker_app=${OPEN_HARNESS_DOCKER_APP:-}
+if [ -z "$docker_app" ] && [ "$platform" = darwin ]; then
+  for candidate in /Applications/Docker.app "$HOME/Applications/Docker.app"; do
+    if [ -d "$candidate" ]; then docker_app=$candidate; break; fi
+  done
+fi
+docker_desktop_installed() { [ "$platform" = darwin ] && [ -n "$docker_app" ] && [ -d "$docker_app" ]; }
+if ! command -v docker >/dev/null 2>&1 && [ "$platform" = darwin ]; then
+  for bin_dir in "${docker_app:+$docker_app/Contents/Resources/bin}" "$HOME/.docker/bin"; do
+    if [ -n "$bin_dir" ] && [ -x "$bin_dir/docker" ]; then export PATH="$PATH:$bin_dir"; break; fi
+  done
+fi
 docker_cli_missing_message() {
   if [ "$platform" = darwin ]; then
     if docker_desktop_installed; then
-      echo "Docker Desktop is installed but its command-line tools are not on PATH yet. Open Docker Desktop once and finish its setup, then run this launcher again."
+      echo "Docker Desktop is installed at $docker_app but no docker command was found on PATH or inside the app. Open Docker Desktop once and finish its setup, then run this launcher again."
     else
       echo "Docker Desktop is not installed. Download it from https://www.docker.com/products/docker-desktop/ (choose Apple silicon or Intel to match this Mac), open it once, then run this launcher again."
     fi
@@ -145,7 +167,12 @@ fi
 
 engine_os=$(docker info --format '{{.OSType}}' 2>/dev/null | tr -d '\r')
 [ "$engine_os" = "linux" ] || fail 2 "Docker is running $engine_os containers, but Open Harness needs Linux containers. In Docker Desktop choose 'Switch to Linux containers…' from its menu, then run this launcher again."
-docker compose version >/dev/null 2>&1 || fail 2 "Docker Compose v2 ('docker compose') is not available. Update Docker Desktop, which includes it, then run this launcher again."
+if ! docker compose version >/dev/null 2>&1; then
+  if docker_desktop_installed && [ -x "$docker_app/Contents/Resources/cli-plugins/docker-compose" ]; then
+    fail 2 "Docker Desktop's Compose plugin is at $docker_app/Contents/Resources/cli-plugins but the docker command does not see it. Open Docker Desktop once so it registers its command-line plugins, then run this launcher again."
+  fi
+  fail 2 "Docker Compose v2 ('docker compose') is not available. Update Docker Desktop, which includes it, then run this launcher again."
+fi
 
 # --------------------------------------------------------------- compose ----
 # Every Compose call uses the same file list so an override chosen once applies
@@ -193,14 +220,14 @@ done
 # --------------------------------------------------------------- pairing ----
 # The dashboard hands out its operator token only to a browser that presents a
 # one-use code minted inside the coordinator container. The code travels in the
-# URL fragment (never sent to a server), is consumed by the page on load, and is
-# never printed here.
+# URL fragment, omitted from the initial HTTP request. The page exchanges it
+# with the local coordinator on load. It is never printed here.
 urlencode() {
   value=$1; encoded=""; i=0
   while [ "$i" -lt "${#value}" ]; do
     c=${value:$i:1}
     case "$c" in
-      [A-Za-z0-9._~-]) encoded="$encoded$c" ;;
+      [A-Za-z0-9_.~-]) encoded="$encoded$c" ;;
       *) encoded="$encoded$(printf '%%%02X' "'$c")" ;;
     esac
     i=$((i + 1))
@@ -220,18 +247,27 @@ if [ "$open_browser" = "0" ]; then
   pause_if_wrapped; exit 0
 fi
 
-pair_json=$(compose exec -T open-harness node /opt/open-harness/runtime/browser-pair.mjs 2>/dev/null)
+# The helper prints one JSON object with a base64url code; anything else — a
+# non-zero exit, no output, or a code in another shape — means no usable link,
+# and the launcher says so instead of opening a dashboard that would only ask
+# for pairing. The helper's own stderr goes to the log, never to the URL.
+pair_json=$(compose exec -T open-harness node /opt/open-harness/runtime/browser-pair.mjs 2>>"$log_file")
+pair_status=$?
 pair_code=$(printf '%s' "$pair_json" | tr -d '\n\r' | sed -n 's/.*"code"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-if [ -n "$pair_code" ]; then
-  target="$app_url/#pair=$(urlencode "$pair_code")"
-  if open_url "$target"; then
-    say "Open Harness is running at $app_url — a paired browser window is opening."
-  else
-    fail 5 "Open Harness is running at $app_url, but no browser could be opened from here. Run the launcher again from a desktop session, or open $app_url and follow the pairing instructions shown there."
-  fi
+mint_failed() {
+  fail 5 "Open Harness is running at $app_url, but no browser connection link could be created ($1). No browser was opened, because a dashboard opened without a link only asks for pairing. This usually means the coordinator image is older than this launcher or did not start correctly: run '$0 --logs', update the release if it is out of date, then run this launcher again."
+}
+[ "$pair_status" -eq 0 ] || mint_failed "the pairing helper in the coordinator container exited with status $pair_status"
+[ -n "$pair_code" ] || mint_failed "the pairing helper printed no code"
+case "$pair_code" in
+  *[!A-Za-z0-9_-]*) mint_failed "the pairing helper printed a code in an unexpected form" ;;
+esac
+[ "${#pair_code}" -ge 32 ] && [ "${#pair_code}" -le 128 ] || mint_failed "the pairing helper printed a code of unexpected length"
+target="$app_url/#pair=$(urlencode "$pair_code")"
+if open_url "$target"; then
+  say "Open Harness is running at $app_url — a paired browser window is opening."
 else
-  warn "Could not mint a browser pairing code (is this release's coordinator image current?). Opening the dashboard without one; it will say if pairing is required."
-  open_url "$app_url" || fail 5 "Open Harness is running at $app_url, but no browser could be opened from here."
+  fail 5 "Open Harness is running at $app_url, but no browser could be opened from here. Run the launcher again from a desktop session, or open $app_url and follow the pairing instructions shown there."
 fi
 pause_if_wrapped
 exit 0

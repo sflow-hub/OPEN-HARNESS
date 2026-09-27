@@ -127,6 +127,75 @@ test('pairing exchanges the code on this coordinator only, keeps the token, and 
   } finally { stub.restore(); }
 }));
 
+test('a browser whose storage is unavailable still bootstraps with the token pairing just gave it, until the coordinator refuses it', async () => {
+  // Private windows and blocked site data make localStorage throw; the token from pair()
+  // then lives only in this client, for this coordinator, and is dropped on a refusal.
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, get() { throw new Error('Access to storage is denied.'); } });
+  let accepted = 'paired-token';
+  const stub = stubFetch((url, init) => {
+    if (url.endsWith('/v1/browser/pair')) return ok({ token: 'paired-token', mode: 'live' });
+    if (url.endsWith('/v1/bootstrap')) return String(new Headers(init?.headers).get('authorization') || '') === `Bearer ${accepted}` ? ok({ token: accepted, mode: 'live' }) : refused();
+    return ok({});
+  });
+  try {
+    const client = new ControlClient();
+    await client.pair('one-use-code');
+    assert.equal((await client.bootstrap()).token, 'paired-token');
+    assert.equal(stub.calls.at(-1)?.authorization, 'Bearer paired-token', 'presented from memory, storage being unusable');
+    // A fresh client (a reload) has nothing: no storage, no memory — the plain refusal, no header.
+    await assert.rejects(new ControlClient().bootstrap(), PairingRequiredError);
+    assert.equal(stub.calls.at(-1)?.authorization, '');
+    // The coordinator stops accepting the token (new data folder): the memory goes with it.
+    accepted = 'rotated-token';
+    await assert.rejects(client.bootstrap(), PairingRequiredError);
+    assert.equal(stub.calls.at(-1)?.authorization, 'Bearer paired-token');
+    await assert.rejects(client.bootstrap(), PairingRequiredError);
+    assert.equal(stub.calls.at(-1)?.authorization, '', 'nothing is retried with a token the coordinator refused');
+  } finally {
+    stub.restore();
+    if (previous) Object.defineProperty(globalThis, 'localStorage', previous); else delete (globalThis as { localStorage?: unknown }).localStorage;
+  }
+});
+
+test('a bootstrap that was in flight when a pairing completed cannot clear or replace the token that pairing produced', () => withStorage(async store => {
+  // The plain visit's bare bootstrap is slow; a link pasted meanwhile pairs the browser. When
+  // the old answer (401, no token) finally lands it must not wipe the new token — and an old
+  // successful answer must not put an older token back either.
+  let releaseBare: (response: Response) => void = () => {};
+  const stub = stubFetch((url, init) => {
+    if (url.endsWith('/v1/browser/pair')) return ok({ token: 'paired-token', mode: 'live' });
+    if (url.endsWith('/v1/bootstrap')) {
+      const sent = String(new Headers(init?.headers).get('authorization') || '');
+      if (sent === 'Bearer paired-token') return ok({ token: 'paired-token', mode: 'live' });
+      return new Promise<Response>(resolve => { releaseBare = resolve; });
+    }
+    return ok({});
+  });
+  try {
+    const client = new ControlClient();
+    const stale = client.bootstrap();
+    stale.catch(() => {});
+    await client.pair('one-use-code');
+    assert.equal(store.get(PAIR_KEY), 'paired-token');
+    releaseBare(refused());
+    await assert.rejects(stale, error => !(error instanceof PairingRequiredError) && /newer browser pairing/.test((error as Error).message));
+    assert.equal(store.get(PAIR_KEY), 'paired-token', 'the late refusal cleared nothing');
+    assert.equal(client.token, 'paired-token');
+    assert.equal((await client.bootstrap()).token, 'paired-token');
+    assert.equal(stub.calls.at(-1)?.authorization, 'Bearer paired-token');
+    // The same for a late success carrying an older token (a source dashboard's bare answer).
+    store.clear();
+    const other = new ControlClient();
+    const early = other.bootstrap();
+    await other.pair('one-use-code');
+    releaseBare(ok({ token: 'older-token', mode: 'live' }));
+    assert.equal((await early).token, 'older-token', 'the answer itself is still returned');
+    assert.equal(other.token, 'paired-token', 'but it does not replace the paired token');
+    assert.equal(store.get(PAIR_KEY), 'paired-token');
+  } finally { stub.restore(); }
+}));
+
 test('a used or expired code is reported with the coordinator’s words and stores nothing', () => withStorage(async store => {
   const stub = stubFetch(() => Response.json({ error: 'This browser connection link is invalid or expired. Open Open Harness with its launcher to get a new link.', pairingRequired: true }, { status: 401 }));
   try {

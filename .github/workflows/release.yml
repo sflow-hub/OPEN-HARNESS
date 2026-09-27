@@ -99,7 +99,16 @@ jobs:
           name: release-engine
           path: release-images
       - name: Use the exact engine selected by verification
-        run: node -e "const fs=require('fs'); fs.appendFileSync(process.env.GITHUB_ENV, 'OPEN_HARNESS_ENGINE_IMAGE='+JSON.parse(fs.readFileSync('release-images/engine.json')).ref+'\nTMPDIR='+process.env.RUNNER_TEMP+'\n')"
+        env:
+          RELEASE_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const image = JSON.parse(fs.readFileSync('release-images/engine.json'));
+          const digest = image.platforms[`linux/${process.env.RELEASE_ARCHITECTURE}`];
+          if (!/^sha256:[a-f0-9]{64}$/.test(digest || '')) throw new Error('Missing engine architecture digest.');
+          fs.appendFileSync(process.env.GITHUB_ENV, `OPEN_HARNESS_ENGINE_IMAGE=${image.ref}\nOPEN_HARNESS_ENGINE_SCAN_IMAGE=${image.ref.split('@')[0]}@${digest}\nTMPDIR=${process.env.RUNNER_TEMP}\n`);
+          NODE
       - uses: docker/setup-buildx-action@v3
       - name: Build native coordinator image
         id: build-coordinator
@@ -138,6 +147,14 @@ jobs:
           OPEN_HARNESS_COORDINATOR_BUILD_METADATA: ${{ steps.build-coordinator.outputs.metadata }}
           OPEN_HARNESS_HERMES_BUILD_METADATA: ${{ steps.build-hermes.outputs.metadata }}
         run: node scripts/release-images.mjs capture-scan-inputs release-images '${{ matrix.architecture }}'
+      - name: Scan the exact private engine architecture
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.OPEN_HARNESS_ENGINE_SCAN_IMAGE }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          exit-code: '1'
       - name: Scan coordinator image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -388,4 +405,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --prerelease --generate-notes --title "Open Harness ${GITHUB_REF_NAME}"
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --prerelease --notes-file docs/RELEASE_NOTES.md --generate-notes --title "Open Harness ${GITHUB_REF_NAME}"

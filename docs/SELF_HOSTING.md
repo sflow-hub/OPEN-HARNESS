@@ -28,33 +28,11 @@ OPEN_HARNESS_PUBLIC_URL=https://agents.example.com/api/local
 OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1
 ```
 
-The final setting allows remote requests through the dashboard proxy; Compose still requires browser pairing. Do not enable it until proxy authentication is working. Mint the one-use code locally and open the paired link on your HTTPS dashboard origin. This Nginx example uses an `htpasswd` file and disables response buffering so run events arrive promptly:
+The final setting allows remote requests through the dashboard proxy; Compose still requires browser pairing. Do not enable it until proxy authentication is working on every route, including `/api/local`. The client uses `Authorization: Bearer …` for the operator token, so an edge login must preserve that header and authenticate separately, for example through its own session cookie. HTTP Basic authentication on the same requests conflicts with this contract; do not exempt the API from edge authentication to work around it. A complete remote proxy configuration has not been accepted as part of the local-browser release.
 
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name agents.example.com;
+Configure the proxy to preserve the dashboard Host and protocol, disable response buffering for run events, and allow long-running requests. Verify that an unauthenticated client cannot reach either the dashboard or API before enabling remote access. Mint the one-use code locally and open the paired link on your HTTPS dashboard origin.
 
-    ssl_certificate /etc/letsencrypt/live/agents.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/agents.example.com/privkey.pem;
-
-    auth_basic "Open Harness";
-    auth_basic_user_file /etc/nginx/open-harness.htpasswd;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_read_timeout 1h;
-    }
-}
-```
-
-Reload Nginx, then rebuild the Compose service so it receives the environment values:
+After validating the proxy, rebuild the Compose service so it receives the environment values:
 
 ```bash
 docker compose up -d --build
@@ -68,7 +46,12 @@ No host folders are exported by default. Copy `compose.host-folders.example.yaml
 
 ## Update
 
-Back up first, update the source release, then rebuild:
+Back up first and stop the stack. For an extracted source archive, extract the new source
+release into a separate folder, retain your Compose project name, `.env` and explicit folder
+override choices, then run its launcher with `--build` and the same override options. Keep
+the previous release folder and backup for rollback. No Git installation is needed.
+
+For an actual Git checkout, update and rebuild from that checkout:
 
 ```bash
 docker compose down
@@ -79,7 +62,7 @@ docker compose ps
 
 Database migrations run when the coordinator starts. Existing SQLite state, credentials, profiles, and the private container engine remain in named volumes.
 
-This update requires runtime contract 5. It adds confirmed desktop initialization for selected-folder startup and enables the private desktop's accessibility bus before applications launch, including browsers opened before the first computer-control call. If Readiness reports **Update agent runtime**, run runtime setup from the dashboard before starting agents. Rebuilding the coordinator alone does not rebuild the image inside the private engine. A policy-only patch cannot upgrade an older full runtime.
+This update requires runtime contract 6. It refreshes the runtime base and dependency packages, keeps confirmed desktop initialization for selected-folder startup, and enables the private desktop's accessibility bus before applications launch, including browsers opened before the first computer-control call. If Readiness reports **Update agent runtime**, run runtime setup from the dashboard before starting agents. Rebuilding the coordinator alone does not rebuild the image inside the private engine. A policy-only patch cannot upgrade an older full runtime.
 
 To roll back, stop the stack and restore the backup taken before the update into empty volumes, then start the previous release. Do not run older code against a state volume that has already been opened by a newer release.
 

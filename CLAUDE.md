@@ -123,8 +123,10 @@ Consequences:
 
 Trust model is a single trusted operator (`SECURITY.md`). Container isolation is the primary
 boundary; the host home directory, Docker socket, and other agents' private directories are
-never mounted. The dashboard bootstrap token authorizes arbitrary run creation, host-path
-mounts and agent execution, so it is loopback-only and `Host`-header checked.
+never mounted. The dashboard operator token authorizes arbitrary run creation, host-path
+mounts and agent execution. Host-native bootstrap is loopback-only and `Host`-header checked;
+Compose instead requires a one-use pairing code from the coordinator CLI. Its public
+readiness endpoint returns only `{ok:true}`.
 
 Call out changes to authentication, the bootstrap token, container isolation, runner pairing,
 or credential storage explicitly in the PR description. Never open a public issue or PR for a
@@ -161,8 +163,10 @@ installers need separate platform acceptance.
 - `OPEN_HARNESS_STATE_DIR` should stay commented out rather than set empty. `harness:setup`
   fills it with `~/.open-harness/<project>` when Docker Desktop cannot read the project
   folder, because agents started there would never receive their profile or credential.
-- Agent containers run `--restart unless-stopped`. Quit from the tray or stop the coordinator
-  with Ctrl-C so it cleans up containers belonging to its state directory. For manual recovery,
+- Private and Compose agent containers run `--restart unless-stopped`. Native selected-folder
+  containers use `--restart no`; each new admission verifies mounts in a fresh inert container
+  before starting the desktop or agent, and requires Docker on the same Linux kernel.
+  Quit from the tray or stop the coordinator with Ctrl-C so it cleans up its containers. For manual recovery,
   inspect the `open-harness.state` label and mounts before stopping specific container IDs;
   another workspace may share the Docker daemon.
 - Concurrency caps: one task per agent, two top-level runs you started, four total including

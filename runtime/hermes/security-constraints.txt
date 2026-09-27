@@ -1,4 +1,4 @@
-# Candidate packaging override for CVE-2026-84381 and CVE-2026-84382.
+# Reviewed packaging override for CVE-2026-84381 and CVE-2026-84382.
 # Pinned Hermes originally requires httpx2==2.7.0; its matching httpcore2 also
 # resolves to 2.7.0. MCP 2.0.0 accepts httpx2>=2.5.0. See SECURITY_PACKAGING.md.
 httpx2==2.12.0

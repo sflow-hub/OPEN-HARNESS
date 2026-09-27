@@ -8,7 +8,8 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ### Fixed
 
-- Initialize each private desktop's accessibility session before applications launch, so browsers opened before the first computer-control call support clicking and typing; require runtime contract 5, including confirmed initialization for native Linux folder grants. (codex)
+- Refresh the coordinator and agent image dependencies, keep the coordinator as a Docker client without a redundant daemon, and require a full runtime-contract-6 rebuild. Image publication remains gated on security scans and platform acceptance. (codex)
+- Initialize each private desktop's accessibility session before applications launch, so browsers opened before the first computer-control call support clicking and typing; require runtime contract 6, retaining confirmed initialization for native Linux folder grants. (codex)
 - Keep computer control inside private per-agent desktops; block legacy native execution and probes, remove host-runtime installer fallbacks, and retain safe cleanup of saved native processes. (codex)
 - Harden profile generation and workspace file access against agent-planted links, require Docker for both sandboxed access modes, and verify private-file isolation and folder revocation with real containers. (codex)
 - Preserve canonical Hermes memory and skills on the assigned computer, durable run history and input delivery, revision-scoped permissions, and safe process recovery while retaining saved credentials, teams and projects. (codex)
@@ -22,6 +23,8 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ### Added
 
+- Mac and Windows local-browser launchers with one-use pairing, explicit folder sharing and an offline backup/restore guide; Docker Desktop is the only host prerequisite. Native platform acceptance remains pending. (claude, codex)
+- Preserve the packaged workspace across release-folder changes, accept pairing links pasted into an open dashboard, and refresh setup readiness without reloading; delayed older connection replies cannot discard a newly paired browser token. (claude, codex)
 - Prepare digest-pinned ARM64/AMD64 browser packages with native image checks and anonymous install/restore release gates; runtime setup downloads the packaged image without a source-build fallback. Publication and native Mac/Windows acceptance remain pending. (codex)
 - Require a one-use local pairing link for Compose browsers, expose only explicitly exported host folders to agent grants, and refuse unsupported localhost-only model routes with actionable guidance. (codex)
 - Real Docker, Compose, runner, private desktop and persistent-workflow regression gates alongside expanded lifecycle and integration tests. (codex)

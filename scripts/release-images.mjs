@@ -106,8 +106,9 @@ export function browserCompose(input, lock) {
       assert.equal(service, engine, 'The entrypoint belongs only to the engine.');
     }
   }
-  // Compose normally stamps project-specific names during normalization.
-  delete config.name;
+  // Updates unpack into new directories; keep their default workspace stable.
+  config.name = 'open-harness';
+  // Let Compose regenerate resource names for the default or an explicit project.
   for (const group of ['volumes', 'networks']) for (const item of Object.values(config[group] || {})) if (!item.external) delete item.name;
   return config;
 }
@@ -126,7 +127,7 @@ function main() {
   assert.ok(directory, 'Specify an output directory.');
   mkdirSync(directory, { recursive: true });
   if (operation === 'resolve-engine') {
-    saveJson(resolve(directory, 'engine.json'), imageEntry('docker.io/library/docker', descriptor('docker:28-dind')));
+    saveJson(resolve(directory, 'engine.json'), imageEntry('docker.io/library/docker', descriptor('docker:29.8.1-dind@sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0')));
   } else if (operation === 'capture-scan-inputs') {
     const { version, revision } = identity();
     assert.ok(PLATFORMS.includes(`linux/${architecture}`));

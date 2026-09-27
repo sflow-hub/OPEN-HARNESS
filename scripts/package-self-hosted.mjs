@@ -12,7 +12,7 @@ function command(binary, args, cwd, env) {
   return result.stdout.trim();
 }
 const requiredSource = ['package-lock.json', 'compose.yaml', 'Dockerfile.coordinator', '.env.example', 'docs/SELF_HOSTING.md', 'runtime/hermes/Dockerfile'];
-const browserFiles = ['runtime/dind-entrypoint.sh', 'compose.host-folders.example.yaml', 'docs/LOCAL_BROWSER.md', 'LICENSE', 'Start Open Harness.command', 'Start Open Harness.cmd'];
+const browserFiles = ['runtime/dind-entrypoint.sh', 'compose.host-folders.example.yaml', 'docs/LOCAL_BROWSER.md', 'docs/SELF_HOSTING.md', 'LICENSE', 'Start Open Harness.command', 'Start Open Harness.cmd'];
 const privateFile = path => /(^|\/)\.env(?:\.|$)/.test(path) && path !== '.env.example' || /(^|\/)(?:\.open-harness[^/]*|node_modules|dist|test-results|playwright-report)(?:\/|$)/.test(path);
 const collaborationFile = path => path === 'COORDINATION.md' || path.startsWith('work/') || path.endsWith('.bundle') || /(?:^|\/)\.DS_Store$/.test(path) || / 2\.[^/]+$/.test(path);
 

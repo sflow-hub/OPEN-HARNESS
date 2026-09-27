@@ -17,11 +17,15 @@ async function seed(request: APIRequestContext) {
   return token as string;
 }
 // Puts the pairing contract in front of the mock coordinator and counts what the page tried.
-async function enforcePairing(page: Page, realToken: string) {
+async function enforcePairing(page: Page, realToken: string, { bareDelayMs = 0 } = {}) {
   const attempts = { unauthenticated: 0, authenticated: 0, pair: [] as string[] };
   await page.route(`${control}/v1/bootstrap`, async route => {
     const presented = route.request().headers()['authorization'] || '';
-    if (presented !== `Bearer ${realToken}`) { attempts.unauthenticated += 1; return route.fulfill({ status: 401, json: REFUSED }); }
+    if (presented !== `Bearer ${realToken}`) {
+      attempts.unauthenticated += 1;
+      if (bareDelayMs) await new Promise(resolve => setTimeout(resolve, bareDelayMs));
+      return route.fulfill({ status: 401, json: REFUSED });
+    }
     attempts.authenticated += 1;
     const response = await route.fetch();
     await route.fulfill({ response, json: { ...await response.json(), mode: 'live' } });
@@ -41,7 +45,7 @@ const storedToken = (page: Page) => page.evaluate(base => localStorage.getItem(`
 // The connection status sits in the sidebar, which the phone layout keeps behind a button.
 async function sidebarShows(page: Page, text: string) {
   const open = page.getByRole('button', { name: 'Open navigation' });
-  if (await open.isVisible()) await open.click();
+  if (await open.isVisible() && !await page.getByRole('button', { name: 'Close navigation' }).isVisible()) await open.click();
   await expect(page.getByText(text)).toBeVisible();
 }
 
@@ -128,4 +132,82 @@ test('a source dashboard whose coordinator does not require pairing is unchanged
   await sidebarShows(page, 'Automated test mode');
   expect(await storedToken(page)).toBeNull();
   await expect(page.getByRole('alert').filter({ hasText: 'paired' })).toHaveCount(0);
+});
+
+// Manual pairing, as the docs describe it: the operator mints a code and pastes the link
+// into a dashboard that is already open. Only the fragment changes, so nothing reloads.
+const pasteLink = (page: Page, code: string) => page.evaluate(value => { window.location.hash = `#pair=${value}`; }, code);
+
+test('a fresh link pasted into an open unpaired dashboard pairs it in place, and a stale one pasted later is refused and cleared', async ({ page, request }) => {
+  const token = await seed(request);
+  const attempts = await enforcePairing(page, token);
+  await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+  await expect(page.getByRole('alert').filter({ hasText: 'isn’t paired with Open Harness' })).toBeVisible();
+  expect(attempts.unauthenticated).toBe(1);
+  await pasteLink(page, GOOD);
+  await sidebarShows(page, 'Agent runtime ready');
+  await expect(page.getByRole('alert').filter({ hasText: 'paired' })).toHaveCount(0);
+  await expect(page).not.toHaveURL(/#/);
+  expect(await storedToken(page)).toBe(token);
+  expect(attempts.pair).toEqual([GOOD]);
+  // The paired connection presented the token; nothing was tried bare.
+  expect(attempts.unauthenticated).toBe(1);
+  // A used link pasted into the now paired dashboard: exchanged once, refused, cleared; the
+  // dashboard stays connected on its token and no gate appears.
+  await pasteLink(page, 'stale-code');
+  await expect(page).not.toHaveURL(/#/);
+  await expect.poll(() => attempts.pair).toEqual([GOOD, 'stale-code']);
+  await sidebarShows(page, 'Agent runtime ready');
+  await expect(page.getByRole('alert').filter({ hasText: 'paired' })).toHaveCount(0);
+  expect(attempts.unauthenticated).toBe(1);
+  expect(await storedToken(page)).toBe(token);
+});
+
+test('a stale link pasted into an open unpaired dashboard is refused and cleared, and the page still never loads unauthenticated', async ({ page, request }) => {
+  const token = await seed(request);
+  const attempts = await enforcePairing(page, token);
+  await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+  await expect(page.getByRole('alert').filter({ hasText: 'isn’t paired with Open Harness' })).toBeVisible();
+  await pasteLink(page, 'stale-code');
+  const gate = page.getByRole('alert').filter({ hasText: 'already been used or has expired' });
+  await expect(gate).toBeVisible();
+  await expect(page).not.toHaveURL(/#/);
+  await sidebarShows(page, 'Browser not paired');
+  expect(await storedToken(page)).toBeNull();
+  expect(attempts.pair).toEqual(['stale-code']);
+  // The plain visit and the attempt after the refused link: one bare bootstrap each, then
+  // nothing on a timer.
+  await page.waitForTimeout(2_500);
+  expect(attempts.unauthenticated).toBe(2);
+  // A fresh link afterwards still works from that gate.
+  await pasteLink(page, GOOD);
+  await sidebarShows(page, 'Agent runtime ready');
+  await expect(gate).toHaveCount(0);
+  expect(attempts.pair).toEqual(['stale-code', GOOD]);
+  expect(attempts.unauthenticated).toBe(2);
+});
+
+test('a slow refusal of the plain visit, landing after a link pasted meanwhile has paired the browser, changes nothing', async ({ page, request }) => {
+  // The bare bootstrap of the plain visit is still in flight when the operator pastes a
+  // fresh link. The pairing wins the race; the old refusal then arrives and must neither
+  // clear the new token nor put the gate up.
+  const token = await seed(request);
+  const attempts = await enforcePairing(page, token, { bareDelayMs: 1_500 });
+  await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+  await expect(dashboard(page)).toBeVisible();
+  await expect.poll(() => attempts.unauthenticated).toBe(1);
+  await pasteLink(page, GOOD);
+  await sidebarShows(page, 'Agent runtime ready');
+  expect(attempts.pair).toEqual([GOOD]);
+  // Now the stale refusal lands.
+  await page.waitForTimeout(2_000);
+  await expect(page.getByRole('alert').filter({ hasText: 'paired' })).toHaveCount(0);
+  await sidebarShows(page, 'Agent runtime ready');
+  expect(await storedToken(page)).toBe(token);
+  expect(attempts.unauthenticated).toBe(1);
+  // And the browser is really paired: a reload presents the token and never asks bare.
+  await page.reload();
+  await sidebarShows(page, 'Agent runtime ready');
+  expect(attempts.unauthenticated).toBe(1);
+  expect(await storedToken(page)).toBe(token);
 });

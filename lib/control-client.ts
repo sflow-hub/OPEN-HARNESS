@@ -70,16 +70,31 @@ function storeToken(token: string) { try { if (token) localStorage.setItem(pairK
 
 export class ControlClient {
   token = "";
+  // The token pairing produced, kept for this page as well as in storage: in a private
+  // window or with site data blocked, storage throws or forgets, and the bootstrap that
+  // follows pair() must still present what the coordinator just handed out. Scoped to the
+  // coordinator base it came from, like the stored copy.
+  private paired: { base: string; token: string } | null = null;
+  // Counts successful pairings. A bootstrap that was already in flight when a pairing
+  // completed was sent without (or with an older) token; whatever it comes back with
+  // describes the state before that pairing and must not touch the token it produced.
+  private pairings = 0;
+  private keepPaired(token: string) { this.paired = token ? { base: base(), token } : null; storeToken(token); }
+  private pairedToken() { return storedToken() || (this.paired && this.paired.base === base() ? this.paired.token : ""); }
   async bootstrap() {
     // A paired browser identifies itself; a plain source/dev dashboard has nothing stored and
     // bootstraps exactly as before.
-    const paired = storedToken();
+    const epoch = this.pairings, paired = this.pairedToken();
     const response = await fetch(`${base()}/v1/bootstrap`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), ...(paired ? { headers: { Authorization: `Bearer ${paired}` } } : {}) });
     const body = await parseBody(response) as { error?: string; pairingRequired?: boolean };
-    if (response.status === 401 && body.pairingRequired) { storeToken(""); throw new PairingRequiredError(body.error || "This browser is not paired with Open Harness."); }
+    const superseded = epoch !== this.pairings;
+    if (response.status === 401 && body.pairingRequired) {
+      if (superseded) throw new Error("This connection attempt was replaced by a newer browser pairing.");
+      this.keepPaired(""); throw new PairingRequiredError(body.error || "This browser is not paired with Open Harness.");
+    }
     if (!response.ok) throw new Error(body.error || "Open Harness control service is unavailable.");
-    const status = body as unknown as RuntimeStatus; this.token = status.token;
-    if (paired) storeToken(status.token);
+    const status = body as unknown as RuntimeStatus;
+    if (!superseded) { this.token = status.token; if (paired) this.keepPaired(status.token); }
     return status;
   }
   // Exchanges a one-use code from the launcher's link for the operator token, on this
@@ -88,7 +103,7 @@ export class ControlClient {
     const response = await fetch(`${base()}/v1/browser/pair`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     const body = await parseBody(response) as { error?: string };
     if (!response.ok) throw new Error(body.error || "This browser connection link is invalid or expired. Open Open Harness with its launcher to get a new link.");
-    const status = body as unknown as RuntimeStatus; this.token = status.token; storeToken(status.token);
+    const status = body as unknown as RuntimeStatus; this.pairings += 1; this.token = status.token; this.keepPaired(status.token);
     return status;
   }
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {

@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   ArrowUpRight,
@@ -208,6 +208,13 @@ export default function Home() {
   // with a link that was already used or has expired. Neither state polls or falls back.
   const [pairing, setPairing] = useState<{ state: "none" | "required" | "invalid"; message: string }>({ state: "none", message: "" });
   const connectAttempt = useRef(0);
+  // A code taken out of the address bar by the hashchange listener below, held for exactly
+  // one exchange by the next connection attempt.
+  const pendingPairCode = useRef("");
+  const runtimeRefresh = useRef(0);
+  // What the first-run guide last reported the runtime to be, kept until a bootstrap answer
+  // agrees: a re-read requested for another reason (closing the guide) carries it on.
+  const runtimeExpectation = useRef<boolean | null>(null);
   const [notifyWhenDone, setNotifyWhenDone] = useState(false);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [inspector, setInspector] = useState(true);
@@ -439,9 +446,13 @@ export default function Home() {
       // the link it arrived with has been used.
       let linkFailure = "";
       const link = /^#pair=([^&#]+)$/.exec(window.location.hash);
-      if (link) {
-        window.history.replaceState(null, "", window.location.pathname + window.location.search);
-        try { await client.pair(decodeURIComponent(link[1])); }
+      if (link) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      // Either the fragment this page was opened with or one that arrived later (see the
+      // hashchange listener); taken once, so a retry never exchanges the same code twice.
+      const code = link ? link[1] : pendingPairCode.current;
+      pendingPairCode.current = "";
+      if (code) {
+        try { await client.pair(decodeURIComponent(code)); }
         catch (error) { linkFailure = error instanceof Error ? error.message : "This browser connection link is invalid or expired."; }
       }
       try {
@@ -522,6 +533,43 @@ export default function Home() {
     // The one-time migration intentionally snapshots the hydrated browser workspace.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
+  // The sidebar's runtime label reads the bootstrap answer, which is otherwise only taken
+  // at connection time; the first-run guide's checks and set-up actions change it. This
+  // re-reads that one answer — no workspace sync, no history, and bootstrap()'s pairing
+  // rules as they are. The coordinator serves it from a short-lived probe cache, so right
+  // after a set-up action it can still describe the state before it: when the guide has
+  // just reported the state it expects, ask again a few times until the two agree.
+  const refreshRuntime = useCallback((expectAvailable?: boolean, attempt = 0) => {
+    window.clearTimeout(runtimeRefresh.current);
+    if (expectAvailable !== undefined) runtimeExpectation.current = expectAvailable;
+    const expected = runtimeExpectation.current;
+    controlRef.current.bootstrap().then(status => {
+      setRuntime(status);
+      if (expected === null || status.runtime.available === expected || attempt >= 3) { runtimeExpectation.current = null; return; }
+      runtimeRefresh.current = window.setTimeout(() => refreshRuntime(undefined, attempt + 1), 2_500);
+    }).catch(error => { if (error instanceof PairingRequiredError) setPairing({ state: "required", message: error.message }); });
+  }, []);
+  useEffect(() => () => window.clearTimeout(runtimeRefresh.current), []);
+  // A link pasted into the address bar of a dashboard that is already open is a
+  // same-document navigation: nothing reloads, so the read at the top of connect() never
+  // sees it. The code is taken out of the address bar at once and the connection is
+  // restarted the way Try again does — the attempt in flight is cancelled by the effect's
+  // cleanup, the new one exchanges the code, then bootstraps and hydrates as usual. A later
+  // link replaces an earlier one that has not been exchanged yet.
+  useEffect(() => {
+    const onHashChange = () => {
+      const link = /^#pair=([^&#]+)$/.exec(window.location.hash);
+      if (!link) return;
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      pendingPairCode.current = link[1];
+      connectAttempt.current = 0;
+      setRetrying(true);
+      setReady(false);
+      window.setTimeout(() => { setReady(true); setRetrying(false); }, 50);
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
   useEffect(() => {
     if (!runtime || !selectedAgent) return;
     let cancelled = false;
@@ -2432,7 +2480,7 @@ export default function Home() {
                 </select>
                 <small>Agents using “Use workspace default” run on this credential.</small>
               </label>
-              {settings.provider === "local" && <label>Model API base URL<input value={settings.baseUrl || ""} onChange={e => setSettings(current => ({ ...current, baseUrl: e.target.value }))} placeholder="http://host.docker.internal:11434/v1" /><small>Use an address reachable from the agent container.</small></label>}
+              {settings.provider === "local" && <label>Model API base URL<input value={settings.baseUrl || ""} onChange={e => setSettings(current => ({ ...current, baseUrl: e.target.value }))} placeholder="https://models.example.com/v1" /><small>Use an address reachable from the agent container.</small></label>}
               <p className="muted small">Only agents using “Use workspace default” follow these changes. Agents with their own model keep it.</p>
             </fieldset>
             <div className="settings-divider" />
@@ -2553,14 +2601,17 @@ export default function Home() {
         setAdvancedFeatures(true);
         localStorage.setItem(ADVANCED_KEY, 'on');
         setOnboardingOpen(false);
+        refreshRuntime();
         setEditingAgentTab('computer');
         setEditingAgent(agent);
       }} onDismiss={() => {
         setOnboardingOpen(false);
+        refreshRuntime();
       }} onFinished={() => {
         localStorage.setItem(ONBOARDING_KEY, 'done');
         setOnboardingOpen(false);
-      }} />}
+        refreshRuntime();
+      }} onRuntimeChecked={status => refreshRuntime(status.executionReady)} />}
       {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
       {file && (
         <div className="modal-backdrop" onClick={() => setSelectedFile(null)}>

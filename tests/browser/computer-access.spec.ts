@@ -227,7 +227,15 @@ test('a Docker Desktop install offers only the folders exported to it, at their 
   const saved = await (await request.get(control + '/v1/agents/atlas/profile', { headers })).json();
   expect(saved.profile.computer.access).toBe('folders');
   expect(saved.profile.computer.folders.map(({ path, mode }: { path: string; mode: string }) => ({ path, mode }))).toEqual([{ path: '/host-folders/notes', mode: 'write' }]);
-  // Back on a computer that reports no exports, the same grant is an ordinary typed path.
+  // The same installation refuses model servers on this computer's loopback or Docker's host
+  // aliases, so the endpoint hint on the Model tab does not suggest them.
+  await panel.getByRole('tab', { name: 'Model' }).click();
+  await panel.getByText('Advanced endpoint').click();
+  await expect(panel.getByLabel('Model API base URL')).toHaveAttribute('placeholder', 'https://models.example.com/v1');
+  await expect(panel.getByText(/host\.docker\.internal on this computer are refused here/)).toBeVisible();
+  await expect(panel.getByText(/use host\.docker\.internal/)).toHaveCount(0);
+  // Back on a computer that reports no exports, the same grant is an ordinary typed path, and
+  // the endpoint hint is the native one again.
   await page.unroute(`${control}/v1/machines`);
   await panel.getByRole('button', { name: 'Close agent settings' }).click();
   await expect(panel).toBeHidden();
@@ -235,6 +243,10 @@ test('a Docker Desktop install offers only the folders exported to it, at their 
   await again.getByText('Advanced resources and shared folders').click();
   await expect(again.getByRole('textbox', { name: 'Shared folder 1 path' })).toHaveValue('/host-folders/notes');
   await expect(again.getByText('Open Harness is running in Docker Desktop.')).toHaveCount(0);
+  await again.getByRole('tab', { name: 'Model' }).click();
+  await again.getByText('Advanced endpoint').click();
+  await expect(again.getByLabel('Model API base URL')).toHaveAttribute('placeholder', 'http://host.docker.internal:11434/v1');
+  await expect(again.getByText(/for a model server on the computer running the agent, use host\.docker\.internal/)).toBeVisible();
 });
 
 test('with nothing exported, the editor says how to export a folder instead of offering a path box', async ({ page }) => {
