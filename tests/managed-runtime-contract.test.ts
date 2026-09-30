@@ -37,7 +37,7 @@ test('the agent config enables the policy plugin as a list Hermes can read', () 
 test('the agent config still carries the selected model and endpoint', () => {
   const config = writeConfig();
   assert.equal(config.model.default, 'some-model');
-  assert.equal(config.model.base_url, 'http://localhost:9/v1');
+  assert.equal(config.model.base_url, 'http://host.docker.internal:9/v1');
 });
 
 // Hermes gates OPENAI_API_KEY on the endpoint's host (GHSA-76xc-57q6-vm5m), so a custom
@@ -47,7 +47,7 @@ test('a custom endpoint carries its credential through a providers entry', () =>
   const config = writeConfig();
   const entry = config.providers?.custom;
   assert.ok(entry, 'providers.custom is missing for a custom endpoint');
-  assert.equal(entry.base_url, 'http://localhost:9/v1');
+  assert.equal(entry.base_url, 'http://host.docker.internal:9/v1');
   assert.equal(entry.key_env, 'OPEN_HARNESS_MODEL_API_KEY');
   assert.equal(config.model.provider, 'custom');
 });
@@ -173,8 +173,5 @@ test('an approval is answered in the vocabulary Hermes accepts', () => {
 test('the managed gateway announces itself as a session that can answer approvals', () => {
   const hermes = readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes.ts'), 'utf8');
   assert.match(hermes, /HERMES_GATEWAY_SESSION=1/);
-  for (const path of ['runtime/service.ts', 'runtime/runner.ts']) {
-    assert.match(readFileSync(join(import.meta.dirname, '..', path), 'utf8'), /HERMES_GATEWAY_SESSION: '1'/,
-      `${path} must mark its native gateway as an approval channel too`);
-  }
+
 });

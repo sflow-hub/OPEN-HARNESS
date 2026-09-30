@@ -15,6 +15,9 @@ type Props = {
   onComputerSettings: () => void;
   onDismiss: () => void;
   onFinished: () => void;
+  // The guide's checks and set-up actions change what the coordinator reports as the
+  // runtime state; the parent re-reads that state when told a fresh answer exists.
+  onRuntimeChecked?: (status: OnboardingStatus) => void;
 };
 
 const keyFor = (provider: string) => ({ xai: 'XAI_API_KEY', openai: 'OPENAI_API_KEY', openrouter: 'OPENROUTER_API_KEY' } as Record<string,string>)[provider] || '';
@@ -31,7 +34,7 @@ function CheckRow({ check, busy, onAction }: { check: ReadinessCheck; busy: bool
 
 const selfHosted = process.env.NEXT_PUBLIC_OPEN_HARNESS_SELF_HOSTED === '1';
 
-export default function Onboarding({ client, model, revision, onModelSaved, onComputerSettings, onDismiss, onFinished }: Props) {
+export default function Onboarding({ client, model, revision, onModelSaved, onComputerSettings, onDismiss, onFinished, onRuntimeChecked }: Props) {
   const [step, setStep] = useState(0);
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
   const [busy, setBusy] = useState('');
@@ -46,7 +49,7 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
 
   async function refresh() {
     setBusy('status'); setMessage('');
-    try { setStatus(await client.request<OnboardingStatus>('/v1/onboarding/status')); }
+    try { const value = await client.request<OnboardingStatus>('/v1/onboarding/status'); setStatus(value); onRuntimeChecked?.(value); }
     catch (error) { setMessage(error instanceof Error ? error.message : 'Could not check this computer.'); }
     finally { setBusy(''); }
   }
@@ -58,22 +61,23 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
 
   async function action(value: NonNullable<ReadinessCheck['action']>) {
     setBusy(value); setMessage(value === 'prepare-runtime' ? 'Preparing the agent runtime. Keep Open Harness open; the first setup can take several minutes.' : 'Starting Docker…');
-    try { setStatus(await client.request<OnboardingStatus>('/v1/onboarding/action', { method: 'POST', body: JSON.stringify({ action: value }) })); setMessage('Computer check completed.'); }
+    try { const result = await client.request<OnboardingStatus>('/v1/onboarding/action', { method: 'POST', body: JSON.stringify({ action: value }) }); setStatus(result); setMessage('Computer check completed.'); onRuntimeChecked?.(result); }
     catch (error) { setMessage(error instanceof Error ? error.message : 'Setup could not be completed.'); }
     finally { setBusy(''); }
   }
 
+  const savedKeyFor = (candidate: Provider) => candidate === model.provider && model.credentialRef ? model.credentialRef : keyFor(candidate);
   async function saveModel() {
     if (!modelId.trim()) { setMessage('Choose or enter a model.'); return; }
-    if (provider !== 'local' && !apiKey && !secretNames.includes(keyFor(provider))) { setMessage('Paste an API key, or choose a local model server.'); return; }
+    if (provider !== 'local' && !apiKey && !secretNames.includes(savedKeyFor(provider))) { setMessage('Paste an API key, or choose a local model server.'); return; }
     setBusy('model'); setMessage('Saving and testing the connection…');
-    const credentialRef = provider === 'local' ? '' : keyFor(provider);
+    const credentialRef = provider === 'local' ? '' : savedKeyFor(provider);
     const selected: ModelChoice = { provider, model: modelId.trim(), baseUrl: provider === 'local' ? baseUrl.trim() : '', credentialRef };
     try {
-      if (apiKey && credentialRef) { await client.request('/v1/secrets', { method: 'POST', body: JSON.stringify({ name: credentialRef, value: apiKey, ...(status?.credentialMode === 'runner' ? { machineId: status.credentialMachineId } : {}) }) }); setSecretNames(current => [...new Set([...current, credentialRef])]); }
-      const saved = await client.request<{ model: ModelChoice; revision: number }>('/v1/workspace/model', { method: 'PUT', body: JSON.stringify({ revision, model: selected }) });
-      const test = await client.request<{ ok: boolean; message: string }>('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: saved.model }) });
-      onModelSaved(saved.model, saved.revision); setApiKey(''); setModelReady(test.ok);
+      const test = await client.request<{ ok: boolean; message: string; model?: ModelChoice; revision?: number }>('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: selected, apiKey: apiKey || undefined, save: true, revision }) });
+      if (!test.ok || !test.model) { setModelReady(false); setMessage(`${test.message} Your previous workspace model is still active.`); return; }
+      if (test.model.credentialRef) setSecretNames(current => [...new Set([...current, test.model!.credentialRef])]);
+      onModelSaved(test.model, test.revision ?? revision); setApiKey(''); setModelReady(true);
       if (test.ok && status?.executionReady) {
         setMessage(test.message);
         setTimeout(() => setStep(3), 450);
@@ -110,7 +114,7 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
         <p className="onboarding-lead">Use an API key from a model provider, or connect a compatible model server running on your network.</p>
         <label>Provider<select value={provider} onChange={event => { const next = event.target.value as Provider; setProvider(next); setModelId(PROVIDERS[next].model); setBaseUrl(''); setMessage(''); }}>{Object.entries(PROVIDERS).map(([id, value]) => <option key={id} value={id}>{value.label}</option>)}</select></label>
         <label>Model<input value={modelId} onChange={event => setModelId(event.target.value)} placeholder="Model ID" /></label>
-        {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="http://127.0.0.1:11434/v1" /><small>Enter the OpenAI-compatible API address shown by your model app.</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(keyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a></small></label>}
+        {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder={selfHosted ? 'https://models.example.com/v1' : 'http://127.0.0.1:11434/v1'} /><small>{selfHosted ? 'Enter an OpenAI-compatible API address that the coordinator and the agent containers can reach over the network. localhost, 127.0.0.1 and host.docker.internal on this computer are refused here.' : 'Enter the OpenAI-compatible API address shown by your model app.'}</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(savedKeyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a></small></label>}
         {message && <p className={`onboarding-message ${modelReady ? 'success' : ''}`} role="status">{message}</p>}
         <div className="onboarding-actions"><button type="button" className="subtle-button" onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</button><button type="button" className="light-button" disabled={busy === 'model'} onClick={saveModel}>{busy === 'model' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Save and test</button></div>
       </div>}

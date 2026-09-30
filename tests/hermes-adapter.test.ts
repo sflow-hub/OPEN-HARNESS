@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeModels } from '../runtime/profile-runtime';
-import { HermesGateway, lastWords } from '../runtime/hermes';
+import { HermesGateway, lastWords, stopNativeTree } from '../runtime/hermes';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { assertProcessStopped } from './helpers/process-state';
 
 class StreamingGateway extends HermesGateway {
   constructor(readonly submit: () => Promise<unknown> = async () => ({ status: 'streaming' })) { super('test'); }
@@ -50,4 +55,53 @@ test('a crashed gateway reports the agent\'s own last output, not just an exit c
   assert.ok(lastWords([`x${'y'.repeat(900)}`]).length < 460);
   // Newest last: the final line is the one that explains the crash.
   assert.ok(summary.endsWith("No module named 'hermes_cli'"));
+});
+
+test('native gateway requests fail closed before spawning, including mock mode', async t => {
+  const mock = process.env.OPEN_HARNESS_MOCK;
+  t.after(() => { if (mock === undefined) delete process.env.OPEN_HARNESS_MOCK; else process.env.OPEN_HARNESS_MOCK = mock; });
+  let spawned = false;
+  for (const value of ['0', '1']) {
+    process.env.OPEN_HARNESS_MOCK = value;
+    const gateway = new HermesGateway('native-blocked', [], { cwd: tmpdir(), entry: 'unused', python: process.execPath, env: process.env, onSpawn: () => { spawned = true; } });
+    await assert.rejects(gateway.start(), /not sandboxed and is disabled/);
+    await gateway.stop();
+  }
+  assert.equal(spawned, false);
+});
+
+test('legacy native cleanup still stops TERM-ignoring gateways and detached tool descendants', { skip: process.platform === 'win32' }, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'open-harness-stop-tree-')), entry = join(dir, 'legacy.mjs');
+  const pids: number[] = [];
+  t.after(() => { for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} } rmSync(dir, { recursive: true, force: true }); });
+  writeFileSync(entry, `
+    import { spawn } from 'node:child_process';
+    process.on('SIGTERM', () => {});
+    const tool = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)"], { detached: true, stdio: ['ignore','pipe','ignore'] });
+    tool.stdout.once('data', () => console.log(JSON.stringify([process.pid, tool.pid])));
+    setInterval(() => {}, 1000);
+  `);
+  const child = spawn(process.execPath, [entry], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  pids.push(...await new Promise<number[]>((resolve, reject) => { child.once('error', reject); child.stdout.once('data', data => resolve(JSON.parse(String(data)))); }));
+  assert.equal(pids.length, 2);
+  const started = Date.now();
+  await stopNativeTree(pids[0]);
+  assert.ok(Date.now() - started >= 1900, 'Cleanup waited for graceful termination before escalating');
+  for (const pid of pids) assertProcessStopped(pid);
+});
+
+test('mock clarification waits for the answer and mock sessions retain supplied history', async t => {
+  const mock = process.env.OPEN_HARNESS_MOCK; process.env.OPEN_HARNESS_MOCK = '1';
+  t.after(() => { if (mock === undefined) delete process.env.OPEN_HARNESS_MOCK; else process.env.OPEN_HARNESS_MOCK = mock; });
+  const gateway = new HermesGateway('mock');
+  const history = [{ role: 'user', content: 'Remember the blue notebook.' }];
+  const session = await gateway.request('session.create', { messages: history });
+  assert.equal((await gateway.submitPrompt(session.session_id, 'MOCK_HISTORY')).final_response, JSON.stringify(history));
+  let settled = false;
+  const answer = gateway.submitPrompt(session.session_id, 'MOCK_CLARIFY').then(value => { settled = true; return value; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false);
+  await gateway.request('clarify.respond', { request_id: 'mock-clarify', answer: 'blue' });
+  assert.match((await answer).final_response, /Answer: blue/);
+  await gateway.stop();
 });

@@ -1,14 +1,15 @@
-# Reinstall only the policy extension on top of the existing pinned image.
-# Identical result to a full rebuild of runtime/hermes/Dockerfile, but reuses
-# every heavy layer instead of re-cloning Hermes and re-running pip install .[all].
+# Refresh only managed policy on an image already built for this runtime contract.
+# Older images also need OS/CUA/init changes and must use the full Dockerfile.
 # Build with the extension directory as the context:
 #   docker build -f runtime/hermes/extension/Dockerfile.patch -t open-harness-hermes:2026.9.11 runtime/hermes/extension
-# It must carry the same runtime label as the full Dockerfile, or Open Harness will
-# keep reporting the image as out of date.
-FROM open-harness-hermes:2026.9.11
+ARG BASE_IMAGE=open-harness-hermes:2026.9.11
+FROM ${BASE_IMAGE}
+ARG OPEN_HARNESS_RUNTIME=7
 USER root
+RUN test "$(cat /opt/open-harness/runtime-contract 2>/dev/null)" = "$OPEN_HARNESS_RUNTIME" \
+  || { echo 'This image requires a full runtime rebuild before updating managed policy.' >&2; exit 1; }
 COPY . /opt/open-harness/extension/
-RUN pip install --no-cache-dir --force-reinstall --no-deps /opt/open-harness/extension
+RUN chmod -R a+rX /opt/open-harness/extension \
+  && pip install --no-cache-dir --force-reinstall --no-deps /opt/open-harness/extension
 USER hermes
-ARG OPEN_HARNESS_RUNTIME=2
 LABEL dev.openharness.runtime=$OPEN_HARNESS_RUNTIME

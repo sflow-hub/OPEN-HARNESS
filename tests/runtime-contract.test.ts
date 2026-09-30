@@ -24,11 +24,12 @@ for (const file of ['runtime/hermes/Dockerfile', 'runtime/hermes/extension/Docke
   });
 }
 
-test('the full Dockerfile installs Open Harness files after the upstream layers', () => {
+test('the full Dockerfile installs managed policy files after the upstream layers', () => {
   const text = readFileSync(join(root, 'runtime/hermes/Dockerfile'), 'utf8');
-  const upstream = text.indexOf('hermes computer-use install'), ours = text.indexOf('COPY runtime/hermes/');
-  assert.ok(upstream > 0 && ours > upstream, 'COPY runtime/hermes/ must come after the heavy upstream layers so a change there does not rebuild them');
-  assert.ok(text.indexOf('LABEL ') > ours, 'the contract label must be the last layer so bumping it invalidates nothing');
+  // Dependency constraints must precede installation; policy-only changes must still reuse it.
+  const upstream = text.indexOf('hermes computer-use install'), ours = text.search(/^COPY runtime\/hermes\/ \/opt\/open-harness\/$/m);
+  assert.ok(upstream > 0 && ours > upstream, 'The managed-policy directory copy must come after the heavy upstream layers so a policy change does not rebuild them');
+  assert.ok(text.indexOf(`LABEL ${RUNTIME_LABEL}=`) > ours, 'the contract label must be the last layer so bumping it invalidates nothing');
 });
 
 test('classifyContract: no image, unlabeled image, older label, current label', () => {

@@ -1,3 +1,7 @@
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { Readable } from 'node:stream';
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
@@ -30,6 +34,22 @@ function bootstrapAllowed(request: Request) {
   return Boolean(host && LOOPBACK_HOST.test(host));
 }
 
+// A cold runtime build can outlast fetch's five-minute response-header deadline.
+// Keep this one setup request bounded without changing other proxy traffic.
+async function forwardSetup(request: Request, target: string, headers: Headers) {
+  const body = Buffer.from(await request.arrayBuffer());
+  return new Promise<Response>((resolve, reject) => {
+    const send = new URL(target).protocol === 'https:' ? httpsRequest : httpRequest;
+    const upstream = send(target, { method: request.method, headers: Object.fromEntries(headers), signal: AbortSignal.any([request.signal, AbortSignal.timeout(60 * 60_000)]) }, response => {
+      const status = response.statusCode || 502;
+      const stream = [204, 205, 304].includes(status) ? null : Readable.toWeb(response) as ReadableStream<Uint8Array>;
+      resolve(new Response(stream, { status, headers: { 'Content-Type': response.headers['content-type'] || 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }));
+    });
+    upstream.once('error', reject);
+    upstream.end(body);
+  });
+}
+
 async function proxy(request: Request, context: Context) {
   const { path } = await context.params;
   if (!proxyable(path)) return Response.json({ error: 'This path is not available through the dashboard.' }, { status: 404 });
@@ -46,6 +66,7 @@ async function proxy(request: Request, context: Context) {
     const value = request.headers.get(name); if (value) headers.set(name, value);
   }
   try {
+    if (request.method === 'POST' && path.join('/') === 'v1/onboarding/action') return await forwardSetup(request, target, headers);
     const response = await fetch(target, { method: request.method, headers, body: ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer(), redirect: 'manual', cache: 'no-store' });
     return new Response(response.body, { status: response.status, headers: { 'Content-Type': response.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
   } catch (error) {

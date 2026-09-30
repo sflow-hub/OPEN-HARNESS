@@ -1,0 +1,127 @@
+name: Real container runtime
+
+on:
+  pull_request:
+  push:
+    branches: [main, codex/browser-release-candidate]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hermes-container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 105
+    env:
+      OPEN_HARNESS_HERMES_IMAGE: open-harness-hermes:ci
+      OPEN_HARNESS_REAL_CONTAINER: '1'
+      OPEN_HARNESS_DISABLE_OS_VAULT: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Check upgrade fixture failure handling without Docker
+        run: node --test tests/real-upgrade-fixture.test.mjs
+      - name: Check Docker daemon
+        run: docker info
+      - name: Check disk capacity for real runtime acceptance
+        shell: bash
+        run: |
+          df -h / "$RUNNER_TEMP"
+          docker system df
+          node --input-type=module <<'NODE'
+          import { statfsSync } from 'node:fs';
+          const { bavail, bsize } = statfsSync('/');
+          const available = bavail * bsize;
+          console.log(`Free disk before runtime build: ${(available / 1024 ** 3).toFixed(2)} GiB`);
+          if (available < 20 * 1024 ** 3) {
+            console.error('Runtime acceptance needs at least 20 GiB free before building. This runner has insufficient capacity; acceptance has not run.');
+            process.exit(1);
+          }
+          NODE
+      - name: Build the pinned production Hermes image
+        timeout-minutes: 55
+        run: npm run harness:setup
+      - name: Exercise real private-container runs without cloud credentials
+        timeout-minutes: 6
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: node --import tsx tests/real-hermes-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/runtime-smoke.log"
+      - name: Exercise durable memory, skills, delegation and scheduled dispatch
+        timeout-minutes: 6
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+          OPEN_HARNESS_REAL_WORKFLOWS: '1'
+        run: node --import tsx tests/real-workflows-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/workflows-smoke.log"
+      - name: Verify per-agent sandbox boundaries and folder revocation
+        timeout-minutes: 3
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: node --import tsx tests/real-sandbox-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/sandbox-smoke.log"
+      - name: Exercise real Chromium and the private virtual desktop
+        timeout-minutes: 5
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+          OPEN_HARNESS_DESKTOP_SMOKE: '1'
+        run: node --import tsx tests/real-desktop-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/desktop-smoke.log"
+      - name: Exercise the production Compose stack and persistent state
+        timeout-minutes: 25
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+          OPEN_HARNESS_COMPOSE_SMOKE: '1'
+        run: node --import tsx tests/compose-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/compose-smoke.log"
+      - name: Collect fixture evidence and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-container-runtime-evidence
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/runtime-smoke.log
+            ${{ runner.temp }}/open-harness-real-smoke-*/evidence.json
+            ${{ runner.temp }}/open-harness-real-smoke-*/diagnostics.json
+            ${{ runner.temp }}/sandbox-smoke.log
+            ${{ runner.temp }}/open-harness-sandbox-*/evidence.json
+            ${{ runner.temp }}/open-harness-sandbox-*/diagnostics.json
+            ${{ runner.temp }}/workflows-smoke.log
+            ${{ runner.temp }}/open-harness-workflows-*/evidence.json
+            ${{ runner.temp }}/open-harness-workflows-*/diagnostics.json
+            ${{ runner.temp }}/desktop-smoke.log
+            ${{ runner.temp }}/open-harness-desktop-smoke-*/evidence.json
+            ${{ runner.temp }}/open-harness-desktop-smoke-*/diagnostics.json
+            ${{ runner.temp }}/open-harness-desktop-smoke-*/container.log
+            ${{ runner.temp }}/open-harness-desktop-smoke-*/shared/*.png
+            ${{ runner.temp }}/compose-smoke.log
+            ${{ runner.temp }}/open-harness-compose-smoke-*/evidence.json
+            ${{ runner.temp }}/open-harness-compose-smoke-*/diagnostics.json
+            ${{ runner.temp }}/open-harness-compose-smoke-*/compose.log
+            ${{ runner.temp }}/open-harness-compose-smoke-*/image-load.log
+            ${{ runner.temp }}/open-harness-compose-smoke-*/config.json
+            ${{ runner.temp }}/open-harness-compose-smoke-*/provider-requests.json
+      - name: Remove only smoke-test containers
+        if: always()
+        run: docker ps -aq --filter 'name=^/open-harness-real-smoke-' --filter 'name=^/open-harness-wf-(parent|child|clock)-' --filter 'name=^/oh-desktop-smoke-' | xargs -r docker rm -f
+      - name: Remove only this job's Compose acceptance projects
+        if: always()
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for project_file in "$RUNNER_TEMP"/open-harness-compose-smoke-*/project.txt; do
+            project=$(cat "$project_file")
+            [[ "$project" =~ ^oh-compose-smoke-[a-f0-9]{8}$ ]] || continue
+            fixture_dir=$(dirname "$project_file")
+            docker compose --project-name "$project" --project-directory "$GITHUB_WORKSPACE" \
+              --env-file "$fixture_dir/compose.env" -f compose.yaml -f "$fixture_dir/override.yaml" \
+              down --volumes --remove-orphans --timeout 30
+            docker image rm "$project-coordinator:smoke" || true
+          done

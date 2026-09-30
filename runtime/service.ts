@@ -1,17 +1,17 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { appendFileSync, mkdirSync, writeFileSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, existsSync, rmSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { appendFileSync, mkdirSync, writeFileSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, existsSync } from "node:fs";
+import { resolve, join, relative } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
-import { discoverTools, discoverModels, nativeRuntimeProbe, prepareProfile, runtimeProbe } from "./profile-runtime";
-import { HANDOFF_TOOL, profileAgent, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
+import { discoverTools, discoverModels, prepareProfile, runtimeProbe } from "./profile-runtime";
+import { HANDOFF_TOOL, draftProfile, mcpToolId, mcpServerOf, profileAgent, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
 import { SchemaTooNewError, Store, type RunRow } from "./db";
 import { SecretStore, SecretsUnavailableError } from "./secrets";
 import { Credentials, CredentialError } from "./credentials";
 import type { CredentialRecord, CredentialUsage, CredentialUse } from "../lib/credentials";
-import { validateComputerTarget } from './computer-validation';
-import { hermesApprovalDecision, HermesGateway, dockerStatusCached, ensureContainer, stopManagedContainers } from "./hermes";
+import { assertSandboxedComputer, sharedFolderSource, validateComputerTarget } from './computer-validation';
+import { hermesApprovalDecision, HermesGateway, dockerStatusCached, ensureContainer, stopAgentContainers, stopManagedContainers } from "./hermes";
 import { coordinationSocket } from "./coordination-socket";
 import { TaskError, TaskStore } from "./tasks";
 import { TeamError, TeamStore } from "./teams";
@@ -21,12 +21,23 @@ import { exportAgentFiles, importAgentFiles, type TransferBundle } from './trans
 import { onboardingAction, onboardingStatus } from './readiness';
 import { APP_VERSION } from '../lib/version';
 import { HERMES_COMMIT, HERMES_RELEASE } from '../lib/hermes-pin';
+import { recoverNativeProcess } from './process-identity';
+import { acquireCoordinatorLock } from './coordinator-lock';
+import { conversationHistory } from './conversation-history';
+import { testModelConnection } from './model-validation';
+import { atomicWorkspaceWrite, readWorkspaceFile, safeWorkspacePath, resolveContainedPath } from './path-safety';
+import { profileMemory } from './profile-memory';
+import { agentContext, type ContextOperation, type ContextResult } from './agent-context';
+import { BROWSER_PAIRING_INVALID, BROWSER_PAIRING_MESSAGE, consumeBrowserPairing } from './browser-pairing';
 
 const root = resolve(process.env.OPEN_HARNESS_STATE_DIR || ".open-harness");
-mkdirSync(root, { recursive: true }); mkdirSync(join(root, "shared"), { recursive: true }); mkdirSync(join(root, "agents"), { recursive: true });
+mkdirSync(root, { recursive: true });
+const releaseOwnership = acquireCoordinatorLock(root);
+process.once('exit', releaseOwnership);
+mkdirSync(join(root, "shared"), { recursive: true }); mkdirSync(join(root, "agents"), { recursive: true });
 const store = openStore(join(root, "state.db"));
 function openStore(file: string) {
-  try { return new Store(file); }
+  try { return new Store(file, false); }
   catch (error) {
     if (!(error instanceof SchemaTooNewError)) throw error;
     console.error(error.message);
@@ -49,7 +60,6 @@ const profiles = new Profiles(store.db);
 const teams = new TeamStore(store.db);
 const tasks = new TaskStore(store.db);
 store.runListener = run => tasks.syncRun(run);
-tasks.reconcile();
 const machines = new Machines(store.db);
 const importedWorkspace = store.db.prepare("SELECT payload_json FROM migrations WHERE key='browser-v1'").get() as { payload_json: string } | undefined;
 const importedAgents = importedWorkspace ? JSON.parse(importedWorkspace.payload_json).agents || [] : [];
@@ -60,8 +70,17 @@ const active = new Map<string, { gateway: HermesGateway; sessionId: string }>();
 const remoteActive = new Map<string, { machineId: string; commandId: string }>();
 const remoteStopping = new Set<string>();
 const stoppingAgents = new Set<string>();
+const executingAgents = new Set<string>();
+const probingAgents = new Set<string>();
 const coordinationSockets = new Map<string, ReturnType<typeof coordinationSocket>>();
 let pumping = false;
+let recovering = true;
+let stoppingSweeps = 0;
+let shuttingDown = false;
+const cancelledRuns = new Set<string>();
+const blockedComputers = new Set<string>();
+const terminalStates = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
+const activeStates = new Set(['running', 'waiting_approval', 'waiting_input']);
 const maxTaskQueue = Math.max(1, Number(process.env.MAX_TASK_QUEUE || 100));
 const maxTaskRuns = Math.max(1, Number(process.env.MAX_TASK_RUNS || 3));
 // How long a dispatched run waits for a runner that has stopped heartbeating.
@@ -164,28 +183,139 @@ async function dispatchSecrets(machineId: string, profile: AgentProfile, effecti
   if (!key) throw new MachineError('This computer has not published its encryption key yet. It is sent on every heartbeat, so wait a few seconds for it to check in, or pair it again.', 409);
   return Object.fromEntries(await Promise.all(Object.entries(plain).map(async ([name, value]) => [name, await encryptRunnerSecret(key, value)])));
 }
-async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) { const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input, encryptedSecrets: await dispatchSecrets(machine.id, profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
+async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) {
+  assertSandboxedComputer(profile.computer);
+  const machine = machines.canAssign(profile.computer.machineId, profile.id);
+  if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409);
+  const effectiveModel = profiles.effective(profile), encryptedSecrets = await dispatchSecrets(machine.id, profile, effectiveModel);
+  const probe = { ...(input as Record<string, any> || {}) };
+  let encryptedApiKey;
+  const publicKey = machines.encryptionKey(machine.id);
+  if (probe.apiKey || Object.values(probe.env || {}).some(Boolean)) {
+    if (!publicKey) throw new MachineError('Reconnect this runner before testing credentials.', 409);
+    if (probe.apiKey) encryptedApiKey = await encryptRunnerSecret(publicKey, String(probe.apiKey));
+    if (probe.env) for (const [name, value] of Object.entries(probe.env)) if (value) encryptedSecrets[name] = await encryptRunnerSecret(publicKey, String(value));
+  }
+  delete probe.apiKey;
+  if (probe.env) probe.env = Object.fromEntries(Object.keys(probe.env).map(name => [name, '']));
+  return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input: probe, encryptedSecrets, ...(encryptedApiKey ? { encryptedApiKey } : {}), coordinationToken: agentToken(profile.id) }).id);
+}
 
+function priorHistory(run: RunRow) {
+  const earlier = store.db.prepare("SELECT * FROM runs WHERE conversation_id=? AND agent_id=? AND id<>? AND state IN ('completed','failed','interrupted','cancelled') ORDER BY created_at,rowid").all(run.conversation_id, run.agent_id, run.id) as RunRow[];
+  return conversationHistory(earlier);
+}
+async function watchRemote(run: RunRow, command: { machineId: string; id: string }) {
+  remoteActive.set(run.id, { machineId: command.machineId, commandId: command.id });
+  let offlineSince = 0;
+  try {
+    for (;;) {
+      const current = store.getRun(run.id);
+      if (!current || terminalStates.has(current.state)) return;
+      const status = machines.command(command.id);
+      if (!status) throw new Error('The runner command disappeared before completion.');
+      if (['completed', 'failed'].includes(status.state)) {
+        const stopped = remoteStopping.has(run.id);
+        const state = stopped ? 'cancelled' : status.state === 'completed' ? 'completed' : status.result?.interrupted ? 'interrupted' : 'failed';
+        const answer = state === 'completed' ? String(status.result?.text || status.result?.final_response || status.result?.message || status.result?.result || '') : null;
+        const error = state === 'failed' || state === 'interrupted' ? String(status.result?.error || 'Remote runner failed.') : null;
+        store.setRun(run.id, { state, result: answer, error });
+        event(run.id, `run.${state}`, { ...(answer !== null ? { result: answer } : {}), ...(error ? { error } : {}), machineId: command.machineId });
+        return;
+      }
+      if (machines.get(command.machineId).status !== 'online') {
+        if (!offlineSince) offlineSince = Date.now();
+        else if (Date.now() - offlineSince > REMOTE_OFFLINE_GRACE_MS) throw new Error('The runner stopped responding. Its work was not replayed because the outcome is uncertain.');
+      } else offlineSince = 0;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  } catch (error) {
+    if (!terminalStates.has(store.getRun(run.id)?.state || '')) {
+      const message = error instanceof Error ? error.message : 'Runner tracking failed.';
+      store.setRun(run.id, { state: 'interrupted', error: message }); event(run.id, 'run.interrupted', { error: message });
+    }
+  } finally { remoteActive.delete(run.id); remoteStopping.delete(run.id); void pump(); }
+}
 async function executeRemote(run: RunRow, snapshot: AgentProfile & { effectiveModel: ReturnType<Profiles['effective']> }) {
   const machine = machines.canAssign(snapshot.computer.machineId, run.agent_id);
   if (machine.status !== 'online') throw new Error(`${machine.name} is offline. This task will remain queued until its runner reconnects.`);
-  const command = machines.enqueue(machine.id, run.agent_id, 'run', { runId: run.id, prompt: run.prompt, snapshot, encryptedSecrets: await dispatchSecrets(machine.id, snapshot, snapshot.effectiveModel), coordinationToken: agentToken(run.agent_id) });
-  remoteActive.set(run.id, { machineId: machine.id, commandId: command.id });
-  let offlineSince = 0;
+  const encryptedSecrets = await dispatchSecrets(machine.id, snapshot, snapshot.effectiveModel);
+  if (cancelledRuns.has(run.id) || terminalStates.has(store.getRun(run.id)?.state || '')) return;
+  const command = machines.enqueue(machine.id, run.agent_id, 'run', { runId: run.id, prompt: run.prompt, history: priorHistory(run), snapshot, encryptedSecrets, coordinationToken: agentToken(run.agent_id) });
   event(run.id, 'runner.dispatched', { commandId: command.id, machineId: machine.id, machineName: machine.name });
-  try {
-    for (;;) {
-      await new Promise(resolve => setTimeout(resolve, 250));
-      const current = store.getRun(run.id); if (!current || current.state === 'cancelled') throw Object.assign(new Error('Run cancelled.'), { cancelled: true });
-      const status = machines.command(command.id); if (!status) throw new Error('The runner command disappeared before completion.');
-      if (machines.get(machine.id).status !== 'online') {
-        if (!offlineSince) offlineSince = Date.now();
-        else if (Date.now() - offlineSince > REMOTE_OFFLINE_GRACE_MS) throw new Error(`${machine.name} stopped responding and did not return within ${Math.round(REMOTE_OFFLINE_GRACE_MS / 60_000)} minutes. Its work was not replayed because the outcome is uncertain.`);
-      } else offlineSince = 0;
-      if (status.state === 'completed') return status.result || {};
-      if (status.state === 'failed') throw new Error(String((status.result as { error?: string } | null)?.error || 'Remote runner failed.'));
+  await watchRemote(run, command);
+}
+
+function recoverRunResponses() {
+  for (const [table, kind, key] of [['run_inputs', 'input', 'inputId'], ['approvals', 'approval', 'approvalId']] as const) {
+    const pending = store.db.prepare(`SELECT id,run_id,state FROM ${table} WHERE state IN ('submitting','submitted')`).all() as Array<{ id: string; run_id: string; state: string }>;
+    for (const request of pending) {
+      const run = store.getRun(request.run_id);
+      const command = store.db.prepare(`SELECT state,payload_json FROM runner_commands WHERE kind=? AND json_extract(payload_json,'$.runId')=? AND json_extract(payload_json,'$.${key}')=? ORDER BY created_at DESC,rowid DESC LIMIT 1`).get(kind, request.run_id, request.id) as { state: string; payload_json: string } | undefined;
+      const active = Boolean(run && activeStates.has(run.state));
+      const state = !active ? 'expired' : !command || command.state === 'failed' ? 'pending' : command.state === 'completed' ? kind === 'input' ? 'answered' : String(JSON.parse(command.payload_json).decision) : 'submitted';
+      store.db.prepare(`UPDATE ${table} SET state=?,resolved_at=? WHERE id=?`).run(state, ['pending', 'submitted'].includes(state) ? null : new Date().toISOString(), request.id);
     }
-  } finally { remoteActive.delete(run.id); }
+  }
+  for (const run of store.liveRuns()) {
+    const approvalPending = store.db.prepare("SELECT 1 FROM approvals WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+    const inputPending = store.db.prepare("SELECT 1 FROM run_inputs WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+    if (approvalPending || inputPending || ['waiting_input', 'waiting_approval'].includes(run.state)) store.setRun(run.id, { state: approvalPending ? 'waiting_approval' : inputPending ? 'waiting_input' : 'running' });
+  }
+}
+
+function blockCleanup(agentId: string, computer: ComputerConfig, error: string) {
+  stoppingAgents.add(agentId); blockedComputers.add(computer.machineId);
+  store.db.prepare('INSERT OR REPLACE INTO runtime_cleanup(agent_id,computer_json,error) VALUES(?,?,?)').run(agentId, JSON.stringify(computer), error);
+}
+async function cleanPreviousRuntime(agentId: string, computer: ComputerConfig) {
+  if (process.env.OPEN_HARNESS_MOCK !== '1') {
+    if (computer.access === 'direct') {
+      const handle = store.db.prepare('SELECT pid,identity FROM runtime_processes WHERE agent_id=?').get(agentId) as { pid: number; identity: string } | undefined;
+      if (!handle) throw new Error('An older native run has no saved process identity. Its process tree must be stopped before this computer can resume work.');
+      await recoverNativeProcess(handle.pid, handle.identity);
+    } else await stopAgentContainers(agentId, root);
+  }
+  store.db.prepare('DELETE FROM runtime_processes WHERE agent_id=?').run(agentId);
+  store.db.prepare('DELETE FROM runtime_cleanup WHERE agent_id=?').run(agentId);
+  stoppingAgents.delete(agentId);
+  const remaining = store.db.prepare('SELECT computer_json FROM runtime_cleanup').all() as { computer_json: string }[];
+  if (!remaining.some(row => JSON.parse(row.computer_json).machineId === computer.machineId)) blockedComputers.delete(computer.machineId);
+}
+async function recoverRuns() {
+  recoverRunResponses();
+  const cleaned = new Set<string>();
+  // Also recover probes and prior failed cleanup, including failures on a run that
+  // was already terminal when the coordinator restarted.
+  const leftovers = store.db.prepare('SELECT agent_id,computer_json FROM runtime_cleanup').all() as { agent_id: string; computer_json: string }[];
+  for (const row of store.db.prepare('SELECT agent_id FROM runtime_processes').all() as { agent_id: string }[]) {
+    const profile = profiles.get(row.agent_id);
+    if (profile && !leftovers.some(item => item.agent_id === row.agent_id)) leftovers.push({ agent_id: row.agent_id, computer_json: JSON.stringify({ ...profile.computer, machineId: 'local', access: 'direct' }) });
+  }
+  for (const row of leftovers) {
+    const computer = JSON.parse(row.computer_json) as ComputerConfig;
+    try { await cleanPreviousRuntime(row.agent_id, computer); cleaned.add(row.agent_id); }
+    catch (error) { blockCleanup(row.agent_id, computer, error instanceof Error ? error.message : String(error)); }
+  }
+  for (const run of store.liveRuns()) {
+    const command = store.db.prepare("SELECT id,machine_id FROM runner_commands WHERE kind='run' AND agent_id=? AND json_extract(payload_json,'$.runId')=? ORDER BY created_at DESC LIMIT 1").get(run.agent_id, run.id) as { id: string; machine_id: string } | undefined;
+    if (command) {
+      if (store.db.prepare("SELECT 1 FROM runner_commands WHERE kind='stop' AND json_extract(payload_json,'$.runId')=? AND state IN ('queued','leased','completed') LIMIT 1").get(run.id)) remoteStopping.add(run.id);
+      void watchRemote(run, { id: command.id, machineId: command.machine_id });
+    } else {
+      let error = 'The local runtime restarted. Completed actions were preserved; this run was not replayed.';
+      const computer = (profiles.runSnapshot(run.id) || profiles.get(run.agent_id))?.computer;
+      try {
+        if (!cleaned.has(run.agent_id) && computer) await cleanPreviousRuntime(run.agent_id, computer);
+      } catch (cleanupError) {
+        error += ` Cleanup could not be confirmed: ${cleanupError instanceof Error ? cleanupError.message : cleanupError}`;
+        if (computer) blockCleanup(run.agent_id, computer, error);
+      }
+      store.setRun(run.id, { state: 'interrupted', error }); event(run.id, 'run.interrupted', { error });
+    }
+  }
+  tasks.reconcile();
+  recovering = false;
 }
 
 async function waitRunnerCommand(commandId: string) {
@@ -193,7 +323,7 @@ async function waitRunnerCommand(commandId: string) {
 }
 async function performTransfer(transfer: { id: string; agentId: string; sourceMachineId: string; destinationMachineId: string; pendingProfile?: AgentProfile }) {
   try {
-    while (store.agentBusy(transfer.agentId)) await new Promise(resolve => setTimeout(resolve, 500));
+    while (store.agentBusy(transfer.agentId) || executingAgents.has(transfer.agentId) || probingAgents.has(transfer.agentId)) await new Promise(resolve => setTimeout(resolve, 500));
     machines.setTransfer(transfer.id, 'exporting', 'Exporting managed files, memory, and skills.');
     const bundle = transfer.sourceMachineId === 'local' ? exportAgentFiles(root, transfer.agentId) : (() => { const source = machines.get(transfer.sourceMachineId); if (source.status === 'revoked') throw new Error('Source computer was revoked before export.'); return waitRunnerCommand(machines.enqueue(transfer.sourceMachineId, transfer.agentId, 'export-agent', { transferId: transfer.id }).id) as Promise<TransferBundle>; })();
     const resolvedBundle = await bundle;
@@ -206,7 +336,7 @@ async function performTransfer(transfer: { id: string; agentId: string; sourceMa
       result = { ...importAgentFiles(root, transfer.agentId, resolvedBundle), validated: true };
       if (pending?.computer.desktop !== 'none' && pending && process.env.OPEN_HARNESS_MOCK !== '1') {
         const check = { action: 'computer', desktop: pending.computer.desktop };
-        const tested = pending.computer.desktop === 'existing' ? nativeRuntimeProbe(join(root, 'agents', pending.id, 'profile'), check) : await runtimeProbe(ensureContainer(pending.id, root, pending.computer), check);
+        const tested = await runtimeProbe(ensureContainer(pending.id, root, pending.computer), check);
         if (!tested.ok) throw new Error(String(tested.message || 'Desktop control is not ready on this computer.'));
       }
     } else result = await waitRunnerCommand(machines.enqueue(transfer.destinationMachineId, transfer.agentId, 'import-agent', { transferId: transfer.id, bundle: resolvedBundle, profile: pending, requiredSecrets }).id) as { checksum: string; validated?: boolean };
@@ -223,14 +353,10 @@ function internalAllowed(agentId: string | null, tool: string, runId?: string) {
 }
 
 async function gatewayFor(agentId: string, allowedTools: string[] | null = null, computer?: ComputerConfig) {
+  assertSandboxedComputer(computer);
   let gateway = gateways.get(agentId);
   if (gateway) return gateway;
-  if (computer?.access === 'direct') {
-    const agentRoot = join(root, 'agents', agentId), profileRoot = join(agentRoot, 'profile');
-    gateway = new HermesGateway(`native-${agentId}`, allowedTools, { cwd: join(root, 'shared'), entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: profileRoot, HERMES_TUI: '1', HERMES_GATEWAY_SESSION: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } });
-  } else {
-    gateway = new HermesGateway(ensureContainer(agentId, root, computer), allowedTools);
-  }
+  gateway = new HermesGateway(ensureContainer(agentId, root, computer), allowedTools);
   gateway.on('log', (entry: { level?: string; message?: string }) => appendAgentLog(agentId, entry));
   gateways.set(agentId, gateway);
   try { await gateway.start(); return gateway; }
@@ -238,86 +364,114 @@ async function gatewayFor(agentId: string, allowedTools: string[] | null = null,
 }
 
 function mapHermesEvent(run: RunRow, value: any) {
-  const type = String(value?.type || value?.event || "runtime.event");
+  const type = String(value?.type || value?.event || 'runtime.event');
   const payload = value?.payload ?? value?.data ?? value;
-  if (type === "approval.request") {
+  const current = store.getRun(run.id);
+  const sessionId = value?.session_id || payload?.session_id;
+  // Runner delivery is authenticated and pinned to this run's command. Session
+  // metadata may arrive after completion when a buffered event is replayed.
+  if (current && !current.session_id && ['session.started', 'session.info'].includes(type) && typeof sessionId === 'string' && sessionId.length <= 512 && sessionId) store.setRun(run.id, { session_id: sessionId });
+  // Buffered runner events can arrive after their completion receipt. Preserve the
+  // transcript, but never turn terminal work back into a waiting run.
+  if (!current || terminalStates.has(current.state)) { event(run.id, type, payload); return; }
+  if (type === 'approval.request') {
+    const requestId = String(payload?.request_id || payload?.id || '');
+    const duplicate = store.db.prepare('SELECT id FROM approvals WHERE run_id=? AND gateway_request_id=?').get(run.id, requestId);
+    if (duplicate) return;
     const approvalId = crypto.randomUUID();
-    store.createApproval(approvalId, run.id, String(payload?.request_id || payload?.id || ""), payload);
-    store.setRun(run.id, { state: "waiting_approval" });
-    event(run.id, "approval.request", { ...payload, approvalId });
-  } else if (type === "clarify.request" || type === "secret.request" || type === "sudo.request") {
-    store.setRun(run.id, { state: "waiting_input" }); event(run.id, type, payload);
+    store.createApproval(approvalId, run.id, requestId, payload);
+    store.setRun(run.id, { state: 'waiting_approval' });
+    event(run.id, type, { ...payload, approvalId });
+  } else if (['clarify.request', 'secret.request', 'sudo.request'].includes(type)) {
+    const inputId = crypto.randomUUID(), requestId = String(payload?.request_id || payload?.id || '');
+    const inserted = store.db.prepare('INSERT OR IGNORE INTO run_inputs(id,run_id,gateway_request_id,type,payload_json,created_at) VALUES(?,?,?,?,?,?)').run(inputId, run.id, requestId, type.split('.')[0], JSON.stringify(payload), new Date().toISOString());
+    if (!inserted.changes) return;
+    store.setRun(run.id, { state: 'waiting_input' }); event(run.id, type, { ...payload, inputId });
   } else {
+    if (['clarify.expire', 'secret.expire', 'sudo.expire'].includes(type)) {
+      store.db.prepare("UPDATE run_inputs SET state='expired',resolved_at=? WHERE run_id=? AND gateway_request_id=? AND state IN ('pending','submitting','submitted')").run(new Date().toISOString(), run.id, String(payload?.request_id || payload?.id || ''));
+      if (!store.pendingInputs(run.id).length) store.setRun(run.id, { state: store.pendingApprovals(run.id).length ? 'waiting_approval' : 'running' });
+    }
     if (type === 'message.delta') tasks.appendOutput(run.id, String(payload?.text || ''));
     event(run.id, type, payload);
   }
 }
 
 async function execute(run: RunRow) {
+  executingAgents.add(run.agent_id);
   store.setRun(run.id, { state: "running" });
   let subscribed: { gateway: HermesGateway; listener: (value: any) => void } | null = null;
+  let outcome: { state: 'completed' | 'failed' | 'interrupted' | 'cancelled'; result?: string; error?: string } | undefined;
   try {
     const profile = profiles.get(run.agent_id);
     if (!profile) throw new Error("Agent profile not found. Open Agent settings and save this agent.");
+    assertSandboxedComputer(profile.computer);
     const snapshot = profiles.snapshot(run.id, profile);
     credentials.touch([snapshot.effectiveModel.credentialRef, ...snapshot.connectors.filter(c => c.enabled).map(c => c.secretRef)]);
     const assigned = machines.canAssign(snapshot.computer.machineId, run.agent_id);
     event(run.id, "run.started", { runId: run.id, agentId: run.agent_id, machineId: assigned.id, machineName: assigned.name });
     event(run.id, "profile.applied", { revision: snapshot.revision, model: snapshot.effectiveModel, allowedTools: snapshot.allowedTools, computer: snapshot.computer });
     if (assigned.id !== 'local') {
-      const result = await executeRemote(run, snapshot);
-      const current = store.getRun(run.id); if (current?.state === 'cancelled') return;
-      const answer = String(result?.text || result?.final_response || result?.message || result?.result || '');
-      store.setRun(run.id, { state: 'completed', result: answer }); event(run.id, 'run.completed', { result: answer, machineId: assigned.id });
+      await executeRemote(run, snapshot);
       return;
     }
     const priorGateway = gateways.get(run.agent_id);
     if (priorGateway) { await priorGateway.stop(); gateways.delete(run.agent_id); }
-    if (!coordinationSockets.has(run.agent_id)) coordinationSockets.set(run.agent_id, coordinationSocket(join(root, 'agents', run.agent_id, 'managed'), run.agent_id, (req, res) => { server.emit('request', req, res); }));
-    await coordinationSockets.get(run.agent_id);
-    if (store.getRun(run.id)?.state === 'cancelled') return;
-    const native = snapshot.computer.access === 'direct';
-    // A container agent reached the coordinator only over the unix socket in its managed mount.
-    // Docker Desktop passes bind mounts through a VM, where that socket is visible and refuses
-    // every connection, so on the setup this project documents as supported no coordination tool
-    // worked at all. The socket is still tried first -- it needs no port and cannot be reached
-    // from off the machine -- with the host URL behind it, exactly as a paired runner already
-    // does for its own containers. The container needs the control token either way.
-    prepareProfile(root, snapshot, snapshot.effectiveModel, secrets, agentToken(run.agent_id), run.id, native
-      ? { cwd: join(root, 'shared'), coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlSocket: join(root, 'agents', run.agent_id, 'managed', 'coord.sock') }
-      : { controlUrl: `http://host.docker.internal:${port}` });
+    const useSocket = process.platform === 'linux';
+    if (useSocket) {
+      if (!coordinationSockets.has(run.agent_id)) coordinationSockets.set(run.agent_id, coordinationSocket(join(root, 'agents', run.agent_id, 'managed'), run.agent_id, (req, res) => { server.emit('request', req, res); }));
+      await coordinationSockets.get(run.agent_id)!;
+    }
+    if (cancelledRuns.has(run.id) || store.getRun(run.id)?.state === 'cancelled') return;
+    prepareProfile(root, snapshot, snapshot.effectiveModel, secrets, agentToken(run.agent_id), run.id, useSocket ? {} : { controlUrl: `http://host.docker.internal:${port}` });
     const gateway = await gatewayFor(run.agent_id, snapshot.allowedTools, snapshot.computer);
     const listener = (value: any) => mapHermesEvent(run, value); gateway.on("event", listener); subscribed = { gateway, listener };
-    const session = run.session_id ? { session_id: run.session_id } : await gateway.request("session.create", { cwd: native ? join(root, 'shared') : "/workspace/shared", profile: "default" });
-    if (store.getRun(run.id)?.state === "cancelled") return;
+    const session = run.session_id ? { session_id: run.session_id } : await gateway.request("session.create", { cwd: "/workspace/shared", profile: "default", messages: priorHistory(run) });
+    if (cancelledRuns.has(run.id) || store.getRun(run.id)?.state === "cancelled") return;
     const sessionId = String(session?.session_id || session?.id || run.session_id || "");
     if (!sessionId) throw new Error("Hermes did not return a session ID.");
     store.setRun(run.id, { session_id: sessionId }); active.set(run.id, { gateway, sessionId });
     const result = await gateway.submitPrompt(sessionId, run.prompt);
-    active.delete(run.id);
     const current = store.getRun(run.id);
-    if (current?.state === "cancelled") return;
+    if (cancelledRuns.has(run.id) || current?.state === "cancelled") return;
     const answer = String(result?.text || result?.final_response || result?.message || "");
-    store.setRun(run.id, { state: "completed", result: answer }); event(run.id, "run.completed", { result: answer });
+    outcome = { state: 'completed', result: answer };
   } catch (error) {
-    active.delete(run.id); const message = error instanceof Error ? error.message : "Hermes execution failed.";
-    const state = store.getRun(run.id)?.state === "cancelled" || remoteStopping.has(run.id) ? "cancelled" : (error as { interrupted?: boolean })?.interrupted ? "interrupted" : "failed";
+    if (terminalStates.has(store.getRun(run.id)?.state || '')) return;
+    const message = error instanceof Error ? error.message : "Hermes execution failed.";
+    const state = cancelledRuns.has(run.id) || store.getRun(run.id)?.state === "cancelled" || remoteStopping.has(run.id) ? "cancelled" : (error as { interrupted?: boolean })?.interrupted ? "interrupted" : "failed";
     remoteStopping.delete(run.id);
-    store.setRun(run.id, { state, error: message }); event(run.id, `run.${state}`, { error: message });
-  } finally { if (subscribed) subscribed.gateway.off("event", subscribed.listener); void pump(); }
+    outcome = { state, error: message };
+  } finally {
+    if (subscribed) {
+      subscribed.gateway.off("event", subscribed.listener);
+      try { await subscribed.gateway.stop(); gateways.delete(run.agent_id); store.db.prepare('DELETE FROM runtime_processes WHERE agent_id=?').run(run.agent_id); }
+      catch (error) {
+        const computer = (profiles.runSnapshot(run.id) || profiles.get(run.agent_id))?.computer;
+        const message = `Runtime cleanup could not be confirmed: ${error instanceof Error ? error.message : error}`;
+        if (computer) blockCleanup(run.agent_id, computer, message);
+        outcome = { state: 'interrupted', error: message };
+      }
+    }
+    active.delete(run.id);
+    if (cancelledRuns.has(run.id) && outcome?.state !== 'interrupted') outcome = { state: 'cancelled' };
+    if (outcome) { store.setRun(run.id, outcome); event(run.id, `run.${outcome.state}`, outcome); }
+    cancelledRuns.delete(run.id); executingAgents.delete(run.agent_id); void pump();
+  }
 }
 
 async function pump() {
-  if (pumping) return; pumping = true;
+  if (pumping || recovering || shuttingDown || stoppingSweeps) return; pumping = true;
   try {
     while (store.activeCount() < 4) {
       const next = store.queued().find(candidate =>
-        !store.agentBusy(candidate.agent_id) && !stoppingAgents.has(candidate.agent_id) && !machines.transferring(candidate.agent_id) &&
+        !store.agentBusy(candidate.agent_id) && !executingAgents.has(candidate.agent_id) && !probingAgents.has(candidate.agent_id) && !stoppingAgents.has(candidate.agent_id) && !machines.transferring(candidate.agent_id) &&
         (!tasks.isTaskRun(candidate.id) || tasks.activeRunCount() < maxTaskRuns) &&
         (candidate.depth > 0 || store.activeTopLevelCount() < 2) && (() => {
           const profile = profiles.get(candidate.agent_id); if (!profile) return true;
+          if (blockedComputers.has(profile.computer.machineId)) return false;
           try { if (machines.canAssign(profile.computer.machineId, candidate.agent_id).status !== 'online') return false; } catch { return false; }
-          const occupants = store.listRuns().filter(run => ['running','waiting_approval','waiting_input'].includes(run.state)).map(run => profiles.runSnapshot(run.id) || profiles.get(run.agent_id)).filter((other): other is AgentProfile => Boolean(other && other.computer.machineId === profile.computer.machineId));
+          const occupants = store.liveRuns().map(run => profiles.runSnapshot(run.id) || profiles.get(run.agent_id)).filter((other): other is AgentProfile => Boolean(other && other.computer.machineId === profile.computer.machineId));
           if (occupants.length >= profile.computer.resources.concurrency) return false;
           return profile.computer.desktop !== 'existing' || occupants.every(other => other.computer.desktop !== 'existing');
         })());
@@ -328,6 +482,8 @@ async function pump() {
 }
 
 async function stopRunTree(runId: string) {
+  stoppingSweeps++;
+  try {
   const ids = [runId, ...store.descendants(runId).map(item => item.id)];
   let stopped = 0;
   const failures: string[] = [];
@@ -342,7 +498,7 @@ async function stopRunTree(runId: string) {
       event(id, 'stop.pending', { machineId: remote.machineId, message: 'Stop requested. Waiting for the runner to confirm.' });
       stoppingAgents.delete(run.agent_id); stopped++; continue;
     }
-    store.setRun(id, { state: "cancelled" });
+    cancelledRuns.add(id);
     try {
       const gateway = live?.gateway || (run.state === 'queued' ? undefined : gateways.get(run.agent_id));
       if (live) await live.gateway.request("session.interrupt", { session_id: live.sessionId }, 5000).catch(() => {});
@@ -351,16 +507,17 @@ async function stopRunTree(runId: string) {
       const message = error instanceof Error ? error.message : "Runtime stop could not be confirmed.";
       store.setRun(id, { state: "interrupted", error: message });
       event(id, "run.interrupted", { error: message });
+      const computer = (profiles.runSnapshot(id) || profiles.get(run.agent_id))?.computer;
+      if (computer) blockCleanup(run.agent_id, computer, message);
       failures.push(message);
-    } finally {
-      // Always release the agent. Holding it would keep it out of admission for the life of
-      // the process, and the run is already recorded as cancelled or interrupted either way.
-      stoppingAgents.delete(run.agent_id);
+      continue;
     }
+    store.setRun(id, { state: "cancelled" });
+    stoppingAgents.delete(run.agent_id);
     event(id, "run.cancelled", { stoppedWithParent: id !== runId }); stopped++;
   }
-  void pump();
   return { stopped, failures };
+  } finally { stoppingSweeps--; void pump(); }
 }
 
 async function waitForRun(id: string, timeoutMs = 30 * 60 * 1000) {
@@ -375,7 +532,9 @@ async function waitForRun(id: string, timeoutMs = 30 * 60 * 1000) {
 
 function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number; deferStart?: boolean }) {
   if (!input.agentId || !input.prompt?.trim()) throw new Error("agentId and prompt are required.");
-  if (!profiles.get(input.agentId)) throw new ProfileError("Agent profile not found.", 404);
+  const profile = profiles.get(input.agentId);
+  if (!profile) throw new ProfileError("Agent profile not found.", 404);
+  assertSandboxedComputer(profile.computer);
   const parent = input.parentRunId ? store.getRun(input.parentRunId) : undefined;
   const depth = parent ? parent.depth + 1 : Number(input.depth || 0);
   if (depth > 2) throw new Error("Delegation depth is limited to two.");
@@ -389,10 +548,10 @@ function createRun(input: { agentId: string; conversationId?: string; prompt: st
   const run: RunRow = { id: crypto.randomUUID(), agent_id: input.agentId, conversation_id: input.conversationId || crypto.randomUUID(), prompt: input.prompt.trim(), state: "queued", session_id: null, parent_run_id: input.parentRunId || null, depth, created_at: stamp, updated_at: stamp, result: null, error: null };
   store.createRun(run); event(run.id, "run.queued", { position: store.listRuns().filter(item => item.state === "queued").length }); if (!input.deferStart) void pump(); return run;
 }
-function runResponse(run: RunRow) { const profile = profiles.runSnapshot(run.id) || profiles.get(run.agent_id); const machineId = profile?.computer.machineId || null; let machineConnection: string | null = null; if (machineId) { try { machineConnection = machines.get(machineId).status; } catch { machineConnection = 'revoked'; } } return { ...run, machine_id: machineId, machine_connection: machineConnection }; }
+function runResponse(run: RunRow) { const profile = profiles.runSnapshot(run.id) || profiles.get(run.agent_id); const machineId = profile?.computer.machineId || null; let machineConnection: string | null = null; if (machineId) { try { machineConnection = machines.get(machineId).status; } catch { machineConnection = 'revoked'; } } return { ...run, machine_id: machineId, machine_connection: machineConnection, pendingApprovals: store.pendingApprovals(run.id), pendingInputs: store.pendingInputs(run.id) }; }
 
 function listFiles(dir: string) {
-  if (!dir.startsWith(root)) throw new Error("Invalid workspace path.");
+  safeWorkspacePath(root, relative(root, dir));
   mkdirSync(dir, { recursive: true });
   return readdirSync(dir, { withFileTypes: true }).filter(entry => entry.isFile()).slice(0, 200).map(entry => {
     const path = join(dir, entry.name), stat = statSync(path); return { name: entry.name, size: stat.size, updatedAt: stat.mtime.toISOString(), mimeType: mimeType(entry.name), encoding: isText(entry.name) ? "utf8" : "base64" };
@@ -403,8 +562,16 @@ function mimeType(name: string) {
   const ext = name.toLowerCase().split(".").pop();
   return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml", pdf: "application/pdf", json: "application/json", csv: "text/csv", md: "text/markdown", html: "text/html" } as Record<string, string>)[ext || ""] || (isText(name) ? "text/plain" : "application/octet-stream");
 }
-function workspaceDir(url: URL) { const scope = url.searchParams.get("scope") || "shared", agentId = url.searchParams.get("agentId") || ""; return { scope, dir: scope === "private" ? join(root, "agents", validId(agentId), "private") : join(root, "shared") }; }
-function safeFile(dir: string, name: string) { if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(name) || name.includes("..")) throw new Error("Invalid filename."); const target = join(dir, name); if (!target.startsWith(dir + "/")) throw new Error("Invalid path."); return target; }
+function workspaceDir(url: URL) {
+  const scope = url.searchParams.get('scope') || 'shared', agentId = url.searchParams.get('agentId') || '';
+  if (!['shared', 'private'].includes(scope)) throw new ProfileError('Invalid workspace scope.');
+  if (scope === 'private') validId(agentId);
+  return { scope, dir: safeWorkspacePath(root, scope === 'private' ? `agents/${agentId}/private` : 'shared') };
+}
+function safeFile(dir: string, name: string) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(name) || name.includes('..')) throw new Error('Invalid filename.');
+  return safeWorkspacePath(root, relative(root, resolveContainedPath(dir, name)));
+}
 
 function validTaskMutation(input: Record<string, unknown>, current?: ReturnType<TaskStore["getTask"]>) {
   const teamId = input.teamId === undefined ? current?.teamId || null : input.teamId ? String(input.teamId) : null;
@@ -423,20 +590,46 @@ function agentMayTouchTask(agentId: string, assignOthers: boolean, task: ReturnT
   return task.ownerAgentId === null || task.ownerAgentId === agentId || task.collaboratorAgentIds.includes(agentId) || assignOthers;
 }
 
+async function bootstrapStatus() {
+  return { token: secrets.token, mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: APP_VERSION, hermes: { release: HERMES_RELEASE, commit: HERMES_COMMIT } };
+}
+
 const server = createServer(async (req, res) => {
+  if (recovering) return json(res, 503, { error: 'The coordinator is recovering its previous work. Retry shortly.' });
   const origin = req.headers.origin;
   if (origin && !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return json(res, 403, { error: "Open Harness accepts local browser clients only." });
   if (req.method === "OPTIONS") { res.writeHead(204, { "Access-Control-Allow-Origin": allowedOrigin(origin), "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" }); return res.end(); }
   const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
+  let probingAgent: string | null = null;
+  function reserveProbe(id: string) {
+    if (store.agentBusy(id) || executingAgents.has(id) || probingAgents.has(id) || stoppingAgents.has(id)) throw new ProfileError('This agent is busy. Wait for its current run or connection check to finish.', 409);
+    probingAgents.add(id); probingAgent = id;
+  }
   try {
-    if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); if (!loopbackHost(req.headers.host)) return json(res, 403, { error: 'Dashboard bootstrap requires a loopback address. Open Open Harness at http://localhost:3000.' }); return json(res, 200, { token: secrets.token, mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: APP_VERSION, hermes: { release: HERMES_RELEASE, commit: HERMES_COMMIT } }); }
+    if (req.method === 'GET' && url.pathname === '/v1/ready') return json(res, 200, { ok: true });
+    if (req.method === 'GET' && url.pathname === '/v1/bootstrap') {
+      if (process.env.OPEN_HARNESS_REQUIRE_BROWSER_PAIRING === '1') {
+        if (!authenticated(req)) return json(res, 401, { error: BROWSER_PAIRING_MESSAGE, pairingRequired: true });
+      } else {
+        const address = req.socket.remoteAddress || '';
+        if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' });
+        if (!loopbackHost(req.headers.host)) return json(res, 403, { error: 'Dashboard bootstrap requires a loopback address. Open Open Harness at http://localhost:3000.' });
+      }
+      return json(res, 200, await bootstrapStatus());
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/browser/pair') {
+      if (process.env.OPEN_HARNESS_REQUIRE_BROWSER_PAIRING !== '1') return json(res, 404, { error: 'Browser pairing is not enabled.' });
+      const input = await body(req);
+      if (!consumeBrowserPairing(root, input?.code)) return json(res, 401, { error: BROWSER_PAIRING_INVALID, pairingRequired: true });
+      return json(res, 200, await bootstrapStatus());
+    }
     if (req.method === 'GET' && (url.pathname === '/v1/install/runner.sh' || url.pathname === '/v1/install/runner.ps1')) {
       const name = url.pathname.endsWith('.ps1') ? 'install-runner.ps1' : 'install-runner.sh';
       return raw(res, 200, name.endsWith('.ps1') ? 'text/plain; charset=utf-8' : 'text/x-shellscript; charset=utf-8', readFileSync(join(import.meta.dirname, 'installers', name)));
     }
     if (req.method === 'GET' && url.pathname === '/v1/install/file') {
       const requested = String(url.searchParams.get('path') || '').replaceAll('\\', '/');
-      const allowed = new Set(['runtime/runner.mjs', 'runtime/hermes/Dockerfile', 'runtime/hermes/NOTICE.md', 'runtime/hermes/container-init.sh', 'runtime/hermes/coordination.mjs', 'runtime/hermes/inspect_runtime.py', 'runtime/hermes/managed_entry.py', 'runtime/hermes/extension/open_harness_policy.py', 'runtime/hermes/extension/pyproject.toml']);
+      const allowed = new Set(['runtime/runner.mjs', 'runtime/hermes/Dockerfile', 'runtime/hermes/NOTICE.md', 'runtime/hermes/container-init.sh', 'runtime/hermes/coordination.mjs', 'runtime/hermes/inspect_runtime.py', 'runtime/hermes/managed_entry.py', 'runtime/hermes/cua_compat.py', 'runtime/hermes/security-constraints.txt', 'runtime/hermes/apply-security-overrides.py', 'runtime/hermes/extension/open_harness_policy.py', 'runtime/hermes/extension/pyproject.toml', 'runtime/ubuntu/helpers/check-native-platform.sh', 'runtime/ubuntu/helpers/ubuntu-snapshot.sh', 'runtime/ubuntu/helpers/check_packages.py', 'runtime/ubuntu/helpers/curl_http3.py', 'runtime/ubuntu/helpers/debian_inputs.py', 'runtime/ubuntu/helpers/debian_origin.py', 'runtime/ubuntu/helpers/elf_arch.py', 'runtime/ubuntu/helpers/ohpkg.py', 'runtime/ubuntu/lock/runtime-inputs.lock.json', 'runtime/ubuntu/lock/ubuntu-os-packages.txt']);
       if (!allowed.has(requested)) return json(res, 404, { error: 'Runner file not found.' });
       const target = requested === 'runtime/runner.mjs' ? join(import.meta.dirname, 'runner.mjs') : join(import.meta.dirname, requested.slice('runtime/'.length));
       if (!existsSync(target)) return json(res, 503, { error: 'The standalone runner bundle is unavailable. Run npm run runner:bundle on this source installation.' });
@@ -450,7 +643,27 @@ const server = createServer(async (req, res) => {
     const runnerCommand = url.pathname.match(/^\/v1\/runner\/commands\/([^/]+)\/(events|complete)$/);
     if (runner && runnerCommand && req.method === 'POST') {
       const input = await body(req), commandId = runnerCommand[1];
-      if (runnerCommand[2] === 'complete') { const command = machines.command(commandId); machines.finish(runner, commandId, input.result || { error: input.error }, Boolean(input.error)); if (command?.agentId) void pump(); return json(res, 200, { ok: true }); }
+      if (runnerCommand[2] === 'complete') {
+        const command = machines.command(commandId), receipt = machines.finish(runner, commandId, input.result || { error: input.error }, Boolean(input.error));
+        if (!receipt.duplicate && command && ['input', 'approval'].includes(command.kind)) {
+          const row = store.db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(command.id) as { payload_json: string };
+          const payload = JSON.parse(row.payload_json) as { runId?: string; inputId?: string; approvalId?: string; type?: string; decision?: string };
+          const run = store.getRun(String(payload.runId || ''));
+          if (run && run.agent_id === command.agentId) {
+            const table = command.kind === 'input' ? 'run_inputs' : 'approvals', requestId = command.kind === 'input' ? payload.inputId : payload.approvalId;
+            const isActive = activeStates.has(run.state), failed = Boolean(input.error);
+            const state = !isActive ? 'expired' : failed ? 'pending' : command.kind === 'input' ? 'answered' : String(payload.decision);
+            const changed = store.db.prepare(`UPDATE ${table} SET state=?,resolved_at=? WHERE id=? AND run_id=? AND state='submitted'`).run(state, isActive && failed ? null : new Date().toISOString(), String(requestId || ''), run.id);
+            if (changed.changes && isActive) {
+              const approvalPending = store.db.prepare("SELECT 1 FROM approvals WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+              const inputPending = store.db.prepare("SELECT 1 FROM run_inputs WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+              store.setRun(run.id, { state: approvalPending ? 'waiting_approval' : inputPending ? 'waiting_input' : 'running' });
+              event(run.id, failed ? `${command.kind}.delivery_failed` : `${command.kind}.resolved`, command.kind === 'input' ? { inputId: requestId, type: payload.type, ...(failed ? { error: 'The runner could not deliver this response. Try again.' } : {}) } : { approvalId: requestId, decision: payload.decision, ...(failed ? { error: 'The runner could not deliver this decision. Try again.' } : {}) });
+            }
+          }
+        }
+        if (command?.agentId) void pump(); return json(res, 200, { ok: true });
+      }
       const eventId = String(input.eventId || ''); if (!eventId) return json(res, 400, { error: 'Event ID is required.' });
       const claimedRunId = String(input.runId || '');
       if (machines.receiveEvent(runner, commandId, eventId, claimedRunId)) { const run = store.getRun(claimedRunId); if (run) mapHermesEvent(run, input.event); }
@@ -470,18 +683,29 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action, secrets.names())); }
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/model-test') {
       const input = await body(req), model = validateModel(input.model);
-      if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { ok: true, message: 'Model connection is ready.' });
-      if (model.credentialRef && !secrets.has(model.credentialRef)) return json(res, 200, { ok: false, message: 'Save your API key first.' });
-      const endpoints: Record<string,string> = { xai: 'https://api.x.ai/v1', openrouter: 'https://openrouter.ai/api/v1', openai: 'https://api.openai.com/v1' };
-      const baseUrl = (model.baseUrl || endpoints[model.provider] || '').replace(/\/$/, '');
-      if (!baseUrl) return json(res, 200, { ok: false, message: 'Enter the address of your model server.' });
-      const key = model.credentialRef ? secrets.environment()[model.credentialRef] : '';
-      try {
-        const response = await fetch(`${baseUrl}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(15_000), redirect: 'error' });
-        if (response.ok) return json(res, 200, { ok: true, message: 'Model connection is ready.' });
-        const messages: Record<number,string> = { 401: 'The API key was rejected.', 403: 'The provider denied access.', 404: 'The model server address was not found.', 429: 'The provider rate limit was reached. Try again shortly.' };
-        return json(res, 200, { ok: false, message: messages[response.status] || `The provider returned HTTP ${response.status}.` });
-      } catch (error) { return json(res, 200, { ok: false, message: error instanceof Error ? error.message : 'Could not reach the model provider.' }); }
+      if (input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > 10_000)) throw new ProfileError('Invalid API key.');
+      const revision = Number(input.revision ?? profiles.defaults().revision);
+      if (input.save && revision !== profiles.defaults().revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409);
+      const key = input.apiKey === undefined || input.apiKey === '' ? secrets.environment()[model.credentialRef] || '' : input.apiKey;
+      const machineId = String(input.machineId || 'local');
+      let tested: Awaited<ReturnType<typeof testModelConnection>>;
+      if (machineId === 'local') tested = await testModelConnection(model, key);
+      else {
+        const machine = machines.canAssign(machineId, 'model-check');
+        if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before testing a model.`, 409);
+        const profile = draftProfile({ id: 'model-check', name: 'Model check', role: 'Assistant', description: '', tone: 0, instructions: '', memory: [] });
+        profile.computer.machineId = machineId; profile.model = { ...model, inherit: false };
+        tested = await runnerProbe(profile, 'probe-runtime', { action: 'model-test', model, apiKey: key }) as Awaited<ReturnType<typeof testModelConnection>>;
+      }
+      if (!tested.ok || !input.save) return json(res, 200, tested);
+      if (revision !== profiles.defaults().revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409);
+      const savedModel = { ...model };
+      if (input.apiKey) {
+        savedModel.credentialRef = `MODEL_${crypto.randomUUID().replaceAll('-', '').toUpperCase()}`;
+        credentials.create({ ref: savedModel.credentialRef, label: `${model.provider} model ${savedModel.credentialRef.slice(-8)}`, provider: model.provider, value: input.apiKey });
+      }
+      try { return json(res, 200, { ...tested, ...profiles.setDefaults(savedModel, revision) }); }
+      catch (error) { if (input.apiKey) credentials.remove(savedModel.credentialRef); throw error; }
     }
     if (url.pathname === '/v1/machines') {
       if (req.method === 'GET') return json(res, 200, { machines: machines.list() });
@@ -503,9 +727,10 @@ const server = createServer(async (req, res) => {
         const profile = input.agentId ? profiles.get(String(input.agentId)) || undefined : undefined, checked = machines.test(machineId, profile);
         if (!checked.ok || !profile || process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, checked);
         try {
+          reserveProbe(profile.id);
           ensureProfileDirs(profile.id);
           const check = { action: 'computer', desktop: profile.computer.desktop };
-          const result = machineId === 'local' ? profile.computer.access === 'direct' ? nativeRuntimeProbe(join(root, 'agents', profile.id, 'profile'), check) : await runtimeProbe(ensureContainer(profile.id, root, profile.computer), check) : await runnerProbe(profile, 'probe-runtime', check);
+          const result = machineId === 'local' ? await runtimeProbe(ensureContainer(profile.id, root, profile.computer), check) : await runnerProbe(profile, 'probe-runtime', check);
           return json(res, 200, { ...checked, ok: Boolean(result.ok), message: String(result.message || checked.message), machine: checked.machine });
         } catch (error) { return json(res, 200, { ...checked, ok: false, message: error instanceof Error ? error.message : 'Computer access check failed.' }); }
       }
@@ -516,6 +741,7 @@ const server = createServer(async (req, res) => {
     if (agentComputerMatch && req.method === 'POST') {
       const agentId = validId(decodeURIComponent(agentComputerMatch[1])), input = await body(req), profile = profiles.get(agentId); if (!profile) return json(res, 404, { error: 'Agent profile not found.' });
       if (agentComputerMatch[2] === 'stop') { const runs = store.listRuns().filter(run => run.agent_id === agentId && ['queued','running','waiting_approval','waiting_input'].includes(run.state)); let stopped = 0; const failures: string[] = []; for (const run of runs) { const result = await stopRunTree(run.id); stopped += result.stopped; failures.push(...result.failures); } return json(res, 200, { ok: true, stopped, ...(failures.length ? { failures } : {}), pending: remoteActive.has(runs[0]?.id) }); }
+      if (probingAgents.has(agentId)) throw new ProfileError('This agent is checking its settings or context. Wait for it to finish before moving it.', 409);
       const destination = String(input.destinationMachineId || ''), pending = { ...profile, computer: { ...profile.computer, machineId: destination } };
       const transfer = machines.transfer(agentId, profile.computer.machineId, destination, pending); void performTransfer(transfer);
       return json(res, 202, transfer);
@@ -556,8 +782,10 @@ const server = createServer(async (req, res) => {
       const profile = profiles.get(id);
       if (action === 'profile' && req.method === 'PUT') {
         const input = await body(req); if (input.id !== id) throw new ProfileError('Profile ID does not match the selected agent.');
+        if (probingAgents.has(id)) throw new ProfileError('This agent is checking its settings or context. Wait for it to finish before saving.', 409);
         const current = profiles.get(id), desired = validateProfile(input); if (machines.transferring(id)) throw new MachineError('This agent is already transferring. Wait for it to finish before editing its computer.', 409); machines.canAssign(desired.computer.machineId, id);
-        const moving = Boolean(current && current.computer.machineId !== desired.computer.machineId), saved = profiles.save(moving ? { ...desired, computer: current!.computer } : desired); ensureProfileDirs(id);
+        if (process.env.OPEN_HARNESS_DEPLOYMENT === 'compose' && desired.computer.machineId === 'local' && desired.computer.access === 'folders') for (const folder of desired.computer.folders) sharedFolderSource(folder.path, folder.mode);
+        const moving = Boolean(current && current.computer.machineId !== desired.computer.machineId), saved = profiles.save(desired, moving); ensureProfileDirs(id);
         if (moving) { const pending = { ...desired, revision: saved.revision }; machines.reserve(desired.computer.machineId, id, desired.computer.reserveMachine); void performTransfer(machines.transfer(id, current!.computer.machineId, desired.computer.machineId, pending)); }
         else machines.reserve(saved.computer.machineId, id, saved.computer.reserveMachine);
         return json(res, 200, profileResponse(saved));
@@ -571,6 +799,7 @@ const server = createServer(async (req, res) => {
         return json(res, 200, profileResponse(profiles.save({ ...profile, model: { ...profiles.effective(profile), inherit: false, credentialRef: ref } })));
       }
       if (action === 'profile' && req.method === 'GET') return json(res, 200, profileResponse(profile));
+      if (!['profile', 'credential'].includes(action)) reserveProbe(id);
       if (action === 'tools' && req.method === 'GET') {
         ensureProfileDirs(id);
         const catalog = profile.computer.machineId === 'local' ? await discoverTools(id, root, profile) : await runnerProbe(profile, 'probe-tools') as ToolCatalog;
@@ -597,14 +826,11 @@ const server = createServer(async (req, res) => {
       }
       if (action === 'connection-check' && req.method === 'POST') {
         const input = await body(req), model = validateModel(input.model);
-        if (model.credentialRef && !secrets.has(model.credentialRef)) return json(res, 200, { ok: false, message: `Add the ${model.credentialRef} credential first.` });
-        if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { ok: true, message: 'Deterministic test connection is ready.' });
-        const endpoints: Record<string,string> = { xai: 'https://api.x.ai/v1', openrouter: 'https://openrouter.ai/api/v1', openai: 'https://api.openai.com/v1' };
-        const baseUrl = model.baseUrl || endpoints[model.provider];
-        if (!baseUrl) return json(res, 200, { ok: false, message: 'This provider does not expose a compatible model-list endpoint. Model authentication will be checked by Hermes at task start.' });
-        ensureProfileDirs(id);
-        try { return json(res, 200, profile.computer.machineId === 'local' ? await runtimeProbe(ensureContainer(id, root, profile.computer), { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' }) : await runnerProbe(profile, 'probe-runtime', { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' })); }
-        catch (error) { return json(res, 200, { ok: false, message: error instanceof Error ? error.message : 'Connection failed.' }); }
+        const key = secrets.environment()[model.credentialRef] || '';
+        if (model.credentialRef && !key && profile.computer.machineId === 'local') return json(res, 200, { ok: false, message: `Add the ${model.credentialRef} credential first.` });
+        const tested = profile.computer.machineId === 'local' ? await testModelConnection(model, key)
+          : await runnerProbe(profile, 'probe-runtime', { action: 'model-test', model, apiKey: key });
+        return json(res, 200, tested);
       }
       if (action === 'connector-check' && req.method === 'POST') {
         const input = await body(req), candidate = input.connector;
@@ -615,43 +841,52 @@ const server = createServer(async (req, res) => {
         try {
           ensureProfileDirs(id);
           const result = process.env.OPEN_HARNESS_MOCK === '1' ? { status: 'connected', tools: [{ name: 'lookup', description: 'Mock connected tool' }] } : profile.computer.machineId === 'local' ? await runtimeProbe(ensureContainer(id, root, profile.computer), { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} }) : await runnerProbe(profile, 'probe-runtime', { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} });
-          const tools = (result.tools as Array<{ name: string; description: string }>).map(t => ({ id: `mcp_${tested.name}_${t.name}`, name: t.name, description: t.description, group: 'mcp', available: true }));
+          const tools = (result.tools as Array<{ name: string; description: string }>).map(t => ({ id: mcpToolId(tested.name, t.name), name: t.name, description: t.description, group: 'mcp', available: true }));
           const prior = store.db.prepare('SELECT json FROM tool_catalogs WHERE agent_id=?').get(id) as { json: string } | undefined;
           const catalog: ToolCatalog = prior ? JSON.parse(prior.json) : { source: 'runtime', tools: [] };
-          catalog.tools = [...catalog.tools.filter(t => !t.id.startsWith(`mcp_${tested.name}_`)), ...tools];
+          catalog.tools = [...catalog.tools.filter(t => mcpServerOf(t.id) !== tested.name && !t.id.startsWith(`mcp_${tested.name}_`)), ...tools];
           store.db.prepare('INSERT INTO tool_catalogs VALUES(?,?) ON CONFLICT(agent_id) DO UPDATE SET json=excluded.json').run(id, JSON.stringify(catalog));
           return json(res, 200, { ...result, tools });
         } catch { return json(res, 200, { status: 'failed', error: 'MCP initialize/tools-list handshake failed. Check the executable, arguments, and credentials.', tools: [] }); }
       }
     }
-    const skillMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/context\/skills\/([^/]+)$/);
-    if (skillMatch) {
-      const safe = validId(skillMatch[1]);
-      const skill = decodeURIComponent(skillMatch[2]);
-      if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(skill)) return json(res, 400, { error: "Invalid skill name." });
-      const skillDir = join(root, "agents", safe, "profile", "skills", skill), skillFile = join(skillDir, "SKILL.md");
-      if (req.method === "GET") { if (!existsSync(skillFile)) return json(res, 404, { error: "Skill not found." }); return json(res, 200, { name: skill, content: readFileSync(skillFile, "utf8") }); }
-      if (req.method === "PUT") { const input = await body(req); mkdirSync(skillDir, { recursive: true }); writeFileSync(skillFile, String(input.content || ""), { mode: 0o600 }); return json(res, 200, { ok: true }); }
-      if (req.method === "DELETE") { if (existsSync(skillDir)) rmSync(skillDir, { recursive: true }); return json(res, 200, { ok: true }); }
-    }
-    const contextMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/context$/);
+    const contextMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/context(?:\/skills\/([^/]+))?$/);
     if (contextMatch) {
-      const safe = validId(contextMatch[1]), profile = join(root, "agents", safe, "profile"), memoryPath = join(profile, "MEMORY.md"), userPath = join(profile, "USER.md"), skillsPath = join(profile, "skills"); mkdirSync(profile, { recursive: true });
-      if (req.method === "PUT") { const input = await body(req); if (String(input.memory || "").length > 50_000) return json(res, 413, { error: "Memory is limited to 50 KB." }); writeFileSync(memoryPath, String(input.memory || ""), { mode: 0o600 }); return json(res, 200, { ok: true }); }
-      if (req.method === "GET") { const skills = existsSync(skillsPath) ? readdirSync(skillsPath, { withFileTypes: true }).filter(item => item.isDirectory()).map(item => item.name).slice(0, 200) : [], available = (await dockerStatusCached()).available; return json(res, 200, { memory: existsSync(memoryPath) ? readFileSync(memoryPath, "utf8") : "", user: existsSync(userPath) ? readFileSync(userPath, "utf8") : "", skills, capabilities: { terminal: available, process: available, code: available, files: available, web: available, browser: available, memory: available, skills: available, mcp: available, delegation: available, schedules: true } }); }
+      const id = validId(decodeURIComponent(contextMatch[1])), name = contextMatch[2] === undefined ? undefined : decodeURIComponent(contextMatch[2]);
+      if (!['GET', 'PUT', ...(name ? ['DELETE'] : [])].includes(req.method || '')) return json(res, 405, { error: 'Unsupported context method.' });
+      if (name !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(name)) throw new ProfileError('Invalid skill name.');
+      if (machines.transferring(id)) throw new ProfileError('This agent is transferring. Wait for it to finish before editing its context.', 409);
+      reserveProbe(id);
+      const input = req.method === 'PUT' ? await body(req) : {};
+      const operation: ContextOperation = name === undefined ? { operation: req.method === 'GET' ? 'get' : 'set-memory', memory: String(input.memory || '') }
+        : { operation: req.method === 'GET' ? 'get-skill' : req.method === 'PUT' ? 'put-skill' : 'delete-skill', name, content: String(input.content || '') };
+      if (operation.operation === 'set-memory' && operation.memory!.length > 50_000) throw new ProfileError('Memory is limited to 50 KB.', 413);
+      const profile = profiles.get(id), machineId = profile?.computer.machineId || 'local';
+      let result: ContextResult;
+      if (machineId === 'local') result = agentContext(root, id, operation);
+      else {
+        const machine = machines.canAssign(machineId, id);
+        if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before editing context.`, 409);
+        result = await waitRunnerCommand(machines.enqueue(machineId, id, 'agent-context', operation).id) as ContextResult;
+      }
+      if (operation.operation === 'get' && result.status === 200) {
+        const machine = machines.get(machineId), available = machineId === 'local' ? (await dockerStatusCached()).available : machine.capabilities.container || machine.capabilities.direct;
+        result.value.capabilities = { terminal: available, process: available, code: available, files: available, web: available, browser: available, memory: available, skills: available, mcp: available, delegation: available, schedules: true };
+      }
+      return json(res, result.status, result.value);
     }
     if (req.method === "POST" && url.pathname === "/v1/migrate") {
       const input = await body(req); const found = store.db.prepare("SELECT 1 FROM migrations WHERE key='browser-v1'").get();
       if (found) return json(res, 200, { migrated: false, reason: "already_migrated" });
+      const files = (input.files || []).map((file: { name: unknown; content: unknown }) => ({ target: safeFile(join(root, 'shared'), String(file.name).replace(/[^a-zA-Z0-9._ -]/g, '_')), content: String(file.content).slice(0, 1_000_000) }));
       store.db.prepare("INSERT INTO migrations(key,payload_json,created_at) VALUES(?,?,?)").run("browser-v1", JSON.stringify(input), new Date().toISOString());
       for (const agent of input.agents || []) {
         profiles.import(agent);
-        const safe = validId(String(agent.id)), profile = join(root, "agents", safe, "profile");
-        mkdirSync(profile, { recursive: true });
-        if (Array.isArray(agent.memory) && agent.memory.length) writeFileSync(join(profile, "MEMORY.md"), agent.memory.map((item: unknown) => `- ${String(item)}`).join("\n") + "\n", { mode: 0o600 });
+        const { memory } = profileMemory(root, String(agent.id));
+        if (Array.isArray(agent.memory) && agent.memory.length && !existsSync(memory)) atomicWorkspaceWrite(memory, agent.memory.map((item: unknown) => `- ${String(item)}`).join("\n") + "\n");
       }
       for (const conversation of input.conversations || []) store.db.prepare("INSERT OR IGNORE INTO conversations(id,agent_id,title,legacy_json,created_at,updated_at) VALUES(?,?,?,?,?,?)").run(conversation.id, conversation.agentId, conversation.title, JSON.stringify(conversation), conversation.updatedAt || new Date().toISOString(), conversation.updatedAt || new Date().toISOString());
-      for (const file of input.files || []) { const target = join(root, "shared", String(file.name).replace(/[^a-zA-Z0-9._ -]/g, "_")); writeFileSync(target, String(file.content).slice(0, 1_000_000)); }
+      for (const file of files) atomicWorkspaceWrite(file.target, file.content);
       writeFileSync(join(root, "browser-v1-backup.json"), JSON.stringify(input, null, 2), { mode: 0o600 });
       return json(res, 200, { migrated: true });
     }
@@ -696,16 +931,95 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/v1/runs") return json(res, 202, runResponse(createRun(await body(req))));
     if (req.method === "GET" && url.pathname === "/v1/runs") return json(res, 200, { runs: store.listRuns().map(runResponse) });
-    const runMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)(?:\/(events|steer|stop|approval))?$/);
+    if (req.method === 'GET' && url.pathname === '/v1/conversations') {
+      const agentId = url.searchParams.get('agentId');
+      const rows = (agentId ? store.db.prepare('SELECT * FROM runs WHERE agent_id=? ORDER BY created_at,rowid').all(agentId) : store.db.prepare('SELECT * FROM runs ORDER BY created_at,rowid').all()) as RunRow[];
+      const conversations = new Map<string, { id: string; agentId: string; title: string; updatedAt: string; runs: ReturnType<typeof runResponse>[] }>();
+      for (const run of rows) {
+        const key = `${run.agent_id}:${run.conversation_id}`;
+        const conversation = conversations.get(key) || { id: run.conversation_id, agentId: run.agent_id, title: run.prompt.slice(0, 52), updatedAt: run.updated_at, runs: [] };
+        conversation.runs.push(runResponse(run)); conversation.updatedAt = run.updated_at > conversation.updatedAt ? run.updated_at : conversation.updatedAt; conversations.set(key, conversation);
+      }
+      return json(res, 200, { conversations: [...conversations.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) });
+    }
+    if (req.method === "POST" && url.pathname === "/v1/runs/stop-all") { let stopped = 0; const failures: string[] = []; for (const run of store.listRuns().filter(item => !item.parent_run_id && ["queued","running","waiting_approval","waiting_input"].includes(item.state))) { const result = await stopRunTree(run.id); stopped += result.stopped; failures.push(...result.failures); } return json(res, 200, { stopped, ...(failures.length ? { failures } : {}) }); }
+    const runMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)(?:\/(events|steer|stop|approval|input))?$/);
     if (runMatch) {
       const run = store.getRun(runMatch[1]); if (!run) return json(res, 404, { error: "Run not found." }); const action = runMatch[2];
       if (!action && req.method === "GET") return json(res, 200, runResponse(run));
       if (action === "events" && req.method === "GET") return json(res, 200, { events: store.events(run.id, Number(url.searchParams.get("after") || 0)), run: runResponse(store.getRun(run.id)!) });
       if (action === "steer" && req.method === "POST") { const input = await body(req), live = active.get(run.id), remote = remoteActive.get(run.id); if (!live && !remote) return json(res, 409, { error: "Run is not active." }); if (live) await live.gateway.request("session.steer", { session_id: live.sessionId, text: String(input.text || "") }); else machines.enqueue(remote!.machineId, run.agent_id, 'steer', { runId: run.id, commandId: remote!.commandId, text: String(input.text || '') }); event(run.id, "run.steered", { text: input.text }); return json(res, 200, { ok: true }); }
       if (action === "stop" && req.method === "POST") { const result = await stopRunTree(run.id); return json(res, 200, { ok: true, stopped: result.stopped, ...(result.failures.length ? { failures: result.failures } : {}) }); }
-      if (action === "approval" && req.method === "POST") { const input = await body(req), approval = store.approval(String(input.approvalId)); if (!approval || approval.run_id !== run.id) return json(res, 404, { error: "Approval not found." }); const live = active.get(run.id), remote = remoteActive.get(run.id); if (!live && !remote) return json(res, 409, { error: "Run is not active." }); const granted = hermesApprovalDecision(String(input.decision || "")), decision = granted === "deny" ? "deny" : "approve"; if (live) await live.gateway.request("approval.respond", { session_id: live.sessionId, request_id: approval.gateway_request_id, choice: granted, all: false }); else machines.enqueue(remote!.machineId, run.agent_id, 'approval', { runId: run.id, commandId: remote!.commandId, requestId: approval.gateway_request_id, decision: granted }); store.resolveApproval(String(input.approvalId), decision); store.setRun(run.id, { state: "running" }); event(run.id, "approval.resolved", { approvalId: input.approvalId, decision }); return json(res, 200, { ok: true }); }
+      if (action === 'approval' && req.method === 'POST') {
+        const input = await body(req), approval = store.approval(String(input.approvalId));
+        if (!approval || approval.run_id !== run.id) return json(res, 404, { error: 'Approval not found.' });
+        if (approval.state !== 'pending' || !activeStates.has(run.state)) return json(res, 409, { error: 'This approval is no longer pending.' });
+        const live = active.get(run.id), remote = remoteActive.get(run.id);
+        if (!live && !remote) return json(res, 409, { error: 'Run is not active.' });
+        if (!['approve', 'deny', 'once', 'session', 'always'].includes(input.decision)) throw new ProfileError('Choose approve or deny.');
+        const choice = hermesApprovalDecision(input.decision), decision = choice === 'deny' ? 'deny' : 'approve', approvalId = String(approval.id);
+        const claimed = store.db.prepare("UPDATE approvals SET state='submitting' WHERE id=? AND run_id=? AND state='pending'").run(approvalId, run.id);
+        if (!claimed.changes) return json(res, 409, { error: 'This approval is already being answered.' });
+        try {
+          if (live) {
+            await live.gateway.request('approval.respond', { session_id: live.sessionId, request_id: approval.gateway_request_id, choice, all: false });
+            store.db.prepare("UPDATE approvals SET state=?,resolved_at=? WHERE id=? AND state='submitting'").run(decision, new Date().toISOString(), approvalId);
+            event(run.id, 'approval.resolved', { approvalId, decision });
+          } else {
+            machines.enqueue(remote!.machineId, run.agent_id, 'approval', { runId: run.id, commandId: remote!.commandId, requestId: approval.gateway_request_id, approvalId, decision, choice });
+            store.db.prepare("UPDATE approvals SET state='submitted' WHERE id=? AND state='submitting'").run(approvalId);
+          }
+        } catch (error) {
+          store.db.prepare("UPDATE approvals SET state=? WHERE id=? AND state='submitting'").run(activeStates.has(store.getRun(run.id)?.state || '') ? 'pending' : 'expired', approvalId);
+          throw error;
+        }
+        if (!terminalStates.has(store.getRun(run.id)?.state || '')) {
+          const approvalPending = store.db.prepare("SELECT 1 FROM approvals WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+          const inputPending = store.db.prepare("SELECT 1 FROM run_inputs WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+          store.setRun(run.id, { state: approvalPending ? 'waiting_approval' : inputPending ? 'waiting_input' : 'running' });
+        }
+        return json(res, 200, { ok: true, pending: Boolean(remote) });
+      }
+      if (action === 'input' && req.method === 'POST') {
+        const input = await body(req), pending = store.db.prepare('SELECT * FROM run_inputs WHERE id=? AND run_id=?').get(String(input.inputId), run.id) as { id: string; gateway_request_id: string; type: string; state: string } | undefined;
+        if (!pending) return json(res, 404, { error: 'Input request not found.' });
+        if (pending.state !== 'pending' || !activeStates.has(run.state)) return json(res, 409, { error: 'This input is no longer pending.' });
+        const value = input.value;
+        if ((typeof value !== 'string' && !(pending.type === 'clarify' && Array.isArray(value) && value.every(item => typeof item === 'string'))) || JSON.stringify(value).length > 20_000) throw new ProfileError('Enter a valid response.');
+        const live = active.get(run.id), remote = remoteActive.get(run.id);
+        if (!live && !remote) return json(res, 409, { error: 'Run is not active.' });
+        const claimed = store.db.prepare("UPDATE run_inputs SET state='submitting' WHERE id=? AND run_id=? AND state='pending'").run(pending.id, run.id);
+        if (!claimed.changes) return json(res, 409, { error: 'This input is already being answered.' });
+        try {
+          const fields: Record<string, string> = { clarify: 'answer', secret: 'value', sudo: 'password' };
+          if (live) {
+            await live.gateway.request(`${pending.type}.respond`, { request_id: pending.gateway_request_id, [fields[pending.type]]: value });
+            store.db.prepare("UPDATE run_inputs SET state='answered',resolved_at=? WHERE id=? AND state='submitting'").run(new Date().toISOString(), pending.id);
+            event(run.id, 'input.resolved', { inputId: pending.id, type: pending.type });
+          } else {
+            let response: Record<string, unknown> = { value };
+            if (pending.type !== 'clarify') {
+              const key = store.db.prepare('SELECT encryption_public_key FROM machines WHERE id=?').get(remote!.machineId) as { encryption_public_key?: string };
+              if (!key?.encryption_public_key) throw new MachineError('Reconnect this runner before sending a private response.', 409);
+              response = { encrypted: await encryptRunnerSecret(key.encryption_public_key, String(value)) };
+            }
+            if (!activeStates.has(store.getRun(run.id)?.state || '') || !store.db.prepare("SELECT 1 FROM run_inputs WHERE id=? AND state='submitting'").get(pending.id)) throw new ProfileError('This run or input request finished before the response could be sent.', 409);
+            machines.enqueue(remote!.machineId, run.agent_id, 'input', { runId: run.id, commandId: remote!.commandId, requestId: pending.gateway_request_id, inputId: pending.id, type: pending.type, ...response });
+            store.db.prepare("UPDATE run_inputs SET state='submitted' WHERE id=? AND state='submitting'").run(pending.id);
+          }
+        } catch (error) {
+          store.db.prepare("UPDATE run_inputs SET state=? WHERE id=? AND state='submitting'").run(activeStates.has(store.getRun(run.id)?.state || '') ? 'pending' : 'expired', pending.id);
+          if (pending.type !== 'clarify' && !(error instanceof ProfileError || error instanceof MachineError)) throw new ProfileError('The agent could not accept this private response. Check whether its request is still pending.');
+          throw error;
+        }
+        if (!terminalStates.has(store.getRun(run.id)?.state || '')) {
+          const approvalPending = store.db.prepare("SELECT 1 FROM approvals WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+          const inputPending = store.db.prepare("SELECT 1 FROM run_inputs WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
+          store.setRun(run.id, { state: approvalPending ? 'waiting_approval' : inputPending ? 'waiting_input' : 'running' });
+        }
+        return json(res, 200, { ok: true, pending: Boolean(remote) });
+      }
     }
-    if (req.method === "POST" && url.pathname === "/v1/runs/stop-all") { let stopped = 0; const failures: string[] = []; for (const run of store.listRuns().filter(item => !item.parent_run_id && ["queued","running","waiting_approval","waiting_input"].includes(item.state))) { const result = await stopRunTree(run.id); stopped += result.stopped; failures.push(...result.failures); } return json(res, 200, { stopped, ...(failures.length ? { failures } : {}) }); }
     if (url.pathname === "/v1/credentials") {
       if (req.method === "GET") return json(res, 200, { credentials: credentialRecords(), backend: credentials.backend });
       if (req.method === "POST") { const input = await body(req); return json(res, 201, credentialRecord(credentials.create(input))); }
@@ -732,7 +1046,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true, name: row.ref });
     }
     if (/^\/v1\/agents\/[^/]+\/connectors/.test(url.pathname)) return json(res, 410, { error: 'Connection settings moved into Agent settings. Reload the app.' });
-    if (url.pathname === "/v1/files") { const { scope, dir } = workspaceDir(url); mkdirSync(dir, { recursive: true }); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = safeFile(dir, name); if (!existsSync(target)) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readFileSync(target, encoding), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(dir), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = safeFile(dir, String(input.name || "")); writeFileSync(target, content, { encoding, mode: 0o600 }); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = safeFile(dir, String(url.searchParams.get("name") || "")); if (existsSync(target)) unlinkSync(target); return json(res, 200, { ok: true }); } }
+    if (url.pathname === "/v1/files") { const { scope, dir } = workspaceDir(url); mkdirSync(dir, { recursive: true }); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = safeFile(dir, name); if (!existsSync(target)) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readWorkspaceFile(target).toString(encoding), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(dir), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = safeFile(dir, String(input.name || "")); atomicWorkspaceWrite(target, Buffer.from(content, encoding)); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = safeFile(dir, String(url.searchParams.get("name") || "")); if (existsSync(target)) unlinkSync(target); return json(res, 200, { ok: true }); } }
     if (req.method === "GET" && url.pathname === "/v1/routines") return json(res, 200, { routines: store.db.prepare("SELECT * FROM schedules ORDER BY created_at DESC").all() });
     if (req.method === "POST" && url.pathname === "/v1/routines") { const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)); const next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, input.agentId, input.name, input.prompt, minutes, input.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone, 1, next, stamp.toISOString(), stamp.toISOString()); return json(res, 201, { id, nextRunAt: next }); }
     // A routine with a typo, a wrong agent, or a runaway interval could previously only
@@ -779,7 +1093,8 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/internal/task") {
       const input = await body(req), runId = String(req.headers['x-open-harness-run'] || '');
       if (!internalAllowed(internalAgent, TASK_TOOL, runId)) return json(res, 403, { error: 'Task board access is disabled for this run.' });
-      const profile = profiles.get(internalAgent!); if (!profile) return json(res, 403, { error: 'Agent profile not found.' });
+      const activeRun = runId ? store.getRun(runId) : store.liveRuns().find(run => run.agent_id === internalAgent);
+      const profile = activeRun ? profiles.runSnapshot(activeRun.id) : null; if (!profile) return json(res, 403, { error: 'Agent profile not found.' });
       // The schema nests an action's fields under `input`, and nothing else says so, so a model
       // that puts stageId or text alongside `action` is guessing reasonably -- and used to get
       // "Stage is required." with no hint about where the field belonged. Both spellings work;
@@ -824,6 +1139,13 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/internal/schedule") { if (!internalAllowed(internalAgent, ROUTINE_TOOL, String(req.headers["x-open-harness-run"] || ""))) return json(res, 403, { error: "Scheduling is disabled for this run." }); const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)), next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, internalAgent, input.name, input.prompt, minutes, input.timezone || "UTC", 1, next, stamp.toISOString(), stamp.toISOString()); return json(res, 201, { id, nextRunAt: next }); }
     return json(res, 404, { error: "Not found." });
   } catch (error) { return json(res, error instanceof ProfileError || error instanceof TaskError || error instanceof TeamError || error instanceof MachineError || error instanceof CredentialError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
+  finally {
+    if (probingAgent) {
+      const gateway = gateways.get(probingAgent);
+      if (gateway) { try { await gateway.stop(); gateways.delete(probingAgent); store.db.prepare('DELETE FROM runtime_processes WHERE agent_id=?').run(probingAgent); } catch (error) { const computer = profiles.get(probingAgent)?.computer; if (computer) blockCleanup(probingAgent, computer, error instanceof Error ? error.message : String(error)); } }
+      probingAgents.delete(probingAgent); void pump();
+    }
+  }
 });
 
 // createRun throws for an agent that no longer exists, for a full queue, and for depth
@@ -874,7 +1196,10 @@ server.on("error", error => {
   else console.error(`The coordinator could not listen on ${bind}:${port}: ${error.message}`);
   process.exit(1);
 });
-server.listen(port, bind, () => console.log(`Open Harness coordinator listening on http://${bind}:${port}`));
+await new Promise<void>(resolve => server.listen(port, bind, resolve));
+await recoverRuns();
+console.log(`Open Harness coordinator listening on http://${bind}:${port}`);
+void pump();
 // Without these the coordinator exits silently when anything throws outside a request —
 // a timer callback, a detached promise — leaving no record of why the service stopped.
 // In-flight runs are marked interrupted on the next start, so exiting is safe; being
@@ -886,7 +1211,6 @@ process.on("uncaughtException", error => { console.error(`The coordinator stoppe
 // hold their CPU/memory reservations forever. SIGINT (Ctrl-C on `npm run harness:serve`)
 // has to clean up exactly like SIGTERM does; stopping gateways in parallel and under a
 // deadline keeps that cleanup from itself hanging on a wedged daemon.
-let shuttingDown = false;
 async function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -894,16 +1218,19 @@ async function shutdown(signal: string) {
   const deadline = setTimeout(() => { console.error("Shutdown took too long; exiting with agents possibly still running."); process.exit(1); }, 15_000);
   deadline.unref();
   server.close();
-  await Promise.allSettled([
+  const stopped = await Promise.allSettled([
     ...[...gateways.values()].map(gateway => gateway.stop()),
     ...[...coordinationSockets.values()].map(socket => socket.then(s => s.close())),
   ]);
+  const failures = stopped.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+  let failed = failures.length > 0;
+  for (const result of failures) console.error(`Runtime cleanup failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
   // Gateways stop the containers they own. Anything else this coordinator started, including
   // containers created by a settings probe, is stopped here so it does not come back.
-  try { const reaped = stopManagedContainers(); if (reaped.length) console.log(`Stopped ${reaped.length} agent container${reaped.length === 1 ? '' : 's'}.`); }
-  catch (error) { console.error(`Some agent containers may still be running: ${error instanceof Error ? error.message : 'unknown error'}`); }
+  try { const reaped = await stopManagedContainers(root); if (reaped.stopped.length) console.log(`Stopped ${reaped.stopped.length} agent container${reaped.stopped.length === 1 ? '' : 's'}.`); if (reaped.failures.length) { failed = true; console.error(reaped.failures.join('\n')); } }
+  catch (error) { failed = true; console.error(`Some agent containers may still be running: ${error instanceof Error ? error.message : 'unknown error'}`); }
   clearTimeout(deadline);
-  process.exit(0);
+  process.exit(failed ? 1 : 0);
 }
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(signal, () => void shutdown(signal));
 // The desktop shell supervises this process through tauri-plugin-shell, whose only

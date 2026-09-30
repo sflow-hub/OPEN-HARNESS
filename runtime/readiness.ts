@@ -12,7 +12,7 @@ export const HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harne
 // a fix keeps the bug while its tag never changes. The image carries this number as a
 // label. Anything else means "rebuild", including no label at all: contract 1 is the set
 // of images built before the label existed. Bump it whenever runtime/hermes/ changes.
-export const RUNTIME_CONTRACT = 2;
+export const RUNTIME_CONTRACT = 7;
 export const RUNTIME_LABEL = 'dev.openharness.runtime';
 export type ImageContract = 'missing' | 'stale' | 'current';
 export function classifyContract(result: { status: number | null; stdout: string }): ImageContract {
@@ -36,24 +36,10 @@ function command(name: string, args: string[], timeout = 7_000) {
   return spawnSync(name, args, { encoding: 'utf8', timeout });
 }
 
-function pythonReady() {
-  for (const executable of [process.env.HERMES_PYTHON, platform === 'win32' ? 'python' : 'python3', 'python'].filter(Boolean) as string[]) {
-    const result = command(executable, ['-c', 'import hermes_cli, open_harness_policy'], 8_000);
-    if (result.status === 0) return true;
-  }
-  return false;
-}
-
-function desktopCheck(): ReadinessCheck {
-  if (platform === 'linux') {
-    const active = Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
-    return active
-      ? { id: 'desktop', label: 'Desktop control', state: 'ready', detail: 'A graphical session is available. Existing-desktop control can be enabled per agent.' }
-      : { id: 'desktop', label: 'Desktop control', state: 'unavailable', detail: 'No graphical session is active. Private virtual desktops remain available inside isolated workspaces.' };
-  }
-  if (platform === 'darwin') return { id: 'desktop', label: 'Desktop control', state: 'action', detail: 'macOS will ask for Accessibility and Screen Recording access when an agent first controls this desktop.' };
-  if (platform === 'win32') return { id: 'desktop', label: 'Desktop control', state: 'ready', detail: 'An interactive Windows session is available. Keep the runner signed in for existing-desktop control.' };
-  return { id: 'desktop', label: 'Desktop control', state: 'unavailable', detail: 'Desktop control is not supported on this operating system.' };
+function desktopCheck(ready = true): ReadinessCheck {
+  return platform === 'linux'
+    ? { id: 'desktop', label: 'Desktop control', state: ready ? 'ready' : 'action', detail: ready ? 'A private agent desktop is available. It has its own apps and login sessions.' : 'Set up Docker and the pinned agent runtime to enable a private agent desktop.' }
+    : { id: 'desktop', label: 'Desktop control', state: 'unavailable', detail: 'Use a Linux runner with Docker for a private agent desktop. Control of your existing signed-in desktop is disabled because it cannot be isolated.' };
 }
 
 export function onboardingStatus(credentialNames: string[] = [], stateRoot = process.env.OPEN_HARNESS_STATE_DIR || '.open-harness'): OnboardingStatus {
@@ -75,7 +61,6 @@ export function onboardingStatus(credentialNames: string[] = [], stateRoot = pro
   const daemon = installed && command('docker', ['version', '--format', '{{.Server.Version}}']).status === 0;
   const contract: ImageContract = daemon ? imageContract() : 'missing';
   const image = contract === 'current';
-  const native = pythonReady();
   const container: ReadinessCheck = !installed
     ? { id: 'container-engine', label: 'Private workspaces', state: 'missing', detail: `Install Docker on ${labels[platform]} to give agents isolated workspaces.`, helpUrl: installUrls[platform] }
     : !daemon
@@ -84,12 +69,10 @@ export function onboardingStatus(credentialNames: string[] = [], stateRoot = pro
   const runtime: ReadinessCheck = image
     ? { id: 'agent-runtime', label: 'Agent runtime', state: 'ready', detail: 'The pinned Hermes runtime is ready for isolated agents.' }
     : contract === 'stale'
-      ? { id: 'agent-runtime', label: 'Agent runtime', state: 'action', detail: 'The agent runtime on this computer was built before a fix and must be rebuilt. Layers already downloaded are reused.', action: 'prepare-runtime', actionLabel: 'Update agent runtime' }
+      ? { id: 'agent-runtime', label: 'Agent runtime', state: 'action', detail: process.env.OPEN_HARNESS_HERMES_PULL === '1' ? 'Download the agent runtime supplied with this Open Harness release.' : 'The agent runtime on this computer was built before a fix and must be rebuilt. Layers already downloaded are reused.', action: 'prepare-runtime', actionLabel: 'Update agent runtime' }
     : daemon
       ? { id: 'agent-runtime', label: 'Agent runtime', state: 'action', detail: 'One final download and setup is needed. This can take several minutes the first time.', action: 'prepare-runtime', actionLabel: 'Set up agent runtime' }
-      : native
-        ? { id: 'agent-runtime', label: 'Agent runtime', state: 'ready', detail: 'A local Hermes installation is ready for direct computer access.' }
-        : { id: 'agent-runtime', label: 'Agent runtime', state: 'missing', detail: 'Start or install Docker to set up the agent runtime.', helpUrl: installUrls[platform] };
+      : { id: 'agent-runtime', label: 'Agent runtime', state: 'missing', detail: 'Start or install Docker to set up the agent runtime.', helpUrl: installUrls[platform] };
 
   // Only meaningful once the image exists: the probe runs a throwaway container from it.
   const sharing = image ? stateSharing(stateRoot) : null;
@@ -103,10 +86,10 @@ export function onboardingStatus(credentialNames: string[] = [], stateRoot = pro
     platformLabel: labels[platform],
     // A container runtime that cannot read the profile directory cannot run an agent,
     // so it must not count as ready just because the image is present.
-    executionReady: (image && (!sharing || sharing.ok)) || native,
-    recommendedAccess: image && (!sharing || sharing.ok) ? 'private' : 'direct',
+    executionReady: image && (!sharing || sharing.ok),
+    recommendedAccess: 'private',
     credentialMode: 'coordinator', credentialNames,
-    checks: [{ id: 'coordinator', label: 'Open Harness', state: 'ready', detail: 'The coordinator is running and your data folder is writable.' }, container, runtime, ...(sharingCheck ? [sharingCheck] : []), desktopCheck()],
+    checks: [{ id: 'coordinator', label: 'Open Harness', state: 'ready', detail: 'The coordinator is running and your data folder is writable.' }, container, runtime, ...(sharingCheck ? [sharingCheck] : []), desktopCheck(image && (!sharing || sharing.ok))],
   };
 }
 
@@ -153,13 +136,21 @@ export async function onboardingAction(action: unknown, credentialNames: string[
     return onboardingStatus(credentialNames);
   }
   if (action === 'prepare-runtime') {
-    await waitForDocker(10_000);
-    const runtimeRoot = import.meta.dirname;
-    const projectRoot = join(runtimeRoot, '..');
-    const dockerfile = join(runtimeRoot, 'hermes', 'Dockerfile');
-    if (!existsSync(dockerfile)) throw new Error('The bundled agent runtime files are missing. Reinstall Open Harness.');
-    await runStreaming('docker', ['build', '-f', dockerfile, '-t', HERMES_IMAGE, projectRoot], projectRoot);
+    await prepareRuntime();
     return onboardingStatus(credentialNames);
   }
   throw new Error('Unknown setup action.');
+}
+
+export async function prepareRuntime() {
+  if (process.env.OPEN_HARNESS_HERMES_PULL === '1' && !/^\S+@sha256:[a-f0-9]{64}$/.test(HERMES_IMAGE)) throw new Error('This release is missing its pinned agent image. Download a complete Open Harness release; its image-lock.json and Compose file must stay together.');
+  await waitForDocker(10_000);
+  if (process.env.OPEN_HARNESS_HERMES_PULL === '1') {
+    await runStreaming('docker', ['pull', HERMES_IMAGE]);
+  } else {
+    const projectRoot = join(import.meta.dirname, '..'), dockerfile = join(import.meta.dirname, 'hermes', 'Dockerfile');
+    if (!existsSync(dockerfile)) throw new Error('The bundled agent runtime files are missing. Reinstall Open Harness.');
+    await runStreaming('docker', ['build', '-f', dockerfile, '-t', HERMES_IMAGE, projectRoot], projectRoot);
+  }
+  if (imageContract() !== 'current') throw new Error('The downloaded or built agent runtime does not match this Open Harness release. Setup stopped without starting an agent. Check the release files and try again.');
 }
