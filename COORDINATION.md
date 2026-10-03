@@ -657,18 +657,25 @@ Temporary ownership for mobile-app removal (user-authorized 2026-09-25 11:15 MDT
   and the dropped "second agent stays available" case in `tests/browser/mvp.spec.ts`.
 
 
-  **Codex reply — October 3:** Taken. Item (1) incorporates Claude's `81a41a8` delivery;
-  Codex added the generated-config regression and resolved verification wording.
-  Item (3) has current Docker-client/nonroot/health coverage; obsolete image and
-  exception-list assertions remain removed. Items (2) and (4) remain unverified:
-  Docker Desktop socket absent, no Trivy, no local final-soak receipts/SSH route.
-  Item (5) is prepared at `work/release-review-20261003/debian-origin-workflow.patch`
-  with review notes and 8/8 isolated gate regressions; application awaits the
-  user's requested review. Actual Node suite: 267 pass, one expected workflow
-  guard failure, three skips; Python: 158 run, OK with 31 evidence-dependent skips;
-  typecheck/lint pass. Shared build completed all five bundling phases but its
-  worker is still in I/O wait; final build result and Claude browser acceptance
-  remain pending. Claude's onboarding/browser edits are preserved.
+  **Codex reply — October 3:** Taken and implemented. Item (1) incorporates
+  Claude's `81a41a8` manual default/bundle delivery; the generated-profile
+  regression and verification wording are corrected. Item (3) restores applicable
+  Docker-client/nonroot/health packaging assertions; obsolete assumptions remain
+  removed. Item (5) was presented as a concrete patch and applied after the user's
+  continuation following review. The ordinary suites are green: Node 268 pass,
+  3 skips; Python 160 run, OK with 31 evidence skips; typecheck/lint/build pass;
+  Claude's `857c520` browser acceptance passes 132/132.
+
+  Item (2) now has a completed contract-7 native AMD64 image build and actual
+  failed scans: Debian browser 28 HIGH package findings (14 CVEs); whole image
+  12 HIGH and one CRITICAL, with zero secret findings. No exceptions were restored.
+  The failed receipt is refused before runtime exercise/publication. Candidate
+  Chromium update archives were authenticated for both architectures, with pins
+  unchanged pending independent review and a complete security refresh. Evidence
+  and package-level remediation are in `work/release-review-20261003/` and
+  `runtime/VERIFICATION.md`. Item (4) remains unverified: recover September 30's
+  final receipt/journal/identities/cleanup or require a qualifying replacement
+  final-image soak. No public release, tag or push has been issued.
 
 ## Log (append-only, newest last)
 
@@ -1321,3 +1328,11 @@ Failure archive9ce2bd5b926641b456aaee1dd4902520159b79f3a37bef8a86534ef581171fa4 
 2026-10-03 14:20 MDT — claude — Running npm run build + npx playwright test (ports 4317/3000) for the four merge-regression fixes; please do not build or use those ports for ~8 minutes.
 
 2026-10-03 14:21 MDT — codex — Narrow ROADMAP follow-up: correcting old floating-APT wording now that OS/browser archives are signed-snapshot/version/hash-bound. Python/npm resolution is still not fully locked; retaining reproducibility as deferred instead of claiming byte-identical rebuilds. No change to runtime dependencies.
+2026-10-03 14:25 MDT — claude — Committed 857c520: four merge regressions fixed (credential chip shows model; switcher quick picks filtered by effective provider; agent editor refetches credentials via credentialCatalog; workspace test targets the Workspace model picker). Full gates on this tree: build pass; Playwright 132/132; npm test 268 pass/0 fail/3 skip; typecheck 0; lint 0 errors/5 warnings. Branch is green locally; ready for PR once Codex finishes its open items.
+
+2026-10-03 14:28 MDT — codex — Read Claude857c520 green delivery:132/132browser, productionbuild, Node268/3skip/typecheck/lint pass. Native Hermesv3 passed offline curl distribution build in423.3seconds, pinned Python/Node and Hermes installation; proceeding through browser installation/final package/linkage checks. Dedicated scannerDB SHA256004acbf4d8b0d8527987d80f0b98a6eea54c0fd8ac26d4cf728de2adbaf4abb5, UpdatedAt2026-10-03T19:02:38Z. No finalimage/scan/acceptance or soak claimed yet.
+
+2026-10-03 14:36 MDT — codex — Contract7 native AMD64 source image built successfully: sha256:33a5088ad64e3bf4e9bbf300123e3aede4ca1f3adecfc2f1e7ce195558f36d4a; build package/ELF/Debian inventory checks passed. Exact-image Debian-origin gate FAILED at component-scan:14 unique HIGH CVEs,28 package findings against Chromium/chromium-common154.0.8037.57, no component secrets; fixed version reported154.0.8037.92-1~deb13u1, Debian tracker confirms CVE-2026-102299. No ignore/severity waiver. Original gate stopped because external checkout is not shared by Docker Desktop; SHA256-matching source-only home fixture ran the unchanged gate, evidence copied/readback verified to work/release-review-20261003/debian-origin-gate-shared-source, both probe containers absent and own source fixture removed. Whole-image scan now running separately because gate stopped before it; no passing receipt, protocol/desktop exercise or publication. Claude: please independently review this finding and proposed authenticated Chromium security-pin refresh (both architectures, signed indexes, exact hashes, finalPackages and provenance); no old Trivy exceptions should be restored. Claiming runtime/ubuntu/README.md stale pending-workflow/build wording correction.
+2026-10-03 14:40 MDT — claude — Pushed pre-live-testing-snapshot and opened PR #1 to main (security-flagged; states the Chromium Debian-origin gate failure and "do not tag"). Starting the requested independent review of the Chromium security-pin refresh.
+
+2026-10-03 14:41 MDT — codex — Whole-image scan of33a5088a completed exit1:12HIGH/1CRITICAL, zero secret findings (OpenSSL3.5.5-1ubuntu3.5, bundled npm brace-expansion/http-cache-semantics/undici, PyJWT2.13.0). No exceptions/pin changes; failed receipt validator exits1 as required. Authenticated candidate Chromium154.0.8037.92 inputs downloaded and SHA256/size/control verified for AMD64+ARM64 from signed20261003T180000Z Debian indexes; raw metadata/InRelease/source records retained. Prepared work/release-review-20261003/security-remediation.md with exact package findings, candidate-only limits and needed lock/dependency/rebuild gates; scan-evidence.SHA256SUMS binds28files. Claude independent review requested for all findings, especially no-fixed-version http-cache-semantics. Updated VERIFICATION/runtime Ubuntu README/readiness notes accurately. No real protocol/desktop exercise after failed scan, no publication or replacement soak. UI/full ordinary suites remain Claude857c520 green.

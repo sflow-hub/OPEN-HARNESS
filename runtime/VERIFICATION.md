@@ -3318,3 +3318,56 @@ The helper now skips regular metadata files, while still rejecting an active
 non-loopback interface or unreadable interface flags. Two regressions cover those
 cases; the curl suite runs 24 tests, OK with eight retained-evidence skips. A third
 native build is running; no image scan or acceptance is recorded as passed.
+
+
+October 3 native AMD64 contract-7 build and failed security gates
+-------------------------------------------------------------
+
+The third source build completed successfully for immutable local image
+`sha256:33a5088ad64e3bf4e9bbf300123e3aede4ca1f3adecfc2f1e7ce195558f36d4a`
+(tag `open-harness-hermes:launch-review-20261003`). The default verified-runtime
+stage passed package, ELF/linkage and Debian-origin inventory checks. The old
+contract-2 runtime was preserved.
+
+With Trivy 0.74.0 and frozen database SHA256
+`004acbf4d8b0d8527987d80f0b98a6eea54c0fd8ac26d4cf728de2adbaf4abb5`
+(updated 2026-10-03T19:02:38Z), the unchanged Debian-origin gate failed:
+14 unique HIGH Chromium CVEs, reported as 28 findings against Chromium and
+chromium-common `154.0.8037.57-1~deb13u1`. The scanner reports a fixed version of
+`154.0.8037.92-1~deb13u1`; Debian confirms that fix for CVE-2026-102299.
+No component secret findings were reported. The gate stopped at component-scan,
+so its remaining checks and negative control have not passed and no receipt exists.
+
+A separate scan of the exact same image, needed because the gate stopped before
+its whole-image step, returned 12 HIGH and one CRITICAL finding: OpenSSL's three
+Ubuntu packages (CVE-2026-84782), npm's bundled brace-expansion,
+http-cache-semantics and undici, and Python PyJWT. No secret findings were
+reported. Ubuntu confirms OpenSSL `3.5.5-1ubuntu3.6` as fixed; PyJWT's reported
+fix is `2.14.0`. The scanner gives no fixed version for the http-cache-semantics
+finding, which requires independent review. The app's passing production npm
+audit does not cover npm's own bundled runtime dependencies. No ignore file,
+severity waiver or dependency pin change was introduced.
+
+Docker Desktop does not share the external checkout or /tmp. Its initial
+external-path gate attempt failed before scanning. A dedicated source-only home
+fixture was copied and verified byte-for-byte against the checkout; the unchanged
+gate mounted only helper/lock and dedicated output. Both probe containers were
+recorded absent after cleanup. Evidence was copied back and hash verified, and
+only that fixture was removed. Automatic approval review rejected an earlier
+broad home-directory probe; that mount was not executed. The narrow fixture
+was approved. Receipt verification correctly exits 1 for the failed gate.
+
+Candidate Chromium security inputs from signed Debian snapshot indexes at
+`20261003T180000Z` were independently downloaded for AMD64 and ARM64: all four
+archives match signed index sizes/SHA256 and package controls. Signed releases
+and source metadata are retained. These are candidate inputs for a reviewed
+refresh, not changed pins or evidence of a secure final image. Current advisories
+must be reviewed again before selecting the final pin.
+
+Private local evidence is retained in `work/release-review-20261003/`:
+`hermes-build.log`, `debian-origin-gate-shared-source/`, `whole-image-scan/`,
+`chromium-security-input-review.json`, and `scan-evidence.SHA256SUMS` (28 files).
+`security-remediation.md` gives the package/version findings and follow-up gates.
+Claude was asked for independent review through COORDINATION.md. Runtime exercise,
+publication, clean-host acceptance/recovery and final soak remain blocked/pending;
+the September 30 final soak evidence remains unverified.

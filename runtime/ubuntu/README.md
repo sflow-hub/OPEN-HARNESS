@@ -26,7 +26,10 @@ As [Debian documents](https://snapshot.debian.org/#usage), historical snapshot
 Release expiry is disabled only for those sources; archive-keyring signatures and
 locked package versions, identities, sizes and hashes remain required. Live mirror
 updates therefore cannot remove the exact browser inputs from a later build.
-AMD64's Ubuntu package set still needs a completed, verified AMD64 image build.
+The October 3 native AMD64 contract-7 review image passed the build's package,
+ELF/linkage and Debian inventory checks. Its security scans failed on browser,
+OpenSSL and language dependencies; it is not an accepted release image. See
+`runtime/VERIFICATION.md` for the exact identity and findings.
 
 The portable ARM64 candidate built on September 29, 2026 and verified all 329
 packages and 90 native files. The curl distribution's `test-nonflaky` policy
@@ -59,8 +62,9 @@ configuration. `receipt.json` is written only when every step and binding
 passed; otherwise `failure.json` names the failure. Either way, `status.json`,
 `calls/`, `steps/` and `reports/` keep the raw commands, exit codes and reports.
 
-The release workflow still needs the reviewed gate integration. Its source
-change has not been accepted. `publish-architecture` in
+The reviewed gate integration is applied to the release workflow. Its receipt
+is verified before runtime exercise and publication; failed evidence is retained.
+`publish-architecture` in
 `scripts/release-images.mjs` refuses to publish unless
 the receipt is complete and for the exact scanned image, sources and database.
 `verify-debian-origin-gate <directory> <arch> <image>` runs the same check
