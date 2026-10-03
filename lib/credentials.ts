@@ -1,18 +1,28 @@
 // A credential is a named reference. Values live only in the coordinator's SecretStore
 // (OS vault, or a 0600 file); everything here is metadata safe to send to the browser.
+import type { ModelChoice } from './agent-profile';
+
 export type CredentialUse =
   | { kind: 'workspace-default' }
   | { kind: 'agent-model'; agentId: string; agentName: string }
   | { kind: 'agent-connector'; agentId: string; agentName: string; connectorName: string; enabled: boolean };
 export type CredentialUsage = { uses: CredentialUse[]; agentCount: number; activeRuns: number };
 export type CredentialRecord = {
-  ref: string; label: string; provider: string;
+  ref: string; label: string; provider: string; model: string; baseUrl: string;
   fingerprint: string; length: number; present: boolean;
   createdAt: string; updatedAt: string; lastUsedAt: string | null;
   usage: CredentialUsage;
 };
 export type CredentialList = { credentials: CredentialRecord[]; backend: string };
-export type CredentialDraft = { label?: string; provider?: string; value?: string; ref?: string };
+export type CredentialDraft = { label?: string; provider?: string; value?: string; ref?: string; model?: string; baseUrl?: string };
+
+// Defaults seed a selection; each agent owns its resulting model independently.
+export function modelForCredential(current: ModelChoice, credential: Pick<CredentialRecord, 'ref' | 'provider' | 'model' | 'baseUrl'>): ModelChoice {
+  const provider = credential.provider || current.provider;
+  const baseUrl = credential.baseUrl || (credential.provider ? '' : current.baseUrl);
+  const sameConnection = provider === current.provider && baseUrl === current.baseUrl;
+  return { provider, credentialRef: credential.ref, model: credential.model || (sameConnection ? current.model : ''), baseUrl };
+}
 
 // Creation caps refs at 64. SecretStore.set allows up to 81 but validateModel caps
 // references at 80, so a longer name would be storable and permanently unreferenceable.

@@ -4,6 +4,33 @@ All notable changes to Open Harness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project is
 pre-1.0, so breaking changes can still land in a minor version.
 
+## [Unreleased]
+
+### Fixed
+
+- Fetch locked Debian browser packages from the signed snapshot at the reviewed input cutoff, so live mirror updates cannot make the pinned Hermes runtime unbuildable. Package identities and hashes remain enforced. (codex)
+
+- Refresh the coordinator and agent image dependencies, keep the coordinator as a Docker client without a redundant daemon, and require a full runtime-contract-6 rebuild. Image publication remains gated on security scans and platform acceptance. (codex)
+- Initialize each private desktop's accessibility session before applications launch, so browsers opened before the first computer-control call support clicking and typing; require runtime contract 6, retaining confirmed initialization for native Linux folder grants. (codex)
+- Keep computer control inside private per-agent desktops; block legacy native execution and probes, remove host-runtime installer fallbacks, and retain safe cleanup of saved native processes. (codex)
+- Harden profile generation and workspace file access against agent-planted links, require Docker for both sandboxed access modes, and verify private-file isolation and folder revocation with real containers. (codex)
+- Preserve canonical Hermes memory and skills on the assigned computer, durable run history and input delivery, revision-scoped permissions, and safe process recovery while retaining saved credentials, teams and projects. (codex)
+- Test onboarding model drafts before saving them, encrypt temporary remote probe credentials, and repair the Stop all route. (codex)
+- Prevent one workspace from stopping or replacing another workspace’s agent container; migrate verified legacy containers and report cleanup failures. (codex)
+- Run Compose as a nonroot coordinator using a private Unix engine socket and separate agent network; restore production security headers and keep local Git bundles out of images. Existing root-owned state has an explicit migration in the operations guide. (codex)
+- Restore private Chromium desktop initialization, enforce runtime contract 3 for full and incremental builds, and upgrade stale runtime images during runner installation. (codex)
+- Test a pasted model key and save it in one request so a rejected candidate never replaces a working workspace model; offer an inheriting agent the credentials of its effective (workspace) provider; give only runtime preparation the long request budget. (claude)
+- Follow each conversation's own run so two agents can work at once, queued follow-ups are shown and followed to their own replies, and Steer/Stop act on the open conversation; answer clarification, secret and sudo requests from the conversation; rebuild earlier conversations on a fresh client and catch finished runs up from every event page without repeating text. (claude)
+- Stop a late workspace-model sync from flagging untouched settings as edited or overwriting an edit in progress; save the workspace when the tab is left, not only after a delay; keep commas in the task label field as they are typed. (claude)
+
+### Added
+
+- Mac and Windows local-browser launchers with one-use pairing, explicit folder sharing and an offline backup/restore guide; Docker Desktop is the only host prerequisite. Native platform acceptance remains pending. (claude, codex)
+- Preserve the packaged workspace across release-folder changes, accept pairing links pasted into an open dashboard, and refresh setup readiness without reloading; delayed older connection replies cannot discard a newly paired browser token. (claude, codex)
+- Prepare digest-pinned ARM64/AMD64 browser packages with native image checks and anonymous install/restore release gates; runtime setup downloads the packaged image without a source-build fallback. Publication and native Mac/Windows acceptance remain pending. (codex)
+- Require a one-use local pairing link for Compose browsers, expose only explicitly exported host folders to agent grants, and refuse unsupported localhost-only model routes with actionable guidance. (codex)
+- Real Docker, Compose, runner, private desktop and persistent-workflow regression gates alongside expanded lifecycle and integration tests. (codex)
+
 ## [0.4.0-beta.1] — 2026-09-25
 
 ### Added

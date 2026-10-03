@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   ArrowUpRight,
@@ -30,6 +30,7 @@ import {
   Paperclip,
   Cable,
   CalendarClock,
+  ShieldAlert,
   ShieldCheck,
   Users,
 } from "lucide-react";
@@ -41,13 +42,17 @@ import {
   type Agent,
   type Artifact,
   type Conversation,
+  type Message,
   type RunEvent,
 } from "../lib/types";
 import { PROVIDERS, type Provider } from "../lib/provider";
 import {
   ControlClient,
+  PairingRequiredError,
   type PersistentRun,
   type RuntimeStatus,
+  type RemoteConversation,
+  isLiveRun,
 } from "../lib/control-client";
 
 import AgentSettings from "../components/agent-settings";
@@ -55,14 +60,28 @@ import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import TeamManager, { TeamBadge } from "../components/team-manager";
 import CredentialManager, { CredentialSwitcher } from "../components/credential-manager";
-import { fitsProvider, type CredentialRecord } from "../lib/credentials";
-import { profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
+import ModelPicker from "../components/model-picker";
+import { CREDENTIAL_PROVIDERS, modelForCredential, providerLabel, type CredentialRecord } from "../lib/credentials";
+import { isSandboxedComputer, profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
 import type { Team } from "../lib/team";
 import { APP_VERSION } from "../lib/version";
 
 const STORAGE_KEY = "open-harness.workspace.v2";
 const LEGACY_STORAGE_KEY = "open-harness.workspace.v1";
 const SETTINGS_KEY = "open-harness.settings.v1";
+const promptId = (run: Pick<PersistentRun, "id">) => `prompt:${run.id}`;
+const replyId = (run: Pick<PersistentRun, "id">) => `reply:${run.id}`;
+function describe(value: unknown, fallback: string): string {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "string") return value.length > 400 ? `${value.slice(0, 400)}…` : value;
+  if (typeof value !== "object") return String(value);
+  const record = value as Record<string, unknown>;
+  for (const key of ["output", "text", "content", "message", "summary", "preview", "command", "description", "question", "path", "error"]) {
+    if (typeof record[key] === "string" && record[key]) return describe(record[key], fallback);
+  }
+  try { return describe(JSON.stringify(value), fallback); } catch { return fallback; }
+}
+
 const ONBOARDING_KEY = "open-harness.onboarding.v1";
 const ADVANCED_KEY = "open-harness.advanced.v1";
 const MIGRATED_KEY = "open-harness.migrated.v1";
@@ -70,7 +89,7 @@ const MIGRATED_KEY = "open-harness.migrated.v1";
 // blob, which would silently drop anything else stored alongside it.
 const NOTIFY_KEY = "open-harness.notify.v1";
 type View = "home" | "teams" | "chat" | "files" | "routines" | "tasks";
-type ModelSettings = { provider: Provider; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
+type ModelSettings = { provider: string; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
 const defaultSettings: ModelSettings = {
   provider: "xai",
   model: PROVIDERS.xai.model,
@@ -142,9 +161,11 @@ export default function Home() {
   const [workspaceModelRevision, setWorkspaceModelRevision] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [advancedFeatures, setAdvancedFeatures] = useState(false);
-  // Snapshot of the settings when the dialog opened, so dismissing it can tell an
-  // untouched dialog from one holding an unsaved model change or a freshly pasted key.
-  const [settingsBaseline, setSettingsBaseline] = useState("");
+  // The settings as last saved or loaded, so dismissing the dialog can tell an untouched
+  // form from one holding an unsaved model change. Kept in step with every source of
+  // saved settings rather than snapshotted when the dialog opens: a snapshot taken while
+  // the coordinator's answer was still in flight flagged an untouched form as edited.
+  const [settingsBaseline, setSettingsBaseline] = useState(JSON.stringify(defaultSettings));
   const [confirmCloseSettings, setConfirmCloseSettings] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
@@ -153,12 +174,12 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
   const [agentTeamFilter, setAgentTeamFilter] = useState("all");
-  const [running, setRunning] = useState(false);
-  const [persistentRun, setPersistentRun] = useState<PersistentRun | null>(null);
+  const [liveRuns, setLiveRuns] = useState<Record<string, PersistentRun>>({});
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
-  // A queue, not a slot. Two agents can pause at once, and the second request used to
-  // overwrite the first — leaving a run blocked on an approval with no way to answer it.
-  const [approvals, setApprovals] = useState<Array<{ approvalId: string; detail: string; runId: string; agentName: string }>>([]);
+  const [answered, setAnswered] = useState<Array<{ id: string; runId: string; at: number }>>([]);
+  const ANSWER_GRACE_MS = 20_000;
+  const [answering, setAnswering] = useState("");
+  const [inputDraft, setInputDraft] = useState<{ inputId: string; text: string; choices: string[] }>({ inputId: "", text: "", choices: [] });
   const [inputMode, setInputMode] = useState<"steer" | "followup">("steer");
   const [routines, setRoutines] = useState<Array<Record<string, unknown>>>([]);
   const [routineDraft, setRoutineDraft] = useState<{ id?: string; name: string; prompt: string; agentId: string; intervalMinutes: number } | null>(null);
@@ -183,12 +204,24 @@ export default function Home() {
   const [reconnecting, setReconnecting] = useState(false);
   const [offline, setOffline] = useState("");
   const [retrying, setRetrying] = useState(false);
+  // The Docker-backed install hands its operator token only to a browser that arrives with
+  // the launcher's one-use link. "required": this browser has no token; "invalid": it came
+  // with a link that was already used or has expired. Neither state polls or falls back.
+  const [pairing, setPairing] = useState<{ state: "none" | "required" | "invalid"; message: string }>({ state: "none", message: "" });
   const connectAttempt = useRef(0);
+  // A code taken out of the address bar by the hashchange listener below, held for exactly
+  // one exchange by the next connection attempt.
+  const pendingPairCode = useRef("");
+  const runtimeRefresh = useRef(0);
+  // What the first-run guide last reported the runtime to be, kept until a bootstrap answer
+  // agrees: a re-read requested for another reason (closing the guide) carries it on.
+  const runtimeExpectation = useRef<boolean | null>(null);
   const [notifyWhenDone, setNotifyWhenDone] = useState(false);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [inspector, setInspector] = useState(true);
   const controlRef = useRef(new ControlClient());
-  const runLock = useRef(false);
+  const followed = useRef(new Set<string>());
+  const sending = useRef(new Set<string>());
   const bottomRef = useRef<HTMLDivElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
@@ -204,6 +237,33 @@ export default function Home() {
   const testMode = runtime?.mode === "test";
   const connected = Boolean(runtime?.runtime.available && !testMode);
 
+  // Read by code that runs after an await and needs the workspace as last rendered, not as
+  // it was when the closure was created.
+  const workspaceRef = useRef(workspace);
+  useEffect(() => { workspaceRef.current = workspace; }, [workspace]);
+  // Same for the settings form, read when the coordinator's saved model arrives. Set at
+  // commit so no fetch callback can see the form from a render ago.
+  const settingsRef = useRef({ open: settingsOpen, settings, baseline: settingsBaseline });
+  useLayoutEffect(() => { settingsRef.current = { open: settingsOpen, settings, baseline: settingsBaseline }; }, [settingsOpen, settings, settingsBaseline]);
+  const live = Object.values(liveRuns);
+  const conversationRuns = conversation ? live.filter((run) => run.conversation_id === conversation.id) : [];
+  // What Steer and Stop act on in the open conversation: the run executing, else the first
+  // one queued. `running` is about this conversation only; other agents keep working.
+  const activeRun = conversationRuns.find((run) => run.state !== "queued") || conversationRuns[0] || null;
+  const running = Boolean(activeRun);
+  const anyRunning = live.length > 0;
+  const busyAgents = new Set(live.map((run) => run.agent_id));
+  // Everything any live run is waiting on, as the coordinator last reported it. Derived
+  // rather than accumulated from events, so a reload, a resume past the request event, or
+  // an answer given from another client all leave the banner telling the truth.
+  const nameOf = (id: string) => workspace.agents.find((item) => item.id === id)?.name || "Your agent";
+  // Saved before direct access and existing-desktop control were withdrawn: the coordinator
+  // keeps the profile but refuses to run it until its Computer settings move into a container.
+  const needsComputerSettings = (item: Agent) => Boolean(item.profile && !isSandboxedComputer(item.profile.computer));
+  const suppressed = (id: string) => answered.some((entry) => entry.id === id && Date.now() - entry.at < ANSWER_GRACE_MS);
+  const approvals = live.flatMap((run) => (run.pendingApprovals || []).filter((item) => !suppressed(item.approvalId)).map((item) => ({ ...item, runId: run.id, agentName: nameOf(run.agent_id) })));
+  const inputs = live.flatMap((run) => (run.pendingInputs || []).filter((item) => !suppressed(item.inputId)).map((item) => ({ ...item, runId: run.id, agentName: nameOf(run.agent_id) })));
+
   function updateConversation(
     id: string,
     update: (c: Conversation) => Conversation,
@@ -213,23 +273,127 @@ export default function Home() {
       conversations: w.conversations.map((c) => (c.id === id ? update(c) : c)),
     }));
   }
-  // Reattaching to a run means finding the assistant message its events belong to, or adding
-  // one. Doing only half of that is how reopening a task streamed into a message that was
-  // never in the conversation, so every token, tool call and error was silently discarded.
-  function attachRunMessage(run: PersistentRun, title: string) {
-    const existing = workspace.conversations.find((item) => item.id === run.conversation_id);
-    const existingReply = existing?.messages.find((message) => message.runId === run.id);
-    const messageId = existingReply?.id || uid();
-    const reply = { id: messageId, runId: run.id, role: "assistant" as const, content: run.result || run.error || "", error: Boolean(run.error), activities: [] };
-    if (!existing) {
+  // Puts a run the coordinator knows about into its conversation — creating the
+  // conversation, or just the run's two messages, when this client has not seen it — and
+  // follows it if it is still live. Safe to call for a run already shown: the message ids
+  // are derived from the run, so nothing is added twice.
+  function attachRun(run: PersistentRun, title = run.prompt.slice(0, 52)) {
+    const known = workspaceRef.current.conversations
+      .find((item) => item.id === run.conversation_id)?.messages
+      .find((message) => message.runId === run.id);
+    const mid = known?.id || replyId(run);
+    const reply = { id: mid, runId: run.id, role: "assistant" as const, content: run.result || run.error || "", error: Boolean(run.error), activities: [], settled: !isLiveRun(run) };
+    setWorkspace((current) => {
+      const existing = current.conversations.find((item) => item.id === run.conversation_id);
+      if (!existing) {
+        return {
+          ...current,
+          conversations: [
+            { id: run.conversation_id, agentId: run.agent_id, title, updatedAt: now(), messages: [{ id: promptId(run), role: "user", content: run.prompt }, reply] },
+            ...current.conversations,
+          ],
+        };
+      }
+      if (existing.messages.some((message) => message.runId === run.id)) return current;
+      return {
+        ...current,
+        conversations: current.conversations.map((item) => item.id !== existing.id ? item : {
+          ...item,
+          messages: [...item.messages, { id: promptId(run), role: "user", content: run.prompt }, reply],
+          updatedAt: now(),
+        }),
+      };
+    });
+    if (isLiveRun(run)) follow(run, run.conversation_id, mid, run.agent_id, known?.eventCursor || 0, Boolean(known?.content));
+  }
+  // A client with no history of its own — a phone that just paired, a browser whose storage
+  // was cleared — used to see the coordinator's agents and none of what they had done. The
+  // coordinator keeps every run's prompt and outcome, which is enough to rebuild each
+  // conversation this client is missing. Conversations it already has are merged instead:
+  // a run started from another client is added, and a reply this client stopped watching
+  // before the run finished is caught up from the coordinator's events.
+  function hydrateHistory(remembered: RemoteConversation[]) {
+    const known = workspaceRef.current;
+    const catchUp: Array<{ run: PersistentRun; mid: string; cursor: number; hasText: boolean }> = [];
+    const merged = new Map<string, Message[]>();
+    const added: Conversation[] = [];
+    for (const item of remembered) {
+      // Delegated work is shown inside the run that asked for it, not as a chat of its own.
+      const runs = item.runs.filter((run) => !run.parent_run_id);
+      if (!runs.length) continue;
+      const existing = known.conversations.find((conversation) => conversation.id === item.id);
+      if (!existing) {
+        // A conversation for an agent this workspace does not have would fail validation
+        // on the next load and take the whole saved workspace down with it.
+        if (!workspaceRef.current.agents.some((agent) => agent.id === item.agentId)) continue;
+        added.push({
+          id: item.id,
+          agentId: item.agentId,
+          title: item.title || runs[0].prompt.slice(0, 52),
+          updatedAt: item.updatedAt || now(),
+          messages: runs.flatMap((run) => [
+            { id: promptId(run), role: "user" as const, content: run.prompt },
+            { id: replyId(run), runId: run.id, role: "assistant" as const, content: run.result || run.error || "", error: Boolean(run.error), activities: [], settled: !isLiveRun(run) },
+          ]),
+        });
+        continue;
+      }
+      let messages = existing.messages;
+      for (const run of runs) {
+        const reply = messages.find((message) => message.runId === run.id);
+        if (!reply) {
+          messages = [...messages, { id: promptId(run), role: "user", content: run.prompt }, { id: replyId(run), runId: run.id, role: "assistant", content: run.result || run.error || "", error: Boolean(run.error), activities: [], settled: !isLiveRun(run) }];
+        } else if (!isLiveRun(run) && !reply.settled) {
+          // Anything not marked final is caught up from where this client left off, partial
+          // text included: a page closed after the first streamed words looks complete
+          // and is not.
+          catchUp.push({ run, mid: reply.id, cursor: reply.eventCursor || 0, hasText: Boolean(reply.content) });
+        }
+      }
+      if (messages !== existing.messages) merged.set(item.id, messages);
+    }
+    if (added.length || merged.size) {
       setWorkspace((current) => ({
         ...current,
-        conversations: [{ id: run.conversation_id, agentId: run.agent_id, title, updatedAt: now(), messages: [{ id: uid(), role: "user" as const, content: run.prompt }, reply] }, ...current.conversations],
+        conversations: [
+          ...current.conversations.map((conversation) => merged.has(conversation.id) ? { ...conversation, messages: merged.get(conversation.id)! } : conversation),
+          ...added.filter((conversation) => !current.conversations.some((existing) => existing.id === conversation.id)),
+        // Newest first, like everything else in the sidebar, so a run another client made
+        // just now is not hidden below a dozen older chats.
+        ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
       }));
-    } else if (!existingReply) {
-      updateConversation(existing.id, (current) => ({ ...current, messages: [...current.messages, reply] }));
     }
-    return { messageId, cursor: existingReply?.eventCursor || 0, hadContent: Boolean(existingReply?.content) };
+    for (const entry of catchUp) {
+      const cid = remembered.find((item) => item.runs.some((run) => run.id === entry.run.id))!.id;
+      void followRun(entry.run, cid, entry.mid, entry.run.agent_id, entry.cursor, entry.hasText, false).catch(() => {
+        // The coordinator no longer has this run's events; say so rather than spin forever.
+        updateConversation(cid, (current) => ({
+          ...current,
+          messages: current.messages.map((message) => message.id !== entry.mid ? message : {
+            ...message,
+            content: message.content || entry.run.result || entry.run.error || "This run's transcript is no longer available.",
+            error: message.error || Boolean(entry.run.error),
+            settled: true,
+            activities: message.activities?.map((activity) => activity.status === "running" ? { ...activity, status: "error", detail: "Interrupted when the page closed." } : activity),
+          }),
+        }));
+      });
+    }
+  }
+  // Starts the one poller a live run gets. The entry in liveRuns is what the rest of the
+  // page reads — which agent is busy, what Stop acts on, whether a message is still being
+  // written — and it disappears when the run reaches a final state.
+  function follow(run: PersistentRun, cid: string, mid: string, agentId: string, cursor = 0, hasText = false) {
+    if (followed.current.has(run.id)) return;
+    followed.current.add(run.id);
+    setLiveRuns((current) => ({ ...current, [run.id]: run }));
+    void followRun(run, cid, mid, agentId, cursor, hasText)
+      .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
+      .finally(() => {
+        followed.current.delete(run.id);
+        setLiveRuns((current) => { const next = { ...current }; delete next[run.id]; return next; });
+        if (!followed.current.size) setReconnecting(false);
+      });
   }
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 1000px)");
@@ -254,8 +418,11 @@ export default function Home() {
       const prefs = localStorage.getItem(SETTINGS_KEY);
       if (prefs) {
         const p = JSON.parse(prefs);
-        if (Object.hasOwn(PROVIDERS, p.provider) && typeof p.model === "string")
-          setSettings({ ...defaultSettings, ...p });
+        if (Object.hasOwn(PROVIDERS, p.provider) && typeof p.model === "string") {
+          const remembered = { ...defaultSettings, ...p };
+          setSettings(remembered);
+          setSettingsBaseline(JSON.stringify(remembered));
+        }
       }
     } catch {
       setNotice(
@@ -273,10 +440,26 @@ export default function Home() {
     let cancelled = false;
     let retryTimer = 0;
     const connect = async () => {
+      const client = controlRef.current;
+      // The launcher opens http://localhost:3000/#pair=<code>. The code is read once, taken
+      // out of the address bar before anything else happens, and exchanged only with this
+      // page's own coordinator. A browser that already holds a token keeps working even if
+      // the link it arrived with has been used.
+      let linkFailure = "";
+      const link = /^#pair=([^&#]+)$/.exec(window.location.hash);
+      if (link) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      // Either the fragment this page was opened with or one that arrived later (see the
+      // hashchange listener); taken once, so a retry never exchanges the same code twice.
+      const code = link ? link[1] : pendingPairCode.current;
+      pendingPairCode.current = "";
+      if (code) {
+        try { await client.pair(decodeURIComponent(code)); }
+        catch (error) { linkFailure = error instanceof Error ? error.message : "This browser connection link is invalid or expired."; }
+      }
       try {
-        const client = controlRef.current;
         const status = await client.bootstrap();
         if (cancelled) return;
+        setPairing({ state: "none", message: "" });
         setRuntime(status);
         const synced = await client.request<{ agents: Agent[] }>("/v1/agents/sync", {
           method: "POST",
@@ -289,51 +472,50 @@ export default function Home() {
         if (workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspace.teams }) });
         const teamResult = await client.request<{ teams: Team[] }>("/v1/teams?includeRetired=1");
         if (!cancelled) {
+          workspaceRef.current = { ...workspaceRef.current, agents: synced.agents };
           setWorkspace(current => ({ ...current, teams: teamResult.teams.filter(team => !team.retiredAt), agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })) }));
           setRetiredTeams(teamResult.teams.filter(team => Boolean(team.retiredAt)));
           const defaults = await client.request<{ model: ModelChoice; revision: number }>("/v1/workspace/model/import", {
             method: "POST",
             body: JSON.stringify({ model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: settings.credentialRef || "" } }),
           });
-          setSettings({ provider: defaults.model.provider as Provider, model: defaults.model.model, baseUrl: defaults.model.baseUrl, credentialRef: defaults.model.credentialRef });
+          const saved = { provider: defaults.model.provider as Provider, model: defaults.model.model, baseUrl: defaults.model.baseUrl, credentialRef: defaults.model.credentialRef };
+          // This can land after Workspace settings was opened, even typed in. It is the
+          // saved model, what the form is compared against; an edit already made stays.
+          const form = settingsRef.current;
+          if (!form.open || JSON.stringify(form.settings) === form.baseline) setSettings(saved);
+          setSettingsBaseline(JSON.stringify(saved));
           setWorkspaceModelRevision(defaults.revision);
           if (localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
         }
         try { const saved = await client.request<{ credentials: CredentialRecord[] }>("/v1/credentials"); if (!cancelled) setCredentials(saved.credentials); } catch {}
-        const [{ routines: savedRoutines }, { runs }] = await Promise.all([
+        const [{ routines: savedRoutines }, { runs }, history] = await Promise.all([
           client.request<{ routines: Array<Record<string, unknown>> }>(
             "/v1/routines",
           ),
           client.request<{ runs: PersistentRun[] }>("/v1/runs"),
+          client.conversations(),
         ]);
         if (!cancelled) {
           setRoutines(savedRoutines);
-          const live = runs.find((run) =>
-            ["queued", "running", "waiting_approval", "waiting_input"].includes(
-              run.state,
-            ),
-          );
-          if (live) {
-            const { messageId, cursor, hadContent } = attachRunMessage(live, live.prompt.slice(0, 52));
-            setSelectedAgent(live.agent_id);
-            setConversationId(live.conversation_id);
+          hydrateHistory(history.conversations);
+          const liveNow = runs.filter(run => !run.parent_run_id && isLiveRun(run));
+          for (const run of liveNow) attachRun(run);
+          if (liveNow[0]) {
+            setSelectedAgent(liveNow[0].agent_id);
+            setConversationId(liveNow[0].conversation_id);
             setView("chat");
-            setPersistentRun(live);
-            setRunning(true);
-            runLock.current = true;
-            void followRun(live, live.conversation_id, messageId, live.agent_id, cursor, hadContent)
-              .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
-              .finally(() => {
-                runLock.current = false;
-                setRunning(false);
-                setPersistentRun(null);
-                setReconnecting(false);
-              });
           }
         }
         if (!cancelled) setOffline("");
       } catch (error) {
         if (cancelled) return;
+        if (error instanceof PairingRequiredError) {
+          // Not an outage: the coordinator is there and refused an unpaired browser. Only a
+          // fresh link from the launcher changes that, so there is nothing to retry on a timer.
+          setPairing({ state: linkFailure ? "invalid" : "required", message: linkFailure || error.message });
+          return;
+        }
         setOffline(error instanceof Error ? error.message : "The local agent runtime is unavailable.");
         // First run needs the guide most when nothing is reachable yet, and the gate for it
         // used to sit inside the success path.
@@ -352,6 +534,43 @@ export default function Home() {
     // The one-time migration intentionally snapshots the hydrated browser workspace.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
+  // The sidebar's runtime label reads the bootstrap answer, which is otherwise only taken
+  // at connection time; the first-run guide's checks and set-up actions change it. This
+  // re-reads that one answer — no workspace sync, no history, and bootstrap()'s pairing
+  // rules as they are. The coordinator serves it from a short-lived probe cache, so right
+  // after a set-up action it can still describe the state before it: when the guide has
+  // just reported the state it expects, ask again a few times until the two agree.
+  const refreshRuntime = useCallback((expectAvailable?: boolean, attempt = 0) => {
+    window.clearTimeout(runtimeRefresh.current);
+    if (expectAvailable !== undefined) runtimeExpectation.current = expectAvailable;
+    const expected = runtimeExpectation.current;
+    controlRef.current.bootstrap().then(status => {
+      setRuntime(status);
+      if (expected === null || status.runtime.available === expected || attempt >= 3) { runtimeExpectation.current = null; return; }
+      runtimeRefresh.current = window.setTimeout(() => refreshRuntime(undefined, attempt + 1), 2_500);
+    }).catch(error => { if (error instanceof PairingRequiredError) setPairing({ state: "required", message: error.message }); });
+  }, []);
+  useEffect(() => () => window.clearTimeout(runtimeRefresh.current), []);
+  // A link pasted into the address bar of a dashboard that is already open is a
+  // same-document navigation: nothing reloads, so the read at the top of connect() never
+  // sees it. The code is taken out of the address bar at once and the connection is
+  // restarted the way Try again does — the attempt in flight is cancelled by the effect's
+  // cleanup, the new one exchanges the code, then bootstraps and hydrates as usual. A later
+  // link replaces an earlier one that has not been exchanged yet.
+  useEffect(() => {
+    const onHashChange = () => {
+      const link = /^#pair=([^&#]+)$/.exec(window.location.hash);
+      if (!link) return;
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      pendingPairCode.current = link[1];
+      connectAttempt.current = 0;
+      setRetrying(true);
+      setReady(false);
+      window.setTimeout(() => { setReady(true); setRetrying(false); }, 50);
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
   useEffect(() => {
     if (!runtime || !selectedAgent) return;
     let cancelled = false;
@@ -375,7 +594,7 @@ export default function Home() {
   // Surface storage failures from the external persistence operation.
   useEffect(() => {
     if (!ready) return;
-    const timer = window.setTimeout(() => {
+    const save = () => {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(storable(workspace)));
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -384,8 +603,12 @@ export default function Home() {
           "Browser storage is full or unavailable. Export a backup now to keep your work.",
         );
       }
-    }, 800);
-    return () => window.clearTimeout(timer);
+    };
+    const timer = window.setTimeout(save, 800);
+    // Leaving within that delay used to drop the newest messages: a conversation whose run
+    // was still streaming when the tab closed came back without the prompt it was sent.
+    window.addEventListener("pagehide", save);
+    return () => { window.clearTimeout(timer); window.removeEventListener("pagehide", save); };
   }, [workspace, settings, ready]);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -462,11 +685,13 @@ export default function Home() {
     : [...current.agents, profileAgent(profile)] }));
   const settingsSnapshot = () => JSON.stringify(settings);
   const openSettings = () => {
-    setSettingsBaseline(settingsSnapshot());
     setConfirmCloseSettings(false);
     setSettingsOpen(true);
   };
   const closeSettings = () => { setConfirmCloseSettings(false); setSettingsOpen(false); };
+  // Discarding puts the saved values back, so the next visit does not find the edits
+  // still there and ask again.
+  const discardSettings = () => { setSettings(JSON.parse(settingsBaseline)); closeSettings(); };
   // Dismissing this dialog used to drop an unsaved model change or a pasted API key
   // with no warning, which is the worst version of it: the key is gone from the form
   // and was never sent anywhere.
@@ -490,7 +715,7 @@ export default function Home() {
       }
     };
     const beforeLeave = (e: BeforeUnloadEvent) => {
-      if (runLock.current) e.preventDefault();
+      if (followed.current.size || sending.current.size) e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("beforeunload", beforeLeave);
@@ -555,23 +780,10 @@ export default function Home() {
     );
   }
   function openTaskRun(run: PersistentRun, title: string) {
-    const { messageId, cursor, hadContent } = attachRunMessage(run, title);
+    attachRun(run, title);
     setSelectedAgent(run.agent_id);
     setConversationId(run.conversation_id);
     setView("chat");
-    if (!runLock.current && ["queued", "running", "waiting_approval", "waiting_input"].includes(run.state)) {
-      runLock.current = true;
-      setRunning(true);
-      setPersistentRun(run);
-      void followRun(run, run.conversation_id, messageId, run.agent_id, cursor, hadContent)
-        .catch(() => setNotice("Lost contact with the local service while following this task. It is still running — reload to reattach."))
-        .finally(() => {
-          runLock.current = false;
-          setRunning(false);
-          setPersistentRun(null);
-          setReconnecting(false);
-        });
-    }
   }
   function newAgent() {
     setEditingAgent({
@@ -657,6 +869,7 @@ export default function Home() {
     }
     setWorkspace((current) => ({ ...current, files: loaded }));
   }
+  const EVENT_PAGE = 500;
   async function followRun(
     run: PersistentRun,
     cid: string,
@@ -664,33 +877,17 @@ export default function Home() {
     agentId: string,
     startCursor = 0,
     hasExistingText = false,
+    // false when catching a finished run up after the fact: the transcript is filled in,
+    // but the run is not shown as live and nobody is notified about it.
+    track = true,
   ) {
     let cursor = startCursor;
     let receivedStreamText = hasExistingText;
     let consecutiveFailures = 0;
-    // The event cursor is persisted with the conversation, while approval banners are
-    // intentionally transient UI state. Rebuild a still-pending approval before
-    // resuming after that cursor so a browser reload cannot hide the blocked run.
-    if (run.state === "waiting_approval" && startCursor > 0) {
-      try {
-        const replay = await controlRef.current.events(run.id, 0);
-        const pending = [...replay.events].reverse().find(item => item.type === "approval.request");
-        if (pending) {
-          const payload = pending.payload || {};
-          const approvalId = String(payload.approvalId || "");
-          if (approvalId) setApprovals(current => current.some(item => item.approvalId === approvalId)
-            ? current
-            : [...current, {
-                approvalId,
-                detail: String(payload.command || payload.description || "Hermes requests approval."),
-                runId: run.id,
-                agentName: agentNameFor(agentId),
-              }]);
-        }
-      } catch {
-        // The normal retry loop below owns connectivity errors and will keep trying.
-      }
-    }
+    // A reply that already has text but no cursor got that text from the stored result,
+    // not from this client's own stream. Playing the deltas into it from the start would
+    // say everything twice; the terminal reconciliation below is what it needs.
+    const replayText = !(startCursor === 0 && hasExistingText && !track);
     while (true) {
       // The run lives on the coordinator, not here. A dropped fetch — a sleeping
       // laptop, a coordinator restart, a blip — used to end this loop and leave the
@@ -708,16 +905,22 @@ export default function Home() {
         await new Promise(resolve => setTimeout(resolve, Math.min(8000, 500 * 2 ** (consecutiveFailures - 1))));
         continue;
       }
-      setPersistentRun(snapshot.run);
+      if (track) {
+        setLiveRuns((current) => ({ ...current, [run.id]: snapshot.run }));
+        // Fresh word from the coordinator about this run: anything it no longer lists as
+        // pending was taken, so the optimistic suppression for it can go.
+        const stillPending = new Set([...(snapshot.run.pendingApprovals || []).map((item) => item.approvalId), ...(snapshot.run.pendingInputs || []).map((item) => item.inputId)]);
+        setAnswered((current) => current.some((entry) => entry.runId === run.id && !stillPending.has(entry.id)) ? current.filter((entry) => entry.runId !== run.id || stillPending.has(entry.id)) : current);
+      }
       for (const item of snapshot.events) {
         cursor = Math.max(cursor, item.seq);
         const payload = item.payload || {};
         if (item.type === "message.delta") {
           const text = String(payload.text || payload.delta || payload.content || "");
-          if (text) { receivedStreamText = true; handleEvent({ type: "text", text }, cid, mid, agentId); }
+          if (text && replayText) { receivedStreamText = true; handleEvent({ type: "text", text }, cid, mid, agentId); }
         } else if (item.type === "message.complete") {
           const text = String(payload.text || payload.content || "");
-          if (text && !receivedStreamText) {
+          if (text && !receivedStreamText && replayText) {
             receivedStreamText = true;
             handleEvent({ type: "text", text }, cid, mid, agentId);
           }
@@ -726,13 +929,15 @@ export default function Home() {
           item.type === "tool.generating" ||
           item.type === "tool.progress"
         ) {
+          // The mock names these id/preview; the real gateway sends tool_id and a context
+          // that can be an object. Both have to land in the same activity row.
           handleEvent(
             {
               type: "activity",
               activity: {
-                id: String(payload.tool_call_id || payload.id || item.id),
+                id: String(payload.tool_call_id || payload.tool_id || payload.id || item.id),
                 name: String(payload.name || payload.tool || "Hermes tool"),
-                detail: String(payload.preview || payload.detail || "Running…"),
+                detail: describe(payload.preview ?? payload.context ?? payload.detail, "Running…"),
                 status: "running",
               },
             },
@@ -745,9 +950,9 @@ export default function Home() {
             {
               type: "activity",
               activity: {
-                id: String(payload.tool_call_id || payload.id || item.id),
+                id: String(payload.tool_call_id || payload.tool_id || payload.id || item.id),
                 name: String(payload.name || payload.tool || "Hermes tool"),
-                detail: String(payload.result || payload.preview || "Complete"),
+                detail: describe(payload.result ?? payload.preview ?? payload.context, "Complete"),
                 status: payload.error ? "error" : "done",
               },
             },
@@ -756,21 +961,19 @@ export default function Home() {
             agentId,
           );
         } else if (item.type === "approval.request") {
-          const detail = String(
-            payload.command || payload.description || "Hermes requests approval.",
-          );
-          const approvalId = String(payload.approvalId);
-          setApprovals(current => current.some(item => item.approvalId === approvalId)
-            ? current
-            : [...current, { approvalId, detail, runId: run.id, agentName: agentNameFor(agentId) }]);
-          // An approval blocks the run and the agent's whole slot until it is answered,
-          // so this is the one the user most needs to hear about while looking elsewhere.
-          notifyDone(`${agentNameFor(agentId)} needs your approval`, detail);
+          // The banner itself comes from the run's pending list; this is only the nudge for
+          // someone looking elsewhere, because an unanswered approval holds the agent's slot.
+          notifyDone(`${agentNameFor(agentId)} needs your approval`, describe(payload.command ?? payload.description, "Hermes requests approval."));
+        } else if (item.type === "clarify.request" || item.type === "secret.request" || item.type === "sudo.request") {
+          notifyDone(`${agentNameFor(agentId)} has a question`, describe(payload.question ?? payload.prompt ?? payload.message, "Your agent needs an answer to continue."));
         } else if (item.type === "run.failed" || item.type === "run.interrupted") {
           const message = String(payload.error || "Run interrupted.");
           handleEvent({ type: "error", message }, cid, mid, agentId);
           notifyDone(`${agentNameFor(agentId)} stopped`, message);
-        } else if (item.type === "run.completed" && payload.result && !receivedStreamText) {
+        } else if (item.type === "run.cancelled") {
+          // A stop used to leave an empty reply behind, as if the agent had said nothing.
+          handleEvent({ type: "error", message: payload.stoppedWithParent ? "Stopped along with the task that delegated it." : "Stopped. Your completed work is saved." }, cid, mid, agentId);
+        } else if (item.type === "run.completed" && payload.result && !receivedStreamText && replayText) {
           receivedStreamText = true;
           handleEvent(
             { type: "text", text: String(payload.result) },
@@ -788,47 +991,81 @@ export default function Home() {
         }));
       }
       if (["completed", "failed", "interrupted", "cancelled"].includes(snapshot.run.state)) {
+        // A run that finished while nobody was watching can have more events than one
+        // page holds; stopping at the first page dropped its result. Drain the rest first.
+        if (snapshot.events.length >= EVENT_PAGE) continue;
+        // The stored outcome is authoritative for what the reply says. Streamed text that
+        // arrived is kept; a reply left empty, or a failure never written down, is filled
+        // in from the run itself.
+        const final = snapshot.run;
+        updateConversation(cid, current => ({
+          ...current,
+          messages: current.messages.map(message => {
+            if (message.id !== mid) return message;
+            // A completed run's stored result is what the agent actually answered, so it
+            // replaces whatever was streamed — partial text from a closed page, or text
+            // that arrived twice. A run that ended any other way keeps what was streamed
+            // and gets its error written under it if that never arrived.
+            const missingError = final.error && !message.content.includes(final.error);
+            const content = final.state === "completed" && final.result
+              ? final.result
+              : missingError
+                ? (message.content ? `${message.content}\n\n${final.error}` : final.error!)
+                : message.content || (final.state === "cancelled" ? "Stopped. Your completed work is saved." : final.state === "completed" ? "" : "Run interrupted.");
+            return { ...message, content, settled: true, error: message.error || Boolean(final.error) || final.state !== "completed", activities: message.activities?.map(activity => activity.status === "running" ? { ...activity, status: final.state === "completed" ? "done" : "error" } : activity) };
+          }),
+        }));
         await refreshRuntimeFiles().catch(() => {});
-        if (snapshot.run.state === "completed") notifyDone(`${agentNameFor(agentId)} finished`, "Your task is done. Open Harness to see the result.");
-        // Otherwise a resolved or abandoned request keeps its banner over a later run.
-        setApprovals(current => current.filter(item => item.runId !== snapshot.run.id));
-        return snapshot.run;
+        if (track && final.state === "completed") notifyDone(`${agentNameFor(agentId)} finished`, "Your task is done. Open Harness to see the result.");
+        return final;
       }
       // A hidden tab still has a live run, but nobody is reading it. task-manager.tsx
       // already backs off the same way; polling twice a second behind another window
-      // just burns the coordinator and re-renders this page for no one.
+      // just burns the coordinator and re-renders this page for no one. A phone polls
+      // slower still, on a radio and a battery; the event cursor means nothing is missed.
       await new Promise((resolve) => setTimeout(resolve, document.hidden ? 4000 : 500));
     }
   }
   async function send(text = input) {
-    if (!text.trim() || !ready) return;
+    const prompt = text.trim();
+    if (!prompt || !ready) return;
     if (testMode) {
-      setNotice("Agent chat is disabled in automated test mode. Open the installed desktop app to run a real agent.");
+      setNotice("Agent chat is disabled in automated test mode. Start Open Harness without mock mode to run a real agent.");
       return;
     }
-    if (running && persistentRun) {
+    const cid = conversationId || uid();
+    if (sending.current.has(cid)) return;
+    const agentId = agent.id;
+    // Steering and follow-ups go to this conversation's own run — never to whatever some
+    // other agent is doing. A run that is only queued has nothing to steer yet.
+    if (activeRun) {
+      const steer = inputMode === "steer" && activeRun.state !== "queued";
+      sending.current.add(cid);
       try {
-        if (inputMode === "steer") {
-          await controlRef.current.request(`/v1/runs/${persistentRun.id}/steer`, {
+        if (steer) {
+          await controlRef.current.request(`/v1/runs/${activeRun.id}/steer`, {
             method: "POST",
-            body: JSON.stringify({ text: text.trim() }),
+            body: JSON.stringify({ text: prompt }),
           });
           setNotice("Guidance queued for the next tool boundary.");
         } else {
-          await controlRef.current.createRun({
-            agentId: agent.id,
-            conversationId: conversationId || undefined,
-            prompt: text.trim(),
-          });
+          const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt });
+          updateConversation(cid, (c) => ({
+            ...c,
+            messages: [...c.messages, { id: promptId(run), role: "user", content: prompt }, { id: replyId(run), runId: run.id, role: "assistant", content: "", activities: [] }],
+            updatedAt: now(),
+          }));
+          follow(run, cid, replyId(run), agentId);
           setNotice("Follow-up queued behind the current task.");
         }
         setInput("");
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "Could not send guidance.");
+      } finally {
+        sending.current.delete(cid);
       }
       return;
     }
-    if (runLock.current) return;
     if (!connected) {
       setNotice(
         runtime?.runtime.message ||
@@ -836,71 +1073,89 @@ export default function Home() {
       );
       return;
     }
-    runLock.current = true;
-    setRunning(true);
+    sending.current.add(cid);
     setInput("");
-    const cid = conversationId || uid();
-    const mid = uid();
-    const agentId = agent.id;
-    const userMessage = {
-      id: uid(),
-      role: "user" as const,
-      content: text.trim(),
-    };
-    const messages = [...(conversation?.messages || []), userMessage];
+    const userMessage = { id: uid(), role: "user" as const, content: prompt };
     if (!conversationId) {
       setWorkspace((w) => ({
         ...w,
         conversations: [
-          {
-            id: cid,
-            agentId,
-            title: text.trim().slice(0, 52),
-            messages: [
-              ...messages,
-              { id: mid, role: "assistant", content: "", activities: [] },
-            ],
-            updatedAt: now(),
-          },
+          { id: cid, agentId, title: prompt.slice(0, 52), messages: [userMessage], updatedAt: now() },
           ...w.conversations,
         ],
       }));
       setConversationId(cid);
-    } else
-      updateConversation(cid, (c) => ({
-        ...c,
-        messages: [
-          ...messages,
-          { id: mid, role: "assistant", content: "", activities: [] },
-        ],
-        updatedAt: now(),
-      }));
-    const emit = (event: RunEvent) => handleEvent(event, cid, mid, agentId);
-    try {
-      const run = await controlRef.current.createRun({
-        agentId,
-        conversationId: cid,
-        prompt: text.trim(),
-      });
-      setPersistentRun(run);
-      updateConversation(cid, (c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === mid ? { ...message, runId: run.id } : message,
-        ),
-      }));
-      await followRun(run, cid, mid, agentId);
-    } catch (error) {
-      emit({
-        type: "error",
-        message: error instanceof Error ? error.message : "Something went wrong.",
-      });
-    } finally {
-      runLock.current = false;
-      setRunning(false);
-      setPersistentRun(null);
+    } else {
+      updateConversation(cid, (c) => ({ ...c, messages: [...c.messages, userMessage], updatedAt: now() }));
+    }
+    {
+      try {
+        const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt });
+        // The reply appears once the coordinator has accepted the run, so its id can be
+        // derived from the run's and a reload finds the same message.
+        updateConversation(cid, (c) => ({ ...c, messages: [...c.messages, { id: replyId(run), runId: run.id, role: "assistant", content: "", activities: [] }] }));
+        follow(run, cid, replyId(run), agentId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Something went wrong.";
+        updateConversation(cid, (c) => ({ ...c, messages: [...c.messages, { id: uid(), role: "assistant", content: message, error: true, activities: [] }] }));
+      } finally {
+        sending.current.delete(cid);
+      }
+      return;
     }
   }
+  // The open conversation's request first; anything another agent is waiting on still
+  // shows, because it is holding that agent's slot until it is answered.
+  const pendingApproval = approvals.find((item) => conversationRuns.some((run) => run.id === item.runId)) || approvals[0] || null;
+  const pendingInput = inputs.find((item) => conversationRuns.some((run) => run.id === item.runId)) || inputs[0] || null;
+  const resolveApproval = async (item: (typeof approvals)[number], decision: "approve" | "deny") => {
+    setAnswering(item.approvalId);
+    try {
+      await controlRef.current.request(`/v1/runs/${item.runId}/approval`, { method: "POST", body: JSON.stringify({ approvalId: item.approvalId, decision }) });
+      setAnswered((current) => [...current, { id: item.approvalId, runId: item.runId, at: Date.now() }]);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not send that decision.");
+    } finally {
+      setAnswering("");
+    }
+  };
+  // What the agent asked, and any choices it offered. The real gateway's payloads vary by
+  // request kind, so this reads the likely fields and falls back to something sayable.
+  const inputQuestion = (item: (typeof inputs)[number]) => {
+    const payload = item.payload || {};
+    if (item.type === "secret") return describe(payload.prompt ?? payload.description ?? payload.name, "The agent needs a credential to continue. It is sent to the run, not shown in the transcript.");
+    if (item.type === "sudo") return describe(payload.prompt ?? payload.reason ?? payload.command, "The agent needs your password to run a privileged command.");
+    return describe(payload.question ?? payload.prompt ?? payload.message, "Your agent needs an answer to continue.");
+  };
+  const inputChoices = (item: (typeof inputs)[number]): string[] => {
+    const raw = item.type === "clarify" ? item.payload?.options ?? item.payload?.choices : undefined;
+    return Array.isArray(raw) ? raw.map((choice) => typeof choice === "string" ? choice : describe((choice as Record<string, unknown>)?.label ?? (choice as Record<string, unknown>)?.value ?? choice, "")).filter(Boolean) : [];
+  };
+  const inputAllowsMany = (item: (typeof inputs)[number]) => Boolean(item.payload?.multiple ?? item.payload?.allow_multiple ?? item.payload?.multi_select);
+  const answerPendingInput = async (item: (typeof inputs)[number]) => {
+    const draft = inputDraft.inputId === item.inputId ? inputDraft : { inputId: item.inputId, text: "", choices: [] };
+    const text = draft.text.trim();
+    // Typed text wins over picked choices; several choices only go together as a list
+    // when the agent said more than one is fine.
+    const value: string | string[] = item.type !== "clarify" ? draft.text : text ? text : inputAllowsMany(item) ? draft.choices : draft.choices[0] || "";
+    if (!value.length) return;
+    setAnswering(item.inputId);
+    try {
+      await controlRef.current.answerInput(item.runId, item.inputId, value);
+      setAnswered((current) => [...current, { id: item.inputId, runId: item.runId, at: Date.now() }]);
+      setInputDraft({ inputId: "", text: "", choices: [] });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not send that answer.");
+    } finally {
+      setAnswering("");
+    }
+  };
+  // What to show under a reply that has no text yet, which depends on where its run is.
+  const pendingLabel = (run: PersistentRun) =>
+    run.state === "queued" ? "Queued behind the current task…"
+      : run.state === "waiting_approval" ? "Waiting for your approval…"
+        : run.state === "waiting_input" ? "Waiting for your answer…"
+          : reconnecting ? "Reconnecting — your agent is still working…" : "Working on it…";
   async function upload(files: FileList | null) {
     if (!files) return;
     const additions: Artifact[] = [];
@@ -1104,15 +1359,14 @@ export default function Home() {
                 className={`agent-row ${view === "chat" && a.id === selectedAgent ? "selected" : ""}`}
                 key={a.id}
                 onClick={() => openAgent(a.id)}
-                disabled={running && a.id !== selectedAgent}
               >
                 <Avatar agent={a} />
                 <div>
                   <strong>{a.name}</strong>
                   <small>{a.role}</small>
                 </div>
-                {running && a.id === selectedAgent && (
-                  <LoaderCircle className="spin" size={12} />
+                {busyAgents.has(a.id) && (
+                  <LoaderCircle className="spin" size={12} aria-label={`${a.name} is working`} />
                 )}
               </button>
             ))}
@@ -1123,7 +1377,6 @@ export default function Home() {
               </div>
               {recent.map((c) => (
                 <button
-                  disabled={running}
                   className={`recent ${c.id === conversationId && view === "chat" ? "selected" : ""}`}
                   key={c.id}
                   onClick={() => {
@@ -1144,8 +1397,8 @@ export default function Home() {
           )}
         </div>
         <div className="sidebar-bottom">
-          <span className={`status-dot ${offline ? "offline" : connected || testMode ? "" : "pending"}`} />
-          {testMode ? "Automated test mode" : offline ? "Not connected" : connected ? "Agent runtime ready" : "Agent runtime needs setup"}
+          <span className={`status-dot ${offline || pairing.state !== "none" ? "offline" : connected || testMode ? "" : "pending"}`} />
+          {testMode ? "Automated test mode" : pairing.state !== "none" ? "Browser not paired" : offline ? "Not connected" : connected ? "Agent runtime ready" : "Agent runtime needs setup"}
           <button onClick={() => openSettings()}>
             <Settings size={15} /> Settings <span>↗</span>
           </button>
@@ -1219,8 +1472,7 @@ export default function Home() {
                 <button
                   className="agent-card"
                   onClick={() => openAgent(a.id)}
-                  disabled={running && a.id !== selectedAgent}
-                >
+                  >
                   <Avatar agent={a} large />
                   <ArrowUpRight className="card-arrow" size={17} />
                   <h3>{a.name}</h3>
@@ -1232,15 +1484,17 @@ export default function Home() {
                   </p>
                   <div className="card-footer">
                     <span className="status-dot" />
-                    {running && a.id === selectedAgent
+                    {busyAgents.has(a.id)
                       ? "Working on your task"
-                      : "Ready when you are"}
+                      : needsComputerSettings(a)
+                        ? "Needs new computer settings"
+                        : "Ready when you are"}
                     <span>→</span>
                   </div>
                 </button>
                 <button className="agent-card-settings" onClick={() => setEditingAgent({ ...a })} aria-label={`Edit ${a.name} profile`} title="Agent settings"><SlidersHorizontal size={16} /></button>
                 <div className="agent-card-tools">
-                  <CredentialSwitcher agent={a} credentials={credentials} workspaceRef={settings.credentialRef || ""} client={controlRef.current} running={running && a.id === selectedAgent} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
+                  <CredentialSwitcher agent={a} credentials={credentials} workspaceRef={settings.credentialRef || ""} workspaceProvider={settings.provider} client={controlRef.current} running={busyAgents.has(a.id)} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
                 </div>
                 </div>
               ))}
@@ -1278,7 +1532,7 @@ export default function Home() {
                   <strong>{agent.name}</strong>
                   <small>{agent.role}</small>
                 </div>
-                <CredentialSwitcher agent={agent} credentials={credentials} workspaceRef={settings.credentialRef || ""} client={controlRef.current} running={running} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
+                <CredentialSwitcher agent={agent} credentials={credentials} workspaceRef={settings.credentialRef || ""} workspaceProvider={settings.provider} client={controlRef.current} running={running} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
                 <div className="toolbar-actions">
                   <button
                     title="New conversation"
@@ -1368,13 +1622,7 @@ export default function Home() {
                       {m.activities && m.activities.length > 0 && (
                         <details
                           className="activity-list"
-                          open={
-                            running &&
-                            m ===
-                              conversation.messages[
-                                conversation.messages.length - 1
-                              ]
-                          }
+                          open={Boolean(m.runId && liveRuns[m.runId])}
                         >
                           <summary>
                             <Cable size={12} />
@@ -1404,10 +1652,10 @@ export default function Home() {
                       <div className={m.error ? "message-error" : ""}>
                         <Markdown>{m.content}</Markdown>
                       </div>
-                      {!m.content && running && (
+                      {!m.content && m.runId && liveRuns[m.runId] && (
                         <div className="working">
                           <LoaderCircle size={13} className="spin" />
-                          {reconnecting ? "Reconnecting — your agent is still working…" : "Working on it…"}
+                          {pendingLabel(liveRuns[m.runId])}
                         </div>
                       )}
                     </article>
@@ -1493,10 +1741,10 @@ export default function Home() {
                           type="button"
                           aria-label="Stop run"
                           onClick={() => {
-                            if (persistentRun)
+                            if (activeRun)
                               void controlRef.current
-                                .request<{ failures?: string[] }>(`/v1/runs/${persistentRun.id}/stop`, { method: "POST" })
-                                .then((result) => { if (result.failures?.length) setNotice(`This task was marked stopped, but the runtime did not confirm: ${result.failures[0]}`); })
+                                .request<{ failures?: string[] }>(`/v1/runs/${activeRun.id}/stop`, { method: "POST" })
+                                .then((result) => { if (result.failures?.length) setNotice(`The runtime has not confirmed that this task stopped: ${result.failures[0]}`); })
                                 .catch((error) => setNotice(error instanceof Error ? error.message : "Could not stop this task."));
                           }}
                         >
@@ -1509,7 +1757,7 @@ export default function Home() {
                           onClick={() =>
                             void controlRef.current
                               .request<{ failures?: string[] }>("/v1/runs/stop-all", { method: "POST" })
-                              .then((result) => { if (result.failures?.length) setNotice(`Some tasks were marked stopped without the runtime confirming: ${result.failures[0]}`); })
+                              .then((result) => { if (result.failures?.length) setNotice(`The runtime has not confirmed that all tasks stopped: ${result.failures[0]}`); })
                               .catch((error) => setNotice(error instanceof Error ? error.message : "Could not stop the running tasks."))
                           }
                         >
@@ -1533,35 +1781,84 @@ export default function Home() {
                     ? "This task continues if you close the browser. Send guidance or queue a follow-up."
                     : "Enter to send · Shift + Enter for a new line · Files are shared with all your agents"}
                 </div>
-                {approvals.length > 0 && (() => {
-                  const pending = approvals[0];
-                  const resolve = async (decision: "approve" | "deny") => {
-                    try {
-                      await controlRef.current.request(`/v1/runs/${pending.runId}/approval`, {
-                        method: "POST",
-                        body: JSON.stringify({ approvalId: pending.approvalId, decision }),
-                      });
-                    } catch (error) {
-                      setNotice(error instanceof Error ? error.message : "Could not send that decision.");
-                      return;
-                    }
-                    setApprovals(current => current.filter(item => item.approvalId !== pending.approvalId));
-                  };
-                  return (
-                    <div className="approval-banner" role="alert">
-                      <ShieldCheck size={18} />
-                      <div>
-                        <strong>
-                          {pending.agentName} needs approval
-                          {approvals.length > 1 && <span className="approval-count"> · {approvals.length - 1} more waiting</span>}
-                        </strong>
-                        <p>{pending.detail}</p>
-                      </div>
-                      <button className="subtle-button" onClick={() => void resolve("deny")}>Deny</button>
-                      <button className="light-button" onClick={() => void resolve("approve")}>Approve once</button>
+                {needsComputerSettings(agent) && (
+                  <div className="approval-banner computer-blocked-banner" role="alert">
+                    <ShieldAlert size={18} />
+                    <div>
+                      <strong>{agent.name} needs new computer settings</strong>
+                      <p>It was set to work directly on this computer, which is no longer available because it ran outside the sandbox. Move it to a private agent desktop or a private workspace to continue.</p>
                     </div>
-                  );
-                })()}
+                    <button className="light-button" type="button" onClick={() => { setEditingAgentTab("computer"); setEditingAgent({ ...agent }); }}>Open Computer settings</button>
+                  </div>
+                )}
+                {pendingApproval && (
+                  <div className="approval-banner" role="alert">
+                    <ShieldCheck size={18} />
+                    <div>
+                      <strong>
+                        {pendingApproval.agentName} needs approval
+                        {approvals.length > 1 && <span className="approval-count"> · {approvals.length - 1} more waiting</span>}
+                      </strong>
+                      <p>{pendingApproval.detail}</p>
+                    </div>
+                    <button className="subtle-button" disabled={answering === pendingApproval.approvalId} onClick={() => void resolveApproval(pendingApproval, "deny")}>Deny</button>
+                    <button className="light-button" disabled={answering === pendingApproval.approvalId} onClick={() => void resolveApproval(pendingApproval, "approve")}>Approve once</button>
+                  </div>
+                )}
+                {pendingInput && (
+                  <form
+                    className="approval-banner input-banner"
+                    aria-label={`${pendingInput.agentName} has a question`}
+                    onSubmit={(e) => { e.preventDefault(); void answerPendingInput(pendingInput); }}
+                  >
+                    <MessageSquare size={18} />
+                    <div role="alert">
+                      <strong>
+                        {pendingInput.type === "secret" ? `${pendingInput.agentName} needs a secret` : pendingInput.type === "sudo" ? `${pendingInput.agentName} needs your password` : `${pendingInput.agentName} has a question`}
+                        {inputs.length > 1 && <span className="approval-count"> · {inputs.length - 1} more waiting</span>}
+                      </strong>
+                      <p>{inputQuestion(pendingInput)}</p>
+                      {inputChoices(pendingInput).length > 0 && (
+                        <div className="input-choices" role="group" aria-label="Choices">
+                          {inputChoices(pendingInput).map((choice) => {
+                            const picked = inputDraft.inputId === pendingInput.inputId && inputDraft.choices.includes(choice);
+                            return (
+                              <button
+                                type="button"
+                                key={choice}
+                                className={`run-mode ${picked ? "active" : ""}`}
+                                aria-pressed={picked}
+                                onClick={() => setInputDraft((current) => {
+                                  const base = current.inputId === pendingInput.inputId ? current : { inputId: pendingInput.inputId, text: "", choices: [] };
+                                  const chosen = base.choices.includes(choice) ? base.choices.filter((item) => item !== choice) : inputAllowsMany(pendingInput) ? [...base.choices, choice] : [choice];
+                                  return { ...base, choices: chosen };
+                                })}
+                              >
+                                {choice}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      <input
+                        type={pendingInput.type === "clarify" ? "text" : "password"}
+                        autoComplete={pendingInput.type === "clarify" ? "off" : "new-password"}
+                        aria-label={pendingInput.type === "secret" ? "Secret value" : pendingInput.type === "sudo" ? "Password" : "Your answer"}
+                        placeholder={pendingInput.type === "clarify" ? (inputChoices(pendingInput).length ? "Or type your own answer" : "Type your answer") : "Not shown to the agent's transcript"}
+                        value={inputDraft.inputId === pendingInput.inputId ? inputDraft.text : ""}
+                        onChange={(e) => setInputDraft({ inputId: pendingInput.inputId, text: e.target.value, choices: inputDraft.inputId === pendingInput.inputId ? inputDraft.choices : [] })}
+                        maxLength={10000}
+                      />
+                    </div>
+                    <button
+                      className="light-button"
+                      type="submit"
+                      disabled={answering === pendingInput.inputId || !(inputDraft.inputId === pendingInput.inputId && (inputDraft.text.trim() || inputDraft.choices.length))}
+                    >
+                      {answering === pendingInput.inputId ? "Sending…" : "Send answer"}
+                    </button>
+                  </form>
+                )}
               </div>
             </section>
             {inspector && (
@@ -2038,6 +2335,27 @@ export default function Home() {
         accept=".json"
         onChange={(e) => importWorkspace(e.target.files?.[0])}
       />
+      {pairing.state !== "none" && (
+        <div className="offline-banner pairing-gate" role="alert">
+          <ShieldAlert size={15} />
+          <span>
+            <strong>{pairing.state === "invalid" ? "This link has already been used or has expired." : "This browser isn’t paired with Open Harness."}</strong>
+            <small>{pairing.state === "invalid" ? "Run Start Open Harness again; it opens a freshly paired window. Each link works once and expires after a few minutes." : "Run Start Open Harness (or launchers/start.sh) to open a paired window. Open Harness itself is running; only this browser is not connected to it."}</small>
+          </span>
+          <button
+            className="subtle-button"
+            disabled={retrying}
+            onClick={() => {
+              setRetrying(true);
+              connectAttempt.current = 0;
+              setReady(false);
+              window.setTimeout(() => { setReady(true); setRetrying(false); }, 50);
+            }}
+          >
+            Try again
+          </button>
+        </div>
+      )}
       {offline && (
         <div className="offline-banner" role="alert">
           <CircleAlert size={15} />
@@ -2086,7 +2404,7 @@ export default function Home() {
                   <p className="muted small">Your saved settings will stay as they are.</p>
                   <div className="task-discard-actions">
                     <button type="button" autoFocus onClick={() => setConfirmCloseSettings(false)}>Keep editing</button>
-                    <button type="button" className="task-primary" onClick={closeSettings}>Discard changes</button>
+                    <button type="button" className="task-primary" onClick={discardSettings}>Discard changes</button>
                   </div>
                 </div>
               </div>
@@ -2114,46 +2432,23 @@ export default function Home() {
                 <select
                   value={settings.provider}
                   onChange={(e) => {
-                    const provider = e.target.value as Provider;
-                    setSettings((s) => ({
-                      ...s,
-                      provider,
-                      model:
-                        provider === "local"
-                          ? ""
-                          : PROVIDERS[provider].model,
-                      credentialRef: credentials.some((item) => item.ref === s.credentialRef && fitsProvider(item, provider))
-                        ? s.credentialRef
-                        : credentials.find((item) => item.provider === provider)?.ref || "",
-                    }));
+                    const provider = e.target.value;
+                    const credential = credentials.find(item => item.provider === provider);
+                    setSettings(current => ({ ...current, provider, model: credential?.model || PROVIDERS[provider as Provider]?.model || '', baseUrl: credential?.baseUrl || '', credentialRef: credential?.ref || '' }));
                   }}
                 >
-                  {Object.entries(PROVIDERS).map(([id, p]) => (
-                    <option value={id} key={id}>
-                      {p.label}
-                    </option>
-                  ))}
+                  {[...new Set([...CREDENTIAL_PROVIDERS.map(item => item.id).filter(Boolean), settings.provider])].map(id => <option value={id} key={id}>{providerLabel(id)}</option>)}
                 </select>
               </label>
-              <label>
-                Model ID
-                <input
-                  value={settings.model}
-                  onChange={(e) =>
-                    setSettings((s) => ({ ...s, model: e.target.value }))
-                  }
-                  placeholder="Enter the exact model ID from your provider"
-                  maxLength={200}
-                />
-              </label>
+              <ModelPicker client={controlRef.current} provider={settings.provider} credentialRef={settings.credentialRef} baseUrl={settings.baseUrl} value={settings.model} label="Workspace model" onChange={model => setSettings(current => ({ ...current, model }))} />
               <label>
                 Credential
                 <select
                   value={settings.credentialRef || ""}
-                  onChange={(e) => { if (e.target.value === "__manage") { setCredentialsOpen(true); return; } setSettings((current) => ({ ...current, credentialRef: e.target.value })); }}
+                  onChange={(e) => { if (e.target.value === "__manage") { setCredentialsOpen(true); return; } const ref = e.target.value; const credential = credentials.find(item => item.ref === ref); setSettings(current => ({ ...current, ...(credential ? modelForCredential({ ...current, baseUrl: current.baseUrl || '', credentialRef: current.credentialRef || '' }, credential) : { credentialRef: ref }) })); }}
                 >
                   <option value="">No credential</option>
-                  {credentials.filter((item) => fitsProvider(item, settings.provider)).map((item) => (
+                  {credentials.map((item) => (
                     <option value={item.ref} key={item.ref}>{item.label}{item.present ? "" : " — missing"}</option>
                   ))}
                   {settings.credentialRef && !credentials.some((item) => item.ref === settings.credentialRef) && (
@@ -2163,7 +2458,7 @@ export default function Home() {
                 </select>
                 <small>Agents using “Use workspace default” run on this credential.</small>
               </label>
-              {settings.provider === "local" && <label>Model API base URL<input value={settings.baseUrl || ""} onChange={e => setSettings(current => ({ ...current, baseUrl: e.target.value }))} placeholder="http://host.docker.internal:11434/v1" /><small>Use an address reachable from the agent container.</small></label>}
+              {settings.provider === "local" && <label>Model API base URL<input value={settings.baseUrl || ""} onChange={e => setSettings(current => ({ ...current, baseUrl: e.target.value }))} placeholder="https://models.example.com/v1" /><small>Use an address reachable from the agent container.</small></label>}
               <p className="muted small">Only agents using “Use workspace default” follow these changes. Agents with their own model keep it.</p>
             </fieldset>
             <div className="settings-divider" />
@@ -2181,7 +2476,7 @@ export default function Home() {
                   localStorage.setItem(ADVANCED_KEY, enabled ? "on" : "off");
                 }}
               />
-              <span><strong>Advanced features</strong><small>Show teams, task boards, remote computers, direct computer access, and MCP connections. Turn this off for a simpler workspace of agents, conversations and files.</small></span>
+              <span><strong>Advanced features</strong><small>Show teams, task boards, MCP connections, and computer reservations and resource limits. Turn this off for a simpler workspace of agents, conversations and files.</small></span>
             </label>
             <div className="settings-divider" />
             <h3>Your data stays with you</h3>
@@ -2231,7 +2526,7 @@ export default function Home() {
               </button>
               <button
                 className="subtle-button"
-                disabled={running}
+                disabled={anyRunning}
                 onClick={() => importRef.current?.click()}
               >
                 <FolderOpen size={14} /> Import backup
@@ -2245,18 +2540,15 @@ export default function Home() {
                 className="light-button"
                 onClick={async () => {
                   try {
-                    const saved = await controlRef.current.request<{ revision: number }>("/v1/workspace/model", {
-                      method: "PUT", body: JSON.stringify({ revision: workspaceModelRevision, model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: settings.credentialRef || "" } }),
-                    });
-                    setWorkspaceModelRevision(saved.revision);
-                    const checked = await controlRef.current.request<{ ok: boolean; message: string }>("/v1/onboarding/model-test", {
+                    const checked = await controlRef.current.request<{ ok: boolean; message: string; model?: ModelChoice; revision?: number }>("/v1/onboarding/model-test", {
                       method: "POST",
-                      body: JSON.stringify({ model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: settings.credentialRef || "" } }),
+                      body: JSON.stringify({ model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: settings.credentialRef || "" }, save: true, revision: workspaceModelRevision }),
                     });
                     if (!checked.ok) {
                       setNotice(checked.message);
                       return;
                     }
+                    if (checked.revision !== undefined) setWorkspaceModelRevision(checked.revision);
                     closeSettings();
                     setSettingsBaseline(JSON.stringify(settings));
                     setNotice(checked.message);
@@ -2277,7 +2569,9 @@ export default function Home() {
       )}
       {credentialsOpen && <CredentialManager client={controlRef.current} provider={settings.provider} onClose={() => setCredentialsOpen(false)} onChanged={setCredentials} />}
       {onboardingOpen && runtime && <Onboarding client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: settings.credentialRef || "" }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
-        setSettings({ provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl, credentialRef: model.credentialRef });
+        const chosen = { provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl, credentialRef: model.credentialRef };
+        setSettings(chosen);
+        setSettingsBaseline(JSON.stringify(chosen));
         setWorkspaceModelRevision(revision);
         void controlRef.current.request<{ credentials: CredentialRecord[] }>("/v1/credentials").then(saved => setCredentials(saved.credentials)).catch(() => {});
         localStorage.setItem(SETTINGS_KEY, JSON.stringify({ provider: model.provider, model: model.model, baseUrl: model.baseUrl }));
@@ -2285,15 +2579,18 @@ export default function Home() {
         setAdvancedFeatures(true);
         localStorage.setItem(ADVANCED_KEY, 'on');
         setOnboardingOpen(false);
+        refreshRuntime();
         setEditingAgentTab('computer');
         setEditingAgent(agent);
       }} onDismiss={() => {
         setOnboardingOpen(false);
+        refreshRuntime();
       }} onFinished={() => {
         localStorage.setItem(ONBOARDING_KEY, 'done');
         setOnboardingOpen(false);
-      }} />}
-      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
+        refreshRuntime();
+      }} onRuntimeChecked={status => refreshRuntime(status.executionReady)} />}
+      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} credentialCatalog={credentials} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
       {file && (
         <div className="modal-backdrop" onClick={() => setSelectedFile(null)}>
           <section

@@ -2,18 +2,27 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, openSync, closeSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { coordinationSocket } from '../runtime/coordination-socket';
 
-test('coordination crosses a long workspace path and rejects other agents and APIs', async () => {
-  const dir = join(mkdtempSync(join(tmpdir(), 'harness-socket-')), 'a-long-workspace-name-'.repeat(8), 'managed');
+test('coordination crosses a long workspace path and rejects other agents and APIs', { skip: process.platform === 'win32' }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-socket-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, 'a-long-workspace-name-'.repeat(8), 'managed');
   const socket = await coordinationSocket(dir, 'atlas', (_req, res) => { res.writeHead(200); res.end('allowed'); });
-  const fd = openSync(dir, 'r');
+  assert.equal(socket.path, join(dir, 'coord.sock'));
+  assert.ok(statSync(socket.path).isSocket());
+  assert.equal(statSync(socket.path).mode & 0o777, 0o600);
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  if (process.platform === 'linux') {
+    assert.match(socket.socketPath, new RegExp(`^/proc/${process.pid}/fd/\\d+/coord\\.sock$`));
+    assert.equal(statSync(dirname(socket.socketPath)).ino, statSync(dir).ino);
+  }
   async function call(path: string, agent = 'atlas') {
     return new Promise<number>((resolve, reject) => {
-      const req = request({ socketPath: `/proc/self/fd/${fd}/coord.sock`, path, method: 'POST', headers: { 'X-Open-Harness-Agent': agent } }, res => { res.resume(); res.on('end', () => resolve(res.statusCode!)); });
+      const req = request({ socketPath: socket.socketPath, path, method: 'POST', headers: { 'X-Open-Harness-Agent': agent } }, res => { res.resume(); res.on('end', () => resolve(res.statusCode!)); });
       req.on('error', reject); req.end();
     });
   }
@@ -21,7 +30,12 @@ test('coordination crosses a long workspace path and rejects other agents and AP
     assert.equal(await call('/internal/handoff'), 200);
     assert.equal(await call('/internal/schedule', 'scout'), 403);
     assert.equal(await call('/v1/agents/atlas/profile'), 403);
-  } finally { closeSync(fd); await socket.close(); }
+  } finally { await socket.close(); }
+  await socket.close(); // shutdown is safe if more than one owner requests it
+  assert.equal(existsSync(socket.path), false);
+  if (process.platform === 'linux') assert.equal(existsSync(dirname(socket.socketPath)), false);
+  else assert.equal(existsSync(dirname(dirname(socket.socketPath))), false);
+  assert.equal(existsSync(dir), true);
 });
 
 test('http coordination preserves the coordinator base path and the agent token', async () => {
@@ -44,7 +58,7 @@ test('http coordination preserves the coordinator base path and the agent token'
 // http.request(options, options, callback) makes node read the second argument as the response
 // listener, so each coordination call failed inside the agent with "The listener argument must
 // be of type function" and no coordination tool worked at all on the default local setup.
-test('socket coordination through the agent-side server reaches the coordinator', async () => {
+test('socket coordination through the agent-side server reaches the coordinator', { skip: process.platform === 'win32' }, async () => {
   const dir = join(mkdtempSync(join(tmpdir(), 'harness-socket-call-')), 'managed');
   let received: { url?: string; agent?: string; authorization?: string; run?: string; body?: string } = {};
   const socket = await coordinationSocket(dir, 'atlas', (req, res) => {
@@ -59,7 +73,7 @@ test('socket coordination through the agent-side server reaches the coordinator'
   // A separate process cannot borrow this one's /proc/self/fd handle, and it does not need to:
   // in a container the socket is /run/open-harness/coord.sock, well inside the 108-byte limit.
   const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs')], {
-    env: { ...process.env, OPEN_HARNESS_CONTROL_SOCKET: join(dir, 'coord.sock'), OPEN_HARNESS_AGENT_ID: 'atlas', OPEN_HARNESS_AGENT_TOKEN: 'run-token', OPEN_HARNESS_RUN_ID: 'run-1' },
+    env: { ...process.env, OPEN_HARNESS_CONTROL_SOCKET: socket.socketPath, OPEN_HARNESS_AGENT_ID: 'atlas', OPEN_HARNESS_AGENT_TOKEN: 'run-token', OPEN_HARNESS_RUN_ID: 'run-1' },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   try {

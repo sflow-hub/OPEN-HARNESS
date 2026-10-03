@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CalendarDays, Check,
   CheckCircle2, ChevronDown, CircleAlert, Clock3, Copy, Filter, FolderKanban, GripVertical, LayoutDashboard,
@@ -126,10 +126,16 @@ export default function TaskManager({ agents, teams, client, onOpenRun }: { agen
 
   // The Projects view needs archived projects without forcing archived tasks into every
   // other view, so it widens the request alone; visibleBoards keeps them out elsewhere.
+  // Polling replaced the snapshot on every tick whether or not anything had changed, so the
+  // whole board re-rendered on a timer. Holding on to the previous object when the payload is
+  // identical is what stops a native picker being torn down while it is open.
+  const lastPayload = useRef("");
   const refresh = useCallback(async (quiet = false) => {
     try {
       const value = await client.request<TaskSnapshot>(`/v1/tasks?includeArchived=${filters.archived || showArchivedProjects ? "1" : "0"}`);
-      setSnapshot(value); setLoaded(true); setStale(false);
+      const serialized = JSON.stringify(value);
+      if (serialized !== lastPayload.current) { lastPayload.current = serialized; setSnapshot(value); }
+      setLoaded(true); setStale(false);
       setSelectedBoard(current => current === "all" || value.boards.some(board => board.id === current) ? current : "all");
       if (!quiet) setError("");
     } catch (cause) {
@@ -144,13 +150,20 @@ export default function TaskManager({ agents, teams, client, onOpenRun }: { agen
     try { const saved = JSON.parse(localStorage.getItem(PREF_KEY) || "{}"); if (TASK_VIEWS.includes(saved.taskView)) setTaskView(saved.taskView); if (typeof saved.selectedBoard === "string") setSelectedBoard(saved.selectedBoard); } catch {}
   }, []);
   useEffect(() => { localStorage.setItem(PREF_KEY, JSON.stringify({ taskView, selectedBoard })); }, [taskView, selectedBoard]);
+  // snapshot.tasks was a dependency of the effect that also sets the snapshot, so every fetch
+  // scheduled the next one immediately: the view refetched in a continuous loop, re-rendered
+  // without pause, and a native dropdown could not stay open long enough to choose a project.
+  // The poll now watches a boolean, and the immediate fetch belongs to the request shape alone.
+  const watchingActiveWork = snapshot.tasks.some(isActive);
   useEffect(() => {
     // The service is the task source of truth; refresh immediately on mount.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
-    const timer = window.setInterval(() => { if (!document.hidden && !dragged) void refresh(true); }, snapshot.tasks.some(isActive) ? 2000 : 8000);
+  }, [refresh]);
+  useEffect(() => {
+    const timer = window.setInterval(() => { if (!document.hidden && !dragged) void refresh(true); }, watchingActiveWork ? 2000 : 8000);
     return () => window.clearInterval(timer);
-  }, [refresh, snapshot.tasks, dragged]);
+  }, [refresh, watchingActiveWork, dragged]);
   useEffect(() => { const timer = window.setInterval(() => setClock(Date.now()), 60_000); return () => window.clearInterval(timer); }, []);
 
   const board = snapshot.boards.find(item => item.id === selectedBoard);
@@ -362,7 +375,8 @@ export default function TaskManager({ agents, teams, client, onOpenRun }: { agen
           <label className="full">Due date<input type="date" value={draft.dueAt?.slice(0, 10) || ""} onChange={event => setDraft(value => value && ({ ...value, dueAt: event.target.value ? new Date(`${event.target.value}T23:59:59`).toISOString() : null }))} /></label>
         </div>
         <div className="task-form-section"><label>Description</label><textarea rows={5} value={draft.description} onChange={event => setDraft(value => value && ({ ...value, description: event.target.value }))} placeholder="Give the agent the context and expected outcome." />{draft.description && <div className="task-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft.description}</ReactMarkdown></div>}</div>
-        <div className="task-form-section"><label><Tags size={14} /> Labels</label><input value={draft.labels.join(", ")} onChange={event => setDraft(value => value && ({ ...value, labels: event.target.value.split(",").map(item => item.trim()).filter(Boolean) }))} placeholder="research, launch, writing" /></div>
+        {/* The field keeps what is typed; the labels are read from it. Rendering the parsed labels back into it swallowed each comma as it was typed. */}
+        <div className="task-form-section"><label><Tags size={14} /> Labels</label><input key={draft.id || "new"} defaultValue={draft.labels.join(", ")} onChange={event => setDraft(value => value && ({ ...value, labels: event.target.value.split(",").map(item => item.trim()).filter(Boolean) }))} placeholder="research, launch, writing" /></div>
         <div className="task-form-section"><label><Users size={14} /> Collaborators</label>{!draft.teamId && <p className="muted small">Choose a team to add collaborators.{draft.collaboratorAgentIds.length ? " Existing legacy collaborators are preserved until you change them." : ""}</p>}<div className="collaborator-picker">{eligibleAgents.filter(agent => agent.id !== draft.ownerAgentId).map(agent => <button disabled={!draft.teamId || Boolean(current && isActive(current))} className={draft.collaboratorAgentIds.includes(agent.id) ? "selected" : ""} key={agent.id} onClick={() => setDraft(value => value && ({ ...value, collaboratorAgentIds: value.collaboratorAgentIds.includes(agent.id) ? value.collaboratorAgentIds.filter(id => id !== agent.id) : [...value.collaboratorAgentIds, agent.id] }))}><Avatar agent={agent} />{agent.name}{draft.collaboratorAgentIds.includes(agent.id) && <Check size={13} />}</button>)}</div></div>
         <div className="task-form-section"><div className="section-row"><label><CheckCircle2 size={14} /> Checklist</label><button onClick={() => setDraft(value => value && ({ ...value, checklist: [...value.checklist, { id: uuid(), text: "", done: false, position: value.checklist.length }] }))}><Plus size={13} /> Add item</button></div>{draft.checklist.map((item, index) => <div className="checklist-row" key={item.id}><input type="checkbox" checked={item.done} onChange={event => setDraft(value => value && ({ ...value, checklist: value.checklist.map((entry, itemIndex) => itemIndex === index ? { ...entry, done: event.target.checked } : entry) }))} /><input value={item.text} onChange={event => setDraft(value => value && ({ ...value, checklist: value.checklist.map((entry, itemIndex) => itemIndex === index ? { ...entry, text: event.target.value } : entry) }))} placeholder="Checklist item" /><button aria-label="Remove item" onClick={() => setDraft(value => value && ({ ...value, checklist: value.checklist.filter((_, itemIndex) => itemIndex !== index) }))}><Trash2 size={14} /></button></div>)}</div>
         {current && <><div className="task-form-section"><label><MessageSquare size={14} /> Comments</label><div className="comment-compose"><textarea value={comment} onChange={event => setComment(event.target.value)} rows={2} placeholder="Add a comment" /><button disabled={!comment.trim() || busy} onClick={async () => { const updated = await request<AgentTask>(`/v1/tasks/${current.id}/comments`, { method: "POST", body: JSON.stringify({ body: comment }) }); if (updated) setComment(""); }}>Comment</button></div>{current.comments.map(item => <div className="task-comment" key={item.id}><p>{item.body}</p><time>{item.author || 'you'} · {displayTime(item.createdAt)}</time></div>)}</div>

@@ -16,6 +16,8 @@ async function seed(request: APIRequestContext) {
   // Leave no credentials behind; specs run in one shared control service.
   const { credentials } = await (await request.get(control + '/v1/credentials', { headers })).json();
   for (const item of credentials as Array<{ ref: string }>) await request.delete(control + `/v1/credentials/${item.ref}?force=1`, { headers });
+  const defaults = await (await request.get(control + '/v1/workspace/model', { headers })).json();
+  await request.put(control + '/v1/workspace/model', { headers, data: { revision: defaults.revision, model: { provider: 'xai', model: 'grok-4.6', credentialRef: '', baseUrl: '' } } });
 }
 
 type Page = import('@playwright/test').Page;
@@ -73,7 +75,8 @@ test('switches an agent between credentials from the quick switcher', async ({ p
   await closeSettings(page, testInfo.project.name);
 
   await openSwitcher(page, testInfo.project.name);
-  await page.getByRole('menuitem', { name: /Work key/ }).click();
+  await page.getByLabel('Saved credential').selectOption({ label: 'Work key' });
+  await page.getByRole('button', { name: 'Apply model and credential' }).click();
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Work key');
 
   // The choice is a profile edit, so it must survive a reload.
@@ -81,7 +84,8 @@ test('switches an agent between credentials from the quick switcher', async ({ p
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Work key');
 
   await page.getByRole('button', { name: 'Credential for Atlas' }).click();
-  await page.getByRole('menuitem', { name: /Personal key/ }).click();
+  await page.getByLabel('Saved credential').selectOption({ label: 'Personal key' });
+  await page.getByRole('button', { name: 'Apply model and credential' }).click();
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Personal key');
 });
 
@@ -92,7 +96,8 @@ test('names the agents using a credential before deleting it', async ({ page }, 
   await page.getByRole('button', { name: 'Close saved credentials' }).click();
   await closeSettings(page, testInfo.project.name);
   await openSwitcher(page, testInfo.project.name);
-  await page.getByRole('menuitem', { name: /Work key/ }).click();
+  await page.getByLabel('Saved credential').selectOption({ label: 'Work key' });
+  await page.getByRole('button', { name: 'Apply model and credential' }).click();
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Work key');
 
   const dialog = await openManager(page, testInfo.project.name);
@@ -125,4 +130,75 @@ test('offers saved credentials in agent settings and workspace settings', async 
   await page.getByLabel('Saved credential').selectOption({ label: 'Work key' });
   await page.getByRole('button', { name: 'Save changes' }).click();
   await expect(page.getByText(/^Saved[.—]/)).toBeVisible();
+});
+
+
+test('selects models when adding a key and switches providers independently per agent', async ({ page, request }, testInfo) => {
+  const dialog = await openManager(page, testInfo.project.name);
+  await dialog.getByRole('button', { name: 'Add credential' }).click();
+  await dialog.getByLabel('Name').fill('Router key');
+  await dialog.getByLabel('Provider', { exact: true }).selectOption('openrouter');
+  await dialog.getByLabel('Value', { exact: true }).fill('router-browser-secret');
+  await dialog.getByLabel('Available models').selectOption('mock-scout');
+  await expect(dialog.getByLabel('Default model')).toHaveValue('mock-scout');
+  await dialog.getByRole('button', { name: 'Save credential' }).click();
+  await expect(dialog.getByText('Router key', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('mock-scout', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Close saved credentials' }).click();
+  await closeSettings(page, testInfo.project.name);
+  await openSwitcher(page, testInfo.project.name);
+  const picker = page.getByRole('dialog', { name: 'Model and credential for Atlas' });
+  await picker.getByLabel('Saved credential').selectOption({ label: 'Router key' });
+  await expect(picker.getByLabel('Provider', { exact: true })).toHaveValue('openrouter');
+  await expect(picker.getByLabel('Model', { exact: true })).toHaveValue('mock-scout');
+  await picker.getByLabel('Available models').selectOption('mock-atlas');
+  await picker.getByRole('button', { name: 'Apply model and credential' }).click();
+  await expect(picker).not.toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Router key · mock-atlas');
+  const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  const headers = { Authorization: `Bearer ${token}` };
+  const { profile: atlas } = await (await request.get(control + '/v1/agents/atlas/profile', { headers })).json();
+  expect(atlas.model).toMatchObject({ provider: 'openrouter', model: 'mock-atlas', credentialRef: 'ROUTER_KEY', inherit: false });
+  const { profile: scout } = await (await request.get(control + '/v1/agents/scout/profile', { headers })).json();
+  expect(scout.model.inherit).toBe(true);
+  await page.getByRole('button', { name: 'Credential for Atlas' }).click();
+  await picker.getByRole('button', { name: 'Use workspace default' }).click();
+  await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Workspace default');
+});
+
+test('new credentials become selectable without discarding an agent draft', async ({ page }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const editor = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(editor.getByText('Loading saved profile…')).toBeHidden();
+  await editor.getByLabel('Name', { exact: true }).fill('Atlas draft');
+  await editor.getByRole('tab', { name: 'Model' }).click();
+  await editor.getByRole('switch', { name: 'Use workspace default' }).uncheck();
+  await editor.getByLabel('Saved credential').selectOption('__manage');
+  await addCredential(page, 'New shared key', 'editor-key');
+  await page.getByRole('button', { name: 'Close saved credentials' }).click();
+  await expect(editor.getByLabel('Saved credential')).toContainText('New shared key');
+  await editor.getByLabel('Saved credential').selectOption({ label: 'New shared key' });
+  await editor.getByRole('tab', { name: 'Profile', exact: true }).click();
+  await expect(editor.getByLabel('Name', { exact: true })).toHaveValue('Atlas draft');
+  await editor.getByRole('button', { name: 'Save changes' }).click();
+  await expect(editor.getByText(/^Saved[.—]/)).toBeVisible();
+});
+
+test('first-run setup discovers models with a pasted key before saving it', async ({ page }, testInfo) => {
+  // Mock mode never claims a key works, so the provider's acceptance is a fixture here.
+  await page.route('**/v1/onboarding/model-test', route => { const input = route.request().postDataJSON(); return route.fulfill({ json: { ok: true, message: 'Fixture provider accepted the model.', model: input.model, revision: input.revision + 1 } }); });
+  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await page.getByRole('button', { name: 'Run setup again' }).click();
+  await page.getByRole('button', { name: /Use this computer/ }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  const setup = page.getByRole('dialog', { name: 'Connect your model' });
+  const discovery = page.waitForRequest(request => request.url().endsWith('/v1/models') && request.method() === 'POST');
+  await setup.getByLabel('API key').fill('setup-discovery-key');
+  expect((await discovery).postDataJSON()).toMatchObject({ value: 'setup-discovery-key' });
+  await expect(setup.locator('datalist option[value="mock-scout"]')).toHaveCount(1);
+  await setup.getByRole('combobox', { name: /^Model/ }).fill('mock-scout');
+  await setup.getByRole('button', { name: 'Save and test' }).click();
+  await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeVisible();
 });

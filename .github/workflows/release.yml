@@ -7,27 +7,46 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Require the tag to point at main
         run: test "$GITHUB_SHA" = "$(git rev-parse origin/main)"
-      - name: Require the tag to match the application version
-        run: test "$GITHUB_REF_NAME" = "v$(node -p \"require('./package.json').version\")"
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
           cache: npm
+      - name: Require the tag to match the application version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "$GITHUB_REF_NAME" = "v$version"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
+      - name: Install required release archive tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip unzip
       - run: npm test
+        env:
+          OPEN_HARNESS_REQUIRE_RELEASE_TOOLS: '1'
+      - name: Check runtime package verification
+        run: python3 -B -m unittest discover -s tests/ubuntu-runtime -v
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
@@ -41,8 +60,119 @@ jobs:
           scan-ref: .
           scanners: secret
           exit-code: '1'
-      - name: Build coordinator image
-        run: docker build -f Dockerfile.coordinator -t open-harness-coordinator:release-candidate .
+      - name: Require reviewed engine inputs for both native architectures
+        run: node scripts/release-images.mjs verify-engine-inputs release-images
+
+  images:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 190
+    permissions:
+      contents: read
+      packages: write
+    env:
+      OPEN_HARNESS_HERMES_IMAGE: open-harness-hermes:release-candidate
+      OPEN_HARNESS_ENGINE_IMAGE: open-harness-engine:release-candidate
+      OPEN_HARNESS_REAL_CONTAINER: '1'
+      OPEN_HARNESS_DISABLE_OS_VAULT: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - name: Stage the reviewed engine inputs for this architecture
+        run: |
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          node scripts/release-images.mjs stage-engine-context release-images '${{ matrix.architecture }}'
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build native engine image from reviewed inputs
+        id: build-engine
+        uses: docker/build-push-action@v6
+        with:
+          context: release-images/engine-context
+          file: runtime/engine/Dockerfile
+          platforms: linux/${{ matrix.architecture }}
+          network: none
+          load: true
+          provenance: false
+          build-args: |
+            ENGINE_INPUTS=${{ env.OPEN_HARNESS_ENGINE_INPUTS }}
+            ENGINE_INPUTS_LOCK_SHA256=${{ env.OPEN_HARNESS_ENGINE_INPUTS_LOCK_SHA256 }}
+            CONTAINERD_VERSION=${{ env.OPEN_HARNESS_CONTAINERD_VERSION }}
+            CONTAINERD_SOURCE_MANIFEST=${{ env.OPEN_HARNESS_CONTAINERD_SOURCE_MANIFEST }}
+            RUNC_VERSION=${{ env.OPEN_HARNESS_RUNC_VERSION }}
+            RUNC_SOURCE_MANIFEST=${{ env.OPEN_HARNESS_RUNC_SOURCE_MANIFEST }}
+            BUILDX_VERSION=${{ env.OPEN_HARNESS_BUILDX_VERSION }}
+            BUILDX_SOURCE_MANIFEST=${{ env.OPEN_HARNESS_BUILDX_SOURCE_MANIFEST }}
+          tags: open-harness-engine:release-candidate
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+      - name: Build native coordinator image
+        id: build-coordinator
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.coordinator
+          platforms: linux/${{ matrix.architecture }}
+          load: true
+          provenance: false
+          build-args: |
+            BUILDX_INPUTS=${{ env.OPEN_HARNESS_ENGINE_INPUTS }}
+            BUILDX_SHA256=${{ env.OPEN_HARNESS_BUILDX_SHA256 }}
+          tags: open-harness-coordinator:release-candidate
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          cache-from: type=gha,scope=coordinator-${{ matrix.architecture }}
+          cache-to: type=gha,scope=coordinator-${{ matrix.architecture }},mode=max
+      - name: Build native Hermes image
+        id: build-hermes
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: runtime/hermes/Dockerfile
+          platforms: linux/${{ matrix.architecture }}
+          load: true
+          provenance: false
+          tags: open-harness-hermes:release-candidate
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          cache-from: type=gha,scope=hermes-${{ matrix.architecture }}
+          cache-to: type=gha,scope=hermes-${{ matrix.architecture }},mode=max
+      - name: Record immutable scan inputs
+        env:
+          OPEN_HARNESS_COORDINATOR_BUILD_METADATA: ${{ steps.build-coordinator.outputs.metadata }}
+          OPEN_HARNESS_ENGINE_BUILD_METADATA: ${{ steps.build-engine.outputs.metadata }}
+          OPEN_HARNESS_HERMES_BUILD_METADATA: ${{ steps.build-hermes.outputs.metadata }}
+        run: node scripts/release-images.mjs capture-scan-inputs release-images '${{ matrix.architecture }}'
+      - name: Scan the exact private engine architecture
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: open-harness-engine:release-candidate
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          exit-code: '1'
       - name: Scan coordinator image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -51,35 +181,6 @@ jobs:
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           exit-code: '1'
-      - name: Smoke test fresh Compose stack
-        run: |
-          cleanup() { docker compose down -v; }
-          trap cleanup EXIT
-          docker compose up -d --build
-          for attempt in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:3000/api/health >/dev/null; then break; fi
-            if [ "$attempt" = 60 ]; then docker compose logs open-harness; exit 1; fi
-            sleep 2
-          done
-          test "$(curl -sS -o /tmp/remote-bootstrap.json -w '%{http_code}' -H 'Host: agents.example.com' http://127.0.0.1:3000/api/local/v1/bootstrap)" = 403
-
-  hermes-image:
-    needs: verify
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: runtime/hermes/Dockerfile
-          load: true
-          tags: open-harness-hermes:release-candidate
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
       - name: Scan Hermes image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -88,37 +189,250 @@ jobs:
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           exit-code: '1'
+      - name: Require the scanner and Python for the Debian-origin gate
+        run: |
+          trivy=$(command -v trivy) || { echo "Trivy is required for the Debian-origin gate." >&2; exit 1; }
+          test -x "$trivy"
+          python3 -I -B -c 'import sys; sys.exit(sys.version_info < (3, 11))'
+          echo "OPEN_HARNESS_TRIVY=$trivy" >> "$GITHUB_ENV"
+          echo "OPEN_HARNESS_TRIVY_DB=$RUNNER_TEMP/debian-origin-trivy" >> "$GITHUB_ENV"
+      - name: Download one vulnerability database for the Debian-origin gate
+        run: |
+          mkdir -p "$OPEN_HARNESS_TRIVY_DB"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP" "$OPEN_HARNESS_TRIVY" --config /dev/null image --cache-dir "$OPEN_HARNESS_TRIVY_DB" --download-db-only
+      - name: Gate the Debian-origin packages of the exact scanned Hermes image
+        timeout-minutes: 80
+        run: |
+          image=$(node -p "require('./release-images/scanned-images.json').images.hermes.localId")
+          python3 -I -B scripts/debian-origin-gate.py --image "$image" --arch '${{ matrix.architecture }}' --trivy "$OPEN_HARNESS_TRIVY" --cache-dir "$OPEN_HARNESS_TRIVY_DB" --out release-images/debian-origin-gate
+          node scripts/release-images.mjs verify-debian-origin-gate release-images/debian-origin-gate '${{ matrix.architecture }}' "$image"
+      - name: Exercise real Hermes protocol and tool enforcement
+        run: node --import tsx tests/real-hermes-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/release-hermes.log"
+      - name: Verify per-agent files, grants and resource isolation
+        run: node --import tsx tests/real-sandbox-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/release-sandbox.log"
+      - name: Exercise private desktops on this architecture
+        env:
+          OPEN_HARNESS_DESKTOP_SMOKE: '1'
+        run: node --import tsx tests/real-desktop-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/release-desktop.log"
+      - name: Exercise the exact scanned coordinator and runtime together
+        env:
+          OPEN_HARNESS_COMPOSE_SMOKE: '1'
+          OPEN_HARNESS_COMPOSE_COORDINATOR_IMAGE: open-harness-coordinator:release-candidate
+        run: node --import tsx tests/compose-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/release-compose.log"
+      - name: Publish only the scanned and exercised architecture candidates
+        run: node scripts/release-images.mjs publish-architecture release-images '${{ matrix.architecture }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-images-${{ matrix.architecture }}
+          path: release-images/${{ matrix.architecture }}.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Preserve native runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-runtime-evidence-${{ matrix.architecture }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            release-images/scanned-images.json
+            release-images/debian-origin-gate/reports/
+            release-images/debian-origin-gate/steps/
+            release-images/debian-origin-gate/*.json
+            release-images/engine-context/inputs.sha256
+            ${{ runner.temp }}/release-*.log
+            ${{ runner.temp }}/open-harness-real-smoke-*/evidence.json
+            ${{ runner.temp }}/open-harness-real-smoke-*/diagnostics.json
+            ${{ runner.temp }}/open-harness-sandbox-*/evidence.json
+            ${{ runner.temp }}/open-harness-sandbox-*/diagnostics.json
+            ${{ runner.temp }}/open-harness-desktop-smoke-*/evidence.json
+            ${{ runner.temp }}/open-harness-desktop-smoke-*/diagnostics.json
+            ${{ runner.temp }}/open-harness-compose-smoke-*/evidence.json
+            ${{ runner.temp }}/open-harness-compose-smoke-*/diagnostics.json
+
+  package:
+    needs: [verify, images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-images-*
+          path: release-images
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish scanned Hermes image
+      - name: Join tested architecture digests into candidate manifests
+        run: node scripts/release-images.mjs publish-manifests release-images
+      - name: Install required release archive tools
         run: |
-          docker tag open-harness-hermes:release-candidate ghcr.io/${{ github.repository_owner }}/open-harness-hermes:${{ github.ref_name }}
-          docker tag open-harness-hermes:release-candidate ghcr.io/${{ github.repository_owner }}/open-harness-hermes:2026.9.11
-          docker push ghcr.io/${{ github.repository_owner }}/open-harness-hermes:${{ github.ref_name }}
-          docker push ghcr.io/${{ github.repository_owner }}/open-harness-hermes:2026.9.11
+          sudo apt-get update
+          sudo apt-get install -y zip unzip
+      - name: Package source and prebuilt browser releases from this revision
+        run: npm run release:package -- release-assets release-images/image-lock.json
+      - name: Create checksums
+        working-directory: release-assets
+        run: sha256sum open-harness-*.tar.gz open-harness-*.zip image-lock.json > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets/*
+          retention-days: 7
+          if-no-files-found: error
 
-  publish:
-    needs: [verify, hermes-image]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
+  browser-acceptance:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
           cache: npm
-      - run: npm ci --ignore-scripts
-      - run: npm run release:package -- release-assets
-      - name: Create checksums
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+      - name: Install required release archive tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip unzip
+      - name: Verify and extract the artifact users will download
+        run: |
+          cd release-assets
+          sha256sum --check SHA256SUMS.txt
+          mkdir extracted-tar extracted-zip
+          tar -xzf open-harness-browser-*.tar.gz -C extracted-tar
+          unzip -q open-harness-browser-*.zip -d extracted-zip
+          diff -r extracted-tar extracted-zip
+          node -e "const fs=require('fs'); const lock=JSON.parse(fs.readFileSync('image-lock.json')); fs.appendFileSync(process.env.GITHUB_ENV, 'OPEN_HARNESS_COMPOSE_PACKAGE_DIR='+process.cwd()+'/extracted-${{ matrix.architecture == 'amd64' && 'zip' || 'tar' }}/open-harness-browser-'+lock.version+'\nOPEN_HARNESS_HERMES_IMAGE='+lock.images.hermes.ref+'\nOPEN_HARNESS_ENGINE_IMAGE='+lock.images.engine.ref+'\n')"
+      - name: Exercise the downloaded launcher against real Docker
+        timeout-minutes: 18
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/anonymous-docker
+          OPEN_HARNESS_LAUNCHER_TIMEOUT: '300'
+          OPEN_HARNESS_LAUNCHER_PAUSE: '0'
+        run: |
+          export COMPOSE_PROJECT_NAME="oh-launcher-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.architecture }}"
+          mkdir -p "$DOCKER_CONFIG"
+          package="$OPEN_HARNESS_COMPOSE_PACKAGE_DIR"
+          test -f "$package/launchers/start.sh"
+          test ! -f "$package/Dockerfile.coordinator"
+          compose=(docker compose --project-name "$COMPOSE_PROJECT_NAME" --project-directory "$package" -f "$package/compose.yaml")
+          existing_ids=$("${compose[@]}" ps --all --quiet)
+          test -z "$existing_ids"
+          cleanup() {
+            result=$?
+            trap - EXIT
+            "${compose[@]}" logs --no-color > "$RUNNER_TEMP/release-launcher-compose.log" 2>&1 || true
+            "${compose[@]}" down --volumes --remove-orphans --timeout 30 || true
+            exit "$result"
+          }
+          trap cleanup EXIT
+          launch() {
+            timeout --foreground 360 /bin/bash "$package/launchers/start.sh" --no-open 2>&1 | tee -a "$RUNNER_TEMP/release-launcher.log"
+            curl --fail --silent --show-error --max-time 10 http://127.0.0.1:3000/api/health > /dev/null
+          }
+          launch
+          initial_ids=$("${compose[@]}" ps --all --quiet | sort)
+          test "$(printf '%s\n' "$initial_ids" | wc -l | tr -d ' ')" = 2
+          for id in $initial_ids; do
+            test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$id")" = "$COMPOSE_PROJECT_NAME"
+            test "$(docker inspect --format '{{.State.Running}}' "$id")" = true
+          done
+          coordinator=$("${compose[@]}" ps --quiet open-harness)
+          data_volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' "$coordinator")
+          test -n "$data_volume"
+          test "$(docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}' "$data_volume")" = "$COMPOSE_PROJECT_NAME"
+          "${compose[@]}" exec -T open-harness sh -c 'printf "%s\n" "$1" > /data/shared/launcher-proof.txt' fixture "$COMPOSE_PROJECT_NAME"
+          launch
+          test "$("${compose[@]}" ps --all --quiet | sort)" = "$initial_ids"
+          test "$("${compose[@]}" exec -T open-harness cat /data/shared/launcher-proof.txt)" = "$COMPOSE_PROJECT_NAME"
+          timeout --foreground 90 /bin/bash "$package/launchers/start.sh" --stop 2>&1 | tee -a "$RUNNER_TEMP/release-launcher.log"
+          test "$("${compose[@]}" ps --all --quiet | sort)" = "$initial_ids"
+          for id in $initial_ids; do test "$(docker inspect --format '{{.State.Running}}' "$id")" = false; done
+          docker volume inspect "$data_volume" > /dev/null
+          launch
+          test "$("${compose[@]}" ps --all --quiet | sort)" = "$initial_ids"
+          test "$("${compose[@]}" exec -T open-harness cat /data/shared/launcher-proof.txt)" = "$COMPOSE_PROJECT_NAME"
+          test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' "$coordinator")" = "$data_volume"
+          printf 'project=%s\ndata_volume=%s\ncontainer_ids=%s\nrepeat_launch=passed\nstop_preserves_data=passed\nrestart_preserves_data=passed\n' "$COMPOSE_PROJECT_NAME" "$data_volume" "$initial_ids" > "$RUNNER_TEMP/release-launcher-evidence.txt"
+      - name: Verify anonymous image access and the fresh packaged installation
+        env:
+          OPEN_HARNESS_COMPOSE_SMOKE: '1'
+          OPEN_HARNESS_COMPOSE_PULL_RUNTIME: '1'
+          OPEN_HARNESS_DISABLE_OS_VAULT: '1'
+          TMPDIR: ${{ runner.temp }}
+          # No registry login: the released package must work for a new user.
+          DOCKER_CONFIG: ${{ runner.temp }}/anonymous-docker
+        run: |
+          mkdir -p "$DOCKER_CONFIG"
+          node --import tsx tests/compose-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/release-package.log"
+      - name: Preserve packaged-install and recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package-evidence-${{ matrix.architecture }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/release-launcher.log
+            ${{ runner.temp }}/release-launcher-compose.log
+            ${{ runner.temp }}/release-launcher-evidence.txt
+            ${{ runner.temp }}/release-package.log
+            ${{ runner.temp }}/open-harness-compose-smoke-*/evidence.json
+            ${{ runner.temp }}/open-harness-compose-smoke-*/diagnostics.json
+            ${{ runner.temp }}/open-harness-compose-smoke-*/compose.log
+
+  publish:
+    needs: [verify, images, package, browser-acceptance]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+      - name: Check the exact verified release assets
         working-directory: release-assets
-        run: sha256sum open-harness-self-hosted-*.tar.gz > SHA256SUMS.txt
+        run: sha256sum --check SHA256SUMS.txt
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish verified image version tags
+        run: node scripts/release-images.mjs promote-release release-assets
       - name: Publish prerelease
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --prerelease --generate-notes --title "Open Harness ${GITHUB_REF_NAME}"
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --prerelease --notes-file docs/RELEASE_NOTES.md --generate-notes --title "Open Harness ${GITHUB_REF_NAME}"

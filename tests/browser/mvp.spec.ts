@@ -45,7 +45,8 @@ test('offers a focused workspace when advanced features are turned off, and rest
 
   await closeNav();
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
-  await expect(page.getByRole('tab', { name: 'Computer' })).toHaveCount(0);
+  // Where an agent works is not an advanced setting: every agent gets a container.
+  await expect(page.getByRole('tab', { name: 'Computer' })).toBeVisible();
   await page.getByRole('tab', { name: 'Tools & connections' }).click();
   await expect(page.getByRole('heading', { name: 'MCP connections' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Close agent settings' }).click();
@@ -59,7 +60,7 @@ test('offers a focused workspace when advanced features are turned off, and rest
   await expect(page.getByRole('button', { name: 'Tasks', exact: true })).toBeVisible();
 });
 
-test('a hidden Computer tab never opens a panel with no way back', async ({ page }, testInfo) => {
+test('Computer settings stay available without Advanced features and offer only contained access', async ({ page }, testInfo) => {
   const mobile = testInfo.project.name === 'mobile';
   if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Settings/ }).first().click();
@@ -67,19 +68,31 @@ test('a hidden Computer tab never opens a panel with no way back', async ({ page
   await page.getByRole('button', { name: 'Close settings' }).click();
   if (mobile) await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click');
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
-  await expect(page.getByRole('tab', { name: 'Computer' })).toHaveCount(0);
-  // Whatever panel opens has to belong to a tab the tablist actually offers.
-  const selected = page.getByRole('tab', { selected: true });
-  await expect(selected).toHaveCount(1);
-  await expect(selected).toHaveAccessibleName('Profile');
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
+  await expect(page.getByRole('tab', { selected: true })).toHaveAccessibleName('Computer');
+  await expect(panel.getByRole('radio', { name: 'Private workspace' })).toBeVisible();
+  await expect(panel.getByRole('radio', { name: 'Selected folders' })).toBeVisible();
+  await expect(panel.getByRole('switch', { name: 'Private agent desktop' })).toBeVisible();
+  // Direct access and control of the signed-in desktop are gone, not hidden behind a switch.
+  await expect(panel.getByRole('radio', { name: 'Direct computer access' })).toHaveCount(0);
+  await expect(panel.getByLabel('Desktop access')).toHaveCount(0);
+  // The extras that Advanced features still gates.
+  await expect(panel.getByRole('switch', { name: 'Reserve this computer for this agent' })).toHaveCount(0);
+  await panel.getByText('Advanced resources and shared folders').click();
+  await expect(panel.getByLabel('CPU cores')).toHaveCount(0);
 });
 
 test('does not mark setup complete after a failed model check and supports retry', async ({ page }, testInfo) => {
+  await page.route('**/v1/onboarding/model-test', route => {
+    const input = route.request().postDataJSON();
+    return route.fulfill({ json: { ok: true, message: 'Fixture provider accepted the model.', model: input.model, revision: input.revision + 1 } });
+  });
   let attempts = 0;
   await page.route('**/v1/onboarding/model-test', async route => {
     attempts += 1;
     if (attempts === 1) await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: false, message: 'The API key was rejected.' }) });
-    else await route.continue();
+    else await route.fallback();
   });
   if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Settings/ }).first().click();
@@ -89,7 +102,7 @@ test('does not mark setup complete after a failed model check and supports retry
   const setup = page.getByRole('dialog', { name: 'Connect your model' });
   await setup.getByLabel('API key').fill('test-key');
   await setup.getByRole('button', { name: 'Save and test' }).click();
-  await expect(setup.getByRole('status')).toContainText('API key was rejected');
+  await expect(setup.getByRole('status').filter({ hasText: 'API key was rejected' })).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'You’re ready' })).toHaveCount(0);
   await setup.getByRole('button', { name: 'Save and test' }).click();
   await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeVisible();
@@ -204,4 +217,41 @@ test('reopening a task run streams the work into the conversation it belongs to'
   // Visible completion text means the events landed in a message the conversation actually has.
   await expect(page.getByText('Hermes mock completed the task.')).toBeVisible();
   await expect(page.getByText('Earlier work here')).toBeVisible();
+});
+
+// A single global "running" flag disabled every other agent in the sidebar, so a workspace built
+// around several named agents could only be used one agent at a time. Runs are tracked per agent
+// now: the one that is working shows a spinner, and the rest stay open for a new task.
+test('a second agent stays available while the first one is working', async ({ page, request }, testInfo) => {
+  const mobile = testInfo.project.name === 'mobile';
+  const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  const headers = { Authorization: `Bearer ${token}` };
+  // MOCK_APPROVAL parks the run until someone answers, so it is reliably still active below.
+  const created = await request.post(control + '/v1/runs', { headers, data: { agentId: 'atlas', prompt: 'MOCK_APPROVAL hold this agent busy' } });
+  expect(created.ok()).toBeTruthy();
+  const held = await created.json();
+  await page.reload();
+  if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+
+  const atlasRow = page.locator('.agent-row', { hasText: 'Atlas' });
+  const scoutRow = page.locator('.agent-row', { hasText: 'Scout' });
+  await expect(atlasRow.locator('.spin')).toBeVisible();
+  await expect(atlasRow).toBeEnabled();
+  // The regression: this was disabled for as long as any agent anywhere was working.
+  await expect(scoutRow).toBeEnabled();
+  await expect(scoutRow.locator('.spin')).toHaveCount(0);
+
+  await scoutRow.click();
+  await expect(page.locator('.agent-row.selected')).toContainText('Scout');
+  // Switching away does not abandon the first agent: it is still marked as working. On a phone
+  // selecting an agent closes the drawer over the list, so only its presence can be asserted.
+  await expect(atlasRow.locator('.spin')).toHaveCount(1);
+  if (!mobile) await expect(atlasRow.locator('.spin')).toBeVisible();
+  await expect(atlasRow).not.toHaveClass(/selected/);
+
+  // This test is the only one that deliberately parks a run, and every spec here shares one
+  // coordinator, so it clears it rather than leaving the next file to inherit a busy agent.
+  await request.post(control + `/v1/runs/${held.id}/stop`, { headers });
+  await expect.poll(async () => (await (await request.get(control + `/v1/runs/${held.id}`, { headers })).json()).state)
+    .toMatch(/completed|failed|cancelled|interrupted/);
 });

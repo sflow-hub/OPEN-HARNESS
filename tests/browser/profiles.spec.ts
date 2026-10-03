@@ -15,6 +15,7 @@ test.beforeEach(async ({ request, page }) => { await seed(request); await page.a
 
 test('never presents deterministic test output as a real agent reply', async ({ page }) => {
   await page.getByRole('button', { name: 'Meet Atlas' }).click();
+  await page.getByRole('button', { name: 'New conversation' }).click();
   await expect(page.getByText('Automated test mode', { exact: true }).first()).toBeVisible();
   await page.getByLabel('Message Atlas').fill('Run a real task');
   await page.getByLabel('Message Atlas').press('Enter');
@@ -23,6 +24,10 @@ test('never presents deterministic test output as a real agent reply', async ({ 
 });
 
 test('guides first-time users through computer and model readiness', async ({ page }, testInfo) => {
+  await page.route('**/v1/onboarding/model-test', route => {
+    const input = route.request().postDataJSON();
+    return route.fulfill({ json: { ok: true, message: 'Fixture provider accepted the model.', model: input.model, revision: input.revision + 1 } });
+  });
   if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Settings/ }).first().click();
   await page.getByRole('button', { name: 'Run setup again' }).click();
@@ -143,7 +148,11 @@ test('configures computer access and automatically selects a paired computer', a
   await panel.getByRole('button', { name: 'Add folder' }).click();
   await panel.getByLabel('Shared folder 1 path').fill('/tmp/open-harness-project');
   await panel.getByLabel('Shared folder 1 access').selectOption('write');
-  await panel.getByLabel('Desktop access').selectOption('virtual');
+  // A private agent desktop needs a Linux computer with Docker; the mock local machine
+  // reports whether it is one, and the switch follows that report.
+  const { machines } = await (await request.get(control + '/v1/machines', { headers: { Authorization: `Bearer ${(await (await request.get(control + '/v1/bootstrap')).json()).token}` } })).json();
+  const desktop = panel.getByRole('switch', { name: 'Private agent desktop' });
+  if (machines.find((machine: { id: string }) => machine.id === 'local')?.capabilities.virtualDesktop) await desktop.check(); else await expect(desktop).toBeDisabled();
   await panel.getByRole('button', { name: 'Add computer' }).click();
   await panel.getByLabel('Computer name').fill('Design workstation');
   await panel.getByLabel('Computer operating system').selectOption('win32');
@@ -280,4 +289,50 @@ test('creates, renames, duplicates, and deletes a project', async ({ page }, tes
   await expect(confirm).toBeHidden();
   await expect(cardFor(`${renamed} copy`)).toHaveCount(0);
   await expect(cardFor(renamed)).toBeVisible();
+});
+
+// The Projects picker could not be used: snapshot.tasks was a dependency of the effect that
+// also set the snapshot, so every fetch scheduled the next one at once and the view re-rendered
+// without pause, tearing the open dropdown out of the DOM before a choice could land.
+test('the project picker switches between projects and holds the choice', async ({ page }, testInfo) => {
+  const name = `Picker project ${testInfo.project.name}`;
+  await page.getByRole('button', { name: 'Tasks', exact: true }).click();
+  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  await page.getByRole('button', { name: 'New project', exact: true }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'New project' });
+  await dialog.getByLabel('Project name').fill(name);
+  await dialog.getByRole('button', { name: 'Create project' }).click();
+  await expect(dialog).toBeHidden();
+
+  const picker = page.locator('.task-select select');
+  await expect(picker).toBeVisible();
+  // Selecting by visible label is what a person does with this control.
+  await picker.selectOption({ label: name });
+  await expect(picker).toHaveValue(/.+/);
+  const chosen = await picker.inputValue();
+  expect(chosen).not.toBe('all');
+
+  // The loop used to reset or detach the control; the choice has to survive the poll.
+  await page.waitForTimeout(3000);
+  await expect(picker).toHaveValue(chosen);
+
+  // And switching back has to work just as well.
+  await picker.selectOption('all');
+  await expect(picker).toHaveValue('all');
+  await page.waitForTimeout(2500);
+  await expect(picker).toHaveValue('all');
+});
+
+// The Projects view refetched in a continuous loop: snapshot.tasks was a dependency of the
+// effect that also set the snapshot, so each response scheduled the next request immediately.
+// The view never stopped re-rendering, which is why a native dropdown could not be used --
+// it was torn out of the DOM between opening it and clicking an option. Playwright's
+// selectOption sets the value without opening the list, so it cannot see that; counting
+// requests can. Eight seconds is the idle poll, so a handful over six seconds is plenty.
+test('the task view polls on a timer instead of refetching continuously', async ({ page }) => {
+  let requests = 0;
+  page.on('request', request => { if (request.url().includes('/v1/tasks')) requests += 1; });
+  await page.getByRole('button', { name: 'Tasks', exact: true }).click();
+  await page.waitForTimeout(6000);
+  expect(requests, `saw ${requests} task requests in six seconds`).toBeLessThanOrEqual(4);
 });

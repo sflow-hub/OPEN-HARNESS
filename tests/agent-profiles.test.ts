@@ -73,6 +73,8 @@ test('a running task keeps its snapshot; the next queued task uses the new profi
   assert.equal((await waitRun(first.id)).state, 'completed'); assert.equal((await waitRun(next.id)).state, 'failed');
   assert.deepEqual(JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')).allowedTools, ['mcp__open_harness__task']);
   assert.equal(readFileSync(join(state, 'agents/atlas/profile/SOUL.md'), 'utf8'), '');
+  const config = JSON.parse(readFileSync(join(state, 'agents/atlas/profile/config.yaml'), 'utf8'));
+  assert.deepEqual(config.approvals, { mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' });
 });
 test('disabling a connector removes its tools at execution even if individually selected', async () => {
   const p = await profile(); await save({ ...p, allowedTools: ['mcp_research_lookup'], connectors: [{ id: 'r', name: 'research', command: 'npx', args: [], secretRef: '', enabled: false }] });
@@ -113,7 +115,7 @@ test('MCP inventory survives refresh without claiming a stale handshake is conne
   const connector = { id: 'catalog-test', name: 'catalog_test', command: 'npx', args: [], enabled: true, secretRef: '' };
   await request('/v1/agents/atlas/connector-check', 'POST', { connector });
   const catalog = await request<{ tools: Array<{ id: string; available: boolean; reason?: string }> }>('/v1/agents/atlas/tools');
-  const tool = catalog.tools.find(t => t.id === 'mcp_catalog_test_lookup');
+  const tool = catalog.tools.find(t => t.id === 'mcp__catalog_test__lookup');
   assert.ok(tool); assert.equal(tool.available, false); assert.match(tool.reason || '', /Test this connection again/);
 });
 
@@ -138,12 +140,50 @@ test('pairs and authenticates a remote runner, dispatches work once, and revokes
   assert.doesNotMatch(JSON.stringify(command.payload), /secret-atlas-value/);
   assert.equal(await decryptRunnerSecret(encryption.privateKey, command.payload.encryptedSecrets.ATLAS_KEY), 'secret-atlas-value');
   const duplicate = crypto.randomUUID();
+  await assert.rejects(request('/v1/agents/atlas/context', 'PUT', { memory: 'Cannot edit an active runner.' }), { status: 409 });
+  // C5: an event claiming a run other than the one this command was issued for is rejected
+  // before it can touch any run's event log (verified below by the message.delta count staying 1).
+  assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: crypto.randomUUID(), runId: `${created.id}-other`, event: { type: 'session.started', session_id: 'forged-session', payload: {} } }) })).status, 403);
+  assert.equal((await request<{ session_id: string | null }>(`/v1/runs/${created.id}`)).session_id, null);
+  assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: crypto.randomUUID(), runId: created.id, event: { type: 'session.info', session_id: 'remote-hermes-session', payload: { stored_session_id: 'stored-conversation-id' } } }) })).status, 200);
+  assert.equal((await request<{ session_id: string | null }>(`/v1/runs/${created.id}`)).session_id, 'remote-hermes-session');
+
   // C5: an event claiming a run other than the one this command was issued for is rejected
   // before it can touch any run's event log (verified below by the message.delta count staying 1).
   assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: crypto.randomUUID(), runId: `${created.id}-other`, event: { type: 'message.delta', payload: { text: 'forged' } } }) })).status, 403);
   for (let i = 0; i < 2; i++) assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: duplicate, runId: created.id, event: { type: 'message.delta', payload: { text: 'once' } } }) })).status, 200);
   assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { final_response: 'remote complete' } }) })).status, 200);
   assert.equal((await waitRun(created.id)).result, 'remote complete');
+  // Context belongs to the assigned runner. Reserve its placement until the
+  // reply arrives so a concurrent computer change cannot write to the old host.
+  const remoteContext = request<{ memory: string; skills: string[] }>('/v1/agents/atlas/context');
+  let contextCommand: { id: string; payload: { operation: string } } | undefined;
+  for (let i = 0; i < 80 && !contextCommand; i++) {
+    const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { operation: string } }> };
+    contextCommand = value.commands.find(item => item.kind === 'agent-context');
+    if (!contextCommand) await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.ok(contextCommand); assert.equal(contextCommand.payload.operation, 'get');
+  const beforeMove = await profile();
+  await assert.rejects(save({ ...beforeMove, computer: { ...beforeMove.computer, machineId: 'local', desktop: 'none', reserveMachine: false } }), { status: 409 });
+  assert.equal((await fetch(`${base}/v1/runner/commands/${contextCommand.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { status: 200, value: { memory: 'Memory from the runner.', user: '', skills: ['runner-skill'] } } }) })).status, 200);
+  const read = await remoteContext;
+  assert.equal(read.memory, 'Memory from the runner.'); assert.deepEqual(read.skills, ['runner-skill']);
+  const checking = request<{ ok: boolean }>('/v1/agents/atlas/connection-check', 'POST', { model: { provider: 'custom', model: 'test-model', credentialRef: 'ATLAS_KEY', baseUrl: 'http://127.0.0.1:11434/v1' } });
+  let probeCommand: { id: string; payload: { input: { apiKey?: string }; encryptedApiKey: EncryptedRunnerSecret } } | undefined;
+  const probeDeadline = Date.now() + POLL_BUDGET_MS;
+  while (!probeCommand && Date.now() < probeDeadline) {
+    const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { input: { apiKey?: string }; encryptedApiKey: EncryptedRunnerSecret } }> };
+    probeCommand = value.commands.find(item => item.kind === 'probe-runtime');
+    if (!probeCommand) await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.ok(probeCommand);
+  assert.equal(probeCommand.payload.input.apiKey, undefined);
+  assert.doesNotMatch(JSON.stringify(probeCommand.payload), /secret-atlas-value/);
+  assert.equal(await decryptRunnerSecret(encryption.privateKey, probeCommand.payload.encryptedApiKey), 'secret-atlas-value');
+  assert.equal((await fetch(`${base}/v1/runner/commands/${probeCommand.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { ok: true } }) })).status, 200);
+  assert.equal((await checking).ok, true);
+
   const events = await request<{ events: Array<{ type: string }> }>(`/v1/runs/${created.id}/events`); assert.equal(events.events.filter(item => item.type === 'message.delta').length, 1);
   const spent = await (await fetch(`${base}/v1/runner/commands`, { headers: runnerHeaders })).json() as { commands: Array<{ id: string }> };
   assert.equal(spent.commands.some(item => item.id === command!.id), false, 'a completed command should not be handed out again');

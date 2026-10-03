@@ -20,6 +20,7 @@ await rm(bundle, { recursive: true, force: true });
 await mkdir(resolve(bundle, "runtime"), { recursive: true });
 await cp(resolve(root, "dist", "standalone"), resolve(bundle, "app"), { recursive: true });
 await cp(resolve(root, "runtime", "hermes"), resolve(bundle, "runtime", "hermes"), { recursive: true });
+await cp(resolve(root, "runtime", "ubuntu"), resolve(bundle, "runtime", "ubuntu"), { recursive: true });
 await cp(resolve(root, "runtime", "installers"), resolve(bundle, "runtime", "installers"), { recursive: true });
 for (const entry of ["service", "runner"]) {
   await build({ entryPoints: [resolve(root, "runtime", `${entry}.ts`)], outfile: resolve(bundle, "runtime", `${entry}.mjs`), bundle: true, platform: "node", format: "esm", target: "node22", packages: "external", sourcemap: false, banner: { js: "import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);" } });

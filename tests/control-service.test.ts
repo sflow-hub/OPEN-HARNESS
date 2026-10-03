@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
@@ -26,7 +26,7 @@ async function waitReady() {
   throw new Error("Control service did not start.");
 }
 function start() {
-  child = spawn(process.execPath, ["--import", "tsx", "runtime/service.ts"], { cwd: join(import.meta.dirname, ".."), env: { ...process.env, OPEN_HARNESS_MOCK: "1", OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: stateDir }, stdio: "pipe" });
+  child = spawn(process.execPath, ["--import", "tsx", "runtime/service.ts"], { cwd: join(import.meta.dirname, ".."), env: { ...process.env, OPEN_HARNESS_MOCK: "1", OPEN_HARNESS_DISABLE_OS_VAULT: "1", OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: stateDir }, stdio: "pipe" });
   return waitReady();
 }
 async function request(path: string, init: RequestInit = {}) {
@@ -56,19 +56,87 @@ test("reports first-run readiness and serves no-checkout runner installers", asy
   const pairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ name: 'Easy server', platform: 'linux' }) });
   assert.match(pairing.command, /^curl -fsSL/);
   assert.match(pairing.command, /--pairing-code/);
-  const paired = spawnSync(process.execPath, ['runtime/runner.mjs', '--coordinator', base, '--pairing-code', pairing.code, '--once', '1'], { cwd: join(import.meta.dirname, '..'), encoding: 'utf8', env: { ...process.env, OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_RUNNER_STATE_DIR: join(stateDir, 'installed-runner') } });
+  const paired = spawnSync(process.execPath, ['runtime/runner.mjs', '--coordinator', base, '--pairing-code', pairing.code, '--once', '1'], { cwd: join(import.meta.dirname, '..'), encoding: 'utf8', env: { ...process.env, OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_DISABLE_OS_VAULT: '1', OPEN_HARNESS_RUNNER_STATE_DIR: join(stateDir, 'installed-runner') } });
   assert.equal(paired.status, 0, paired.stderr);
   assert.match(paired.stdout, /Paired machine-/);
+});
+
+test('runner installers supply the Dockerfile file inputs through the restricted download route', async t => {
+  const repo = join(import.meta.dirname, '..'), dockerfile = readFileSync(join(repo, 'runtime/hermes/Dockerfile'), 'utf8');
+  const inputs = [...dockerfile.matchAll(/^COPY (?!-)(.+)$/gm)].flatMap(match => match[1].split(/\s+/).slice(0, -1)).filter(path => path.startsWith('runtime/') && !path.endsWith('/'));
+  for (const directory of ['runtime/ubuntu/helpers', 'runtime/ubuntu/lock']) {
+    assert.ok(dockerfile.includes(`COPY ${directory}/ `));
+    inputs.push(...readdirSync(join(repo, directory)).filter(name => statSync(join(repo, directory, name)).isFile()).map(name => `${directory}/${name}`));
+  }
+  assert.ok(inputs.length > 0);
+  const powershell = await (await fetch(`${base}/v1/install/runner.ps1`)).text();
+  for (const path of inputs) {
+    const response = await fetch(`${base}/v1/install/file?path=${encodeURIComponent(path)}`);
+    assert.equal(response.status, 200, path);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), readFileSync(join(repo, path)), path);
+    assert.ok(powershell.includes(`"${path.replace(/^runtime\/(hermes|ubuntu)\//, '')}"`), `PowerShell installer omits ${path}`);
+  }
+  for (const path of ['.env', 'runtime/hermes/../../.env', 'runtime/service.ts', 'runtime/hermes/secrets.json', 'runtime/ubuntu/../../.env', 'runtime/ubuntu/helpers/private.py']) {
+    assert.equal((await fetch(`${base}/v1/install/file?path=${encodeURIComponent(path)}`)).status, 404, path);
+  }
+  if (process.platform === 'win32') return;
+  const root = mkdtempSync(join(tmpdir(), 'runner download ')), install = join(root, 'install with spaces'), bin = join(root, 'bin');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(install, 'node/bin'), { recursive: true }); mkdirSync(bin);
+  writeFileSync(join(install, 'node/bin/node'), '#!/bin/sh\nexit 99\n'); chmodSync(join(install, 'node/bin/node'), 0o755);
+  // Stop at the build boundary; never pair or install a host service in this test.
+  writeFileSync(join(bin, 'docker'), `#!${process.execPath}
+import fs from 'node:fs';
+import path from 'node:path';
+const args = process.argv.slice(2);
+if (args[0] === 'version') process.exit(0);
+if (args[0] === 'image') process.exit(1);
+if (args[0] !== 'build') process.exit(98);
+const root = args.at(-1), inputs = JSON.parse(process.env.FIXTURE_INPUTS);
+for (const input of inputs) if (!fs.existsSync(path.join(root, input))) { console.error(input); process.exit(78); }
+fs.writeFileSync(process.env.FIXTURE_LOG, JSON.stringify(inputs));
+process.exit(77);
+`);
+  chmodSync(join(bin, 'docker'), 0o755);
+  const log = join(root, 'build-inputs.json');
+  const result = spawnSync('sh', [join(repo, 'runtime/installers/install-runner.sh')], { encoding: 'utf8', timeout: 30_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, OPEN_HARNESS_COORDINATOR: base, OPEN_HARNESS_PAIRING_CODE: 'not-consumed', OPEN_HARNESS_RUNNER_DIR: install, OPEN_HARNESS_RUNNER_STATE_DIR: join(root, 'state'), FIXTURE_INPUTS: JSON.stringify(inputs), FIXTURE_LOG: log } });
+  assert.equal(result.status, 77, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(log, 'utf8')), inputs);
+  for (const path of inputs) assert.deepEqual(readFileSync(join(install, path)), readFileSync(join(repo, path)));
 });
 
 test("authenticates local clients, migrates once, and protects its secret file", async () => {
   assert.equal((await fetch(`${base}/v1/health`)).status, 401);
   const workspace = { agents: [{ id: "atlas", name: "Atlas", role: "Generalist", instructions: "Own the result.", memory: ["Prefer concise reports."] }], conversations: [{ id: "c1", agentId: "atlas", title: "Legacy", updatedAt: new Date().toISOString(), messages: [] }], files: [{ name: "notes.md", content: "Shared context" }] };
+  const sentinel = join(stateDir, 'host-sentinel'); writeFileSync(sentinel, 'Host data');
+  symlinkSync(sentinel, join(stateDir, 'shared', 'notes.md'));
+  await assert.rejects(request('/v1/migrate', { method: 'POST', body: JSON.stringify(workspace) }), /symbolic links/);
+  assert.equal(readFileSync(sentinel, 'utf8'), 'Host data');
+  unlinkSync(join(stateDir, 'shared', 'notes.md'));
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).migrated, true);
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).reason, "already_migrated");
   assert.equal(readFileSync(join(stateDir, "shared", "notes.md"), "utf8"), "Shared context");
-  assert.match(readFileSync(join(stateDir, "agents", "atlas", "profile", "MEMORY.md"), "utf8"), /concise reports/);
-  assert.equal(statSync(join(stateDir, "secrets.json")).mode & 0o777, 0o600);
+  assert.match(readFileSync(join(stateDir, "agents", "atlas", "profile", "memories", "MEMORY.md"), "utf8"), /concise reports/);
+  if (process.platform !== "win32") assert.equal(statSync(join(stateDir, "secrets.json")).mode & 0o777, 0o600);
+});
+
+test('context edits share Hermes memory files and legacy notes cannot overwrite runtime updates', async () => {
+  const home = join(stateDir, 'agents', 'legacy-memory', 'profile');
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, 'MEMORY.md'), 'Dashboard notes from an older version.');
+  writeFileSync(join(home, 'USER.md'), 'Legacy user notes.');
+  const path = '/v1/agents/legacy-memory/context';
+  assert.equal((await request(path)).memory, 'Dashboard notes from an older version.');
+  assert.equal((await request(path)).user, 'Legacy user notes.');
+  await request(path, { method: 'PUT', body: JSON.stringify({ memory: 'Dashboard notes for the next Hermes session.' }) });
+  assert.equal(readFileSync(join(home, 'memories', 'MEMORY.md'), 'utf8'), 'Dashboard notes for the next Hermes session.');
+  writeFileSync(join(home, 'memories', 'MEMORY.md'), 'Updated by the Hermes memory tool.');
+  writeFileSync(join(home, 'memories', 'USER.md'), 'Updated by Hermes user memory.');
+  assert.equal((await request(path)).memory, 'Updated by the Hermes memory tool.');
+  assert.equal((await request(path)).user, 'Updated by Hermes user memory.');
+  await request(path, { method: 'PUT', body: JSON.stringify({ memory: '' }) });
+  assert.equal((await request(path)).memory, '', 'Cleared memory must not resurrect legacy notes.');
+  assert.equal(readFileSync(join(home, 'MEMORY.md'), 'utf8'), 'Dashboard notes from an older version.');
 });
 
 test("runs independently of event polling and replays stable events", async () => {
@@ -118,7 +186,7 @@ test("checks MCP handshakes and reports missing credentials", async () => {
   const connector = { id: "test-connector", name: "source-db", command: "npx", args: ["-y", "example-mcp"], secretRef: "SOURCE_API_KEY", enabled: true };
   const missing = await request("/v1/agents/atlas/connector-check", { method: "POST", body: JSON.stringify({ connector }) }); assert.equal(missing.status, "missing_credentials");
   await request("/v1/secrets", { method: "POST", body: JSON.stringify({ name: "SOURCE_API_KEY", value: "test-secret" }) });
-  const connected = await request("/v1/agents/atlas/connector-check", { method: "POST", body: JSON.stringify({ connector }) }); assert.equal(connected.status, "connected"); assert.equal(connected.tools.length, 1);
+  const connected = await request("/v1/agents/atlas/connector-check", { method: "POST", body: JSON.stringify({ connector }) }); assert.equal(connected.status, "connected"); assert.equal(connected.tools.length, 1); assert.equal(connected.tools[0].id, 'mcp__source-db__lookup');
 });
 
 test("delegates to another named agent and records the handoff", async () => {
@@ -333,13 +401,16 @@ test("gates agent project management on the board permission", async () => {
     await request("/v1/agents/atlas/profile", { method: "PUT", body: JSON.stringify({ ...profile, board: { ...profile.board, manageProjects } }) });
   };
   await setPermission(false);
-  const run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_SLOW hold a board session open" }) });
+  let run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_SLOW hold a board session open" }) });
   await new Promise(resolve => setTimeout(resolve, 80));
   const scoped = createHmac("sha256", token).update("agent:atlas").digest("hex");
   const call = (payload: unknown) => fetch(`${base}/internal/task`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "X-Open-Harness-Run": run.id, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
   assert.equal((await call({ action: "board_create", input: { name: "Agent project" } })).status, 403);
 
+  await request(`/v1/runs/${run.id}/stop`, { method: "POST" });
   await setPermission(true);
+  run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_SLOW use newly granted project permissions" }) });
+  await new Promise(resolve => setTimeout(resolve, 80));
   const allowed = await call({ action: "board_create", input: { name: "Agent project", description: "Opened by an agent." } });
   assert.equal(allowed.status, 201);
   const board = await allowed.json() as any;
@@ -442,4 +513,14 @@ test("the task tool accepts its fields nested, alongside the action, or as a JSO
     await request(`/v1/runs/${held.id}/approval`, { method: "POST", body: JSON.stringify({ approvalId: approval.payload.approvalId, decision: "approve" }) });
     await waitRun(held.id);
   }
+});
+
+
+test("stop-all reaches its dedicated route and stops all active agents", async () => {
+  const first = await request('/v1/runs', { method: 'POST', body: JSON.stringify({ agentId: 'atlas', prompt: 'MOCK_APPROVAL Stop all active work' }) });
+  const second = await request('/v1/runs', { method: 'POST', body: JSON.stringify({ agentId: 'scout', prompt: 'MOCK_APPROVAL Stop all active work' }) });
+  const response = await request('/v1/runs/stop-all', { method: 'POST' });
+  assert.ok(response.stopped >= 2);
+  assert.equal((await waitRun(first.id)).state, 'cancelled');
+  assert.equal((await waitRun(second.id)).state, 'cancelled');
 });
