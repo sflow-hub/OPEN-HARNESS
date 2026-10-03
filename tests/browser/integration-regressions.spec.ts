@@ -97,14 +97,14 @@ test('workspace Save and test keeps a rejected model draft without committing it
   const settings = page.getByRole('dialog', { name: 'Workspace settings' });
   // Type only once the saved model has arrived in the form: an untouched form takes the
   // coordinator's answer, and a value replaced under a selection would be appended to.
-  await expect(settings.getByLabel('Model ID')).toHaveValue(before.model.model);
-  await settings.getByLabel('Model ID').fill('rejected-workspace-model');
+  await expect(settings.getByRole('combobox', { name: 'Workspace model' })).toHaveValue(before.model.model);
+  await settings.getByRole('combobox', { name: 'Workspace model' }).fill('rejected-workspace-model');
   const validation = page.waitForRequest(candidate => candidate.url().endsWith('/v1/onboarding/model-test'));
   await settings.getByRole('button', { name: 'Save and test' }).click();
   expect((await validation).postDataJSON()).toMatchObject({ save: true, revision: before.revision });
-  await expect(page.getByRole('status')).toContainText('Workspace candidate rejected');
+  await expect(page.getByRole('status').filter({ hasText: 'Workspace candidate rejected' })).toBeVisible();
   expect(await (await request.get(control + '/v1/workspace/model', { headers })).json()).toEqual(before);
-  await expect(settings.getByLabel('Model ID')).toHaveValue('rejected-workspace-model');
+  await expect(settings.getByRole('combobox', { name: 'Workspace model' })).toHaveValue('rejected-workspace-model');
 });
 
 test('task labels can be typed one comma at a time', async ({ page }) => {

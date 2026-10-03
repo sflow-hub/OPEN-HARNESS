@@ -5,7 +5,7 @@ import { Check, CircleAlert, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, Tr
 import type { ControlClient } from "../lib/control-client";
 import { CREDENTIAL_LABEL_MAX, CREDENTIAL_PROVIDERS, modelForCredential, describeCredential, providerLabel, summarizeUsage, type CredentialList, type CredentialRecord, type CredentialUsage } from "../lib/credentials";
 
-import type { AgentProfile, ModelChoice, ProfileResponse } from "../lib/agent-profile";
+import type { ModelChoice, ProfileResponse } from "../lib/agent-profile";
 import ModelPicker from "./model-picker";
 
 type Draft = { mode: "create" | "rotate" | "rename"; ref?: string; label: string; provider: string; value: string; model: string; baseUrl: string };
@@ -146,7 +146,7 @@ export default function CredentialManager({ client, onClose, onChanged, provider
 // can be changed without opening the profile editor. One PUT; it applies to the next task,
 // exactly like every other profile edit.
 export function CredentialSwitcher({ agent, credentials, workspaceRef, workspaceProvider, client, onManage, onSaved, running = false }: {
-  agent: { id: string; name: string; profile?: { model: { inherit: boolean; credentialRef: string; provider: string } } };
+  agent: { id: string; name: string; profile?: { model: { inherit: boolean; credentialRef: string; provider: string; model: string } } };
   credentials: CredentialRecord[];
   workspaceRef: string;
   workspaceProvider: string;
@@ -164,7 +164,7 @@ export function CredentialSwitcher({ agent, credentials, workspaceRef, workspace
   const model = agent.profile?.model;
   const byRef = (ref: string) => credentials.find(item => item.ref === ref);
   const workspaceLabel = byRef(workspaceRef)?.label || (workspaceRef ? `${workspaceRef} — missing` : "None");
-  const current = !model || model.inherit ? `Workspace default` : byRef(model.credentialRef)?.label || (model.credentialRef ? `${model.credentialRef} — missing` : "No credential");
+  const current = !model || model.inherit ? "Workspace default" : `${byRef(model.credentialRef)?.label || (model.credentialRef ? `${model.credentialRef} — missing` : "No credential")}${model.model ? ` · ${model.model}` : ""}`;
   // '' provider credentials fit anywhere, which is what connector and custom-endpoint keys need.
   const effectiveProvider = !model || model.inherit ? workspaceProvider : model.provider;
   const options = credentials.filter(item => !item.provider || !effectiveProvider || item.provider === effectiveProvider);
@@ -203,6 +203,9 @@ export function CredentialSwitcher({ agent, credentials, workspaceRef, workspace
       {error && <p role="alert">{error}</p>}
       {!loaded && !error && <p>Loading current model…</p>}
       {loaded && selection && <fieldset disabled={busy}>
+        {options.length > 0 && <div role="menu" aria-label="Credentials for this provider" className="credential-quick">{options.map(item => <button type="button" role="menuitem" key={item.ref} onClick={() => setSelection(modelForCredential(selection, item))}>
+          <span>{item.label}<small>{item.present ? describeCredential(item) || item.ref : "Value missing"}</small></span>{selection.credentialRef === item.ref && <Check size={14} />}
+        </button>)}</div>}
         <label>Saved credential<select value={selection.credentialRef} onChange={event => {
           const credential = byRef(event.target.value);
           setSelection(credential ? modelForCredential(selection, credential) : { ...selection, credentialRef: '' });
@@ -211,7 +214,7 @@ export function CredentialSwitcher({ agent, credentials, workspaceRef, workspace
         <ModelPicker client={client} {...selection} value={selection.model} onChange={model => setSelection({ ...selection, model })} />
         <details open={Boolean(selection.baseUrl) || ['local', 'custom'].includes(selection.provider)}><summary>Advanced endpoint</summary><label>Model API base URL<input type="url" value={selection.baseUrl} onChange={event => setSelection({ ...selection, baseUrl: event.target.value })} /></label></details>
         <button type="button" className="light-button" disabled={!selection.model.trim() || Boolean(selection.credentialRef && !byRef(selection.credentialRef)?.present)} onClick={() => void choose()}>Apply model and credential</button>
-        <button type="button" onClick={() => void choose(true)}>Use workspace default</button>
+        <button type="button" title={`Workspace credential: ${workspaceLabel}`} onClick={() => void choose(true)}>Use workspace default</button>
       </fieldset>}
       <p>{running ? `${agent.name} is working now. Changes apply to its next task.` : 'Each agent can use any saved credential and choose its own model.'}</p>
       <button type="button" disabled={busy} onClick={() => { setOpen(false); onManage(); }}>Manage credentials…</button>

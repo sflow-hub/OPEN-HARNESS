@@ -6,7 +6,7 @@ import { DEFAULT_MODEL, TOOL_GROUPS, draftProfile, isSandboxedComputer, type Age
 import { initialWorkspace, type Agent } from '../lib/types';
 import { describeCredential, fitsProvider, type CredentialRecord } from '../lib/credentials';
 
-type Props = { agent: Agent; client: ControlClient; onClose: () => void; onSaved: (profile: AgentProfile) => void; initialTab?: Tab; advancedFeatures?: boolean; onManageCredentials?: () => void };
+type Props = { agent: Agent; client: ControlClient; onClose: () => void; onSaved: (profile: AgentProfile) => void; initialTab?: Tab; advancedFeatures?: boolean; onManageCredentials?: () => void; credentialCatalog?: CredentialRecord[] };
 const tabs = [{ id: 'profile', label: 'Profile', icon: UserRound }, { id: 'computer', label: 'Computer', icon: MonitorCog }, { id: 'model', label: 'Model', icon: Cpu }, { id: 'prompt', label: 'System prompt', icon: FileText }, { id: 'tools', label: 'Tools & connections', icon: SlidersHorizontal }] as const;
 type Tab = typeof tabs[number]['id'];
 const serialize = (value: AgentProfile) => JSON.stringify(value);
@@ -16,7 +16,7 @@ function Toggle({ checked, onChange, label, description, mixed = false, disabled
   useEffect(() => { if (ref.current) ref.current.indeterminate = mixed; }, [mixed]);
   return <label className="profile-switch-row"><span><strong>{label}</strong>{description && <small>{description}</small>}</span><input ref={ref} type="checkbox" role="switch" aria-label={label} checked={checked} disabled={disabled} onChange={e => onChange(e.target.checked)} /><span className={`profile-switch ${mixed ? 'mixed' : ''}`} aria-hidden="true" /></label>;
 }
-export default function AgentSettings({ agent, client, onClose, onSaved, initialTab = 'profile', advancedFeatures = false, onManageCredentials }: Props) {
+export default function AgentSettings({ agent, client, onClose, onSaved, initialTab = 'profile', advancedFeatures = false, onManageCredentials, credentialCatalog }: Props) {
   const [draft, setDraft] = useState(() => draftProfile(agent));
   const [baseline, setBaseline] = useState(() => serialize(draftProfile(agent)));
   const [tab, setTab] = useState<Tab>(initialTab);
@@ -93,7 +93,7 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
     let cancelled = false;
     client.request<{ secrets: string[]; credentials?: CredentialRecord[]; storage: 'coordinator' | 'runner' }>(`/v1/machines/${encodeURIComponent(draft.computer.machineId)}/secrets`).then(value => { if (!cancelled) { setSecretNames(value.secrets); setCredentials(value.credentials ?? []); setCredentialStorage(value.storage); } }, err => { if (!cancelled) setComputerStatus(errorText(err)); });
     return () => { cancelled = true; };
-  }, [client, draft.computer.machineId, loading]);
+  }, [client, draft.computer.machineId, loading, credentialCatalog]);
   useEffect(() => {
     if (!transfer || !['queued','exporting','importing','verifying'].includes(transfer.state)) return;
     let cancelled = false, timer: ReturnType<typeof setTimeout>;
