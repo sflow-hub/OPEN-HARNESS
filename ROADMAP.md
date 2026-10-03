@@ -40,16 +40,18 @@ Docker containers. Docker Desktop supplies that environment on Mac and Windows. 
   address reachable by both services. A host-model relay is not implemented.
 - **Desktop installers and signed updates.** No code-signing, notarization, or updater keys
   exist. `desktop-release.yml` is `workflow_dispatch`-only and unverified.
-- **Approvals decided by a guardian model.** `approvals.mode` is `smart`, so Hermes asks an
-  auxiliary model whether a flagged command is safe instead of asking the operator, on the
-  operator's own key. On a live check it approved `chmod 777` against a bind-mounted host folder
-  without asking. `manual` gates only commands Hermes has already flagged and is what the
-  dashboard's approval UI is for; the choice is open.
+- **Approval coverage.** Generated profiles use `manual` following the October 3 beta decision,
+  so Hermes-flagged commands go to the operator. Unattended and scheduled approvals are denied.
+  Hermes still decides which commands to flag; manual mode does not gate every command.
+  Final-image acceptance must confirm approval denial, approval, reconnect and stopping while
+  waiting. The historical guardian-model finding remains in `runtime/VERIFICATION.md`.
 - **A hosted multi-operator service.** The Cloudflare/D1 surface was removed in `0.4.0`: its
   authentication was a single spoofable header with no per-user scoping, and it shipped inside
   the local build. Open Harness's trust model (see [SECURITY.md](SECURITY.md)) assumes one
   trusted operator; serving mutually-untrusted operators is a larger effort than anything here.
-- **Reproducible agent image.** `runtime/hermes/Dockerfile` pins the Hermes commit but floats
-  its apt and pip dependencies.
+- **Reproducible agent image.** Hermes, base images and reviewed OS/browser inputs are pinned;
+  OS/browser packages use signed snapshots and checked identities/hashes. Python and npm
+  dependency resolution is not fully locked, so byte-identical rebuilds are not established.
+  Ship and accept the exact immutable image digests instead of treating a rebuild as equivalent.
 - **Retention.** `events`, `runs`, and `runner_commands` grow without bound; there is no
   pruning and no agent-deletion path that removes a container, profile, and history.
