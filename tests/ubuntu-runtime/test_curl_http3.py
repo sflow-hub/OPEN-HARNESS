@@ -290,6 +290,21 @@ class BuilderGuard(unittest.TestCase):
         self.check(pids=self.pids('2048'))
         self.check(net=self.net(lo='0x9', tunl0='0x80', sit0='0x80'))
 
+    def test_sysfs_metadata_is_not_an_interface_but_live_interfaces_still_fail(self):
+        net = self.net(lo='0x9')
+        (net / 'bonding_masters').write_text('')
+        self.assertEqual(self.check(net=net)['interfacesUp'], ['lo'])
+        (net / 'eth0').mkdir()
+        (net / 'eth0' / 'flags').write_text('0x1003\n')
+        with self.assertRaisesRegex(ohpkg.InputError, "interfaces up during the offline build"):
+            self.check(net=net)
+
+    def test_unreadable_interface_flags_still_fail(self):
+        net = self.net(lo='0x9')
+        (net / 'eth0').mkdir()
+        with self.assertRaises(FileNotFoundError):
+            self.check(net=net)
+
     def test_root_or_other_uid_fails(self):
         for uid in (0, 1000):
             with self.assertRaisesRegex(ohpkg.InputError, 'must run as uid 10001'):

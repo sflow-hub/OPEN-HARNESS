@@ -3309,3 +3309,12 @@ Trivy 0.74.0, binary SHA256
 `d89bcc6510a267f11b773398cbf1be5520ce39f9e8b6633178c4487f05b7d791`.
 Its dedicated vulnerability database was downloaded into the ignored review cache.
 No scan ignores were restored. The prior full soak remains unverified.
+
+The second native build passed signed Debian snapshot retrieval and locked Ubuntu
+installation, then failed at the offline curl-builder guard: this Docker Desktop
+kernel exposes a regular `/sys/class/net/bonding_masters` metadata file beside
+interface directories. The guard tried to read its nonexistent `flags` child.
+The helper now skips regular metadata files, while still rejecting an active
+non-loopback interface or unreadable interface flags. Two regressions cover those
+cases; the curl suite runs 24 tests, OK with eight retained-evidence skips. A third
+native build is running; no image scan or acceptance is recorded as passed.

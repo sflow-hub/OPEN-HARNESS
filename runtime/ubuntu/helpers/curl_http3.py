@@ -113,7 +113,8 @@ def check_builder(rebuild, uid=None, net_dir='/sys/class/net', pids_max=PIDS_MAX
     uid = os.getuid() if uid is None else uid
     require(uid == rebuild['builderUid'], f'build must run as uid {rebuild["builderUid"]}, not {uid}')
     net = Path(net_dir)
-    up = sorted(p.name for p in net.iterdir() if int((p / 'flags').read_text().strip(), 16) & 1) if net.is_dir() else []
+    # sysfs also exposes regular metadata files such as bonding_masters beside interface directories.
+    up = sorted(p.name for p in net.iterdir() if not p.is_file() and int((p / 'flags').read_text().strip(), 16) & 1) if net.is_dir() else []
     require(up == ['lo'], f'interfaces up during the offline build: {up}; expected only the loopback the tests use')
     limit = first_value(pids_max)
     require(limit in ('max', 'unknown') or int(limit) >= rebuild['minimumPidsLimit'],
