@@ -98,7 +98,7 @@ test('two credentials for one provider reach their own agents', async () => {
   const atlasEnv = agentEnv('atlas'), scoutEnv = agentEnv('scout');
   assert.ok(atlasEnv.includes(ATLAS_KEY) && !atlasEnv.includes(SCOUT_KEY), 'atlas must only see its own credential');
   assert.ok(scoutEnv.includes(SCOUT_KEY) && !scoutEnv.includes(ATLAS_KEY), 'scout must only see its own credential');
-  assert.equal(statSync(join(state, 'agents', 'atlas', 'profile', '.env')).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(statSync(join(state, 'agents', 'atlas', 'profile', '.env')).mode & 0o777, 0o600);
   assert.ok((await request<CredentialRecord>(`/v1/credentials/${a.ref}`)).lastUsedAt, 'a run should record usage');
 });
 
@@ -147,7 +147,7 @@ test('deleting rewrites the restricted file without disturbing its neighbours', 
   const stored = JSON.parse(secretsFile());
   assert.ok(!('SCOUT_KEY' in stored), 'the deleted value must be gone from disk');
   assert.ok(stored.controlToken && stored.SHARED_SPARE, 'neighbours and the control token must survive');
-  assert.equal(statSync(join(state, 'secrets.json')).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(statSync(join(state, 'secrets.json')).mode & 0o777, 0o600);
 });
 
 test('switching a credential mid-run applies to the next task only', async () => {

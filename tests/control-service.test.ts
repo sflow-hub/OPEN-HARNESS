@@ -117,7 +117,7 @@ test("authenticates local clients, migrates once, and protects its secret file",
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).reason, "already_migrated");
   assert.equal(readFileSync(join(stateDir, "shared", "notes.md"), "utf8"), "Shared context");
   assert.match(readFileSync(join(stateDir, "agents", "atlas", "profile", "memories", "MEMORY.md"), "utf8"), /concise reports/);
-  assert.equal(statSync(join(stateDir, "secrets.json")).mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal(statSync(join(stateDir, "secrets.json")).mode & 0o777, 0o600);
 });
 
 test('context edits share Hermes memory files and legacy notes cannot overwrite runtime updates', async () => {

@@ -6,7 +6,7 @@ import test from 'node:test';
 import { HERMES_COMMIT, HERMES_IMAGE_TAG, HERMES_RELEASE } from '../lib/hermes-pin';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { RUNTIME_CONTRACT, RUNTIME_LABEL, classifyContract, imageContract } from '../runtime/readiness';
 import { containerSignature } from '../runtime/hermes';
 import { chooseStateDir, withEnvValue } from '../runtime/state-dir';
@@ -64,10 +64,10 @@ test('a container signature changes with the image and with nothing else', () =>
 
 test('chooseStateDir: explicit, then existing state, then a readable project folder, then home', () => {
   const base = { projectDefault: '/proj/.open-harness', homeDefault: '/home/u/.open-harness/proj' };
-  assert.deepEqual(chooseStateDir({ ...base, explicit: '/elsewhere', hasState: () => true, dockerCanRead: () => false }), { path: '/elsewhere', reason: 'explicit' });
-  assert.deepEqual(chooseStateDir({ ...base, hasState: () => true, dockerCanRead: () => false }), { path: '/proj/.open-harness', reason: 'existing' });
-  assert.deepEqual(chooseStateDir({ ...base, hasState: () => false, dockerCanRead: () => true }), { path: '/proj/.open-harness', reason: 'project' });
-  assert.deepEqual(chooseStateDir({ ...base, hasState: () => false, dockerCanRead: () => false }), { path: '/home/u/.open-harness/proj', reason: 'home' });
+  assert.deepEqual(chooseStateDir({ ...base, explicit: '/elsewhere', hasState: () => true, dockerCanRead: () => false }), { path: resolve('/elsewhere'), reason: 'explicit' });
+  assert.deepEqual(chooseStateDir({ ...base, hasState: () => true, dockerCanRead: () => false }), { path: resolve('/proj/.open-harness'), reason: 'existing' });
+  assert.deepEqual(chooseStateDir({ ...base, hasState: () => false, dockerCanRead: () => true }), { path: resolve('/proj/.open-harness'), reason: 'project' });
+  assert.deepEqual(chooseStateDir({ ...base, hasState: () => false, dockerCanRead: () => false }), { path: resolve('/home/u/.open-harness/proj'), reason: 'home' });
 });
 
 test('withEnvValue appends, fills an empty assignment, and never overrides a set one', () => {
