@@ -10,7 +10,7 @@ import { SchemaTooNewError, Store, type RunRow } from "./db";
 import { SecretStore, SecretsUnavailableError } from "./secrets";
 import { PROVIDER_ENDPOINTS, providerModelList } from "./provider-models";
 import { Credentials, CredentialError } from "./credentials";
-import type { CredentialRecord, CredentialUsage, CredentialUse } from "../lib/credentials";
+import { modelForCredential, type CredentialRecord, type CredentialUsage, type CredentialUse } from "../lib/credentials";
 import { assertSandboxedComputer, sharedFolderSource, validateComputerTarget } from './computer-validation';
 import { hermesApprovalDecision, HermesGateway, dockerStatusCached, ensureContainer, stopAgentContainers, stopManagedContainers } from "./hermes";
 import { coordinationSocket } from "./coordination-socket";
@@ -84,13 +84,6 @@ const terminalStates = new Set(['completed', 'failed', 'interrupted', 'cancelled
 const activeStates = new Set(['running', 'waiting_approval', 'waiting_input']);
 const maxTaskQueue = Math.max(1, Number(process.env.MAX_TASK_QUEUE || 100));
 const maxTaskRuns = Math.max(1, Number(process.env.MAX_TASK_RUNS || 3));
-// Two agents could work at once, hard-coded, in a workspace whose whole point is several named
-// agents. Four by default, because each one is a container with its own CPU and memory ceiling,
-// and raisable for a machine that can take it. The per-agent Computer settings still apply, so a
-// profile can hold itself to less.
-const maxActiveAgents = Math.max(1, Number(process.env.OPEN_HARNESS_MAX_ACTIVE_AGENTS || 4));
-// Handoff children run alongside their parent, so the overall ceiling leaves room for them.
-const maxActiveRuns = Math.max(maxActiveAgents, Number(process.env.OPEN_HARNESS_MAX_ACTIVE_RUNS || maxActiveAgents * 2));
 // How long a dispatched run waits for a runner that has stopped heartbeating.
 const REMOTE_OFFLINE_GRACE_MS = Math.max(60_000, Number(process.env.OPEN_HARNESS_REMOTE_OFFLINE_GRACE_MS || 5 * 60_000));
 
@@ -473,11 +466,11 @@ async function execute(run: RunRow) {
 async function pump() {
   if (pumping || recovering || shuttingDown || stoppingSweeps) return; pumping = true;
   try {
-    while (store.activeCount() < maxActiveRuns) {
+    while (store.activeCount() < 4) {
       const next = store.queued().find(candidate =>
         !store.agentBusy(candidate.agent_id) && !executingAgents.has(candidate.agent_id) && !probingAgents.has(candidate.agent_id) && !stoppingAgents.has(candidate.agent_id) && !machines.transferring(candidate.agent_id) &&
         (!tasks.isTaskRun(candidate.id) || tasks.activeRunCount() < maxTaskRuns) &&
-        (candidate.depth > 0 || store.activeTopLevelCount() < maxActiveAgents) && (() => {
+        (candidate.depth > 0 || store.activeTopLevelCount() < 2) && (() => {
           const profile = profiles.get(candidate.agent_id); if (!profile) return true;
           if (blockedComputers.has(profile.computer.machineId)) return false;
           try { if (machines.canAssign(profile.computer.machineId, candidate.agent_id).status !== 'online') return false; } catch { return false; }
@@ -718,6 +711,24 @@ const server = createServer(async (req, res) => {
       }
       try { return json(res, 200, { ...tested, ...profiles.setDefaults(savedModel, revision) }); }
       catch (error) { if (input.apiKey) credentials.remove(savedModel.credentialRef); throw error; }
+    }
+    // The models a saved credential can reach, for every screen that chooses one. Unlike the
+    // per-agent catalogue this needs no container, so it answers in under a second and works
+    // before any agent has ever run.
+    if (['GET', 'POST'].includes(req.method || '') && url.pathname === '/v1/models') {
+      // Unsaved keys only travel in a POST body and are never persisted by discovery.
+      const input = req.method === 'POST' ? await body(req) : { provider: url.searchParams.get('provider'), credentialRef: url.searchParams.get('credentialRef'), baseUrl: url.searchParams.get('baseUrl'), value: undefined };
+      const choice = validateModel({ provider: input.provider || 'custom', model: 'catalog', credentialRef: input.credentialRef || '', baseUrl: input.baseUrl || '' });
+      const provider = choice.provider, ref = choice.credentialRef;
+      if (input.value !== undefined && (typeof input.value !== 'string' || input.value.length > 10000)) throw new CredentialError('Invalid credential value.');
+      const baseUrl = (choice.baseUrl || PROVIDER_ENDPOINTS[provider] || '').replace(/\/$/, '');
+      if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { models: ['mock-atlas', 'mock-scout'] });
+      if (!baseUrl) return json(res, 200, { models: [], error: 'This provider has no model-list address. Enter a model ID, or set the endpoint under Advanced.' });
+      if (!input.value && ref && !secrets.has(ref)) return json(res, 200, { models: [], error: `Save the ${ref} credential first.` });
+      try {
+        const result = await providerModelList(baseUrl, input.value || (ref ? secrets.environment()[ref] || '' : ''), provider);
+        return json(res, 200, result.ok ? { models: result.models } : { models: [], error: PROVIDER_STATUS[result.status] || `The provider returned HTTP ${result.status}.` });
+      } catch (error) { return json(res, 200, { models: [], error: error instanceof Error ? error.message : 'Could not reach the model provider.' }); }
     }
     if (url.pathname === '/v1/machines') {
       if (req.method === 'GET') return json(res, 200, { machines: machines.list() });

@@ -60,7 +60,8 @@ import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import TeamManager, { TeamBadge } from "../components/team-manager";
 import CredentialManager, { CredentialSwitcher } from "../components/credential-manager";
-import { fitsProvider, type CredentialRecord } from "../lib/credentials";
+import ModelPicker from "../components/model-picker";
+import { CREDENTIAL_PROVIDERS, modelForCredential, providerLabel, type CredentialRecord } from "../lib/credentials";
 import { isSandboxedComputer, profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
 import type { Team } from "../lib/team";
 import { APP_VERSION } from "../lib/version";
@@ -230,24 +231,6 @@ export default function Home() {
   const conversation = workspace.conversations.find(
     (c) => c.id === conversationId,
   );
-  const persistentRun = agent ? activeRuns[agent.id] || null : null;
-  const running = Boolean(persistentRun);
-  const anyRunning = Object.keys(activeRuns).length > 0;
-  const agentRunning = (id: string) => Boolean(activeRuns[id]);
-  function startRun(agentId: string, run: PersistentRun) {
-    // followRun calls this on every poll, twice a second. Storing a fresh object each time
-    // re-rendered the whole workspace on a timer whether or not anything had changed, which
-    // replaced DOM nodes under the pointer and made a parked run feel like a stuck page.
-    // Returning the same state tells React there is nothing to do.
-    setActiveRuns(current => {
-      const existing = current[agentId];
-      if (existing && existing.id === run.id && existing.state === run.state && existing.result === run.result && existing.error === run.error && existing.machine_connection === run.machine_connection) return current;
-      return { ...current, [agentId]: run };
-    });
-  }
-  function endRun(agentId: string) {
-    setActiveRuns(current => { if (!(agentId in current)) return current; const next = { ...current }; delete next[agentId]; return next; });
-  }
   const file = workspace.files.find((f) => f.id === selectedFile);
   // The deterministic adapter exists for automated tests only. Treating it as a
   // connected runtime let a source preview display canned prose as an agent reply.
@@ -1311,7 +1294,7 @@ export default function Home() {
           <span className="brand-mark">h</span> open harness{" "}
           <span className="version">/ 01</span>
         </button>
-        <button className="new-button" onClick={newAgent}>
+        <button className="new-button" onClick={newAgent} disabled={running}>
           <Plus size={15} /> New agent
         </button>
         <div className="search-box">
@@ -1474,7 +1457,7 @@ export default function Home() {
                 Your agents{" "}
                 <span>{String(workspace.agents.length).padStart(2, "0")}</span>
               </h2>
-              <button onClick={newAgent}>
+              <button onClick={newAgent} disabled={running}>
                 <Plus size={13} /> Create agent
               </button>
             </div>
@@ -1923,7 +1906,7 @@ export default function Home() {
                 )}
                 <button
                   className="subtle-button"
-                  disabled={anyRunning}
+                  disabled={running}
                   onClick={() => uploadRef.current?.click()}
                 >
                   <Plus size={12} /> Add a file
@@ -2027,7 +2010,7 @@ export default function Home() {
               </div>
               <button
                 className="light-button"
-                disabled={anyRunning}
+                disabled={running}
                 onClick={() => uploadRef.current?.click()}
               >
                 <Plus size={14} /> Add files
@@ -2077,7 +2060,7 @@ export default function Home() {
                     </button>
                     <button
                       aria-label={`Delete ${f.name}`}
-                      disabled={anyRunning}
+                      disabled={running}
                       onClick={() => {
                         if (!confirm(`Delete ${f.name}?`)) return;
                         const drop = () => setWorkspace((w) => ({ ...w, files: w.files.filter((x) => x.id !== f.id) }));

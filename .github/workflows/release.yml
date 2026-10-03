@@ -188,7 +188,6 @@ jobs:
           image-ref: open-harness-hermes:release-candidate
           scanners: vuln,secret
           severity: HIGH,CRITICAL
-          trivyignores: security/trivy-exceptions.yaml
           exit-code: '1'
       - name: Exercise real Hermes protocol and tool enforcement
         run: node --import tsx tests/real-hermes-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/release-hermes.log"

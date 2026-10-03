@@ -4,11 +4,9 @@ import { Check, ChevronDown, Cpu, FileText, LoaderCircle, Plus, RefreshCw, Searc
 import { ControlClient } from '../lib/control-client';
 import { DEFAULT_MODEL, TOOL_GROUPS, draftProfile, isSandboxedComputer, type AgentProfile, type MachineInfo, type ModelCatalog, type ModelChoice, type ProfileResponse, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
 import { initialWorkspace, type Agent } from '../lib/types';
-import { describeCredential, modelForCredential, type CredentialRecord } from '../lib/credentials';
+import { describeCredential, fitsProvider, type CredentialRecord } from '../lib/credentials';
 
-import ModelPicker from './model-picker';
-
-type Props = { agent: Agent; client: ControlClient; onClose: () => void; onSaved: (profile: AgentProfile) => void; initialTab?: Tab; advancedFeatures?: boolean; onManageCredentials?: () => void; credentialCatalog?: CredentialRecord[] };
+type Props = { agent: Agent; client: ControlClient; onClose: () => void; onSaved: (profile: AgentProfile) => void; initialTab?: Tab; advancedFeatures?: boolean; onManageCredentials?: () => void };
 const tabs = [{ id: 'profile', label: 'Profile', icon: UserRound }, { id: 'computer', label: 'Computer', icon: MonitorCog }, { id: 'model', label: 'Model', icon: Cpu }, { id: 'prompt', label: 'System prompt', icon: FileText }, { id: 'tools', label: 'Tools & connections', icon: SlidersHorizontal }] as const;
 type Tab = typeof tabs[number]['id'];
 const serialize = (value: AgentProfile) => JSON.stringify(value);
@@ -18,7 +16,7 @@ function Toggle({ checked, onChange, label, description, mixed = false, disabled
   useEffect(() => { if (ref.current) ref.current.indeterminate = mixed; }, [mixed]);
   return <label className="profile-switch-row"><span><strong>{label}</strong>{description && <small>{description}</small>}</span><input ref={ref} type="checkbox" role="switch" aria-label={label} checked={checked} disabled={disabled} onChange={e => onChange(e.target.checked)} /><span className={`profile-switch ${mixed ? 'mixed' : ''}`} aria-hidden="true" /></label>;
 }
-export default function AgentSettings({ agent, client, onClose, onSaved, initialTab = 'profile', advancedFeatures = false, onManageCredentials, credentialCatalog }: Props) {
+export default function AgentSettings({ agent, client, onClose, onSaved, initialTab = 'profile', advancedFeatures = false, onManageCredentials }: Props) {
   const [draft, setDraft] = useState(() => draftProfile(agent));
   const [baseline, setBaseline] = useState(() => serialize(draftProfile(agent)));
   const [tab, setTab] = useState<Tab>(initialTab);
@@ -31,7 +29,9 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
   const [activeRevision, setActiveRevision] = useState<number | null>(null);
   const [secretNames, setSecretNames] = useState<string[]>([]);
   const [catalog, setCatalog] = useState<ToolCatalog>({ source: 'unavailable', tools: [] });
+  const [models, setModels] = useState<ModelCatalog>({ models: [] });
   const [catalogBusy, setCatalogBusy] = useState(false);
+  const [modelsBusy, setModelsBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [connection, setConnection] = useState('');
   const [checking, setChecking] = useState(false);
@@ -93,7 +93,7 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
     let cancelled = false;
     client.request<{ secrets: string[]; credentials?: CredentialRecord[]; storage: 'coordinator' | 'runner' }>(`/v1/machines/${encodeURIComponent(draft.computer.machineId)}/secrets`).then(value => { if (!cancelled) { setSecretNames(value.secrets); setCredentials(value.credentials ?? []); setCredentialStorage(value.storage); } }, err => { if (!cancelled) setComputerStatus(errorText(err)); });
     return () => { cancelled = true; };
-  }, [client, draft.computer.machineId, loading, credentialCatalog]);
+  }, [client, draft.computer.machineId, loading]);
   useEffect(() => {
     if (!transfer || !['queued','exporting','importing','verifying'].includes(transfer.state)) return;
     let cancelled = false, timer: ReturnType<typeof setTimeout>;
@@ -128,9 +128,16 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
     catch (err) { setCatalog(old => ({ ...old, source: old.tools.length ? 'cached' : 'unavailable', error: errorText(err) })); }
     finally { setCatalogBusy(false); }
   }
+  async function refreshModels() {
+    setModelsBusy(true);
+    try { setModels(await client.request<ModelCatalog>(`${base}/models`)); }
+    catch (err) { setModels({ models: [], error: errorText(err) }); }
+    finally { setModelsBusy(false); }
+  }
   function selectTab(next: Tab) {
     setTab(next);
     if (next === 'tools' && !catalog.tools.length && !catalogBusy) void refreshTools();
+    if (next === 'model' && !models.models.length && !modelsBusy) void refreshModels();
   }
   async function refreshMachines() { setComputerBusy(true); try { const result = await client.request<{ machines: MachineInfo[] }>('/v1/machines'); setMachines(result.machines); } catch (err) { setComputerStatus(errorText(err)); } finally { setComputerBusy(false); } }
   async function createPairing() { setComputerBusy(true); setComputerStatus(''); pairingBaseline.current = new Set(machines.map(machine => machine.id)); try { const result = await client.request<{ command: string; expiresAt: string }>('/v1/machines', { method: 'POST', body: JSON.stringify({ name: pairName, platform: pairPlatform, coordinatorUrl: pairCoordinator.trim() }) }); setPairing(result); setComputerStatus('Pairing code created. Run this command on the computer; this screen will connect it automatically.'); } catch (err) { setComputerStatus(errorText(err)); } finally { setComputerBusy(false); } }
@@ -173,14 +180,15 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
   function toggleTools(ids: string[], on: boolean) {
     edit({ allowedTools: on ? [...new Set([...draft.allowedTools, ...ids])] : draft.allowedTools.filter(id => !ids.includes(id)) });
   }
-  const providers = [...new Set(['xai', 'openrouter', 'anthropic', 'openai', 'local', 'custom', draft.model.provider, ...credentials.map(item => item.provider).filter(Boolean)])];
+  const providers = [...new Set(['xai', 'openrouter', 'anthropic', 'openai', 'local', 'custom', draft.model.provider, ...models.models.map(m => m.provider)])];
   const unknown: ToolInfo[] = draft.allowedTools.filter(id => !catalog.tools.some(t => t.id === id)).map(id => ({ id, name: id.replaceAll('_', ' '), group: 'other', description: 'Previously selected tool.', available: false, reason: 'Not found in the current tool catalog.' }));
   const tools = [...catalog.tools, ...unknown];
   const selectedMachine = machines.find(item => item.id === draft.computer.machineId);
   const platformName = (value?: string) => ({ linux: 'Linux', darwin: 'macOS', win32: 'Windows', unknown: 'Unknown OS' } as Record<string,string>)[value || 'unknown'];
   const credentialLabel = (ref: string) => credentials.find(item => item.ref === ref)?.label || ref;
-  const credentialOptions = (current: string) => {
-    const fitting = credentials;
+  // "" provider credentials fit anywhere, which is what connector secrets need.
+  const credentialOptions = (provider: string, current: string) => {
+    const fitting = credentials.filter(item => fitsProvider(item, provider));
     return <>{fitting.map(item => <option key={item.ref} value={item.ref}>{item.label}{item.present ? '' : ' — missing'}</option>)}{current && !fitting.some(item => item.ref === current) && <option value={current}>{current} — missing</option>}<option value="__manage">＋ Manage credentials…</option></>;
   };
   const chooseCredential = (value: string, apply: (ref: string) => void) => { if (value === '__manage') onManageCredentials?.(); else apply(value); };
@@ -282,7 +290,7 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
           return <details key={id} className="profile-tool-group" open={search ? true : undefined}><summary><ChevronDown size={15} /><span><strong>{title}</strong><small>{enabled} / {members.length} enabled</small></span><span className="profile-group-toggle" onClick={e => e.stopPropagation()}><input type="checkbox" aria-label={`Enable ${title}`} aria-checked={enabled > 0 && enabled < members.length ? 'mixed' : enabled > 0} checked={members.length > 0 && enabled === members.length} disabled={!members.length || (id === 'desktop' && draft.computer.desktop === 'none')} onChange={e => toggleTools(members.map(t => t.id), e.target.checked)} /><span aria-hidden="true" /></span></summary><p className="profile-help">{id === 'desktop' && draft.computer.desktop === 'none' ? 'Choose a desktop in Computer settings to enable this tool.' : description}</p>{filtered.map(tool => <Toggle key={tool.id} label={tool.name} description={`${tool.description.slice(0,180)} · ${id === 'desktop' && draft.computer.desktop === 'none' ? 'Choose a desktop first' : tool.available ? 'Available now' : tool.reason || 'Unavailable'}`} checked={draft.allowedTools.includes(tool.id)} disabled={id === 'desktop' && draft.computer.desktop === 'none'} onChange={on => toggleTools([tool.id], on)} />)}{!members.length && <p className="profile-help">No tools discovered for this group.</p>}</details>;
         })}<p className="profile-info">These switches control Hermes tools. Enabled Terminal can still read workspace files or make network requests. Container isolation remains the filesystem boundary.</p>{advancedFeatures && <><div className="profile-section-heading"><h3><FolderKanban size={18} /> Task board</h3><p>What this agent may do on shared projects. It may always work its own and unassigned cards.</p></div><Toggle label="Change other agents’ cards" description="Otherwise it can only touch unassigned cards and its own." checked={draft.board.assignOthers} onChange={assignOthers => edit({ board: { ...draft.board, assignOthers } })} /><Toggle label="Start other agents’ tasks" description="Still respects each project’s agent-dispatch setting." checked={draft.board.dispatch} onChange={dispatch => edit({ board: { ...draft.board, dispatch } })} /><Toggle label="Create and change projects" description="Name, description, colour, and default owner. It can never delete a project, archive one, or change its automation." checked={draft.board.manageProjects} onChange={manageProjects => edit({ board: { ...draft.board, manageProjects } })} /><div className="profile-section-heading"><h3><Cable size={18} /> MCP connections</h3><p>Test the connection to discover its tools, then enable the ones this agent needs.</p></div>{draft.connectors.map((c, index) => {
           const change = (patch: Partial<typeof c>) => { setConnectorChecks(current => ({ ...current, [c.id]: '' })); edit({ connectors: draft.connectors.map((other, i) => i === index ? { ...other, ...patch } : other) }); };
-          return <div className="profile-connector" key={c.id}><Toggle label={c.name || 'New connection'} description="Connection changes apply to the next task." checked={c.enabled} onChange={enabled => change({ enabled })} /><div className="profile-two-columns"><label>Connection name<input value={c.name} onChange={e => change({ name: e.target.value })} placeholder="my-research-tools" /></label><label>Executable<input value={c.command} onChange={e => change({ command: e.target.value })} placeholder="npx" /></label></div><label>Arguments — one per line<textarea rows={3} value={c.args.join('\n')} onChange={e => change({ args: e.target.value.split('\n') })} placeholder={'-y\n@vendor/mcp-server'} /></label><label>Required saved credential<select value={c.secretRef} onChange={e => chooseCredential(e.target.value, secretRef => change({ secretRef }))}><option value="">None</option>{credentialOptions(c.secretRef)}</select></label><div className="profile-actions"><button type="button" className="subtle-button" disabled={connectorChecks[c.id] === 'Checking…'} onClick={async () => { setConnectorChecks(current => ({ ...current, [c.id]: 'Checking…' })); try { const r = await client.request<{ status: string; error?: string; tools: ToolInfo[] }>(`${base}/connector-check`, { method: 'POST', body: JSON.stringify({ connector: c }) }); setConnectorChecks(current => ({ ...current, [c.id]: r.error || `${r.status} · ${r.tools.length} tools discovered` })); if (r.status === 'connected') setCatalog(old => ({ ...old, tools: [...old.tools.filter(t => !t.id.startsWith(`mcp_${c.name}_`)), ...r.tools] })); } catch (err) { setConnectorChecks(current => ({ ...current, [c.id]: errorText(err) })); } }}>Test connection</button><button type="button" className="subtle-button" onClick={() => edit({ connectors: draft.connectors.filter((_, i) => i !== index), allowedTools: draft.allowedTools.filter(id => !id.startsWith(`mcp_${c.name}_`)) })}><Trash2 size={13} /> Remove</button></div><p role="status" className="profile-help">{connectorChecks[c.id] || 'Not checked. Executable availability alone does not prove a connection.'}</p></div>;
+          return <div className="profile-connector" key={c.id}><Toggle label={c.name || 'New connection'} description="Connection changes apply to the next task." checked={c.enabled} onChange={enabled => change({ enabled })} /><div className="profile-two-columns"><label>Connection name<input value={c.name} onChange={e => change({ name: e.target.value })} placeholder="my-research-tools" /></label><label>Executable<input value={c.command} onChange={e => change({ command: e.target.value })} placeholder="npx" /></label></div><label>Arguments — one per line<textarea rows={3} value={c.args.join('\n')} onChange={e => change({ args: e.target.value.split('\n') })} placeholder={'-y\n@vendor/mcp-server'} /></label><label>Required saved credential<select value={c.secretRef} onChange={e => chooseCredential(e.target.value, secretRef => change({ secretRef }))}><option value="">None</option>{credentialOptions('', c.secretRef)}</select></label><div className="profile-actions"><button type="button" className="subtle-button" disabled={connectorChecks[c.id] === 'Checking…'} onClick={async () => { setConnectorChecks(current => ({ ...current, [c.id]: 'Checking…' })); try { const r = await client.request<{ status: string; error?: string; tools: ToolInfo[] }>(`${base}/connector-check`, { method: 'POST', body: JSON.stringify({ connector: c }) }); setConnectorChecks(current => ({ ...current, [c.id]: r.error || `${r.status} · ${r.tools.length} tools discovered` })); if (r.status === 'connected') setCatalog(old => ({ ...old, tools: [...old.tools.filter(t => !t.id.startsWith(`mcp_${c.name}_`)), ...r.tools] })); } catch (err) { setConnectorChecks(current => ({ ...current, [c.id]: errorText(err) })); } }}>Test connection</button><button type="button" className="subtle-button" onClick={() => edit({ connectors: draft.connectors.filter((_, i) => i !== index), allowedTools: draft.allowedTools.filter(id => !id.startsWith(`mcp_${c.name}_`)) })}><Trash2 size={13} /> Remove</button></div><p role="status" className="profile-help">{connectorChecks[c.id] || 'Not checked. Executable availability alone does not prove a connection.'}</p></div>;
         })}<button type="button" className="subtle-button" onClick={() => edit({ connectors: [...draft.connectors, { id: crypto.randomUUID(), name: '', command: '', args: [], secretRef: '', enabled: true }] })}><Plus size={14} /> Add MCP connection</button></>}{credentialNote}</>}
       </div>
       <footer className="profile-footer" inert={discard}><div className="profile-save-status" aria-live="polite">{error ? <div><p role="alert" className="profile-error">{error}</p>{error.includes('changed elsewhere') && <button type="button" className="subtle-button" onClick={async () => { try { const saved = await client.request<ProfileResponse>(`${base}/profile`); setDraft(saved.profile); setBaseline(serialize(saved.profile)); setError(''); } catch (err) { setError(errorText(err)); } }}>Replace draft with saved version</button>}</div> : success ? <p className="profile-success"><Check size={14} />{success}</p> : <p>{legacyComputer ? 'Computer settings must change before this agent can be saved.' : dirty ? 'Unsaved changes' : draft.revision ? `All changes saved · Revision ${draft.revision}` : 'New agent — not saved yet'}</p>}</div><div className="profile-footer-actions"><button type="button" className="subtle-button" disabled={saving} onClick={close}>Cancel</button><button type="button" className="light-button" disabled={saving || loading || legacyComputer || (!dirty && draft.revision > 0)} onClick={() => void save()}>{saving ? <LoaderCircle size={15} /> : <Check size={15} />}{saving ? 'Saving…' : 'Save changes'}</button></div></footer>

@@ -46,9 +46,6 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
   const [apiKey, setApiKey] = useState('');
   const [secretNames, setSecretNames] = useState<string[]>([]);
   const [modelReady, setModelReady] = useState(false);
-  const [modelOptions, setModelOptions] = useState<string[]>([]);
-  const [modelsBusy, setModelsBusy] = useState(false);
-  const [modelsNote, setModelsNote] = useState('');
 
   async function refresh() {
     setBusy('status'); setMessage('');
@@ -61,35 +58,6 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
     Promise.all([client.request<OnboardingStatus>('/v1/onboarding/status'), client.request<{ secrets: string[] }>('/v1/health')]).then(([value, health]) => { if (!cancelled) { setStatus(value); setSecretNames(value.credentialNames || health.secrets); } }, error => { if (!cancelled) setMessage(error instanceof Error ? error.message : 'Could not check this computer.'); }).finally(() => { if (!cancelled) setBusy(''); });
     return () => { cancelled = true; };
   }, [client]);
-
-  // The model field used to be a bare text box: the operator saved a key and then had to
-  // already know an exact model ID, and for OpenRouter it started empty with nothing to go on.
-  // A newly pasted key can discover models before it is saved to the coordinator.
-  // This fetch sets no state of its own, so the effect below can call it without updating
-  // state synchronously while rendering.
-  async function fetchModels(forProvider: Provider, endpoint: string) {
-    const ref = keyFor(forProvider);
-    if (forProvider === 'local' ? !endpoint.trim() : !secretNames.includes(ref) && (!apiKey || status?.credentialMode === 'runner')) return { models: [] as string[], error: '' };
-    const query = new URLSearchParams({ provider: forProvider, credentialRef: forProvider === 'local' ? '' : ref, baseUrl: forProvider === 'local' ? endpoint.trim() : '' });
-    try {
-      const result = apiKey && forProvider !== 'local' && status?.credentialMode !== 'runner'
-        ? await client.request<{ models: string[]; error?: string }>('/v1/models', { method: 'POST', body: JSON.stringify({ provider: forProvider, value: apiKey }) })
-        : await client.request<{ models: string[]; error?: string }>(`/v1/models?${query}`);
-      return { models: result.models || [], error: result.error || '' };
-    } catch (error) { return { models: [] as string[], error: error instanceof Error ? error.message : 'Could not list models.' }; }
-  }
-  async function loadModels(forProvider: Provider, endpoint: string) {
-    setModelsBusy(true);
-    try { const result = await fetchModels(forProvider, endpoint); setModelOptions(result.models); setModelsNote(result.error); }
-    finally { setModelsBusy(false); }
-  }
-  useEffect(() => {
-    if (step !== 2) return;
-    let cancelled = false;
-    const timer = setTimeout(() => { void fetchModels(provider, baseUrl).then(result => { if (!cancelled) { setModelOptions(result.models); setModelsNote(result.error); } }); }, 350);
-    return () => { cancelled = true; clearTimeout(timer); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, provider, baseUrl, apiKey, status?.credentialMode, secretNames.join(',')]);
 
   async function action(value: NonNullable<ReadinessCheck['action']>) {
     setBusy(value); setMessage(value === 'prepare-runtime' ? 'Preparing the agent runtime. Keep Open Harness open; the first setup can take several minutes.' : 'Starting Docker…');

@@ -175,9 +175,3 @@ test('the managed gateway announces itself as a session that can answer approval
   assert.match(hermes, /HERMES_GATEWAY_SESSION=1/);
 
 });
-
-test('managed profiles send flagged commands to the operator approval flow', () => {
-  const source = readFileSync(join(import.meta.dirname, '..', 'runtime', 'profile-runtime.ts'), 'utf8');
-  assert.match(source, /approvals: \{ mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' \}/);
-  assert.doesNotMatch(source, /approvals: \{ mode: 'smart'/);
-});

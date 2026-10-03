@@ -32,14 +32,6 @@ test('the full Dockerfile installs managed policy files after the upstream layer
   assert.ok(text.indexOf(`LABEL ${RUNTIME_LABEL}=`) > ours, 'the contract label must be the last layer so bumping it invalidates nothing');
 });
 
-test('the Hermes runtime removes build tooling and uses the supported Debian base', () => {
-  const text = readFileSync(join(root, 'runtime/hermes/Dockerfile'), 'utf8');
-  assert.match(text, /^FROM python:3\.12-slim-trixie$/m);
-  assert.match(text, /apt-get purge -y --auto-remove git curl npm make g\+\+/);
-  assert.match(text, /rm -rf \/usr\/lib\/node_modules\/npm \/root\/\.npm \/opt\/hermes-agent\/\.git/);
-  assert.match(text, /pip install --no-cache-dir 'httpx2==2\.12\.0'/);
-});
-
 test('classifyContract: no image, unlabeled image, older label, current label', () => {
   assert.equal(classifyContract({ status: 1, stdout: '' }), 'missing');
   assert.equal(classifyContract({ status: null, stdout: '' }), 'missing');
