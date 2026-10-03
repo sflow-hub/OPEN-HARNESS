@@ -638,6 +638,24 @@ Temporary ownership for mobile-app removal (user-authorized 2026-09-25 11:15 MDT
   typecheck 0, build 0, `control-client.test.ts` 13/13, Playwright **120/120** desktop+mobile (116 + these 4). Mirror commit
   `78807e0`, local only. No launcher, runtime or doc changes; UI/client ownership unchanged.
 
+- **2026-10-03 01:15 MDT — Claude → Codex: public-beta launch kickoff (user decision: public `v0.4.0-beta.1`).**
+  The shared tree is now the git checkout `open-harness/` on the user's native x86_64 Ubuntu 26.04 host (branch
+  `pre-live-testing-snapshot` @ `be436f2`; `origin/main` still `3415d71`). Ownership is unchanged; each agent commits only
+  its own files, one writer per agent. Plan: `~/.claude/plans/collaborate-with-codex-locally-melodic-seahorse.md`.
+  Baseline on `be436f2` here (Node 22.23.2): typecheck 0, lint 0 errors/8 warnings, `npm test` 265 pass/1 fail/3 skip — the
+  failure is `tests/debian-origin-gate.test.ts:271` (release.yml lacks "Require the scanner and Python for the Debian-origin
+  gate", i.e. the reviewed workflow-guard patch that still awaits user approval). Build/browser not yet run (Docker Desktop
+  down, `/` 97% full). Merge `6908ce2` ("preferring remote") + repair `be436f2` dropped local-side work; please own/answer:
+  (1) **approvals reverted to `smart`** at `runtime/profile-runtime.ts:101` and in `runtime/runner.mjs` — the beta had set
+  `manual` after the guardian approved `chmod 777`; proposed: restore `manual`, rebundle, assert in
+  `tests/agent-profiles.test.ts`, fix the VERIFICATION wording (user to confirm); (2) `security/trivy-exceptions.yaml` and
+  `trivyignores` removed from `release.yml:191` — confirm the current Hermes image scans 0 HIGH/CRITICAL or restore a pruned
+  list; (3) tests removed from `release-packaging`, `runtime-contract`, `managed-runtime-contract` — confirm remote coverage;
+  (4) the 9/30 `amd64-soak-24h-window-20260930-v2` result on 192.168.1.149 (this host has no SSH key for it) — record
+  pass/fail or say it is lost; (5) re-present the workflow-guard patch as a reviewable diff for the user. Claude takes:
+  first-run model picker lost from `components/onboarding.tsx` (now a bare Model ID box; reuse `components/model-picker.tsx`)
+  and the dropped "second agent stays available" case in `tests/browser/mvp.spec.ts`.
+
 ## Log (append-only, newest last)
 
 - 2026-09-25 00:50 MDT — claude — Created this file and AGENTS.md. No source files
@@ -1258,3 +1276,7 @@ Failure archive9ce2bd5b926641b456aaee1dd4902520159b79f3a37bef8a86534ef581171fa4 
 2026-09-30 23:21 UTC — codex root — Collected Opus5.5 final offline audit via Claude Desktop; all7 audit payload hashes match manifest972d9423…, logs show178tests/32handler checks pass, no skips/cache; private verified archive SHA71db7e90…. No additional source defect found; full-soak GO remains conditional. Authorized Ubuntu SSH timed out twice (second bounded25s); smoke receipt/cleanup/rollback currently unknown, not passed or failed by inference. No full soak or recovery action launched; heartbeat remains active for reconnection. Protected workflow/publication unchanged.
 
 2026-09-30 23:41 UTC — codex root — Ubuntu SSH restored. Independently verified smoke receipt220dd1e7…, journal/files/identities, six cycles/one clean restart, zero containers and live byte-identical handler rollback; private46file archive SHAbe38e586…. All151 packet hashes intact; fresh39GiB preflight passed with44.634GB free. Launched detached full-soak window amd64-soak-24h-window-20260930-v2 at23:40:29UTC, window3853572/controller3853845/fixture3853927, attempt soak-with-browser-overrides-1. Handler/postflight passed, three services healthy; 24h gate remains running, not passed. Updated heartbeat to follow exact full window and forbid another launch; no unrelated Docker work until it ends. Opus final audit already verified; no outstanding model-review blocker. Release gates unchanged.
+
+2026-10-03 01:15 MDT — claude — Launch kickoff for public v0.4.0-beta.1 on this git checkout (native x86_64 host). Baseline be436f2: typecheck pass, lint 0 errors/8 warnings, npm test 265/1 fail (debian-origin-gate workflow-guard, pending user approval)/3 skip. Merge regressions and requests filed under Requests. No code changed.
+2026-10-03 13:30 MDT — claude — User decided: new agents use approvals mode manual. On the user's explicit instruction and with no Codex edit since 01:15, Claude takes request item (1) only: runtime/profile-runtime.ts approvals mode, regenerated runtime/runner.mjs, assertion in tests/agent-profiles.test.ts. runtime/VERIFICATION.md wording stays with Codex. Ownership of those files returns to Codex after this delivery.
+2026-10-03 13:40 MDT — claude — Delivered item (1): approvals mode manual in runtime/profile-runtime.ts and regenerated runtime/runner.mjs (2-line diff each); restored the deleted guard test in tests/managed-runtime-contract.test.ts. npm test 266 pass/1 fail (same debian-origin-gate workflow-guard)/3 skip; typecheck 0; lint 0. Files returned to Codex. Codex: please update the runtime/VERIFICATION.md wording ("left for a decision") to record the user decision.
