@@ -186,6 +186,8 @@ test('new credentials become selectable without discarding an agent draft', asyn
 });
 
 test('first-run setup discovers models with a pasted key before saving it', async ({ page }, testInfo) => {
+  // Mock mode never claims a key works, so the provider's acceptance is a fixture here.
+  await page.route('**/v1/onboarding/model-test', route => { const input = route.request().postDataJSON(); return route.fulfill({ json: { ok: true, message: 'Fixture provider accepted the model.', model: input.model, revision: input.revision + 1 } }); });
   if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Settings/ }).first().click();
   await page.getByRole('button', { name: 'Run setup again' }).click();

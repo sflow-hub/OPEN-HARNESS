@@ -40,7 +40,7 @@ test('a rejected onboarding key preserves the selected saved credential and work
   const validation = page.waitForRequest(candidate => candidate.url().endsWith('/v1/onboarding/model-test'));
   await setup.getByRole('button', { name: 'Save and test' }).click();
   const input = (await validation).postDataJSON();
-  await expect(setup.getByRole('status')).toContainText('Candidate API key rejected');
+  await expect(setup.getByRole('status').filter({ hasText: 'Candidate API key rejected' })).toBeVisible();
   expect(await (await request.get(control + '/v1/workspace/model', { headers })).json()).toEqual(saved);
   expect(input).toMatchObject({ apiKey: 'rejected-candidate-key', save: true, revision: saved.revision, model: { credentialRef: created.ref } });
   const list = await (await request.get(control + '/v1/credentials', { headers })).json();

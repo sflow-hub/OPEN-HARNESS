@@ -6,6 +6,7 @@ import type { ModelChoice } from '../lib/agent-profile';
 import { ControlClient } from '../lib/control-client';
 import type { OnboardingStatus, ReadinessCheck } from '../lib/onboarding';
 import { PROVIDERS, type Provider } from '../lib/provider';
+import ModelPicker from './model-picker';
 
 type Props = {
   client: ControlClient;
@@ -113,7 +114,7 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
       {step === 2 && <div className="onboarding-step">
         <p className="onboarding-lead">Use an API key from a model provider, or connect a compatible model server running on your network.</p>
         <label>Provider<select value={provider} onChange={event => { const next = event.target.value as Provider; setProvider(next); setModelId(PROVIDERS[next].model); setBaseUrl(''); setMessage(''); }}>{Object.entries(PROVIDERS).map(([id, value]) => <option key={id} value={id}>{value.label}</option>)}</select></label>
-        <label>Model<input value={modelId} onChange={event => setModelId(event.target.value)} placeholder="Model ID" /></label>
+        <ModelPicker client={client} provider={provider === 'local' ? (baseUrl.trim() ? provider : '') : (apiKey && status?.credentialMode !== 'runner') || secretNames.includes(savedKeyFor(provider)) ? provider : ''} credentialRef={provider === 'local' ? '' : savedKeyFor(provider)} apiKey={status?.credentialMode === 'runner' ? '' : apiKey} baseUrl={provider === 'local' ? baseUrl.trim() : ''} value={modelId} onChange={setModelId} />
         {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder={selfHosted ? 'https://models.example.com/v1' : 'http://127.0.0.1:11434/v1'} /><small>{selfHosted ? 'Enter an OpenAI-compatible API address that the coordinator and the agent containers can reach over the network. localhost, 127.0.0.1 and host.docker.internal on this computer are refused here.' : 'Enter the OpenAI-compatible API address shown by your model app.'}</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(savedKeyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a></small></label>}
         {message && <p className={`onboarding-message ${modelReady ? 'success' : ''}`} role="status">{message}</p>}
         <div className="onboarding-actions"><button type="button" className="subtle-button" onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</button><button type="button" className="light-button" disabled={busy === 'model'} onClick={saveModel}>{busy === 'model' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Save and test</button></div>
