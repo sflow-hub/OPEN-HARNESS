@@ -72,7 +72,7 @@ class FinalPackageSet(unittest.TestCase):
         data = support.read_json(report)
         self.assertEqual((data['installed'], data['locked'], data['missing'], data['unexpected'], data['different']),
                          (331, 331, [], {}, {}))
-        self.assertIn('This lock has not been built for AMD64', data['validation'])
+        self.assertEqual(data['validation'], self.lock['validation']['amd64'])
 
     def test_previous_amd64_set_reproduces_the_recorded_failure_exactly(self):
         path = self.status({k: list(v) for k, v in self.lock['finalPackages']['amd64'].items()})

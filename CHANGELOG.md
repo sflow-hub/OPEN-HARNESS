@@ -27,6 +27,7 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 - Count agents inheriting the workspace credential in its usage, and require explicit deletion when an active task still uses a credential after its agent switches away. (codex)
 
+- Require runtime contract 11 with signed Chromium/OpenSSL security inputs, guarded PyJWT and npm dependency fixes, and a cache-policy backport. Known issue: scanners still identify npm's http-cache-semantics 4.2.0 (CVE-2026-93748); no scan exception is active and publication remains blocked pending review and acceptance. (codex)
 - Fetch locked Debian browser packages from the signed snapshot at the reviewed input cutoff, so live mirror updates cannot make the pinned Hermes runtime unbuildable. Package identities and hashes remain enforced. (codex)
 
 - Refresh the coordinator and agent image dependencies, keep the coordinator as a Docker client without a redundant daemon, and require a full runtime-contract-6 rebuild. Image publication remains gated on security scans and platform acceptance. (codex)

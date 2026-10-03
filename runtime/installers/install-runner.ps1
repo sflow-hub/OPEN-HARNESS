@@ -11,7 +11,7 @@ $NodeVersion = "v22.23.2"
 $Arch = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") { "arm64" } else { "x64" }
 $NodeDir = Join-Path $InstallDir "node"
 $Node = Join-Path $NodeDir "node.exe"
-New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "runtime\hermes\extension"), (Join-Path $InstallDir "runtime\ubuntu\helpers"), (Join-Path $InstallDir "runtime\ubuntu\lock"), $StateDir | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "runtime\hermes\extension"), (Join-Path $InstallDir "runtime\hermes\vendor\http-cache-semantics"), (Join-Path $InstallDir "runtime\ubuntu\helpers"), (Join-Path $InstallDir "runtime\ubuntu\lock"), $StateDir | Out-Null
 
 Write-Host "Installing Open Harness runner..."
 if (-not (Test-Path $Node)) {
@@ -30,7 +30,7 @@ function Get-RunnerFile([string]$Path) {
   Invoke-WebRequest "$Coordinator/v1/install/file?path=$([uri]::EscapeDataString($Path))" -Headers $Headers -OutFile $Destination
 }
 Get-RunnerFile "runtime/runner.mjs"
-@("Dockerfile", "NOTICE.md", "container-init.sh", "browser_shutdown.py", "cua_compat.py", "coordination.mjs", "gateway-entry.mjs", "model-proxy.mjs", "inspect_runtime.py", "managed_entry.py", "security-constraints.txt", "apply-security-overrides.py", "extension/open_harness_policy.py", "extension/pyproject.toml") | ForEach-Object { Get-RunnerFile "runtime/hermes/$_" }
+@("Dockerfile", "NOTICE.md", "container-init.sh", "browser_shutdown.py", "cua_compat.py", "coordination.mjs", "gateway-entry.mjs", "model-proxy.mjs", "inspect_runtime.py", "managed_entry.py", "security-constraints.txt", "apply-security-overrides.py", "apply-npm-security-overrides.py", "npm-security-overrides.json", "vendor/http-cache-semantics/index.js", "vendor/http-cache-semantics/package.json", "vendor/http-cache-semantics/LICENSE", "extension/open_harness_policy.py", "extension/pyproject.toml") | ForEach-Object { Get-RunnerFile "runtime/hermes/$_" }
 
 @("helpers/check-native-platform.sh", "helpers/ubuntu-snapshot.sh", "helpers/check_packages.py", "helpers/curl_http3.py", "helpers/debian_inputs.py", "helpers/debian_origin.py", "helpers/elf_arch.py", "helpers/ohpkg.py", "lock/runtime-inputs.lock.json", "lock/ubuntu-os-packages.txt") | ForEach-Object { Get-RunnerFile "runtime/ubuntu/$_" }
 

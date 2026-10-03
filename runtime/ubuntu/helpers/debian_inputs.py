@@ -42,8 +42,8 @@ def expected_identity(name, record, arch):
 
 
 def snapshot_sources(lock):
-    # Both distributions use the reviewed input cutoff; package identities/hashes still come from the lock.
-    snapshot = lock['ubuntu']['snapshot']
+    # Package identities/hashes remain locked even when Debian receives a newer security cutoff.
+    snapshot = lock['debian'].get('snapshot', lock['ubuntu']['snapshot'])
     require(isinstance(snapshot, str) and re.fullmatch(r'[0-9]{8}T[0-9]{6}Z', snapshot), 'invalid snapshot timestamp')
     try:
         datetime.datetime.strptime(snapshot, '%Y%m%dT%H%M%SZ')

@@ -5,7 +5,7 @@
 # The fixed snapshot is fetched over HTTPS, and the base image has no CA certificates. Bootstrap ca-certificates from
 # the signed live archive; older versions may have rotated out. This also installs or upgrades OpenSSL packages.
 # After the switch, every package that bootstrap installed or changed is reinstalled from the snapshot: base-image
-# packages at their base version, new packages at their OS-list pin. The dpkg state must then be exactly the base
+# packages at their explicit OS-list pin when present, otherwise their base version. The dpkg state must then be exactly the base
 # state plus those pins. Signature checks are unchanged (the base image's Ubuntu archive keyring verifies the live
 # and snapshot InRelease files), every update fails on any fetch error, and every package index must be the snapshot.
 set -eu
@@ -53,7 +53,7 @@ awk -v want="^https://snapshot[.]ubuntu[.]com/[a-z-]+/$snapshot\$" '
   END { if (!files) { print "ubuntu-snapshot: APT has no package indexes" > "/dev/stderr"; bad = 1 } exit bad }' "$work/policy" \
   || fail "APT is not limited to snapshot $snapshot"
 
-# Target state: the base packages at their base versions plus the bootstrap's new packages at their pins.
+# Target state: explicit pins take precedence over old base versions, including reviewed security updates.
 awk -v pins="$pins" -v expected="$work/expected" '
   BEGIN { while ((getline line < pins) > 0) { i = index(line, "="); pin[substr(line, 1, i - 1)] = substr(line, i + 1) } }
   FNR == NR { base[$1] = $2; next }
@@ -61,8 +61,8 @@ awk -v pins="$pins" -v expected="$work/expected" '
   END {
     for (p in base) if (!(p in now)) { print "ubuntu-snapshot: the CA bootstrap removed " p > "/dev/stderr"; bad = 1 }
     for (p in now) {
-      if (p in base) want = base[p]
-      else if (p in pin) want = pin[p]
+      if (p in pin) want = pin[p]
+      else if (p in base) want = base[p]
       else { print "ubuntu-snapshot: the CA bootstrap installed " p ", which the OS package list does not pin" > "/dev/stderr"; bad = 1; continue }
       print p, want > expected
       if (now[p] != want) print p "=" want

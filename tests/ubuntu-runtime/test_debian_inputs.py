@@ -233,7 +233,7 @@ class SnapshotSources(unittest.TestCase):
     def test_signed_snapshot_sources_keep_binary_and_source_packages(self):
         lock = support.load_lock()
         text = debian_inputs.snapshot_sources(lock)
-        snapshot = lock['ubuntu']['snapshot']
+        snapshot = lock['debian'].get('snapshot', lock['ubuntu']['snapshot'])
         for archive in ('debian', 'debian-security'):
             self.assertIn(f'https://snapshot.debian.org/archive/{archive}/{snapshot}/', text)
         self.assertEqual(text.count('Types: deb deb-src'), 2)
@@ -245,10 +245,17 @@ class SnapshotSources(unittest.TestCase):
     def test_invalid_snapshot_or_suite_is_rejected(self):
         for snapshot in ('20260929T180000Z\nTrusted: yes', '20261329T180000Z', ''):
             lock = support.load_lock()
-            lock['ubuntu']['snapshot'] = snapshot
+            lock['debian']['snapshot'] = snapshot
             with self.assertRaisesRegex(ohpkg.InputError, 'invalid snapshot timestamp'):
                 debian_inputs.snapshot_sources(lock)
         lock = support.load_lock()
         lock['debian']['suite'] = 'trixie\nTrusted: yes'
         with self.assertRaisesRegex(ohpkg.InputError, 'unsupported Debian snapshot suite'):
             debian_inputs.snapshot_sources(lock)
+
+    def test_debian_security_cutoff_does_not_change_ubuntu_sources(self):
+        lock = support.load_lock()
+        lock['debian']['snapshot'] = '20261003T180000Z'
+        lock['ubuntu']['snapshot'] = '20260929T180000Z'
+        self.assertIn('/20261003T180000Z/', debian_inputs.snapshot_sources(lock))
+        self.assertNotIn('/20260929T180000Z/', debian_inputs.snapshot_sources(lock))

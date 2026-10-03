@@ -31,8 +31,8 @@ COPY runtime/ubuntu/lock/ /opt/open-harness-build/lock/
 RUN chmod -R a+rX /opt/open-harness-build \
  && cd /opt/open-harness-build/lock \
  && printf '%s  %s\n' \
-      fca5697674b3d2a7a9945982f2bb7d18e5374160eb479fb969bcb83f0892d491 runtime-inputs.lock.json \
-      412125b2cc346b4db3eadcb662d740060b1ed9ef3f8d14db86da048ac5c73d5b ubuntu-os-packages.txt \
+      3e95f37c7aba00af052709df4145cfc9faa92b6dae8b9d4182c83a5a13a504bb runtime-inputs.lock.json \
+      cd0b460b36a9b5c41a024a1c3da5496b182f1bae6519d7da9374f9d2f83d2de3 ubuntu-os-packages.txt \
     | sha256sum --check --strict - \
  && sh /opt/open-harness-build/helpers/check-native-platform.sh \
  && python3 /opt/open-harness-build/helpers/debian_inputs.py plan --lock runtime-inputs.lock.json --arch "$TARGETARCH"
@@ -62,7 +62,7 @@ ARG BUILDARCH
 ARG OPEN_HARNESS_BUILD_MODE
 RUN --mount=type=bind,from=build-inputs,source=/opt/open-harness-build,target=/opt/open-harness-build \
     sh /opt/open-harness-build/helpers/check-native-platform.sh \
- && sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh 20260929T180000Z /opt/open-harness-build/lock/ubuntu-os-packages.txt \
+ && sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh 20261003T180000Z /opt/open-harness-build/lock/ubuntu-os-packages.txt \
  && sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
  && apt-get -o Acquire::Retries=0 update \
  && DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends build-dep curl=8.18.0-1ubuntu2.7 \
@@ -94,7 +94,7 @@ LABEL dev.openharness.build.mode=$OPEN_HARNESS_BUILD_MODE
 # The exact manual package list of root's tested OS candidate (tools, desktop, libtk8.6, Python's libraries).
 RUN --mount=type=bind,from=build-inputs,source=/opt/open-harness-build,target=/opt/open-harness-build \
     sh /opt/open-harness-build/helpers/check-native-platform.sh \
- && sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh 20260929T180000Z /opt/open-harness-build/lock/ubuntu-os-packages.txt \
+ && sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh 20261003T180000Z /opt/open-harness-build/lock/ubuntu-os-packages.txt \
  && apt-get update \
  && DEBIAN_FRONTEND=noninteractive xargs --no-run-if-empty --delimiter='\n' \
       --arg-file=/opt/open-harness-build/lock/ubuntu-os-packages.txt \
@@ -147,6 +147,11 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && npm install -g --registry=https://registry.npmjs.org npm@11.20.0 \
  && test "$(node --version)" = v24.21.0 && test "$(npm --version)" = 11.20.0 \
  && npm cache clean --force
+COPY runtime/hermes/apply-npm-security-overrides.py runtime/hermes/npm-security-overrides.json /opt/open-harness/
+COPY runtime/hermes/vendor/ /opt/open-harness/vendor/
+RUN python3 /opt/open-harness/apply-npm-security-overrides.py /usr/local/lib/node_modules/npm /opt/open-harness/node/security-overrides.json \
+ && npm --version \
+ && node -e "const r=require;const p='/usr/local/lib/node_modules/npm/node_modules/'; if(r(p+'brace-expansion/package.json').version!=='5.0.11'||r(p+'undici/package.json').version!=='6.28.1')process.exit(1)"
 RUN ln -s "$(dpkg-query -L libnss-wrapper | grep '/libnss_wrapper.so$')" /usr/local/lib/open-harness-nss-wrapper.so
 ARG HERMES_COMMIT=939e45c91d751fadd94dcd1b873ac3cb44846213
 COPY runtime/hermes/security-constraints.txt runtime/hermes/apply-security-overrides.py /opt/open-harness/
@@ -189,7 +194,7 @@ ENV HERMES_HOME=/home/hermes/.hermes HERMES_TUI=1 PYTHONUNBUFFERED=1 \
 WORKDIR /workspace/shared
 # Read by Open Harness to tell whether this image predates a fix; must equal
 # RUNTIME_CONTRACT in runtime/readiness.ts. Last so bumping it invalidates nothing heavier.
-ARG OPEN_HARNESS_RUNTIME=10
+ARG OPEN_HARNESS_RUNTIME=11
 USER root
 RUN printf '%s\n' "$OPEN_HARNESS_RUNTIME" > /opt/open-harness/runtime-contract
 USER hermes

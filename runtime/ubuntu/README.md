@@ -15,7 +15,7 @@ to the Ubuntu image.
 The lock records the reviewed input selection and evidence-bound architecture
 corrections. Its `validation` field describes what each architecture has actually
 verified; detailed execution evidence belongs in `runtime/VERIFICATION.md`.
-Ubuntu APT uses the fixed, signed `20260929T180000Z` snapshot after a temporary
+Ubuntu APT uses the fixed, signed `20261003T180000Z` snapshot after a temporary
 `ca-certificates` bootstrap from the signed live archive. That bootstrap uses the
 available archive version so rotation of older packages cannot prevent setup;
 the final CA package must still match its exact snapshot pin. The helper verifies
@@ -24,7 +24,7 @@ package changes to their locked versions. Explicit snapshot source URLs keep lat
 image layers pinned after cached indexes are removed, on both architectures.
 If an exact input disappears or the
 snapshot cannot be verified, the build fails rather than accepting another
-version. The Debian input stage uses the same reviewed cutoff in the signed
+version. The Debian input stage uses the separately recorded reviewed cutoff in the signed
 Debian and Debian-security snapshot archives, with both binary and source indexes.
 As [Debian documents](https://snapshot.debian.org/#usage), historical snapshot
 Release expiry is disabled only for those sources; archive-keyring signatures and
@@ -38,9 +38,15 @@ OpenSSL and language dependencies; it is not an accepted release image. See
 The portable ARM64 candidate built on September 29, 2026 and verified all 329
 packages and 90 native files. The curl distribution's `test-nonflaky` policy
 ignored test 1510 in both flavours, with 149 OpenSSL and 152 GnuTLS tests skipped.
-That build is not proof of final contract-7 image security or functional acceptance.
+That build is not proof of final contract-8 image security or functional acceptance.
 Whole-image and supplemental Debian-origin scans, actual tools and desktop checks,
 platform acceptance and the final soak remain release requirements.
+
+The contract-8 security refresh pins Chromium 154.0.8037.92 and OpenSSL
+3.5.5-1ubuntu3.7 using authenticated October 3 indexes. Its native AMD64
+build passed package, linkage and provenance checks; refreshed image scans and
+functional acceptance remain required. Historical evidence-reader fixtures retain
+the original September 29 lock instead of treating those receipts as new-image evidence.
 
 ## Supplemental Debian-origin release gate
 

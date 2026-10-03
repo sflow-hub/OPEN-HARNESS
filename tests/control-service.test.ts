@@ -69,6 +69,7 @@ test('runner installers supply the Dockerfile file inputs through the restricted
     inputs.push(...readdirSync(join(repo, directory)).filter(name => statSync(join(repo, directory, name)).isFile()).map(name => `${directory}/${name}`));
   }
   inputs.push('runtime/hermes/browser_shutdown.py');
+  inputs.push(...readdirSync(join(repo, 'runtime/hermes/vendor/http-cache-semantics')).map(name => `runtime/hermes/vendor/http-cache-semantics/${name}`));
   assert.ok(inputs.length > 0);
   const powershell = await (await fetch(`${base}/v1/install/runner.ps1`)).text();
   for (const path of inputs) {

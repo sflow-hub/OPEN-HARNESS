@@ -3407,6 +3407,58 @@ Claude was asked for independent review through COORDINATION.md. Runtime exercis
 publication, clean-host acceptance/recovery and final soak remain blocked/pending;
 the September 30 final soak evidence remains unverified.
 
+
+## October 3 contract-8 native AMD64 security refresh
+
+This was contract 8 on this branch before it was rebased; the same fixes now ship as
+contract 11. It is unrelated to the upstream contract-8 image of November 2.
+
+The final image is `sha256:d068b29df23f947c53e937aa3f9b06cfe4d9732369ece2de8c7fc29d9f076355`.
+Signed October 3 Ubuntu/Debian inputs pin Chromium 154.0.8037.92 and OpenSSL
+3.5.5-1ubuntu3.7. Hash-guarded Hermes manifest overrides install PyJWT 2.15.1;
+integrity-verified npm archives install brace-expansion 5.0.11 and undici 6.28.1.
+A source-hash-guarded cache backport enforces revalidation for restricted shared
+responses. The build passed exact packages, ELF/linkage, Debian provenance,
+lazy dependency checks and pip check. Runtime contract 8 forces a full rebuild.
+
+The unchanged exact-image Debian-origin gate passed both component scans, SBOM
+validation and the deliberately vulnerable negative control. The whole-image
+scan still exits 1: exactly one HIGH finding, CVE-2026-93748 against npm's
+http-cache-semantics 4.2.0 at
+`usr/local/lib/node_modules/npm/node_modules/http-cache-semantics/package.json`;
+zero CRITICAL and zero secrets. The previous Chromium/OpenSSL/PyJWT/brace-expansion/
+undici findings are absent. Trivy 0.74.0 used the October 3 database SHA256
+`004acbf4d8b0d8527987d80f0b98a6eea54c0fd8ac26d4cf728de2adbaf4abb5`.
+Both named probe containers are absent; source-only shared fixture evidence was
+copied, hashes checked and the fixture removed. Raw reports and failure evidence
+remain in `work/release-review-20261003/security-refresh/debian-origin-fixed`.
+No passing gate receipt exists, and no release/protocol/desktop acceptance is claimed.
+
+A separate network-disabled, read-only, non-root image check verified the two npm
+patch versions, backport SHA256
+`e98cf757fe9fecdcf0b92b9600a294758e941abd30fdde8ea69b96f221c301d2`,
+installed override receipt and private-cookie leak regression. Upstream package
+version remains truthful; this mitigation does not claim an upstream fixed release.
+
+Shared Node tests: 279 pass, 3 skip; runtime Python: 167 run, 31 skip, OK.
+Shared typecheck/build pass; lint has zero errors and five existing warnings.
+Claude's ongoing folder UI/browser changes require their own final browser acceptance.
+The isolated security-only source also passes Node (270/3 skip), Python,
+typecheck, lint and build. Tests are mock/fixture coverage except the explicitly
+identified build, scans and image cache check.
+
+The proposed single-CVE/path/version exception is unapplied in
+`work/release-review-20261003/security-refresh/runtime-exception.patch`.
+Automatic approval review requires direct approval in this chat and rejected
+Claude's relayed decision as insufficient. It expires November 2 UTC or retires
+earlier on an upstream release/source change; all other findings still fail.
+Security thresholds and active exception-free validators remain unchanged.
+Publication remains blocked until a reviewed passing exact-image receipt,
+clean-host/runtime and recovery acceptance, engine identities, and final soak.
+September 30 final soak receipts, journal and cleanup remain locally unavailable
+and unverified; recover and independently verify them or run a replacement
+qualifying final-image soak. Rescan immediately before release; newer Chromium
+advisories may require another authenticated pin refresh.
 October 29 persistent teammate workflows and delivery
 ----------------------------------------------------
 

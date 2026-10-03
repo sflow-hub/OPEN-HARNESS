@@ -1,7 +1,7 @@
 # Runtime dependency packaging
 
 These dependency updates are integrated into unreleased source under runtime
-contract 10. They are not a released or scan-approved image. Hermes stays pinned to
+contract 11. They are not a released or scan-approved image. Hermes stays pinned to
 `939e45c91d751fadd94dcd1b873ac3cb44846213`.
 No reasoning-loop source is modified.
 
@@ -28,8 +28,13 @@ contract-6 image evidence is recorded separately in `runtime/VERIFICATION.md`.
   This avoids keeping the replaced distribution's older JavaScript dependencies
   and does not introduce a second distro Python through NodeSource.
 - npm: 11.20.0 replaces 11.19.0. Its verified official archive bundles
-  `brace-expansion` 5.0.9, `ip-address` 10.5.0 and `tar` 7.5.22, which meet the fixes
-  listed by the baseline scan. Whole-package installation preserves npm consistency.
+  `ip-address` 10.5.0 and `tar` 7.5.22. Integrity-verified patch archives replace
+  brace-expansion with 5.0.11 and undici with 6.28.1. Original package versions
+  and source hashes are checked before any mutation. A reviewed max-stale backport
+  prevents shared-cache reuse forbidden by no-cache, proxy-revalidate or private
+  Set-Cookie responses. Its upstream http-cache-semantics version remains 4.2.0;
+  scanners can still report CVE-2026-93748. The release gate remains strict; a
+  proposed narrow exception requires direct approval and is not active.
 - Python: `httpx2` 2.7.0 and its matching `httpcore2` 2.7.0 become 2.12.0.
   `httpx2` 2.12.0 requires `httpcore2==2.12.0`; MCP 2.0.0 permits `httpx2>=2.5.0`.
   CVE-2026-84381 is fixed in 2.10.0; CVE-2026-84382 requires httpx2 2.12.0.
@@ -37,7 +42,9 @@ contract-6 image evidence is recorded separately in `runtime/VERIFICATION.md`.
   `httpx2==2.7.0` declarations (dev, MCP, computer-use extras). A separate original
   SHA256 check covers the one matching requirement in `tools/lazy_deps.py`;
   otherwise real computer-use startup attempts to restore the vulnerable pin.
-  Both files are verified before either is written. No control flow changes.
+  The manifest also upgrades PyJWT[crypto] 2.13.0 to 2.15.1.
+  Both files and every original pin count are verified before either is written.
+  No Hermes control flow changes.
   Constraints enforce the matching pair during installation, and `pip check`
   plus real protocol and desktop fixtures must pass.
 - Provider construction needs exact lazy-dependency pins before the agent runs.

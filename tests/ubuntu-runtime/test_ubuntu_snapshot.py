@@ -88,6 +88,14 @@ class SnapshotHelper(unittest.TestCase):
         state = json.loads((self.dir / 'state.json').read_text())
         return result, state, [call[1:] for call in state['calls'] if call[0] == 'apt-get']
 
+    def test_security_pins_override_vulnerable_base_versions(self):
+        pins = PINS.replace('3.5.5-1ubuntu3.5', '3.5.5-1ubuntu3.7') + 'libssl3t64=3.5.5-1ubuntu3.7\nopenssl-provider-legacy=3.5.5-1ubuntu3.7\n'
+        result, state, _ = self.run_helper(pins=pins)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ('libssl3t64', 'openssl', 'openssl-provider-legacy'):
+            self.assertEqual(state['installed'][name], '3.5.5-1ubuntu3.7')
+        self.assertEqual(state['installed']['libc6'], BASE['libc6'])
+
     def test_bootstrap_changes_are_reinstalled_from_the_snapshot_exactly(self):
         result, state, apt = self.run_helper()
         self.assertEqual(result.returncode, 0, result.stderr)

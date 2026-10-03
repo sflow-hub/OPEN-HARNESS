@@ -14,6 +14,14 @@ from support import ohpkg
 sys.path.insert(0, str(support.PACKAGE / 'tools'))
 import derive_lock  # noqa: E402
 
+# Historical evidence readers must use the original inputs, not a moving security release lock.
+HISTORICAL_OS = support.HERE / 'fixtures/ubuntu-os-packages-20260929.txt'
+
+
+def historical_lock():
+    return json.loads((support.HERE / 'fixtures/runtime-inputs-20260929.lock.json').read_text())
+
+
 # The shape of the retained AMD64 build log: the OS package list step, another step, and the verify step.
 SYNTHETIC_BUILD_LOG = '''\
 #15 [runtime  1/20] RUN --mount=type=bind,from=build-inputs,source=/opt/open-harness-build,target=/opt/open-harness-build \
@@ -53,7 +61,7 @@ def without_snapshot(lock):
 
 def synthetic_probe(lock, arch):
     """A probe Dockerfile and build log shaped like root's, resolving the unchanged OS list to arch's locked set."""
-    pins = dict(p.split('=', 1) for p in support.OS_PACKAGES.read_text().splitlines())
+    pins = dict(p.split('=', 1) for p in HISTORICAL_OS.read_text().splitlines())
     final, other = lock['finalPackages'][arch], lock['finalPackages']['arm64' if arch == 'amd64' else 'amd64']
     setup = f'printf \'APT::Snapshot "{support.UBUNTU_SNAPSHOT}";\\n\' > /etc/apt/apt.conf.d/99-open-harness-snapshot'
     simulate = "xargs --no-run-if-empty --delimiter='\\n' --arg-file=/tmp/ubuntu-os-packages.txt apt-get -s install --no-install-recommends"
@@ -77,7 +85,7 @@ class LockConsistency(unittest.TestCase):
         self.assertEqual(support.sha256(text.encode()), self.lock['ubuntu']['osPackagesSha256'])
         pins = text.splitlines()
         self.assertEqual(len(pins), self.lock['ubuntu']['osPackageCount'])
-        self.assertEqual(len(pins), 203)
+        self.assertEqual(len(pins), 205)
         self.assertEqual(len({p.split('=')[0] for p in pins}), len(pins))
         for pin in pins:
             self.assertRegex(pin, r'^[a-z0-9][a-z0-9.+-]*=[0-9][^=\s]*$')
@@ -113,32 +121,31 @@ class LockConsistency(unittest.TestCase):
             self.assertTrue(version)
 
     def test_validation_states_are_explicit(self):
-        self.assertIn('has not been built', self.lock['validation']['arm64'])
-        amd64 = self.lock['validation']['amd64']
-        for phrase in ('This lock has not been built for AMD64.', 'libdrm-intel1 2.4.131-1 and libpciaccess0 0.18.1-1ubuntu4.1',
-                       'emulated AMD64 build of the previous lock sha256:78cacbef...', 'later checks did not run',
-                       'not on retained signed index records', 'fails closed on any difference'):
-            self.assertIn(phrase, amd64)
+        for arch in ('amd64', 'arm64'):
+            self.assertIn('security refresh has not been built', self.lock['validation'][arch])
+            self.assertIn('runtime/scan checks must be verified', self.lock['validation'][arch])
 
     def test_lock_is_the_live_archive_lock_plus_only_the_snapshot(self):
-        self.assertRegex(self.lock['ubuntu']['snapshot'], r'^\d{8}T\d{6}Z$')
-        self.assertEqual(self.lock['ubuntu']['snapshot'], support.UBUNTU_SNAPSHOT)
-        self.assertEqual(self.lock['derivedFrom']['liveArchiveBuild'], {
+        lock = historical_lock()
+        self.assertRegex(lock['ubuntu']['snapshot'], r'^\d{8}T\d{6}Z$')
+        self.assertEqual(lock['ubuntu']['snapshot'], support.UBUNTU_SNAPSHOT)
+        self.assertEqual(lock['derivedFrom']['liveArchiveBuild'], {
             'buildLogSha256': '465ceb4d283e74732365abf7b616a2acdeb8010e5d87853b0155b85f0d2a0ecc',
             'builtLockSha256': support.LIVE_ARCHIVE_LOCK,
             'intentSha256': 'e5e747316e93f08b620afe10aaf9857c831aa7a9de4cfdb3fe20ec51a072b6d7',
             'resultSha256': 'b20f547076291f91962606c23187b17dcdb62d9a7d8a11d239b0fce307f7edb5',
             'unavailablePins': ['libheif-plugin-aomdec=1.21.2-3ubuntu0.5', 'libheif1=1.21.2-3ubuntu0.5',
                                 'openssl=3.5.5-1ubuntu3.5']})
-        self.assertLessEqual(set(self.lock['derivedFrom']['liveArchiveBuild']['unavailablePins']),
-                             set(support.OS_PACKAGES.read_text().splitlines()))
-        self.assertEqual(self.lock['derivedFrom']['snapshotProbeSha256Sums'], {
+        self.assertLessEqual(set(lock['derivedFrom']['liveArchiveBuild']['unavailablePins']),
+                             set(HISTORICAL_OS.read_text().splitlines()))
+        self.assertEqual(lock['derivedFrom']['snapshotProbeSha256Sums'], {
             'amd64': '6c1b160d4ec11fd79707641a3a99b3c8c4df197710799d9d786930cec9f849e6',
             'arm64': 'fc2e396151f232b5e1ba1ac861e2031fdd4c0bfdaf1af8a2bbcdb2f1db456e3a'})
-        self.assertEqual(support.sha256(ohpkg.canonical_json(without_snapshot(self.lock)).encode()), support.LIVE_ARCHIVE_LOCK)
+        self.assertEqual(support.sha256(ohpkg.canonical_json(without_snapshot(lock)).encode()), support.LIVE_ARCHIVE_LOCK)
 
     def test_lock_is_the_built_lock_plus_only_the_amd64_correction(self):
-        previous = without_snapshot(self.lock)
+        lock = historical_lock()
+        previous = without_snapshot(lock)
         self.assertEqual(previous['derivedFrom'].pop('amd64Build'), {
             'builtLockSha256': support.AMD64_BUILT_LOCK, 'executionMode': 'emulated',
             'buildLogSha256': '7e10d3796be0a6f0760770cbcfc685ab0bafecbc8ab039c4fec40a4f12317b8f',
@@ -174,7 +181,7 @@ class LockConsistency(unittest.TestCase):
 @support.needs(support.PACKET / 'manifest.json', support.PACKET / 'README.md')
 class LockAgainstPacket(unittest.TestCase):
     def setUp(self):
-        self.lock = support.load_lock()
+        self.lock = historical_lock()
         manifest = support.PACKET / 'manifest.json'
         self.assertEqual(support.sha256(manifest.read_bytes()),
                          '595a4addce271d217c7c625975d8295ee290ccf9bebe34aa643a6ba0a43db1a3')
@@ -196,7 +203,7 @@ class LockAgainstPacket(unittest.TestCase):
     def test_os_list_is_the_tested_candidate_list_in_order(self):
         candidate = (support.PACKET / 'ubuntu-os-candidate.Dockerfile').read_text()
         pins = re.search(r'--no-install-recommends (.*?) && apt-get check', candidate, re.S).group(1).split()
-        self.assertEqual(pins, support.OS_PACKAGES.read_text().splitlines())
+        self.assertEqual(pins, HISTORICAL_OS.read_text().splitlines())
 
     def test_debian_records_equal_the_authenticated_packet_records(self):
         packet = {'arm64': {}, 'amd64': {}}
@@ -218,7 +225,7 @@ class Amd64Additions(unittest.TestCase):
     """Reading the AMD64 build log: the reported packages only when apt, dpkg and the package check all agree."""
 
     def setUp(self):
-        self.previous = copy.deepcopy(support.load_lock())
+        self.previous = copy.deepcopy(historical_lock())
         for name in support.AMD64_ONLY:
             del self.previous['finalPackages']['amd64'][name]
 
@@ -252,15 +259,15 @@ class Amd64Additions(unittest.TestCase):
                 with self.assertRaisesRegex(ohpkg.InputError, re.escape(message)):
                     derive_lock.amd64_additions(SYNTHETIC_BUILD_LOG.replace(old, new), self.previous)
         with self.assertRaisesRegex(ohpkg.InputError, 'libdrm-intel1 is already in the AMD64 lock'):
-            derive_lock.amd64_additions(SYNTHETIC_BUILD_LOG, support.load_lock())
+            derive_lock.amd64_additions(SYNTHETIC_BUILD_LOG, historical_lock())
 
 
 class SnapshotEvidenceReading(unittest.TestCase):
     """Reading the live-archive failure and the snapshot probes: the snapshot only when both resolve the locked sets."""
 
     def setUp(self):
-        self.lock = support.load_lock()
-        self.pins = dict(p.split('=', 1) for p in support.OS_PACKAGES.read_text().splitlines())
+        self.lock = historical_lock()
+        self.pins = dict(p.split('=', 1) for p in HISTORICAL_OS.read_text().splitlines())
 
     def test_unavailable_versions_must_be_os_list_pins(self):
         log = ('#15 [runtime  1/20] RUN sh check-native-platform.sh && apt-get update && DEBIAN_FRONTEND=noninteractive xargs '
@@ -333,7 +340,7 @@ class LockDerivation(unittest.TestCase):
         result, written = self.derive(support.EVIDENCE)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(written['lock.json'], support.LOCK.read_bytes())
-        self.assertEqual(written['os.txt'], support.OS_PACKAGES.read_bytes())
+        self.assertEqual(written['os.txt'], HISTORICAL_OS.read_bytes())
         self.assertEqual(json.loads(result.stdout)['finalPackages'], {'arm64': 329, 'amd64': 331})
 
     def test_derivation_refuses_altered_build_or_probe_evidence(self):
