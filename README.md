@@ -1,6 +1,6 @@
 # Open Harness powered by Hermes
 
-> **Public beta:** `v0.4.0-beta.1` targets one trusted operator running Open Harness on Linux and using it from a browser on the same machine, from source or through Docker Compose. Desktop installers, macOS, and Windows are not part of this beta; see [ROADMAP.md](ROADMAP.md). Model-provider requests can incur charges, and Open Harness sends no product telemetry.
+> **Public beta:** `v0.4.0-beta.1` targets one trusted operator running Open Harness in Linux Docker containers and using it from a local browser. Docker Desktop is the Mac/Windows deployment path; published images and final Docker/browser acceptance are still pending. Physical Mac/Windows hardware checks and signed desktop installers are outside the MVP release gates; see [ROADMAP.md](ROADMAP.md). Model-provider requests can incur charges, and Open Harness sends no product telemetry.
 
 Open Harness is an MIT-licensed, local named-agent workspace inspired by Grok Bot. Each named agent runs as a persistent Hermes worker behind a loopback-only Node.js control service. The browser is a client: closing it does not cancel active work.
 
@@ -10,7 +10,7 @@ This is independent software and is not affiliated with xAI or Nous Research.
 
 - Node.js 22.13+ control service with SQLite state and replayable events
 - Hermes `v2026.9.11`, pinned to commit `939e45c91d751fadd94dcd1b873ac3cb44846213`
-- One managed Docker container per isolated agent, or direct execution under a paired runner's OS account
+- One managed Docker container per agent, with an optional private desktop on a Linux runner
 - Outbound-only runners for paired Linux computers, VPSs, and user-owned servers
 - A shared project directory mounted into every agent container
 - Two concurrent top-level runs and four total executions, including delegated subagents
@@ -43,14 +43,16 @@ Open `http://localhost:3000`. `npm run dev` starts Docker if it is installed, th
 Download and unzip the source release, install Docker, then run this command from that folder:
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-Open `http://localhost:3000`. Compose starts the dashboard, coordinator, a private Docker engine for agent containers, and persistent data volumes. No host Node or Python installation is required. By default the dashboard listens only on this computer. For remote access, keep it on loopback behind an authenticated HTTPS reverse proxy, set `OPEN_HARNESS_PUBLIC_URL=https://agents.example.com/api/local`, and explicitly set `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` only after proxy authentication works.
+Compose starts the dashboard, coordinator, a private Docker engine for agent containers, and persistent data volumes. Open the dashboard with the launcher's one-use pairing link; a plain visit to `http://localhost:3000` needs pairing first. Manual source startup and pairing are described in [Self-hosting operations](docs/SELF_HOSTING.md). No host Node or Python installation is required. By default the dashboard listens only on this computer. For remote access, keep it on loopback behind an authenticated HTTPS reverse proxy, set `OPEN_HARNESS_PUBLIC_URL=https://agents.example.com/api/local`, and explicitly set `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` only after proxy authentication works.
 
-The workspace shows agents, conversations, files, credentials, runtime status, routines, teams, and task boards. Turning off **Workspace settings → Advanced features** hides teams, task boards, remote computers, direct computer access, and MCP connections, for a simpler workspace. Routines stay visible either way, because the coordinator runs them whether or not the view is shown.
+The workspace shows agents, conversations, files, credentials, runtime status, routines, teams, and task boards. Turning off **Workspace settings → Advanced features** hides teams, task boards, and MCP connections, for a simpler workspace. Computer settings remain available; reservations and resource limits are advanced options. Routines stay visible either way, because the coordinator runs them whether or not the view is shown.
 
-See [Self-hosting operations](docs/SELF_HOSTING.md) for a complete authenticated reverse-proxy example, health checks, updates, diagnostics, and stopped-stack backup and restore.
+Mac and Windows browser launchers and Docker Desktop requirements are documented in [Local browser installation](docs/LOCAL_BROWSER.md). Prebuilt release publication and final per-architecture Docker/browser acceptance are still pending. Host-specific Docker Desktop integration remains unverified and is tracked separately from MVP acceptance.
+
+See [Self-hosting operations](docs/SELF_HOSTING.md) for remote-access requirements, health checks, updates, diagnostics, and stopped-stack backup and restore.
 Release candidates must also pass the [self-hosted beta checklist](docs/BETA_RELEASE.md).
 
 ### Develop from source
@@ -113,17 +115,11 @@ npm run harness:serve
 
 The dashboard token remains available only from the coordinator machine. Public runner endpoints accept scoped runner credentials or one-time pairing codes.
 
-Each agent starts with a private container. **Selected folders** mounts only the named host folders and preserves their read-only or read-write setting. **Direct computer access** runs Hermes under the runner's OS account; install the pinned host runtime and policy extension before selecting it:
+Each agent runs in a private container. Open **Agent settings → Computer** to enable a **Private agent desktop** on a Linux computer with Docker. Then enable **Desktop control** in **Tools** and save. It has its own apps and login sessions; it cannot operate your signed-in host desktop. On Mac and Windows, the Compose browser installation supplies the Linux environment through Docker Desktop; a separate Linux runner is optional. Shared workspace files remain available to agents on the same runner. **Selected folders** exposes the named host folders with the read-only or read-write setting chosen for each. Native selected-folder execution requires the coordinator or runner and Docker to share a Linux kernel. On Mac or Windows, use the Compose browser installation and explicitly export folders to its Linux services.
 
-```bash
-python3 -m pip install "hermes-agent[all] @ git+https://github.com/NousResearch/hermes-agent.git@939e45c91d751fadd94dcd1b873ac3cb44846213"
-python3 -m pip install runtime/hermes/extension
-hermes computer-use install
-```
+Legacy **Direct computer access** and **Existing desktop** profiles remain readable but cannot start tasks, probes or transfers until converted in Computer settings. Docker is required; there is no unrestricted native fallback. Stop any older runner process and install the updated runner before continuing work.
 
-Existing desktop control also needs the interactive OS session and its platform permissions. macOS requires Accessibility and Screen Recording. Windows remote hosts require a logged-in desktop session. Linux requires X11 or Wayland with AT-SPI. Linux runners can instead give each isolated agent a private Xvfb/Openbox desktop.
-
-Independent agents may share a runner up to its configured capacity. Existing-desktop sessions are serialized. A disconnected runner finishes work already admitted and buffers results until the coordinator returns; new work remains queued. Moving an agent exports managed private files, memory, and skills, verifies every checksum at the destination, and preserves the source if transfer fails.
+Independent agents may share a runner up to its configured capacity. A disconnected runner finishes work already admitted and buffers results until the coordinator returns; new work remains queued. Moving an agent exports managed private files, memory, and skills, verifies every checksum at the destination, and preserves the source if transfer fails.
 
 Profiles are authoritative in SQLite. Each save creates a revision; active work keeps its original revision, and queued work snapshots the latest profile when it starts. Workspace model changes affect inheriting agents only. Disabling instructions preserves their text. Failed saves keep your draft, and conflicting saves ask you to reload the winning revision.
 

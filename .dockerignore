@@ -17,3 +17,8 @@ test-results
 work
 *.log
 *.tsbuildinfo
+
+# Private collaboration history and portable repositories are not application assets.
+COORDINATION.md
+Claude outputs
+*.bundle

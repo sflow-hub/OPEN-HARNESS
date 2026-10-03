@@ -142,11 +142,14 @@ export default function CredentialManager({ client, onClose, onChanged, provider
   </div>;
 }
 
-// Both the card and conversation header edit the same persisted agent model.
-export function CredentialSwitcher({ agent, credentials, client, onManage, onSaved, running = false }: {
-  agent: { id: string; name: string; profile?: AgentProfile };
+// The quick switch. Lives on the agent card and the conversation header so a credential
+// can be changed without opening the profile editor. One PUT; it applies to the next task,
+// exactly like every other profile edit.
+export function CredentialSwitcher({ agent, credentials, workspaceRef, workspaceProvider, client, onManage, onSaved, running = false }: {
+  agent: { id: string; name: string; profile?: { model: { inherit: boolean; credentialRef: string; provider: string } } };
   credentials: CredentialRecord[];
   workspaceRef: string;
+  workspaceProvider: string;
   client: ControlClient;
   onManage: () => void;
   onSaved: (profile: unknown) => void;
@@ -160,7 +163,12 @@ export function CredentialSwitcher({ agent, credentials, client, onManage, onSav
   const [loaded, setLoaded] = useState(false);
   const model = agent.profile?.model;
   const byRef = (ref: string) => credentials.find(item => item.ref === ref);
-  const current = !model || model.inherit ? "Workspace default" : `${byRef(model.credentialRef)?.label || (model.credentialRef ? `${model.credentialRef} — missing` : "No credential")} · ${model.model}`;
+  const workspaceLabel = byRef(workspaceRef)?.label || (workspaceRef ? `${workspaceRef} — missing` : "None");
+  const current = !model || model.inherit ? `Workspace default` : byRef(model.credentialRef)?.label || (model.credentialRef ? `${model.credentialRef} — missing` : "No credential");
+  // '' provider credentials fit anywhere, which is what connector and custom-endpoint keys need.
+  const effectiveProvider = !model || model.inherit ? workspaceProvider : model.provider;
+  const options = credentials.filter(item => !item.provider || !effectiveProvider || item.provider === effectiveProvider);
+
   const wrap = useRef<HTMLSpanElement>(null);
   useEffect(() => {
     if (!open) return;

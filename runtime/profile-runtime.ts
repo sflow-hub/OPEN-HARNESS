@@ -1,8 +1,13 @@
-import { spawn, spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { copyFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ModelChoice, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
 import { dockerStatusCached, ensureContainer, HermesGateway } from './hermes';
+import { profileMemory } from './profile-memory';
+import { assertSandboxedComputer } from './computer-validation';
+import { UNSANDBOXED_COMPUTER_MESSAGE } from '../lib/agent-profile';
+import { atomicWorkspaceWrite as atomic } from './path-safety';
+import { modelEndpointIssue } from './model-validation';
 
 export const COORDINATION_TOOLS: ToolInfo[] = [
   { id: TASK_TOOL, name: 'Task board', group: 'other', description: 'Read and update assigned board tasks.', available: true },
@@ -11,40 +16,45 @@ export const COORDINATION_TOOLS: ToolInfo[] = [
 ];
 const mockTools: ToolInfo[] = [
   ['terminal', 'terminal'], ['process', 'terminal'], ['execute_code', 'code'], ['read_file', 'files'], ['write_file', 'files'], ['search_files', 'files'],
-  ['web_search', 'web'], ['web_extract', 'web'], ['browser_navigate', 'browser'], ['browser_screenshot', 'browser'], ['memory', 'memory'], ['skills_list', 'skills'], ['skill_manage', 'skills'], ['session_search', 'recall'], ['delegate_task', 'delegation'],
+  ['web_search', 'web'], ['web_extract', 'web'], ['browser_navigate', 'browser'], ['browser_screenshot', 'browser'], ['computer_use', 'desktop'], ['memory', 'memory'], ['skills_list', 'skills'], ['skill_manage', 'skills'], ['session_search', 'recall'], ['delegate_task', 'delegation'],
 ].map(([id, group]) => ({ id, group, name: id.replaceAll('_', ' '), description: 'Deterministic test runtime tool.', available: true }));
 export function groupTool(tool: ToolInfo): ToolInfo {
   const group = ({ file: 'files', terminal: 'terminal', process: 'terminal', code_execution: 'code', execute_code: 'code', web: 'web', browser: 'browser', computer_use: 'desktop', memory: 'memory', skills: 'skills', session_search: 'recall', delegation: 'delegation', delegate: 'delegation', cronjob: 'scheduling' } as Record<string, string>)[tool.group] || (tool.id.startsWith('mcp_') ? 'mcp' : tool.group);
   return { ...tool, group };
 }
+export function containerBaseUrl(value: string) {
+  const issue = modelEndpointIssue(value); if (issue) throw new Error(issue);
+  const url = new URL(value);
+  if (['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) url.hostname = 'host.docker.internal';
+  return url.toString().replace(/\/$/, '');
+}
 export function runtimeProbe(container: string, input: object): Promise<Record<string, unknown>> {
+  const probe = input as { action?: string; baseUrl?: string };
+  const request = probe.action === 'connection' && probe.baseUrl ? { ...probe, baseUrl: containerBaseUrl(probe.baseUrl) } : input;
   return new Promise((resolve, reject) => {
     const child = spawn('docker', ['exec', '-i', container, 'python', '/opt/open-harness/inspect_runtime.py'], { stdio: ['pipe', 'pipe', 'pipe'] });
     let output = ''; const timer = setTimeout(() => { child.kill(); reject(new Error('Runtime connection check timed out.')); }, 25000);
     child.stdout.on('data', part => { output += part; if (output.length > 5_000_000) child.kill(); }); child.stderr.resume();
     child.on('error', () => { clearTimeout(timer); reject(new Error('Docker could not start the runtime check.')); });
     child.on('close', code => { clearTimeout(timer); try { const value = JSON.parse(output.trim()); if (code || value.error) reject(new Error(value.error || 'Runtime check failed.')); else resolve(value); } catch { reject(new Error('Runtime check returned an invalid response. Rebuild the Hermes image.')); } });
-    child.stdin.end(JSON.stringify(input) + '\n');
+    child.stdin.end(JSON.stringify(request) + '\n');
   });
 }
-export function nativeRuntimeProbe(profileHome: string, input: object): Record<string, unknown> {
-  const executable = ([process.env.HERMES_PYTHON, process.platform === 'win32' ? 'python' : 'python3', 'python'].filter(Boolean) as string[]).find(name => spawnSync(name, ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore', timeout: 8_000 }).status === 0);
-  if (!executable) throw new Error('Direct access needs the Hermes host runtime. Finish the direct-access setup on this computer.');
-  const result = spawnSync(executable, [join(import.meta.dirname, 'hermes', 'inspect_runtime.py')], { input: JSON.stringify(input) + '\n', encoding: 'utf8', env: { ...process.env, HERMES_HOME: profileHome }, maxBuffer: 5_000_000, timeout: 25_000 });
-  if (result.status || !result.stdout) throw new Error(result.stderr || 'Direct computer access check failed.');
-  const value = JSON.parse(result.stdout) as Record<string, unknown>; if (value.error) throw new Error(String(value.error)); return value;
-}
+export function nativeRuntimeProbe(..._input: unknown[]): never { void _input; throw new Error(UNSANDBOXED_COMPUTER_MESSAGE); }
 export async function discoverTools(agentId: string, root: string, profile?: AgentProfile): Promise<ToolCatalog> {
+  assertSandboxedComputer(profile?.computer);
   if (process.env.OPEN_HARNESS_MOCK === '1') return { source: 'mock', tools: [...mockTools, ...COORDINATION_TOOLS] };
   const status = await dockerStatusCached(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
   try { const result = await runtimeProbe(ensureContainer(agentId, root, profile?.computer), { action: 'catalog' }); return { source: 'runtime', tools: [...(result.tools as ToolInfo[]).filter(t => t.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }; }
   catch (error) { return { source: 'unavailable', tools: [], error: error instanceof Error ? error.message : 'Tool inventory is unavailable.' }; }
 }
-function atomic(path: string, data: string) { writeFileSync(`${path}.tmp`, data, { mode: 0o600 }); renameSync(`${path}.tmp`, path); chmodSync(path, 0o600); }
 export type PrepareProfileOptions = { cwd?: string; coordinationCommand?: string; controlUrl?: string; controlSocket?: string };
 export function prepareProfile(root: string, profile: AgentProfile, effective: ModelChoice, secrets: { environment(): Record<string,string> }, token: string, runId: string, options: PrepareProfileOptions = {}) {
+  assertSandboxedComputer(profile.computer);
+  const baseUrl = effective.baseUrl ? containerBaseUrl(effective.baseUrl) : '';
   const dir = join(root, 'agents', profile.id), home = join(dir, 'profile'), managed = join(dir, 'managed');
   for (const path of [home, managed, join(dir, 'private')]) mkdirSync(path, { recursive: true });
+  profileMemory(root, profile.id);
   const mcp: Record<string, unknown> = {};
   // The agent image bakes its own copy of coordination.mjs, which goes stale the moment the
   // checkout adds a tool: the pinned image's copy predates the task tool, so task boards were
@@ -65,7 +75,7 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
   // Any explicit endpoint is a custom endpoint, whichever provider the user picked: Hermes
   // ignores base_url on its native providers (a proxy for xAI still resolved to api.x.ai)
   // and only the custom path honours the URL and carries the key via key_env.
-  const customEndpoint = Boolean(effective.baseUrl);
+  const customEndpoint = Boolean(baseUrl);
   // Hermes has no provider called "openai"; its API-key provider is "openai-api".
   const hermesProvider = customEndpoint ? 'custom' : ({ local: 'custom', openai: 'openai-api' } as Record<string, string>)[effective.provider] || effective.provider;
   // Hermes will not hand a native provider's variable (XAI_API_KEY, OPENAI_API_KEY, ...) to a
@@ -81,14 +91,14 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
   }
   // Only the env var NAME is written here; the value stays in the profile .env.
   const providers = customEndpoint
-    ? { custom: { name: 'custom', base_url: effective.baseUrl, ...(hasCredential ? { key_env: customKeyEnv } : {}), ...(effective.model ? { default_model: effective.model } : {}) } }
+    ? { custom: { name: 'custom', base_url: baseUrl, ...(hasCredential ? { key_env: customKeyEnv } : {}), ...(effective.model ? { default_model: effective.model } : {}) } }
     : undefined;
   for (const c of profile.connectors.filter(c => c.enabled)) {
     const connectorEnv = c.secretRef && secretValues[c.secretRef] ? { [c.secretRef]: secretValues[c.secretRef] } : {};
     Object.assign(env, connectorEnv);
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: '${' + c.secretRef + '}' } : {} };
   }
-  const config = { model: { default: effective.model, provider: hermesProvider, ...(effective.baseUrl ? { base_url: effective.baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, tools: { tool_search: { enabled: 'off' } }, plugins: { enabled: ['open_harness_policy'] }, ...(providers ? { providers } : {}), mcp_servers: mcp };
+  const config = { model: { default: effective.model, provider: hermesProvider, ...(effective.baseUrl ? { base_url: baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'smart', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, tools: { tool_search: { enabled: 'off' } }, plugins: { enabled: ['open_harness_policy'] }, ...(providers ? { providers } : {}), mcp_servers: mcp };
   // Hermes's Tool Search defers every MCP tool out of the model-facing array and offers
   // tool_search/tool_describe/tool_call bridges instead. Those bridges are not tools an Open
   // Harness profile grants, so the policy extension strips them, and the deferred tools are

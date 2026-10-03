@@ -43,9 +43,11 @@ npm run build     # vinext build + desktop/fix-standalone.mjs
 npx playwright install chromium && npm run test:browser
 ```
 
-`.github/workflows/ci.yml` runs test/typecheck/lint plus a Tauri debug build and the
-Playwright suite, on Ubuntu 24.04 only. Playwright coverage is expected for changes under
-`components/` or `app/`. macOS and Windows are deferred — see `ROADMAP.md` for why.
+`.github/workflows/ci.yml` keeps Linux/macOS/Windows test and Tauri debug-build jobs;
+Playwright runs on Ubuntu 24.04. Linux remains the supported beta installation.
+`.github/workflows/runtime.yml` also exercises actual Docker/Compose, tools, persistent
+workflows and the private desktop without paid inference. Playwright coverage is expected
+for changes under `components/` or `app/`. See `ROADMAP.md` for platform limitations.
 
 Service lifecycle: `harness:install-service`, `harness:start`, `harness:stop`,
 `npm run harness -- status`. Desktop: `desktop:prepare`, `desktop:dev`, `desktop:build`.
@@ -121,8 +123,10 @@ Consequences:
 
 Trust model is a single trusted operator (`SECURITY.md`). Container isolation is the primary
 boundary; the host home directory, Docker socket, and other agents' private directories are
-never mounted. The dashboard bootstrap token authorizes arbitrary run creation, host-path
-mounts, and direct OS execution, so it is loopback-only and `Host`-header checked.
+never mounted. The dashboard operator token authorizes arbitrary run creation, host-path
+mounts and agent execution. Host-native bootstrap is loopback-only and `Host`-header checked;
+Compose instead requires a one-use pairing code from the coordinator CLI. Its public
+readiness endpoint returns only `{ok:true}`.
 
 Call out changes to authentication, the bootstrap token, container isolation, runner pairing,
 or credential storage explicitly in the PR description. Never open a public issue or PR for a
@@ -141,16 +145,16 @@ dies at startup.
 
 ## Verification state
 
-The automated suite runs against a mocked Hermes runtime (`OPEN_HARNESS_MOCK=1`).
-Real-runtime passes on 2026-09-21/22 covered credential storage, profile preparation, plugin
-loading, gateway startup, authenticated round trips to an OpenAI-compatible endpoint, stale
-image detection, and state-directory choice. A third pass on 2026-09-25 added paid-provider
-inference, a real file-writing task, event replay, filesystem isolation, process-tree
-termination, crash recovery, and container reaping. Real MCP servers, Direct Computer Access,
-an approval round trip, and named-agent handoff remain unverified.
-`runtime/VERIFICATION.md` is the record; update it when a real-runtime check is performed.
-`ROADMAP.md` tracks feature maturity — Direct Computer Access is the least mature path, and
-the supported install is a local browser dashboard on Linux.
+The ordinary Node and browser suites use a mocked Hermes runtime (`OPEN_HARNESS_MOCK=1`).
+Actual Ubuntu ARM64 checks on September 25, 2026 additionally exercised the pinned runtime,
+approval denial/approval, encrypted runner credentials and rotation, persistent memory and
+skills, shared-team handoffs, scheduled dispatch across restart, and the private Chromium
+desktop. Those integration fixtures use a scripted local provider, so they establish tool
+and transport behavior, not model reasoning. Earlier paid-provider evidence remains recorded
+separately. `runtime/VERIFICATION.md` is the evidence record; update it after real checks.
+Private agent desktops require a Linux runner with Docker. Legacy native Direct Computer
+Access and Existing desktop modes are disabled; third-party MCP integrations and signed
+installers need separate platform acceptance.
 
 ## Gotchas
 
@@ -159,9 +163,12 @@ the supported install is a local browser dashboard on Linux.
 - `OPEN_HARNESS_STATE_DIR` should stay commented out rather than set empty. `harness:setup`
   fills it with `~/.open-harness/<project>` when Docker Desktop cannot read the project
   folder, because agents started there would never receive their profile or credential.
-- Agent containers run `--restart unless-stopped`. Quit from the tray or stop the coordinator
-  with Ctrl-C; clean up orphans with
-  `docker rm -f $(docker ps -aq --filter name=open-harness-)`.
+- Private and Compose agent containers run `--restart unless-stopped`. Native selected-folder
+  containers use `--restart no`; each new admission verifies mounts in a fresh inert container
+  before starting the desktop or agent, and requires Docker on the same Linux kernel.
+  Quit from the tray or stop the coordinator with Ctrl-C so it cleans up its containers. For manual recovery,
+  inspect the `open-harness.state` label and mounts before stopping specific container IDs;
+  another workspace may share the Docker daemon.
 - Concurrency caps: one task per agent, two top-level runs you started, four total including
   delegated subagents. A run paused on an unanswered approval still holds its slot.
 - Delegation depth is limited to two; cyclic handoffs are rejected.

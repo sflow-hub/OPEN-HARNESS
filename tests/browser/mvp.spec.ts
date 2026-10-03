@@ -45,7 +45,8 @@ test('offers a focused workspace when advanced features are turned off, and rest
 
   await closeNav();
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
-  await expect(page.getByRole('tab', { name: 'Computer' })).toHaveCount(0);
+  // Where an agent works is not an advanced setting: every agent gets a container.
+  await expect(page.getByRole('tab', { name: 'Computer' })).toBeVisible();
   await page.getByRole('tab', { name: 'Tools & connections' }).click();
   await expect(page.getByRole('heading', { name: 'MCP connections' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Close agent settings' }).click();
@@ -59,7 +60,7 @@ test('offers a focused workspace when advanced features are turned off, and rest
   await expect(page.getByRole('button', { name: 'Tasks', exact: true })).toBeVisible();
 });
 
-test('a hidden Computer tab never opens a panel with no way back', async ({ page }, testInfo) => {
+test('Computer settings stay available without Advanced features and offer only contained access', async ({ page }, testInfo) => {
   const mobile = testInfo.project.name === 'mobile';
   if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Settings/ }).first().click();
@@ -67,19 +68,31 @@ test('a hidden Computer tab never opens a panel with no way back', async ({ page
   await page.getByRole('button', { name: 'Close settings' }).click();
   if (mobile) await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click');
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
-  await expect(page.getByRole('tab', { name: 'Computer' })).toHaveCount(0);
-  // Whatever panel opens has to belong to a tab the tablist actually offers.
-  const selected = page.getByRole('tab', { selected: true });
-  await expect(selected).toHaveCount(1);
-  await expect(selected).toHaveAccessibleName('Profile');
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
+  await expect(page.getByRole('tab', { selected: true })).toHaveAccessibleName('Computer');
+  await expect(panel.getByRole('radio', { name: 'Private workspace' })).toBeVisible();
+  await expect(panel.getByRole('radio', { name: 'Selected folders' })).toBeVisible();
+  await expect(panel.getByRole('switch', { name: 'Private agent desktop' })).toBeVisible();
+  // Direct access and control of the signed-in desktop are gone, not hidden behind a switch.
+  await expect(panel.getByRole('radio', { name: 'Direct computer access' })).toHaveCount(0);
+  await expect(panel.getByLabel('Desktop access')).toHaveCount(0);
+  // The extras that Advanced features still gates.
+  await expect(panel.getByRole('switch', { name: 'Reserve this computer for this agent' })).toHaveCount(0);
+  await panel.getByText('Advanced resources and shared folders').click();
+  await expect(panel.getByLabel('CPU cores')).toHaveCount(0);
 });
 
 test('does not mark setup complete after a failed model check and supports retry', async ({ page }, testInfo) => {
+  await page.route('**/v1/onboarding/model-test', route => {
+    const input = route.request().postDataJSON();
+    return route.fulfill({ json: { ok: true, message: 'Fixture provider accepted the model.', model: input.model, revision: input.revision + 1 } });
+  });
   let attempts = 0;
   await page.route('**/v1/onboarding/model-test', async route => {
     attempts += 1;
     if (attempts === 1) await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: false, message: 'The API key was rejected.' }) });
-    else await route.continue();
+    else await route.fallback();
   });
   if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Settings/ }).first().click();

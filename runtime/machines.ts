@@ -1,10 +1,11 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { hostname, platform, arch } from 'node:os';
-import { spawnSync } from 'node:child_process';
-import type { AgentProfile, MachineInfo } from '../lib/agent-profile';
+import { isSandboxedComputer, UNSANDBOXED_COMPUTER_MESSAGE, type AgentProfile, type MachineInfo } from '../lib/agent-profile';
+import { assertSandboxedComputer } from './computer-validation';
 import { dockerStatus } from './hermes';
 import { addColumn } from './db';
+import { hostFolderExports } from './host-folders';
 
 type MachineRow = { id: string; name: string; platform: string; arch: string; status: string; last_seen_at: string | null; local: number; reserved_agent_id: string | null; capabilities_json: string; credential_hash: string | null; revoked_at: string | null; encryption_public_key: string | null };
 type CommandRow = { id: string; machine_id: string; agent_id: string | null; kind: string; payload_json: string; state: string; created_at: string; leased_at: string | null; finished_at: string | null; result_json: string | null };
@@ -55,8 +56,7 @@ export class Machines {
     db.prepare("UPDATE agent_transfers SET state='failed',detail='The coordinator restarted during transfer. The source assignment and data were preserved.',updated_at=? WHERE state IN ('queued','exporting','importing','verifying')").run(now());
     const stamp = now();
     const mock = process.env.OPEN_HARNESS_MOCK === '1', container = mock || dockerStatus().available;
-    const direct = mock || ([process.env.HERMES_PYTHON, process.platform === 'win32' ? 'python' : 'python3', 'python'].filter(Boolean) as string[]).some(executable => spawnSync(executable, ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore', timeout: 8_000 }).status === 0);
-    const capabilities = { container, direct, desktop: mock || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === 'darwin' || process.platform === 'win32'), virtualDesktop: process.platform === 'linux' && container, detail: container || direct ? 'Managed by this Open Harness installation.' : 'Finish computer setup from Workspace settings.' };
+    const capabilities = { container, direct: false, desktop: false, virtualDesktop: process.platform === 'linux' && container, detail: container ? 'Private agent workspaces are ready. Desktop control uses an isolated agent desktop.' : 'Finish Docker setup from Workspace settings.' };
     db.prepare(`INSERT INTO machines(id,name,platform,arch,status,last_seen_at,local,reserved_agent_id,capabilities_json,credential_hash,revoked_at,created_at,updated_at)
       VALUES('local',?,?,?,?,?,1,NULL,?,NULL,NULL,?,?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,platform=excluded.platform,arch=excluded.arch,status='online',last_seen_at=excluded.last_seen_at,capabilities_json=excluded.capabilities_json,updated_at=excluded.updated_at`)
@@ -75,7 +75,7 @@ export class Machines {
   private info(row: MachineRow): MachineInfo {
     const fresh = row.local || (row.last_seen_at && Date.now() - Date.parse(row.last_seen_at) < 45_000);
     const status = row.revoked_at ? 'revoked' : fresh ? 'online' : row.status === 'pairing' ? 'pairing' : 'offline';
-    return { id: row.id, name: row.name, platform: ['linux','darwin','win32'].includes(row.platform) ? row.platform as MachineInfo['platform'] : 'unknown', arch: row.arch, status, lastSeenAt: row.last_seen_at, local: Boolean(row.local), reservedAgentId: row.reserved_agent_id, assignedAgents: this.assigned(row.id), capabilities: JSON.parse(row.capabilities_json) };
+    return { id: row.id, name: row.name, platform: ['linux','darwin','win32'].includes(row.platform) ? row.platform as MachineInfo['platform'] : 'unknown', arch: row.arch, status, lastSeenAt: row.last_seen_at, local: Boolean(row.local), reservedAgentId: row.reserved_agent_id, assignedAgents: this.assigned(row.id), capabilities: { ...JSON.parse(row.capabilities_json), direct: false, desktop: false }, ...(row.local ? { folderExports: hostFolderExports() } : {}) };
   }
   get(id: string) { const row = this.row(id); if (!row) throw new MachineError('Computer not found.', 404); return this.info(row); }
   list() { return (this.db.prepare('SELECT * FROM machines WHERE revoked_at IS NULL ORDER BY local DESC,name').all() as MachineRow[]).map(row => this.info(row)); }
@@ -98,7 +98,7 @@ export class Machines {
     const pairing = this.db.prepare('SELECT * FROM machine_pairings WHERE code_hash=?').get(hash(code)) as { id: string; name: string; platform: string; expires_at: string; used_at: string | null } | undefined;
     if (!pairing || pairing.used_at || Date.parse(pairing.expires_at) <= Date.now()) throw new MachineError('This pairing code is invalid, expired, or already used.', 410);
     const id = `machine-${crypto.randomUUID()}`, token = Buffer.from(randomBytes(32)).toString('base64url'), stamp = now();
-    const capabilities = input.capabilities && typeof input.capabilities === 'object' ? input.capabilities : { container: true, direct: true, desktop: false, virtualDesktop: pairing.platform === 'linux' };
+    const capabilities = input.capabilities && typeof input.capabilities === 'object' ? input.capabilities : { container: false, direct: false, desktop: false, virtualDesktop: false };
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare('UPDATE machine_pairings SET used_at=? WHERE id=? AND used_at IS NULL').run(stamp, pairing.id);
@@ -141,19 +141,33 @@ export class Machines {
   test(machineId: string, profile?: AgentProfile) {
     const machine = this.get(machineId), issues: string[] = [];
     if (machine.status !== 'online') issues.push('Runner is offline.');
-    if (profile?.computer.access === 'private' && !machine.capabilities.container) issues.push('Container execution is unavailable.');
-    if (profile?.computer.access === 'direct' && !machine.capabilities.direct) issues.push(`Direct execution is unavailable. ${machine.capabilities.detail || 'Install Hermes and the Open Harness policy extension on the runner.'}`);
-    if (profile?.computer.desktop === 'existing' && !machine.capabilities.desktop) issues.push(machine.platform === 'darwin' ? 'Grant Accessibility and Screen Recording to the runner.' : machine.platform === 'win32' ? 'Sign in to an interactive Windows session and start the runner there.' : 'Start a graphical session with DISPLAY or Wayland and enable AT-SPI.');
+    if (profile && profile.computer.access !== 'direct' && !machine.capabilities.container) issues.push('Container execution is unavailable.');
+    if (profile && !isSandboxedComputer(profile.computer)) issues.push(UNSANDBOXED_COMPUTER_MESSAGE);
     if (profile?.computer.desktop === 'virtual' && !machine.capabilities.virtualDesktop) issues.push('Private virtual desktops are available on Linux runners only.');
     return { ok: !issues.length, message: issues.length ? issues.join(' ') : `${machine.name} is ready for this agent.`, machine };
   }
-  enqueue(machineId: string, agentId: string | null, kind: string, payload: unknown) { const command = { id: crypto.randomUUID(), machineId, agentId, kind, state: 'queued', createdAt: now() }; this.db.prepare('INSERT INTO runner_commands VALUES(?,?,?,?,?,?,?,?,?,?)').run(command.id, machineId, agentId, kind, JSON.stringify(payload), command.state, command.createdAt, null, null, null); return command; }
+  enqueue(machineId: string, agentId: string | null, kind: string, payload: unknown) { this.checkSandbox(payload); const command = { id: crypto.randomUUID(), machineId, agentId, kind, state: 'queued', createdAt: now() }; this.db.prepare('INSERT INTO runner_commands VALUES(?,?,?,?,?,?,?,?,?,?)').run(command.id, machineId, agentId, kind, JSON.stringify(payload), command.state, command.createdAt, null, null, null); return command; }
   command(id: string) { const row = this.db.prepare('SELECT * FROM runner_commands WHERE id=?').get(id) as CommandRow | undefined; if (!row) return null; let runId = ''; try { runId = String((JSON.parse(row.payload_json) as { runId?: unknown })?.runId || ''); } catch { runId = ''; } return { id: row.id, machineId: row.machine_id, agentId: row.agent_id, kind: row.kind, state: row.state, runId, result: row.result_json ? JSON.parse(row.result_json) : null }; }
   // Ownership of the command is not enough: without pinning the run as well, any paired
   // runner could post approval or clarification events against an unrelated agent's run
   // and park it in waiting_approval indefinitely. A command carries exactly one run.
   receiveEvent(machineId: string, commandId: string, eventId: string, runId: string) { const command = this.command(commandId); if (!command || command.machineId !== machineId) throw new MachineError('Runner command not found.', 404); if (command.runId !== runId) throw new MachineError('This event does not belong to the run its command was issued for.', 403); const changed = this.db.prepare('INSERT OR IGNORE INTO runner_event_receipts VALUES(?,?,?)').run(commandId, eventId, now()); return Boolean(changed.changes); }
-  poll(machineId: string) { const rows = this.db.prepare("SELECT * FROM runner_commands WHERE machine_id=? AND state='queued' ORDER BY created_at LIMIT 10").all(machineId) as CommandRow[]; const leased = now(); for (const row of rows) this.db.prepare("UPDATE runner_commands SET state='leased',leased_at=? WHERE id=? AND state='queued'").run(leased, row.id); return rows.map(row => ({ id: row.id, agentId: row.agent_id, kind: row.kind, payload: JSON.parse(row.payload_json), createdAt: row.created_at })); }
+  private checkSandbox(payload: unknown) {
+    const value = payload as { snapshot?: AgentProfile; profile?: AgentProfile } | null;
+    assertSandboxedComputer(value?.snapshot?.computer); assertSandboxedComputer(value?.profile?.computer);
+  }
+  poll(machineId: string) {
+    const rows = this.db.prepare("SELECT * FROM runner_commands WHERE machine_id=? AND state='queued' ORDER BY created_at LIMIT 10").all(machineId) as CommandRow[];
+    const leased = now(), commands = [];
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload_json);
+      try { this.checkSandbox(payload); }
+      catch (error) { this.finish(machineId, row.id, { error: error instanceof Error ? error.message : UNSANDBOXED_COMPUTER_MESSAGE }, true); continue; }
+      this.db.prepare("UPDATE runner_commands SET state='leased',leased_at=? WHERE id=? AND state='queued'").run(leased, row.id);
+      commands.push({ id: row.id, agentId: row.agent_id, kind: row.kind, payload, createdAt: row.created_at });
+    }
+    return commands;
+  }
   finish(machineId: string, commandId: string, result: unknown, failed = false) { const existing = this.command(commandId); if (!existing || existing.machineId !== machineId) throw new MachineError('Runner command not found.', 404); if (['completed','failed'].includes(existing.state)) return { ok: true, duplicate: true }; this.db.prepare("UPDATE runner_commands SET state=?,finished_at=?,result_json=?,payload_json=? WHERE id=? AND machine_id=? AND state IN ('queued','leased')").run(failed ? 'failed' : 'completed', now(), JSON.stringify(result), this.spentPayload(commandId), commandId, machineId); return { ok: true }; }
   // A finished command keeps only what a later lookup needs. Nothing rereads the credential
   // material it carried, and a queue table is a poor place to leave any copy of it.
@@ -166,7 +180,7 @@ export class Machines {
     } catch { return '{}'; }
   }
   encryptionKey(machineId: string) { return this.row(machineId)?.encryption_public_key || ''; }
-  transfer(agentId: string, source: string, destination: string, pendingProfile?: AgentProfile) { if (this.transferring(agentId)) throw new MachineError('This agent is already transferring. Wait for it to finish before changing computers again.', 409); if (source === destination) throw new MachineError('This agent is already on that computer.', 409); this.canAssign(destination, agentId); const id = crypto.randomUUID(), stamp = now(); this.db.prepare('INSERT INTO agent_transfers(id,agent_id,source_machine_id,destination_machine_id,state,detail,created_at,updated_at,pending_profile_json) VALUES(?,?,?,?,?,?,?,?,?)').run(id, agentId, source, destination, 'queued', 'Waiting for active work to finish.', stamp, stamp, pendingProfile ? JSON.stringify(pendingProfile) : null); return { id, agentId, sourceMachineId: source, destinationMachineId: destination, state: 'queued', detail: 'Waiting for active work to finish.', pendingProfile }; }
+  transfer(agentId: string, source: string, destination: string, pendingProfile?: AgentProfile) { assertSandboxedComputer(pendingProfile?.computer); if (this.transferring(agentId)) throw new MachineError('This agent is already transferring. Wait for it to finish before changing computers again.', 409); if (source === destination) throw new MachineError('This agent is already on that computer.', 409); this.canAssign(destination, agentId); const id = crypto.randomUUID(), stamp = now(); this.db.prepare('INSERT INTO agent_transfers(id,agent_id,source_machine_id,destination_machine_id,state,detail,created_at,updated_at,pending_profile_json) VALUES(?,?,?,?,?,?,?,?,?)').run(id, agentId, source, destination, 'queued', 'Waiting for active work to finish.', stamp, stamp, pendingProfile ? JSON.stringify(pendingProfile) : null); return { id, agentId, sourceMachineId: source, destinationMachineId: destination, state: 'queued', detail: 'Waiting for active work to finish.', pendingProfile }; }
   transferring(agentId: string) { return Boolean(this.db.prepare("SELECT 1 FROM agent_transfers WHERE agent_id=? AND state IN ('queued','exporting','importing','verifying') LIMIT 1").get(agentId)); }
   transferStatus(agentId: string) { const row = this.db.prepare('SELECT state,detail FROM agent_transfers WHERE agent_id=? ORDER BY created_at DESC LIMIT 1').get(agentId) as { state: string; detail: string } | undefined; return row || null; }
   setTransfer(id: string, state: string, detail: string) { this.db.prepare('UPDATE agent_transfers SET state=?,detail=?,updated_at=? WHERE id=?').run(state, detail, now(), id); }

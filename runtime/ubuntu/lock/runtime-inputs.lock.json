@@ -1,0 +1,3001 @@
+{
+  "curl": {
+    "buildDependencies": [
+      "libnghttp3-dev=1.12.0-1",
+      "pkg-config"
+    ],
+    "expectedRuntime": {
+      "features": [
+        "alt-svc",
+        "AsynchDNS",
+        "brotli",
+        "GSS-API",
+        "HSTS",
+        "HTTP2",
+        "HTTP3",
+        "HTTPS-proxy",
+        "IDN",
+        "IPv6",
+        "Kerberos",
+        "Largefile",
+        "libz",
+        "NTLM",
+        "PSL",
+        "SPNEGO",
+        "SSL",
+        "threadsafe",
+        "TLS-SRP",
+        "UnixSockets",
+        "zstd"
+      ],
+      "libraries": [
+        "libcurl/8.18.0",
+        "OpenSSL/3.5.5",
+        "zlib/1.3.1",
+        "brotli/1.2.0",
+        "zstd/1.5.7",
+        "libidn2/2.3.8",
+        "libpsl/0.21.2",
+        "libssh2/1.11.1",
+        "nghttp2/1.68.0",
+        "nghttp3/1.12.0",
+        "librtmp/2.3",
+        "mit-krb5/1.22.1",
+        "OpenLDAP/2.6.10"
+      ],
+      "protocols": [
+        "dict",
+        "file",
+        "ftp",
+        "ftps",
+        "gopher",
+        "gophers",
+        "http",
+        "https",
+        "imap",
+        "imaps",
+        "ipfs",
+        "ipns",
+        "ldap",
+        "ldaps",
+        "mqtt",
+        "pop3",
+        "pop3s",
+        "rtmp",
+        "rtsp",
+        "scp",
+        "sftp",
+        "smb",
+        "smbs",
+        "smtp",
+        "smtps",
+        "telnet",
+        "tftp",
+        "ws",
+        "wss"
+      ]
+    },
+    "rebuild": {
+      "builderUid": 10001,
+      "changelogEntry": [
+        "curl (8.18.0-1ubuntu2.7+openharness.http3.1) resolute; urgency=medium",
+        "",
+        "  * Local candidate: enable OpenSSL QUIC and nghttp3 for the OpenSSL",
+        "    flavour. Preserve the distribution patches, protocols, GnuTLS flavour",
+        "    and test-nonflaky targets. Add nghttp3 build and static-link dependencies.",
+        "",
+        " -- Open Harness local build <build@localhost>  Tue, 29 Sep 2026 04:15:00 +0000",
+        ""
+      ],
+      "command": [
+        "dpkg-buildpackage",
+        "-us",
+        "-uc",
+        "-b",
+        "-j4"
+      ],
+      "controlInsertions": [
+        [
+          "               libnghttp2-dev,\n",
+          "               libnghttp3-dev (>= 1.12.0),\n"
+        ],
+        [
+          "         libnghttp2-dev,\n",
+          "         libnghttp3-dev (>= 1.12.0),\n"
+        ]
+      ],
+      "expectedFiles": {
+        "debian/changelog": "30aefa622876cfe6e622f86ddaba24c822c6582827a99717391327c8b8a34434",
+        "debian/control": "fa11bfef2364839741fbc71ef31412b52bf30bd8eb4216cdfcb10f6e19ae7138",
+        "debian/rules": "ad19f9fa5df921a9ad22016c4d63ebcf6912d49e96267174b3a5c2813e22f008"
+      },
+      "expectedPatchSha256": "1af999f04215ba940ad66ed22f9fdc0a9fe3e7e1b2c5932931a0d9c8d348621e",
+      "minimumPidsLimit": 2048,
+      "rulesAnchor": "$(call configure-curl,openssl)",
+      "rulesReplacement": "$(call configure-curl,openssl,--with-nghttp3 --with-openssl-quic)",
+      "runtimePackages": [
+        "curl",
+        "libcurl4t64",
+        "libcurl3t64-gnutls"
+      ],
+      "version": "8.18.0-1ubuntu2.7+openharness.http3.1"
+    },
+    "source": {
+      "files": {
+        "curl_8.18.0-1ubuntu2.7.debian.tar.xz": {
+          "bytes": 97116,
+          "sha256": "34e22bf5af78936647bfa39bba4b72e82d7eca74fba9333b7b040725ba011303"
+        },
+        "curl_8.18.0-1ubuntu2.7.dsc": {
+          "bytes": 3308,
+          "sha256": "9cee2c82665c24949b36350a0bfc981361cdc951448776967a189526a5febf80"
+        },
+        "curl_8.18.0.orig.tar.gz": {
+          "bytes": 4182005,
+          "sha256": "e9274a5f8ab5271c0e0e6762d2fce194d5f98acc568e4ce816845b2dcc0cf88f"
+        },
+        "curl_8.18.0.orig.tar.gz.asc": {
+          "bytes": 488,
+          "sha256": "449692ee6cbadc99762d1daa86b3faf95d60f82b1d45ea1a33e37adda4bd194b"
+        }
+      },
+      "package": "curl",
+      "version": "8.18.0-1ubuntu2.7"
+    }
+  },
+  "debian": {
+    "packages": {
+      "amd64": {
+        "chromium": {
+          "Architecture": "amd64",
+          "Filename": "pool/updates/main/c/chromium/chromium_154.0.8037.57-1~deb13u1_amd64.deb",
+          "Package": "chromium",
+          "SHA256": "d70bab9fbcb7bfbb7227b9510fb5cf1f7290bd6d6af3dd168b19ba4cc9b8035d",
+          "Size": 90587876,
+          "Version": "154.0.8037.57-1~deb13u1"
+        },
+        "chromium-common": {
+          "Architecture": "amd64",
+          "Filename": "pool/updates/main/c/chromium/chromium-common_154.0.8037.57-1~deb13u1_amd64.deb",
+          "Package": "chromium-common",
+          "SHA256": "8adc7a808ab393bd9f38855c8ad15757be8896eae36afc86728776a02c0794a7",
+          "Size": 30613260,
+          "Source": "chromium",
+          "Version": "154.0.8037.57-1~deb13u1"
+        },
+        "libjpeg62-turbo": {
+          "Architecture": "amd64",
+          "Filename": "pool/main/libj/libjpeg-turbo/libjpeg62-turbo_2.1.5-4_amd64.deb",
+          "Package": "libjpeg62-turbo",
+          "SHA256": "5504299ad0e3c0a9ca9f962a68a650a040db52f9f416a109e74df48d55601d3f",
+          "Size": 168152,
+          "Source": "libjpeg-turbo",
+          "Version": "1:2.1.5-4"
+        }
+      },
+      "arm64": {
+        "chromium": {
+          "Architecture": "arm64",
+          "Filename": "pool/updates/main/c/chromium/chromium_154.0.8037.57-1~deb13u1_arm64.deb",
+          "Package": "chromium",
+          "SHA256": "df210b1e57d974003c50f0c38298e0841dba63053b392653aa60bd34d168bed0",
+          "Size": 78706552,
+          "Version": "154.0.8037.57-1~deb13u1"
+        },
+        "chromium-common": {
+          "Architecture": "arm64",
+          "Filename": "pool/updates/main/c/chromium/chromium-common_154.0.8037.57-1~deb13u1_arm64.deb",
+          "Package": "chromium-common",
+          "SHA256": "5eecb71dd7b23e7c21dd8f1c2c68f2cf80e2f802486b7c59f5286f7a28544be6",
+          "Size": 35619268,
+          "Source": "chromium",
+          "Version": "154.0.8037.57-1~deb13u1"
+        },
+        "libjpeg62-turbo": {
+          "Architecture": "arm64",
+          "Filename": "pool/main/libj/libjpeg-turbo/libjpeg62-turbo_2.1.5-4_arm64.deb",
+          "Package": "libjpeg62-turbo",
+          "SHA256": "e4989073bb0bac8a6ec043c7adb80e1dfe601d8552233da48bb24ab45d1a1d4a",
+          "Size": 172784,
+          "Source": "libjpeg-turbo",
+          "Version": "1:2.1.5-4"
+        }
+      }
+    },
+    "release": "13",
+    "suite": "trixie"
+  },
+  "derivedFrom": {
+    "amd64Build": {
+      "buildLogSha256": "7e10d3796be0a6f0760770cbcfc685ab0bafecbc8ab039c4fec40a4f12317b8f",
+      "builtLockSha256": "78cacbeffe12a2c57018fee4fb805c1c4bdb9873736181a29a0652d0829e000b",
+      "executionMode": "emulated",
+      "intentSha256": "6824633f70ee66e69ae688936ce1d9d331a52615253083d1ed155e389d1a3592",
+      "resultSha256": "ba1bb6e549cd9f1f1c02ac6c42a15828d363b8561842573580821abe163c62fc"
+    },
+    "liveArchiveBuild": {
+      "buildLogSha256": "465ceb4d283e74732365abf7b616a2acdeb8010e5d87853b0155b85f0d2a0ecc",
+      "builtLockSha256": "50424767a819602aeda1c6676db89ee5f1811dc6ca87d7f3716ffb396a4269f0",
+      "intentSha256": "e5e747316e93f08b620afe10aaf9857c831aa7a9de4cfdb3fe20ec51a072b6d7",
+      "resultSha256": "b20f547076291f91962606c23187b17dcdb62d9a7d8a11d239b0fce307f7edb5",
+      "unavailablePins": [
+        "libheif-plugin-aomdec=1.21.2-3ubuntu0.5",
+        "libheif1=1.21.2-3ubuntu0.5",
+        "openssl=3.5.5-1ubuntu3.5"
+      ]
+    },
+    "packetManifestSha256": "595a4addce271d217c7c625975d8295ee290ccf9bebe34aa643a6ba0a43db1a3",
+    "snapshotProbeSha256Sums": {
+      "amd64": "6c1b160d4ec11fd79707641a3a99b3c8c4df197710799d9d786930cec9f849e6",
+      "arm64": "fc2e396151f232b5e1ba1ac861e2031fdd4c0bfdaf1af8a2bbcdb2f1db456e3a"
+    },
+    "testedImage": "sha256:19767a183a718f2758b43bf510d1dafcbf34a92837a4f35e912c68b0e70673a5",
+    "testedImageScanSha256": "99ba1b7c59549433e401fa02bfe63bab138ed49dff789b7b23ba36f1aefc4f02"
+  },
+  "finalPackages": {
+    "amd64": {
+      "adwaita-icon-theme": [
+        "50.0-1",
+        "all"
+      ],
+      "apt": [
+        "3.2.0",
+        "amd64"
+      ],
+      "at-spi2-common": [
+        "2.60.4-0ubuntu0.1",
+        "all"
+      ],
+      "at-spi2-core": [
+        "2.60.4-0ubuntu0.1",
+        "amd64"
+      ],
+      "base-files": [
+        "14ubuntu6.2",
+        "amd64"
+      ],
+      "base-passwd": [
+        "3.6.8",
+        "amd64"
+      ],
+      "bash": [
+        "5.3-2ubuntu1",
+        "amd64"
+      ],
+      "bsdutils": [
+        "1:2.41.3-3ubuntu2.2",
+        "amd64"
+      ],
+      "bubblewrap": [
+        "0.11.1-1ubuntu0.3",
+        "amd64"
+      ],
+      "ca-certificates": [
+        "20260601~26.04.1",
+        "all"
+      ],
+      "chromium": [
+        "154.0.8037.57-1~deb13u1",
+        "amd64"
+      ],
+      "chromium-common": [
+        "154.0.8037.57-1~deb13u1",
+        "amd64"
+      ],
+      "coreutils": [
+        "9.5-1ubuntu2+0.0.0~ubuntu25",
+        "all"
+      ],
+      "coreutils-from-uutils": [
+        "0.0.0~ubuntu25",
+        "all"
+      ],
+      "curl": [
+        "8.18.0-1ubuntu2.7+openharness.http3.1",
+        "amd64"
+      ],
+      "dash": [
+        "0.5.12-12ubuntu3",
+        "amd64"
+      ],
+      "dbus-bin": [
+        "1.16.2-2ubuntu4",
+        "amd64"
+      ],
+      "dbus-daemon": [
+        "1.16.2-2ubuntu4",
+        "amd64"
+      ],
+      "dbus-session-bus-common": [
+        "1.16.2-2ubuntu4",
+        "all"
+      ],
+      "dbus-x11": [
+        "1.16.2-2ubuntu4",
+        "amd64"
+      ],
+      "dconf-gsettings-backend": [
+        "0.49.0-4",
+        "amd64"
+      ],
+      "dconf-service": [
+        "0.49.0-4",
+        "amd64"
+      ],
+      "debconf": [
+        "1.5.92",
+        "all"
+      ],
+      "debianutils": [
+        "5.23.2build1",
+        "amd64"
+      ],
+      "diffutils": [
+        "1:3.12-1ubuntu0.1",
+        "amd64"
+      ],
+      "dpkg": [
+        "1.23.7ubuntu1",
+        "amd64"
+      ],
+      "e2fsprogs": [
+        "1.47.2-3ubuntu4",
+        "amd64"
+      ],
+      "findutils": [
+        "4.10.0-3build2",
+        "amd64"
+      ],
+      "fontconfig": [
+        "2.17.1-3ubuntu1",
+        "amd64"
+      ],
+      "fontconfig-config": [
+        "2.17.1-3ubuntu1",
+        "amd64"
+      ],
+      "fonts-urw-base35": [
+        "20200910-8build1",
+        "all"
+      ],
+      "gcc-16-base": [
+        "16-20260322-1ubuntu1",
+        "amd64"
+      ],
+      "git": [
+        "1:2.53.0-1ubuntu1",
+        "amd64"
+      ],
+      "git-man": [
+        "1:2.53.0-1ubuntu1",
+        "all"
+      ],
+      "glycin-loaders": [
+        "2.1.1+ds-0ubuntu1",
+        "amd64"
+      ],
+      "glycin-thumbnailers": [
+        "2.1.1+ds-0ubuntu1",
+        "amd64"
+      ],
+      "gnu-coreutils": [
+        "9.7-3ubuntu2.1",
+        "amd64"
+      ],
+      "gpgv": [
+        "2.4.8-4ubuntu3.1",
+        "amd64"
+      ],
+      "grep": [
+        "3.12-1",
+        "amd64"
+      ],
+      "gsettings-desktop-schemas": [
+        "50.0-1ubuntu2",
+        "all"
+      ],
+      "gtk-update-icon-cache": [
+        "4.22.4+ds-0ubuntu0.1",
+        "amd64"
+      ],
+      "gzip": [
+        "1.14-1~exp2ubuntu1.1",
+        "amd64"
+      ],
+      "hicolor-icon-theme": [
+        "0.18-2build1",
+        "all"
+      ],
+      "hostname": [
+        "3.25build1",
+        "amd64"
+      ],
+      "init-system-helpers": [
+        "1.69",
+        "all"
+      ],
+      "libacl1": [
+        "2.3.2-2",
+        "amd64"
+      ],
+      "libaom3": [
+        "3.13.1-2ubuntu0.1",
+        "amd64"
+      ],
+      "libapparmor1": [
+        "5.0.2-0ubuntu1~26.04.1",
+        "amd64"
+      ],
+      "libapt-pkg7.0": [
+        "3.2.0",
+        "amd64"
+      ],
+      "libasound2-data": [
+        "1.2.15.3-1ubuntu1.1",
+        "all"
+      ],
+      "libasound2t64": [
+        "1.2.15.3-1ubuntu1.1",
+        "amd64"
+      ],
+      "libasyncns0": [
+        "0.8-7",
+        "amd64"
+      ],
+      "libatk-bridge2.0-0t64": [
+        "2.60.4-0ubuntu0.1",
+        "amd64"
+      ],
+      "libatk1.0-0t64": [
+        "2.60.4-0ubuntu0.1",
+        "amd64"
+      ],
+      "libatomic1": [
+        "16-20260322-1ubuntu1",
+        "amd64"
+      ],
+      "libatspi2.0-0t64": [
+        "2.60.4-0ubuntu0.1",
+        "amd64"
+      ],
+      "libattr1": [
+        "1:2.5.2-4ubuntu0.1",
+        "amd64"
+      ],
+      "libaudit-common": [
+        "1:4.1.2-1ubuntu0.1",
+        "all"
+      ],
+      "libaudit1": [
+        "1:4.1.2-1ubuntu0.1",
+        "amd64"
+      ],
+      "libavahi-client3": [
+        "0.8-18ubuntu1.1",
+        "amd64"
+      ],
+      "libavahi-common-data": [
+        "0.8-18ubuntu1.1",
+        "amd64"
+      ],
+      "libavahi-common3": [
+        "0.8-18ubuntu1.1",
+        "amd64"
+      ],
+      "libblkid1": [
+        "2.41.3-3ubuntu2.2",
+        "amd64"
+      ],
+      "libbrotli1": [
+        "1.2.0-3build1",
+        "amd64"
+      ],
+      "libbsd0": [
+        "0.12.2-2build2",
+        "amd64"
+      ],
+      "libbz2-1.0": [
+        "1.0.8-6ubuntu0.1",
+        "amd64"
+      ],
+      "libc-bin": [
+        "2.43-2ubuntu2.4",
+        "amd64"
+      ],
+      "libc-gconv-modules-extra": [
+        "2.43-2ubuntu2.4",
+        "amd64"
+      ],
+      "libc6": [
+        "2.43-2ubuntu2.4",
+        "amd64"
+      ],
+      "libcairo-gobject2": [
+        "1.18.4-3",
+        "amd64"
+      ],
+      "libcairo2": [
+        "1.18.4-3",
+        "amd64"
+      ],
+      "libcap-ng0": [
+        "0.8.5-4build5",
+        "amd64"
+      ],
+      "libcap2": [
+        "1:2.75-10ubuntu2",
+        "amd64"
+      ],
+      "libcolord2": [
+        "1.4.8-3",
+        "amd64"
+      ],
+      "libcom-err2": [
+        "1.47.2-3ubuntu4",
+        "amd64"
+      ],
+      "libcrypt1": [
+        "1:4.5.1-1",
+        "amd64"
+      ],
+      "libcups2t64": [
+        "2.4.16-1ubuntu1.3",
+        "amd64"
+      ],
+      "libcurl3t64-gnutls": [
+        "8.18.0-1ubuntu2.7+openharness.http3.1",
+        "amd64"
+      ],
+      "libcurl4t64": [
+        "8.18.0-1ubuntu2.7+openharness.http3.1",
+        "amd64"
+      ],
+      "libdatrie1": [
+        "0.2.14-1",
+        "amd64"
+      ],
+      "libdav1d7": [
+        "1.5.3-1",
+        "amd64"
+      ],
+      "libdb5.3t64": [
+        "5.3.28+dfsg2-10ubuntu1",
+        "amd64"
+      ],
+      "libdbus-1-3": [
+        "1.16.2-2ubuntu4",
+        "amd64"
+      ],
+      "libdconf1": [
+        "0.49.0-4",
+        "amd64"
+      ],
+      "libdebconfclient0": [
+        "0.280ubuntu1",
+        "amd64"
+      ],
+      "libdeflate0": [
+        "1.23-2ubuntu1",
+        "amd64"
+      ],
+      "libdouble-conversion3": [
+        "3.4.0-1",
+        "amd64"
+      ],
+      "libdrm-amdgpu1": [
+        "2.4.131-1",
+        "amd64"
+      ],
+      "libdrm-common": [
+        "2.4.131-1",
+        "all"
+      ],
+      "libdrm-intel1": [
+        "2.4.131-1",
+        "amd64"
+      ],
+      "libdrm2": [
+        "2.4.131-1",
+        "amd64"
+      ],
+      "libedit2": [
+        "3.1-20251016-1",
+        "amd64"
+      ],
+      "libelf1t64": [
+        "0.194-4",
+        "amd64"
+      ],
+      "libepoxy0": [
+        "1.5.10-2build1",
+        "amd64"
+      ],
+      "liberror-perl": [
+        "0.17030-1",
+        "all"
+      ],
+      "libexpat1": [
+        "2.7.4-1ubuntu0.2",
+        "amd64"
+      ],
+      "libext2fs2t64": [
+        "1.47.2-3ubuntu4",
+        "amd64"
+      ],
+      "libffi8": [
+        "3.5.2-4",
+        "amd64"
+      ],
+      "libflac14": [
+        "1.5.0+ds-5",
+        "amd64"
+      ],
+      "libfontconfig1": [
+        "2.17.1-3ubuntu1",
+        "amd64"
+      ],
+      "libfontenc1": [
+        "1:1.1.8-1build2",
+        "amd64"
+      ],
+      "libfreetype6": [
+        "2.14.2+dfsg-1ubuntu0.1",
+        "amd64"
+      ],
+      "libfribidi0": [
+        "1.0.16-5",
+        "amd64"
+      ],
+      "libgbm1": [
+        "26.0.8-1ubuntu0.3",
+        "amd64"
+      ],
+      "libgcc-s1": [
+        "16-20260322-1ubuntu1",
+        "amd64"
+      ],
+      "libgcrypt20": [
+        "1.12.0-2ubuntu1.1",
+        "amd64"
+      ],
+      "libgdbm-compat4t64": [
+        "1.26-1build1",
+        "amd64"
+      ],
+      "libgdbm6t64": [
+        "1.26-1build1",
+        "amd64"
+      ],
+      "libgdk-pixbuf-2.0-0": [
+        "2.44.5+dfsg-4ubuntu1",
+        "amd64"
+      ],
+      "libgdk-pixbuf2.0-common": [
+        "2.44.5+dfsg-4ubuntu1",
+        "all"
+      ],
+      "libgif7": [
+        "5.2.2-1ubuntu3.2",
+        "amd64"
+      ],
+      "libgl1": [
+        "1.7.0-3",
+        "amd64"
+      ],
+      "libgl1-mesa-dri": [
+        "26.0.8-1ubuntu0.3",
+        "amd64"
+      ],
+      "libglib2.0-0t64": [
+        "2.88.0-1ubuntu0.1",
+        "amd64"
+      ],
+      "libglvnd0": [
+        "1.7.0-3",
+        "amd64"
+      ],
+      "libglx-mesa0": [
+        "26.0.8-1ubuntu0.3",
+        "amd64"
+      ],
+      "libglx0": [
+        "1.7.0-3",
+        "amd64"
+      ],
+      "libglycin-2-0": [
+        "2.1.1+ds-0ubuntu1",
+        "amd64"
+      ],
+      "libgmp10": [
+        "2:6.3.0+dfsg-5ubuntu2",
+        "amd64"
+      ],
+      "libgnutls30t64": [
+        "3.8.12-2ubuntu1.1",
+        "amd64"
+      ],
+      "libgpg-error0": [
+        "1.58-2",
+        "amd64"
+      ],
+      "libgraphite2-3": [
+        "1.3.14-11ubuntu1.1",
+        "amd64"
+      ],
+      "libgs-common": [
+        "10.06.0~dfsg-3ubuntu1.1",
+        "all"
+      ],
+      "libgs10": [
+        "10.06.0~dfsg-3ubuntu1.1",
+        "amd64"
+      ],
+      "libgs10-common": [
+        "10.06.0~dfsg-3ubuntu1.1",
+        "all"
+      ],
+      "libgssapi-krb5-2": [
+        "1.22.1-2ubuntu4.1",
+        "amd64"
+      ],
+      "libgtk-3-0t64": [
+        "3.24.52-0ubuntu1",
+        "amd64"
+      ],
+      "libgtk-3-common": [
+        "3.24.52-0ubuntu1",
+        "all"
+      ],
+      "libharfbuzz-subset0": [
+        "12.3.2-2",
+        "amd64"
+      ],
+      "libharfbuzz0b": [
+        "12.3.2-2",
+        "amd64"
+      ],
+      "libheif-plugin-aomdec": [
+        "1.21.2-3ubuntu0.5",
+        "amd64"
+      ],
+      "libheif1": [
+        "1.21.2-3ubuntu0.5",
+        "amd64"
+      ],
+      "libhogweed6t64": [
+        "3.10.2-1",
+        "amd64"
+      ],
+      "libhwy1t64": [
+        "1.3.0-2",
+        "amd64"
+      ],
+      "libice6": [
+        "2:1.1.1-1build1",
+        "amd64"
+      ],
+      "libid3tag0": [
+        "0.16.3-4",
+        "amd64"
+      ],
+      "libidn12": [
+        "1.43-2ubuntu0.26.04.1",
+        "amd64"
+      ],
+      "libidn2-0": [
+        "2.3.8-4build1",
+        "amd64"
+      ],
+      "libijs-0.35": [
+        "0.35-16",
+        "amd64"
+      ],
+      "libimlib2t64": [
+        "1.12.6-1",
+        "amd64"
+      ],
+      "libjbig0": [
+        "2.1-6.1ubuntu3",
+        "amd64"
+      ],
+      "libjbig2dec0": [
+        "0.20-1ubuntu0.26.04.1",
+        "amd64"
+      ],
+      "libjpeg-turbo8": [
+        "2.1.5-4ubuntu4",
+        "amd64"
+      ],
+      "libjpeg62-turbo": [
+        "1:2.1.5-4",
+        "amd64"
+      ],
+      "libjpeg8": [
+        "8c-2ubuntu12",
+        "amd64"
+      ],
+      "libjxl0.11": [
+        "0.11.1-6ubuntu4.2",
+        "amd64"
+      ],
+      "libk5crypto3": [
+        "1.22.1-2ubuntu4.1",
+        "amd64"
+      ],
+      "libkeyutils1": [
+        "1.6.3-6ubuntu3",
+        "amd64"
+      ],
+      "libkrb5-3": [
+        "1.22.1-2ubuntu4.1",
+        "amd64"
+      ],
+      "libkrb5support0": [
+        "1.22.1-2ubuntu4.1",
+        "amd64"
+      ],
+      "liblcms2-2": [
+        "2.17-1ubuntu0.2",
+        "amd64"
+      ],
+      "libldap-common": [
+        "2.6.10+dfsg-1ubuntu5",
+        "all"
+      ],
+      "libldap2": [
+        "2.6.10+dfsg-1ubuntu5",
+        "amd64"
+      ],
+      "liblerc4": [
+        "4.0.0+ds-5ubuntu2",
+        "amd64"
+      ],
+      "libllvm21": [
+        "1:21.1.8-6ubuntu1",
+        "amd64"
+      ],
+      "liblz4-1": [
+        "1.10.0-8",
+        "amd64"
+      ],
+      "liblzma5": [
+        "5.8.3-1",
+        "amd64"
+      ],
+      "libmd0": [
+        "1.1.0-2build4",
+        "amd64"
+      ],
+      "libminizip1t64": [
+        "1:1.3.dfsg+really1.3.1-1ubuntu3.1",
+        "amd64"
+      ],
+      "libmount1": [
+        "2.41.3-3ubuntu2.2",
+        "amd64"
+      ],
+      "libmp3lame0": [
+        "3.101~svn6525+dfsg-2",
+        "amd64"
+      ],
+      "libmpg123-0t64": [
+        "1.33.3-2",
+        "amd64"
+      ],
+      "libncursesw6": [
+        "6.6+20251231-1",
+        "amd64"
+      ],
+      "libnettle8t64": [
+        "3.10.2-1",
+        "amd64"
+      ],
+      "libnghttp2-14": [
+        "1.68.0-2ubuntu0.2",
+        "amd64"
+      ],
+      "libnghttp3-9": [
+        "1.12.0-1",
+        "amd64"
+      ],
+      "libnspr4": [
+        "2:4.38.2-1ubuntu1",
+        "amd64"
+      ],
+      "libnss-wrapper": [
+        "1.1.16-5",
+        "amd64"
+      ],
+      "libnss3": [
+        "2:3.120-1ubuntu2.1",
+        "amd64"
+      ],
+      "libobrender32": [
+        "3.6.1-12ubuntu3",
+        "amd64"
+      ],
+      "libobt2": [
+        "3.6.1-12ubuntu3",
+        "amd64"
+      ],
+      "libogg0": [
+        "1.3.6-2",
+        "amd64"
+      ],
+      "libopenh264-8": [
+        "2.6.0+dfsg-2build1",
+        "amd64"
+      ],
+      "libopenjp2-7": [
+        "2.5.4-1ubuntu0.1",
+        "amd64"
+      ],
+      "libopus0": [
+        "1.6.1-1",
+        "amd64"
+      ],
+      "libp11-kit0": [
+        "0.26.2-2",
+        "amd64"
+      ],
+      "libpam-modules": [
+        "1.7.0-5ubuntu3.2",
+        "amd64"
+      ],
+      "libpam-modules-bin": [
+        "1.7.0-5ubuntu3.2",
+        "amd64"
+      ],
+      "libpam-runtime": [
+        "1.7.0-5ubuntu3.2",
+        "all"
+      ],
+      "libpam0g": [
+        "1.7.0-5ubuntu3.2",
+        "amd64"
+      ],
+      "libpango-1.0-0": [
+        "1.57.0-1",
+        "amd64"
+      ],
+      "libpangocairo-1.0-0": [
+        "1.57.0-1",
+        "amd64"
+      ],
+      "libpangoft2-1.0-0": [
+        "1.57.0-1",
+        "amd64"
+      ],
+      "libpangoxft-1.0-0": [
+        "1.57.0-1",
+        "amd64"
+      ],
+      "libpaper2": [
+        "2.2.5-0.3maysync1",
+        "amd64"
+      ],
+      "libpciaccess0": [
+        "0.18.1-1ubuntu4.1",
+        "amd64"
+      ],
+      "libpcre2-8-0": [
+        "10.46-1build1",
+        "amd64"
+      ],
+      "libperl5.40": [
+        "5.40.1-7ubuntu0.3",
+        "amd64"
+      ],
+      "libpixman-1-0": [
+        "0.46.4-1",
+        "amd64"
+      ],
+      "libpng16-16t64": [
+        "1.6.57-1",
+        "amd64"
+      ],
+      "libproc2-0": [
+        "2:4.0.4-9ubuntu1",
+        "amd64"
+      ],
+      "libpsl5t64": [
+        "0.21.2-1.1build2",
+        "amd64"
+      ],
+      "libpulse0": [
+        "1:17.0+dfsg1-2ubuntu4",
+        "amd64"
+      ],
+      "libpython3-stdlib": [
+        "3.14.3-0ubuntu2",
+        "amd64"
+      ],
+      "libpython3.14-minimal": [
+        "3.14.4-1ubuntu0.2",
+        "amd64"
+      ],
+      "libpython3.14-stdlib": [
+        "3.14.4-1ubuntu0.2",
+        "amd64"
+      ],
+      "libreadline8t64": [
+        "8.3-4",
+        "amd64"
+      ],
+      "librsvg2-2": [
+        "2.61.3+dfsg-3",
+        "amd64"
+      ],
+      "librtmp1": [
+        "2.4+20151223.gitfa8646d.1-3",
+        "amd64"
+      ],
+      "libsasl2-2": [
+        "2.1.28+dfsg1-9ubuntu3",
+        "amd64"
+      ],
+      "libsasl2-modules-db": [
+        "2.1.28+dfsg1-9ubuntu3",
+        "amd64"
+      ],
+      "libseccomp2": [
+        "2.6.0-2ubuntu5",
+        "amd64"
+      ],
+      "libselinux1": [
+        "3.9-4build1",
+        "amd64"
+      ],
+      "libsemanage-common": [
+        "3.9-1build1",
+        "all"
+      ],
+      "libsemanage2": [
+        "3.9-1build1",
+        "amd64"
+      ],
+      "libsensors-config": [
+        "1:3.6.2-2build1",
+        "all"
+      ],
+      "libsensors5": [
+        "1:3.6.2-2build1",
+        "amd64"
+      ],
+      "libsepol2": [
+        "3.9-2",
+        "amd64"
+      ],
+      "libsharpyuv0": [
+        "1.5.0-0.1build1",
+        "amd64"
+      ],
+      "libsm6": [
+        "2:1.2.6-1build1",
+        "amd64"
+      ],
+      "libsmartcols1": [
+        "2.41.3-3ubuntu2.2",
+        "amd64"
+      ],
+      "libsndfile1": [
+        "1.2.2-4",
+        "amd64"
+      ],
+      "libspectre1": [
+        "0.2.12-2",
+        "amd64"
+      ],
+      "libsqlite3-0": [
+        "3.46.1-9ubuntu0.3",
+        "amd64"
+      ],
+      "libss2": [
+        "1.47.2-3ubuntu4",
+        "amd64"
+      ],
+      "libssh2-1t64": [
+        "1.11.1-1ubuntu0.26.04.4",
+        "amd64"
+      ],
+      "libssl3t64": [
+        "3.5.5-1ubuntu3.5",
+        "amd64"
+      ],
+      "libstartup-notification0": [
+        "0.12-8build1",
+        "amd64"
+      ],
+      "libstdc++6": [
+        "16-20260322-1ubuntu1",
+        "amd64"
+      ],
+      "libsystemd0": [
+        "259.5-0ubuntu3.4",
+        "amd64"
+      ],
+      "libtasn1-6": [
+        "4.21.0-2",
+        "amd64"
+      ],
+      "libtcl8.6": [
+        "8.6.17+dfsg-1build1",
+        "amd64"
+      ],
+      "libthai-data": [
+        "0.1.30-1",
+        "all"
+      ],
+      "libthai0": [
+        "0.1.30-1",
+        "amd64"
+      ],
+      "libtiff6": [
+        "4.7.0-3ubuntu5",
+        "amd64"
+      ],
+      "libtinfo6": [
+        "6.6+20251231-1",
+        "amd64"
+      ],
+      "libtk8.6": [
+        "8.6.17-1build1",
+        "amd64"
+      ],
+      "libudev1": [
+        "259.5-0ubuntu3.4",
+        "amd64"
+      ],
+      "libunistring5": [
+        "1.3-2build1",
+        "amd64"
+      ],
+      "libunwind8": [
+        "1.8.3-0ubuntu1",
+        "amd64"
+      ],
+      "libuuid1": [
+        "2.41.3-3ubuntu2.2",
+        "amd64"
+      ],
+      "libvorbis0a": [
+        "1.3.7-3build2",
+        "amd64"
+      ],
+      "libvorbisenc2": [
+        "1.3.7-3build2",
+        "amd64"
+      ],
+      "libvulkan1": [
+        "1.4.341.0-1",
+        "amd64"
+      ],
+      "libwayland-client0": [
+        "1.24.0-2",
+        "amd64"
+      ],
+      "libwayland-cursor0": [
+        "1.24.0-2",
+        "amd64"
+      ],
+      "libwayland-egl1": [
+        "1.24.0-2",
+        "amd64"
+      ],
+      "libwebp7": [
+        "1.5.0-0.1build1",
+        "amd64"
+      ],
+      "libwebpdemux2": [
+        "1.5.0-0.1build1",
+        "amd64"
+      ],
+      "libx11-6": [
+        "2:1.8.13-1",
+        "amd64"
+      ],
+      "libx11-data": [
+        "2:1.8.13-1",
+        "all"
+      ],
+      "libx11-xcb1": [
+        "2:1.8.13-1",
+        "amd64"
+      ],
+      "libxau6": [
+        "1:1.0.11-1build2",
+        "amd64"
+      ],
+      "libxaw7": [
+        "2:1.0.16-1build1",
+        "amd64"
+      ],
+      "libxcb-dri3-0": [
+        "1.17.0-2ubuntu1",
+        "amd64"
+      ],
+      "libxcb-glx0": [
+        "1.17.0-2ubuntu1",
+        "amd64"
+      ],
+      "libxcb-present0": [
+        "1.17.0-2ubuntu1",
+        "amd64"
+      ],
+      "libxcb-randr0": [
+        "1.17.0-2ubuntu1",
+        "amd64"
+      ],
+      "libxcb-render0": [
+        "1.17.0-2ubuntu1",
+        "amd64"
+      ],
+      "libxcb-shape0": [
+        "1.17.0-2ubuntu1",
+        "amd64"
+      ],
+      "libxcb-shm0": [
+        "1.17.0-2ubuntu1",
+        "amd64"
+      ],
+      "libxcb-sync1": [
+        "1.17.0-2ubuntu1",
+        "amd64"
+      ],
+      "libxcb-util1": [
+        "0.4.1-1build1",
+        "amd64"
+      ],
+      "libxcb-xfixes0": [
+        "1.17.0-2ubuntu1",
+        "amd64"
+      ],
+      "libxcb1": [
+        "1.17.0-2ubuntu1",
+        "amd64"
+      ],
+      "libxcomposite1": [
+        "1:0.4.6-1build1",
+        "amd64"
+      ],
+      "libxcursor1": [
+        "1:1.2.3-1build1",
+        "amd64"
+      ],
+      "libxdamage1": [
+        "1:1.1.7-1",
+        "amd64"
+      ],
+      "libxdmcp6": [
+        "1:1.1.5-2",
+        "amd64"
+      ],
+      "libxext6": [
+        "2:1.3.4-1build3",
+        "amd64"
+      ],
+      "libxfixes3": [
+        "1:6.0.0-2build2",
+        "amd64"
+      ],
+      "libxfont2": [
+        "1:2.0.6-2ubuntu0.2",
+        "amd64"
+      ],
+      "libxft2": [
+        "2.3.6-1build2",
+        "amd64"
+      ],
+      "libxi6": [
+        "2:1.8.2-2",
+        "amd64"
+      ],
+      "libxinerama1": [
+        "2:1.1.4-3build2",
+        "amd64"
+      ],
+      "libxkbcommon0": [
+        "1.13.1-1",
+        "amd64"
+      ],
+      "libxkbfile1": [
+        "1:1.1.0-1build5",
+        "amd64"
+      ],
+      "libxml2-16": [
+        "2.15.2+dfsg-0.1ubuntu0.2",
+        "amd64"
+      ],
+      "libxmu6": [
+        "2:1.1.3-4",
+        "amd64"
+      ],
+      "libxmuu1": [
+        "2:1.1.3-4",
+        "amd64"
+      ],
+      "libxnvctrl0": [
+        "510.47.03-0ubuntu7",
+        "amd64"
+      ],
+      "libxpm4": [
+        "1:3.5.17-1ubuntu0.26.04.1",
+        "amd64"
+      ],
+      "libxrandr2": [
+        "2:1.5.4-1build1",
+        "amd64"
+      ],
+      "libxrender1": [
+        "1:0.9.12-1build1",
+        "amd64"
+      ],
+      "libxres1": [
+        "2:1.2.1-1build2",
+        "amd64"
+      ],
+      "libxshmfence1": [
+        "1.3.3-1build1",
+        "amd64"
+      ],
+      "libxss1": [
+        "1:1.2.3-1build4",
+        "amd64"
+      ],
+      "libxt6t64": [
+        "1:1.2.1-1.3build1",
+        "amd64"
+      ],
+      "libxtst6": [
+        "2:1.2.5-1build1",
+        "amd64"
+      ],
+      "libxv1": [
+        "2:1.0.13-1",
+        "amd64"
+      ],
+      "libxxf86dga1": [
+        "2:1.1.5-1build2",
+        "amd64"
+      ],
+      "libxxf86vm1": [
+        "1:1.1.4-2",
+        "amd64"
+      ],
+      "libxxhash0": [
+        "0.8.3-2build1",
+        "amd64"
+      ],
+      "libzstd1": [
+        "1.5.7+dfsg-3",
+        "amd64"
+      ],
+      "login": [
+        "1:4.16.0-2+really2.41.3-3ubuntu2.2",
+        "amd64"
+      ],
+      "login.defs": [
+        "1:4.17.4-2ubuntu3",
+        "all"
+      ],
+      "logsave": [
+        "1.47.2-3ubuntu4",
+        "amd64"
+      ],
+      "mawk": [
+        "1.3.4.20260129-1",
+        "amd64"
+      ],
+      "media-types": [
+        "14.0.0build1",
+        "all"
+      ],
+      "mesa-libgallium": [
+        "26.0.8-1ubuntu0.3",
+        "amd64"
+      ],
+      "mount": [
+        "2.41.3-3ubuntu2.2",
+        "amd64"
+      ],
+      "ncurses-base": [
+        "6.6+20251231-1",
+        "all"
+      ],
+      "ncurses-bin": [
+        "6.6+20251231-1",
+        "amd64"
+      ],
+      "netbase": [
+        "6.5build1",
+        "all"
+      ],
+      "openbox": [
+        "3.6.1-12ubuntu3",
+        "amd64"
+      ],
+      "openssl": [
+        "3.5.5-1ubuntu3.5",
+        "amd64"
+      ],
+      "openssl-provider-legacy": [
+        "3.5.5-1ubuntu3.5",
+        "amd64"
+      ],
+      "passwd": [
+        "1:4.17.4-2ubuntu3",
+        "amd64"
+      ],
+      "perl": [
+        "5.40.1-7ubuntu0.3",
+        "amd64"
+      ],
+      "perl-base": [
+        "5.40.1-7ubuntu0.3",
+        "amd64"
+      ],
+      "perl-modules-5.40": [
+        "5.40.1-7ubuntu0.3",
+        "all"
+      ],
+      "poppler-data": [
+        "0.4.12-1build1",
+        "all"
+      ],
+      "procps": [
+        "2:4.0.4-9ubuntu1",
+        "amd64"
+      ],
+      "python3": [
+        "3.14.3-0ubuntu2",
+        "amd64"
+      ],
+      "python3-minimal": [
+        "3.14.3-0ubuntu2",
+        "amd64"
+      ],
+      "python3.14": [
+        "3.14.4-1ubuntu0.2",
+        "amd64"
+      ],
+      "python3.14-minimal": [
+        "3.14.4-1ubuntu0.2",
+        "amd64"
+      ],
+      "readline-common": [
+        "8.3-4",
+        "all"
+      ],
+      "ripgrep": [
+        "15.1.0-1ubuntu1",
+        "amd64"
+      ],
+      "rust-coreutils": [
+        "0.8.0-0ubuntu3",
+        "amd64"
+      ],
+      "sed": [
+        "4.9-2ubuntu1",
+        "amd64"
+      ],
+      "sensible-utils": [
+        "0.0.26build1",
+        "all"
+      ],
+      "shared-mime-info": [
+        "2.4-5build3",
+        "amd64"
+      ],
+      "sysvinit-utils": [
+        "3.15-5ubuntu1",
+        "amd64"
+      ],
+      "tar": [
+        "1.35+dfsg-4ubuntu0.4",
+        "amd64"
+      ],
+      "tini": [
+        "0.19.0-6",
+        "amd64"
+      ],
+      "tzdata": [
+        "2026c-0ubuntu0.26.04.1",
+        "all"
+      ],
+      "ubuntu-keyring": [
+        "2023.11.28.1build1",
+        "all"
+      ],
+      "user-session-migration": [
+        "0.5.1",
+        "amd64"
+      ],
+      "util-linux": [
+        "2.41.3-3ubuntu2.2",
+        "amd64"
+      ],
+      "x11-common": [
+        "1:7.7+26ubuntu1",
+        "all"
+      ],
+      "x11-utils": [
+        "7.7+7build1",
+        "amd64"
+      ],
+      "x11-xkb-utils": [
+        "7.7+9build1",
+        "amd64"
+      ],
+      "xauth": [
+        "1:1.1.2-1.1build1",
+        "amd64"
+      ],
+      "xdg-utils": [
+        "1.2.1-2ubuntu2",
+        "all"
+      ],
+      "xfonts-encodings": [
+        "1:1.0.5-0ubuntu3",
+        "all"
+      ],
+      "xfonts-utils": [
+        "1:7.7+7build1",
+        "amd64"
+      ],
+      "xkb-data": [
+        "2.46-2",
+        "all"
+      ],
+      "xserver-common": [
+        "2:21.1.22-1ubuntu1.2",
+        "all"
+      ],
+      "xvfb": [
+        "2:21.1.22-1ubuntu1.2",
+        "amd64"
+      ],
+      "zlib1g": [
+        "1:1.3.dfsg+really1.3.1-1ubuntu3.1",
+        "amd64"
+      ]
+    },
+    "arm64": {
+      "adwaita-icon-theme": [
+        "50.0-1",
+        "all"
+      ],
+      "apt": [
+        "3.2.0",
+        "arm64"
+      ],
+      "at-spi2-common": [
+        "2.60.4-0ubuntu0.1",
+        "all"
+      ],
+      "at-spi2-core": [
+        "2.60.4-0ubuntu0.1",
+        "arm64"
+      ],
+      "base-files": [
+        "14ubuntu6.2",
+        "arm64"
+      ],
+      "base-passwd": [
+        "3.6.8",
+        "arm64"
+      ],
+      "bash": [
+        "5.3-2ubuntu1",
+        "arm64"
+      ],
+      "bsdutils": [
+        "1:2.41.3-3ubuntu2.2",
+        "arm64"
+      ],
+      "bubblewrap": [
+        "0.11.1-1ubuntu0.3",
+        "arm64"
+      ],
+      "ca-certificates": [
+        "20260601~26.04.1",
+        "all"
+      ],
+      "chromium": [
+        "154.0.8037.57-1~deb13u1",
+        "arm64"
+      ],
+      "chromium-common": [
+        "154.0.8037.57-1~deb13u1",
+        "arm64"
+      ],
+      "coreutils": [
+        "9.5-1ubuntu2+0.0.0~ubuntu25",
+        "all"
+      ],
+      "coreutils-from-uutils": [
+        "0.0.0~ubuntu25",
+        "all"
+      ],
+      "curl": [
+        "8.18.0-1ubuntu2.7+openharness.http3.1",
+        "arm64"
+      ],
+      "dash": [
+        "0.5.12-12ubuntu3",
+        "arm64"
+      ],
+      "dbus-bin": [
+        "1.16.2-2ubuntu4",
+        "arm64"
+      ],
+      "dbus-daemon": [
+        "1.16.2-2ubuntu4",
+        "arm64"
+      ],
+      "dbus-session-bus-common": [
+        "1.16.2-2ubuntu4",
+        "all"
+      ],
+      "dbus-x11": [
+        "1.16.2-2ubuntu4",
+        "arm64"
+      ],
+      "dconf-gsettings-backend": [
+        "0.49.0-4",
+        "arm64"
+      ],
+      "dconf-service": [
+        "0.49.0-4",
+        "arm64"
+      ],
+      "debconf": [
+        "1.5.92",
+        "all"
+      ],
+      "debianutils": [
+        "5.23.2build1",
+        "arm64"
+      ],
+      "diffutils": [
+        "1:3.12-1ubuntu0.1",
+        "arm64"
+      ],
+      "dpkg": [
+        "1.23.7ubuntu1",
+        "arm64"
+      ],
+      "e2fsprogs": [
+        "1.47.2-3ubuntu4",
+        "arm64"
+      ],
+      "findutils": [
+        "4.10.0-3build2",
+        "arm64"
+      ],
+      "fontconfig": [
+        "2.17.1-3ubuntu1",
+        "arm64"
+      ],
+      "fontconfig-config": [
+        "2.17.1-3ubuntu1",
+        "arm64"
+      ],
+      "fonts-urw-base35": [
+        "20200910-8build1",
+        "all"
+      ],
+      "gcc-16-base": [
+        "16-20260322-1ubuntu1",
+        "arm64"
+      ],
+      "git": [
+        "1:2.53.0-1ubuntu1",
+        "arm64"
+      ],
+      "git-man": [
+        "1:2.53.0-1ubuntu1",
+        "all"
+      ],
+      "glycin-loaders": [
+        "2.1.1+ds-0ubuntu1",
+        "arm64"
+      ],
+      "glycin-thumbnailers": [
+        "2.1.1+ds-0ubuntu1",
+        "arm64"
+      ],
+      "gnu-coreutils": [
+        "9.7-3ubuntu2.1",
+        "arm64"
+      ],
+      "gpgv": [
+        "2.4.8-4ubuntu3.1",
+        "arm64"
+      ],
+      "grep": [
+        "3.12-1",
+        "arm64"
+      ],
+      "gsettings-desktop-schemas": [
+        "50.0-1ubuntu2",
+        "all"
+      ],
+      "gtk-update-icon-cache": [
+        "4.22.4+ds-0ubuntu0.1",
+        "arm64"
+      ],
+      "gzip": [
+        "1.14-1~exp2ubuntu1.1",
+        "arm64"
+      ],
+      "hicolor-icon-theme": [
+        "0.18-2build1",
+        "all"
+      ],
+      "hostname": [
+        "3.25build1",
+        "arm64"
+      ],
+      "init-system-helpers": [
+        "1.69",
+        "all"
+      ],
+      "libacl1": [
+        "2.3.2-2",
+        "arm64"
+      ],
+      "libaom3": [
+        "3.13.1-2ubuntu0.1",
+        "arm64"
+      ],
+      "libapparmor1": [
+        "5.0.2-0ubuntu1~26.04.1",
+        "arm64"
+      ],
+      "libapt-pkg7.0": [
+        "3.2.0",
+        "arm64"
+      ],
+      "libasound2-data": [
+        "1.2.15.3-1ubuntu1.1",
+        "all"
+      ],
+      "libasound2t64": [
+        "1.2.15.3-1ubuntu1.1",
+        "arm64"
+      ],
+      "libasyncns0": [
+        "0.8-7",
+        "arm64"
+      ],
+      "libatk-bridge2.0-0t64": [
+        "2.60.4-0ubuntu0.1",
+        "arm64"
+      ],
+      "libatk1.0-0t64": [
+        "2.60.4-0ubuntu0.1",
+        "arm64"
+      ],
+      "libatomic1": [
+        "16-20260322-1ubuntu1",
+        "arm64"
+      ],
+      "libatspi2.0-0t64": [
+        "2.60.4-0ubuntu0.1",
+        "arm64"
+      ],
+      "libattr1": [
+        "1:2.5.2-4ubuntu0.1",
+        "arm64"
+      ],
+      "libaudit-common": [
+        "1:4.1.2-1ubuntu0.1",
+        "all"
+      ],
+      "libaudit1": [
+        "1:4.1.2-1ubuntu0.1",
+        "arm64"
+      ],
+      "libavahi-client3": [
+        "0.8-18ubuntu1.1",
+        "arm64"
+      ],
+      "libavahi-common-data": [
+        "0.8-18ubuntu1.1",
+        "arm64"
+      ],
+      "libavahi-common3": [
+        "0.8-18ubuntu1.1",
+        "arm64"
+      ],
+      "libblkid1": [
+        "2.41.3-3ubuntu2.2",
+        "arm64"
+      ],
+      "libbrotli1": [
+        "1.2.0-3build1",
+        "arm64"
+      ],
+      "libbsd0": [
+        "0.12.2-2build2",
+        "arm64"
+      ],
+      "libbz2-1.0": [
+        "1.0.8-6ubuntu0.1",
+        "arm64"
+      ],
+      "libc-bin": [
+        "2.43-2ubuntu2.4",
+        "arm64"
+      ],
+      "libc-gconv-modules-extra": [
+        "2.43-2ubuntu2.4",
+        "arm64"
+      ],
+      "libc6": [
+        "2.43-2ubuntu2.4",
+        "arm64"
+      ],
+      "libcairo-gobject2": [
+        "1.18.4-3",
+        "arm64"
+      ],
+      "libcairo2": [
+        "1.18.4-3",
+        "arm64"
+      ],
+      "libcap-ng0": [
+        "0.8.5-4build5",
+        "arm64"
+      ],
+      "libcap2": [
+        "1:2.75-10ubuntu2",
+        "arm64"
+      ],
+      "libcolord2": [
+        "1.4.8-3",
+        "arm64"
+      ],
+      "libcom-err2": [
+        "1.47.2-3ubuntu4",
+        "arm64"
+      ],
+      "libcrypt1": [
+        "1:4.5.1-1",
+        "arm64"
+      ],
+      "libcups2t64": [
+        "2.4.16-1ubuntu1.3",
+        "arm64"
+      ],
+      "libcurl3t64-gnutls": [
+        "8.18.0-1ubuntu2.7+openharness.http3.1",
+        "arm64"
+      ],
+      "libcurl4t64": [
+        "8.18.0-1ubuntu2.7+openharness.http3.1",
+        "arm64"
+      ],
+      "libdatrie1": [
+        "0.2.14-1",
+        "arm64"
+      ],
+      "libdav1d7": [
+        "1.5.3-1",
+        "arm64"
+      ],
+      "libdb5.3t64": [
+        "5.3.28+dfsg2-10ubuntu1",
+        "arm64"
+      ],
+      "libdbus-1-3": [
+        "1.16.2-2ubuntu4",
+        "arm64"
+      ],
+      "libdconf1": [
+        "0.49.0-4",
+        "arm64"
+      ],
+      "libdebconfclient0": [
+        "0.280ubuntu1",
+        "arm64"
+      ],
+      "libdeflate0": [
+        "1.23-2ubuntu1",
+        "arm64"
+      ],
+      "libdouble-conversion3": [
+        "3.4.0-1",
+        "arm64"
+      ],
+      "libdrm-amdgpu1": [
+        "2.4.131-1",
+        "arm64"
+      ],
+      "libdrm-common": [
+        "2.4.131-1",
+        "all"
+      ],
+      "libdrm2": [
+        "2.4.131-1",
+        "arm64"
+      ],
+      "libedit2": [
+        "3.1-20251016-1",
+        "arm64"
+      ],
+      "libelf1t64": [
+        "0.194-4",
+        "arm64"
+      ],
+      "libepoxy0": [
+        "1.5.10-2build1",
+        "arm64"
+      ],
+      "liberror-perl": [
+        "0.17030-1",
+        "all"
+      ],
+      "libexpat1": [
+        "2.7.4-1ubuntu0.2",
+        "arm64"
+      ],
+      "libext2fs2t64": [
+        "1.47.2-3ubuntu4",
+        "arm64"
+      ],
+      "libffi8": [
+        "3.5.2-4",
+        "arm64"
+      ],
+      "libflac14": [
+        "1.5.0+ds-5",
+        "arm64"
+      ],
+      "libfontconfig1": [
+        "2.17.1-3ubuntu1",
+        "arm64"
+      ],
+      "libfontenc1": [
+        "1:1.1.8-1build2",
+        "arm64"
+      ],
+      "libfreetype6": [
+        "2.14.2+dfsg-1ubuntu0.1",
+        "arm64"
+      ],
+      "libfribidi0": [
+        "1.0.16-5",
+        "arm64"
+      ],
+      "libgbm1": [
+        "26.0.8-1ubuntu0.3",
+        "arm64"
+      ],
+      "libgcc-s1": [
+        "16-20260322-1ubuntu1",
+        "arm64"
+      ],
+      "libgcrypt20": [
+        "1.12.0-2ubuntu1.1",
+        "arm64"
+      ],
+      "libgdbm-compat4t64": [
+        "1.26-1build1",
+        "arm64"
+      ],
+      "libgdbm6t64": [
+        "1.26-1build1",
+        "arm64"
+      ],
+      "libgdk-pixbuf-2.0-0": [
+        "2.44.5+dfsg-4ubuntu1",
+        "arm64"
+      ],
+      "libgdk-pixbuf2.0-common": [
+        "2.44.5+dfsg-4ubuntu1",
+        "all"
+      ],
+      "libgif7": [
+        "5.2.2-1ubuntu3.2",
+        "arm64"
+      ],
+      "libgl1": [
+        "1.7.0-3",
+        "arm64"
+      ],
+      "libgl1-mesa-dri": [
+        "26.0.8-1ubuntu0.3",
+        "arm64"
+      ],
+      "libglib2.0-0t64": [
+        "2.88.0-1ubuntu0.1",
+        "arm64"
+      ],
+      "libglvnd0": [
+        "1.7.0-3",
+        "arm64"
+      ],
+      "libglx-mesa0": [
+        "26.0.8-1ubuntu0.3",
+        "arm64"
+      ],
+      "libglx0": [
+        "1.7.0-3",
+        "arm64"
+      ],
+      "libglycin-2-0": [
+        "2.1.1+ds-0ubuntu1",
+        "arm64"
+      ],
+      "libgmp10": [
+        "2:6.3.0+dfsg-5ubuntu2",
+        "arm64"
+      ],
+      "libgnutls30t64": [
+        "3.8.12-2ubuntu1.1",
+        "arm64"
+      ],
+      "libgpg-error0": [
+        "1.58-2",
+        "arm64"
+      ],
+      "libgraphite2-3": [
+        "1.3.14-11ubuntu1.1",
+        "arm64"
+      ],
+      "libgs-common": [
+        "10.06.0~dfsg-3ubuntu1.1",
+        "all"
+      ],
+      "libgs10": [
+        "10.06.0~dfsg-3ubuntu1.1",
+        "arm64"
+      ],
+      "libgs10-common": [
+        "10.06.0~dfsg-3ubuntu1.1",
+        "all"
+      ],
+      "libgssapi-krb5-2": [
+        "1.22.1-2ubuntu4.1",
+        "arm64"
+      ],
+      "libgtk-3-0t64": [
+        "3.24.52-0ubuntu1",
+        "arm64"
+      ],
+      "libgtk-3-common": [
+        "3.24.52-0ubuntu1",
+        "all"
+      ],
+      "libharfbuzz-subset0": [
+        "12.3.2-2",
+        "arm64"
+      ],
+      "libharfbuzz0b": [
+        "12.3.2-2",
+        "arm64"
+      ],
+      "libheif-plugin-aomdec": [
+        "1.21.2-3ubuntu0.5",
+        "arm64"
+      ],
+      "libheif1": [
+        "1.21.2-3ubuntu0.5",
+        "arm64"
+      ],
+      "libhogweed6t64": [
+        "3.10.2-1",
+        "arm64"
+      ],
+      "libhwy1t64": [
+        "1.3.0-2",
+        "arm64"
+      ],
+      "libice6": [
+        "2:1.1.1-1build1",
+        "arm64"
+      ],
+      "libid3tag0": [
+        "0.16.3-4",
+        "arm64"
+      ],
+      "libidn12": [
+        "1.43-2ubuntu0.26.04.1",
+        "arm64"
+      ],
+      "libidn2-0": [
+        "2.3.8-4build1",
+        "arm64"
+      ],
+      "libijs-0.35": [
+        "0.35-16",
+        "arm64"
+      ],
+      "libimlib2t64": [
+        "1.12.6-1",
+        "arm64"
+      ],
+      "libjbig0": [
+        "2.1-6.1ubuntu3",
+        "arm64"
+      ],
+      "libjbig2dec0": [
+        "0.20-1ubuntu0.26.04.1",
+        "arm64"
+      ],
+      "libjpeg-turbo8": [
+        "2.1.5-4ubuntu4",
+        "arm64"
+      ],
+      "libjpeg62-turbo": [
+        "1:2.1.5-4",
+        "arm64"
+      ],
+      "libjpeg8": [
+        "8c-2ubuntu12",
+        "arm64"
+      ],
+      "libjxl0.11": [
+        "0.11.1-6ubuntu4.2",
+        "arm64"
+      ],
+      "libk5crypto3": [
+        "1.22.1-2ubuntu4.1",
+        "arm64"
+      ],
+      "libkeyutils1": [
+        "1.6.3-6ubuntu3",
+        "arm64"
+      ],
+      "libkrb5-3": [
+        "1.22.1-2ubuntu4.1",
+        "arm64"
+      ],
+      "libkrb5support0": [
+        "1.22.1-2ubuntu4.1",
+        "arm64"
+      ],
+      "liblcms2-2": [
+        "2.17-1ubuntu0.2",
+        "arm64"
+      ],
+      "libldap-common": [
+        "2.6.10+dfsg-1ubuntu5",
+        "all"
+      ],
+      "libldap2": [
+        "2.6.10+dfsg-1ubuntu5",
+        "arm64"
+      ],
+      "liblerc4": [
+        "4.0.0+ds-5ubuntu2",
+        "arm64"
+      ],
+      "libllvm21": [
+        "1:21.1.8-6ubuntu1",
+        "arm64"
+      ],
+      "liblz4-1": [
+        "1.10.0-8",
+        "arm64"
+      ],
+      "liblzma5": [
+        "5.8.3-1",
+        "arm64"
+      ],
+      "libmd0": [
+        "1.1.0-2build4",
+        "arm64"
+      ],
+      "libminizip1t64": [
+        "1:1.3.dfsg+really1.3.1-1ubuntu3.1",
+        "arm64"
+      ],
+      "libmount1": [
+        "2.41.3-3ubuntu2.2",
+        "arm64"
+      ],
+      "libmp3lame0": [
+        "3.101~svn6525+dfsg-2",
+        "arm64"
+      ],
+      "libmpg123-0t64": [
+        "1.33.3-2",
+        "arm64"
+      ],
+      "libncursesw6": [
+        "6.6+20251231-1",
+        "arm64"
+      ],
+      "libnettle8t64": [
+        "3.10.2-1",
+        "arm64"
+      ],
+      "libnghttp2-14": [
+        "1.68.0-2ubuntu0.2",
+        "arm64"
+      ],
+      "libnghttp3-9": [
+        "1.12.0-1",
+        "arm64"
+      ],
+      "libnspr4": [
+        "2:4.38.2-1ubuntu1",
+        "arm64"
+      ],
+      "libnss-wrapper": [
+        "1.1.16-5",
+        "arm64"
+      ],
+      "libnss3": [
+        "2:3.120-1ubuntu2.1",
+        "arm64"
+      ],
+      "libobrender32": [
+        "3.6.1-12ubuntu3",
+        "arm64"
+      ],
+      "libobt2": [
+        "3.6.1-12ubuntu3",
+        "arm64"
+      ],
+      "libogg0": [
+        "1.3.6-2",
+        "arm64"
+      ],
+      "libopenh264-8": [
+        "2.6.0+dfsg-2build1",
+        "arm64"
+      ],
+      "libopenjp2-7": [
+        "2.5.4-1ubuntu0.1",
+        "arm64"
+      ],
+      "libopus0": [
+        "1.6.1-1",
+        "arm64"
+      ],
+      "libp11-kit0": [
+        "0.26.2-2",
+        "arm64"
+      ],
+      "libpam-modules": [
+        "1.7.0-5ubuntu3.2",
+        "arm64"
+      ],
+      "libpam-modules-bin": [
+        "1.7.0-5ubuntu3.2",
+        "arm64"
+      ],
+      "libpam-runtime": [
+        "1.7.0-5ubuntu3.2",
+        "all"
+      ],
+      "libpam0g": [
+        "1.7.0-5ubuntu3.2",
+        "arm64"
+      ],
+      "libpango-1.0-0": [
+        "1.57.0-1",
+        "arm64"
+      ],
+      "libpangocairo-1.0-0": [
+        "1.57.0-1",
+        "arm64"
+      ],
+      "libpangoft2-1.0-0": [
+        "1.57.0-1",
+        "arm64"
+      ],
+      "libpangoxft-1.0-0": [
+        "1.57.0-1",
+        "arm64"
+      ],
+      "libpaper2": [
+        "2.2.5-0.3maysync1",
+        "arm64"
+      ],
+      "libpcre2-8-0": [
+        "10.46-1build1",
+        "arm64"
+      ],
+      "libperl5.40": [
+        "5.40.1-7ubuntu0.3",
+        "arm64"
+      ],
+      "libpixman-1-0": [
+        "0.46.4-1",
+        "arm64"
+      ],
+      "libpng16-16t64": [
+        "1.6.57-1",
+        "arm64"
+      ],
+      "libproc2-0": [
+        "2:4.0.4-9ubuntu1",
+        "arm64"
+      ],
+      "libpsl5t64": [
+        "0.21.2-1.1build2",
+        "arm64"
+      ],
+      "libpulse0": [
+        "1:17.0+dfsg1-2ubuntu4",
+        "arm64"
+      ],
+      "libpython3-stdlib": [
+        "3.14.3-0ubuntu2",
+        "arm64"
+      ],
+      "libpython3.14-minimal": [
+        "3.14.4-1ubuntu0.2",
+        "arm64"
+      ],
+      "libpython3.14-stdlib": [
+        "3.14.4-1ubuntu0.2",
+        "arm64"
+      ],
+      "libreadline8t64": [
+        "8.3-4",
+        "arm64"
+      ],
+      "librsvg2-2": [
+        "2.61.3+dfsg-3",
+        "arm64"
+      ],
+      "librtmp1": [
+        "2.4+20151223.gitfa8646d.1-3",
+        "arm64"
+      ],
+      "libsasl2-2": [
+        "2.1.28+dfsg1-9ubuntu3",
+        "arm64"
+      ],
+      "libsasl2-modules-db": [
+        "2.1.28+dfsg1-9ubuntu3",
+        "arm64"
+      ],
+      "libseccomp2": [
+        "2.6.0-2ubuntu5",
+        "arm64"
+      ],
+      "libselinux1": [
+        "3.9-4build1",
+        "arm64"
+      ],
+      "libsemanage-common": [
+        "3.9-1build1",
+        "all"
+      ],
+      "libsemanage2": [
+        "3.9-1build1",
+        "arm64"
+      ],
+      "libsensors-config": [
+        "1:3.6.2-2build1",
+        "all"
+      ],
+      "libsensors5": [
+        "1:3.6.2-2build1",
+        "arm64"
+      ],
+      "libsepol2": [
+        "3.9-2",
+        "arm64"
+      ],
+      "libsharpyuv0": [
+        "1.5.0-0.1build1",
+        "arm64"
+      ],
+      "libsm6": [
+        "2:1.2.6-1build1",
+        "arm64"
+      ],
+      "libsmartcols1": [
+        "2.41.3-3ubuntu2.2",
+        "arm64"
+      ],
+      "libsndfile1": [
+        "1.2.2-4",
+        "arm64"
+      ],
+      "libspectre1": [
+        "0.2.12-2",
+        "arm64"
+      ],
+      "libsqlite3-0": [
+        "3.46.1-9ubuntu0.3",
+        "arm64"
+      ],
+      "libss2": [
+        "1.47.2-3ubuntu4",
+        "arm64"
+      ],
+      "libssh2-1t64": [
+        "1.11.1-1ubuntu0.26.04.4",
+        "arm64"
+      ],
+      "libssl3t64": [
+        "3.5.5-1ubuntu3.5",
+        "arm64"
+      ],
+      "libstartup-notification0": [
+        "0.12-8build1",
+        "arm64"
+      ],
+      "libstdc++6": [
+        "16-20260322-1ubuntu1",
+        "arm64"
+      ],
+      "libsystemd0": [
+        "259.5-0ubuntu3.4",
+        "arm64"
+      ],
+      "libtasn1-6": [
+        "4.21.0-2",
+        "arm64"
+      ],
+      "libtcl8.6": [
+        "8.6.17+dfsg-1build1",
+        "arm64"
+      ],
+      "libthai-data": [
+        "0.1.30-1",
+        "all"
+      ],
+      "libthai0": [
+        "0.1.30-1",
+        "arm64"
+      ],
+      "libtiff6": [
+        "4.7.0-3ubuntu5",
+        "arm64"
+      ],
+      "libtinfo6": [
+        "6.6+20251231-1",
+        "arm64"
+      ],
+      "libtk8.6": [
+        "8.6.17-1build1",
+        "arm64"
+      ],
+      "libudev1": [
+        "259.5-0ubuntu3.4",
+        "arm64"
+      ],
+      "libunistring5": [
+        "1.3-2build1",
+        "arm64"
+      ],
+      "libunwind8": [
+        "1.8.3-0ubuntu1",
+        "arm64"
+      ],
+      "libuuid1": [
+        "2.41.3-3ubuntu2.2",
+        "arm64"
+      ],
+      "libvorbis0a": [
+        "1.3.7-3build2",
+        "arm64"
+      ],
+      "libvorbisenc2": [
+        "1.3.7-3build2",
+        "arm64"
+      ],
+      "libvulkan1": [
+        "1.4.341.0-1",
+        "arm64"
+      ],
+      "libwayland-client0": [
+        "1.24.0-2",
+        "arm64"
+      ],
+      "libwayland-cursor0": [
+        "1.24.0-2",
+        "arm64"
+      ],
+      "libwayland-egl1": [
+        "1.24.0-2",
+        "arm64"
+      ],
+      "libwebp7": [
+        "1.5.0-0.1build1",
+        "arm64"
+      ],
+      "libwebpdemux2": [
+        "1.5.0-0.1build1",
+        "arm64"
+      ],
+      "libx11-6": [
+        "2:1.8.13-1",
+        "arm64"
+      ],
+      "libx11-data": [
+        "2:1.8.13-1",
+        "all"
+      ],
+      "libx11-xcb1": [
+        "2:1.8.13-1",
+        "arm64"
+      ],
+      "libxau6": [
+        "1:1.0.11-1build2",
+        "arm64"
+      ],
+      "libxaw7": [
+        "2:1.0.16-1build1",
+        "arm64"
+      ],
+      "libxcb-dri3-0": [
+        "1.17.0-2ubuntu1",
+        "arm64"
+      ],
+      "libxcb-glx0": [
+        "1.17.0-2ubuntu1",
+        "arm64"
+      ],
+      "libxcb-present0": [
+        "1.17.0-2ubuntu1",
+        "arm64"
+      ],
+      "libxcb-randr0": [
+        "1.17.0-2ubuntu1",
+        "arm64"
+      ],
+      "libxcb-render0": [
+        "1.17.0-2ubuntu1",
+        "arm64"
+      ],
+      "libxcb-shape0": [
+        "1.17.0-2ubuntu1",
+        "arm64"
+      ],
+      "libxcb-shm0": [
+        "1.17.0-2ubuntu1",
+        "arm64"
+      ],
+      "libxcb-sync1": [
+        "1.17.0-2ubuntu1",
+        "arm64"
+      ],
+      "libxcb-util1": [
+        "0.4.1-1build1",
+        "arm64"
+      ],
+      "libxcb-xfixes0": [
+        "1.17.0-2ubuntu1",
+        "arm64"
+      ],
+      "libxcb1": [
+        "1.17.0-2ubuntu1",
+        "arm64"
+      ],
+      "libxcomposite1": [
+        "1:0.4.6-1build1",
+        "arm64"
+      ],
+      "libxcursor1": [
+        "1:1.2.3-1build1",
+        "arm64"
+      ],
+      "libxdamage1": [
+        "1:1.1.7-1",
+        "arm64"
+      ],
+      "libxdmcp6": [
+        "1:1.1.5-2",
+        "arm64"
+      ],
+      "libxext6": [
+        "2:1.3.4-1build3",
+        "arm64"
+      ],
+      "libxfixes3": [
+        "1:6.0.0-2build2",
+        "arm64"
+      ],
+      "libxfont2": [
+        "1:2.0.6-2ubuntu0.2",
+        "arm64"
+      ],
+      "libxft2": [
+        "2.3.6-1build2",
+        "arm64"
+      ],
+      "libxi6": [
+        "2:1.8.2-2",
+        "arm64"
+      ],
+      "libxinerama1": [
+        "2:1.1.4-3build2",
+        "arm64"
+      ],
+      "libxkbcommon0": [
+        "1.13.1-1",
+        "arm64"
+      ],
+      "libxkbfile1": [
+        "1:1.1.0-1build5",
+        "arm64"
+      ],
+      "libxml2-16": [
+        "2.15.2+dfsg-0.1ubuntu0.2",
+        "arm64"
+      ],
+      "libxmu6": [
+        "2:1.1.3-4",
+        "arm64"
+      ],
+      "libxmuu1": [
+        "2:1.1.3-4",
+        "arm64"
+      ],
+      "libxnvctrl0": [
+        "510.47.03-0ubuntu7",
+        "arm64"
+      ],
+      "libxpm4": [
+        "1:3.5.17-1ubuntu0.26.04.1",
+        "arm64"
+      ],
+      "libxrandr2": [
+        "2:1.5.4-1build1",
+        "arm64"
+      ],
+      "libxrender1": [
+        "1:0.9.12-1build1",
+        "arm64"
+      ],
+      "libxres1": [
+        "2:1.2.1-1build2",
+        "arm64"
+      ],
+      "libxshmfence1": [
+        "1.3.3-1build1",
+        "arm64"
+      ],
+      "libxss1": [
+        "1:1.2.3-1build4",
+        "arm64"
+      ],
+      "libxt6t64": [
+        "1:1.2.1-1.3build1",
+        "arm64"
+      ],
+      "libxtst6": [
+        "2:1.2.5-1build1",
+        "arm64"
+      ],
+      "libxv1": [
+        "2:1.0.13-1",
+        "arm64"
+      ],
+      "libxxf86dga1": [
+        "2:1.1.5-1build2",
+        "arm64"
+      ],
+      "libxxf86vm1": [
+        "1:1.1.4-2",
+        "arm64"
+      ],
+      "libxxhash0": [
+        "0.8.3-2build1",
+        "arm64"
+      ],
+      "libzstd1": [
+        "1.5.7+dfsg-3",
+        "arm64"
+      ],
+      "login": [
+        "1:4.16.0-2+really2.41.3-3ubuntu2.2",
+        "arm64"
+      ],
+      "login.defs": [
+        "1:4.17.4-2ubuntu3",
+        "all"
+      ],
+      "logsave": [
+        "1.47.2-3ubuntu4",
+        "arm64"
+      ],
+      "mawk": [
+        "1.3.4.20260129-1",
+        "arm64"
+      ],
+      "media-types": [
+        "14.0.0build1",
+        "all"
+      ],
+      "mesa-libgallium": [
+        "26.0.8-1ubuntu0.3",
+        "arm64"
+      ],
+      "mount": [
+        "2.41.3-3ubuntu2.2",
+        "arm64"
+      ],
+      "ncurses-base": [
+        "6.6+20251231-1",
+        "all"
+      ],
+      "ncurses-bin": [
+        "6.6+20251231-1",
+        "arm64"
+      ],
+      "netbase": [
+        "6.5build1",
+        "all"
+      ],
+      "openbox": [
+        "3.6.1-12ubuntu3",
+        "arm64"
+      ],
+      "openssl": [
+        "3.5.5-1ubuntu3.5",
+        "arm64"
+      ],
+      "openssl-provider-legacy": [
+        "3.5.5-1ubuntu3.5",
+        "arm64"
+      ],
+      "passwd": [
+        "1:4.17.4-2ubuntu3",
+        "arm64"
+      ],
+      "perl": [
+        "5.40.1-7ubuntu0.3",
+        "arm64"
+      ],
+      "perl-base": [
+        "5.40.1-7ubuntu0.3",
+        "arm64"
+      ],
+      "perl-modules-5.40": [
+        "5.40.1-7ubuntu0.3",
+        "all"
+      ],
+      "poppler-data": [
+        "0.4.12-1build1",
+        "all"
+      ],
+      "procps": [
+        "2:4.0.4-9ubuntu1",
+        "arm64"
+      ],
+      "python3": [
+        "3.14.3-0ubuntu2",
+        "arm64"
+      ],
+      "python3-minimal": [
+        "3.14.3-0ubuntu2",
+        "arm64"
+      ],
+      "python3.14": [
+        "3.14.4-1ubuntu0.2",
+        "arm64"
+      ],
+      "python3.14-minimal": [
+        "3.14.4-1ubuntu0.2",
+        "arm64"
+      ],
+      "readline-common": [
+        "8.3-4",
+        "all"
+      ],
+      "ripgrep": [
+        "15.1.0-1ubuntu1",
+        "arm64"
+      ],
+      "rust-coreutils": [
+        "0.8.0-0ubuntu3",
+        "arm64"
+      ],
+      "sed": [
+        "4.9-2ubuntu1",
+        "arm64"
+      ],
+      "sensible-utils": [
+        "0.0.26build1",
+        "all"
+      ],
+      "shared-mime-info": [
+        "2.4-5build3",
+        "arm64"
+      ],
+      "sysvinit-utils": [
+        "3.15-5ubuntu1",
+        "arm64"
+      ],
+      "tar": [
+        "1.35+dfsg-4ubuntu0.4",
+        "arm64"
+      ],
+      "tini": [
+        "0.19.0-6",
+        "arm64"
+      ],
+      "tzdata": [
+        "2026c-0ubuntu0.26.04.1",
+        "all"
+      ],
+      "ubuntu-keyring": [
+        "2023.11.28.1build1",
+        "all"
+      ],
+      "user-session-migration": [
+        "0.5.1",
+        "arm64"
+      ],
+      "util-linux": [
+        "2.41.3-3ubuntu2.2",
+        "arm64"
+      ],
+      "x11-common": [
+        "1:7.7+26ubuntu1",
+        "all"
+      ],
+      "x11-utils": [
+        "7.7+7build1",
+        "arm64"
+      ],
+      "x11-xkb-utils": [
+        "7.7+9build1",
+        "arm64"
+      ],
+      "xauth": [
+        "1:1.1.2-1.1build1",
+        "arm64"
+      ],
+      "xdg-utils": [
+        "1.2.1-2ubuntu2",
+        "all"
+      ],
+      "xfonts-encodings": [
+        "1:1.0.5-0ubuntu3",
+        "all"
+      ],
+      "xfonts-utils": [
+        "1:7.7+7build1",
+        "arm64"
+      ],
+      "xkb-data": [
+        "2.46-2",
+        "all"
+      ],
+      "xserver-common": [
+        "2:21.1.22-1ubuntu1.2",
+        "all"
+      ],
+      "xvfb": [
+        "2:21.1.22-1ubuntu1.2",
+        "arm64"
+      ],
+      "zlib1g": [
+        "1:1.3.dfsg+really1.3.1-1ubuntu3.1",
+        "arm64"
+      ]
+    }
+  },
+  "images": {
+    "node": {
+      "index": "sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe",
+      "manifests": {
+        "amd64": "sha256:b64fccfbcd1ae10d11b969a868b50e1c2530a7054813d5cdea04ac3bce551697",
+        "arm64": "sha256:7da5980a342ed134ad56bb16c918f94548cd15cf3b961aa231c286598accb536"
+      },
+      "reference": "docker.io/library/node:24.21.0-trixie-slim"
+    },
+    "python": {
+      "index": "sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f",
+      "manifests": {
+        "amd64": "sha256:44ff437bba879d4941b710a369a8f19266aea34b29002807f0c487fabc9eec9b",
+        "arm64": "sha256:950206c37262dd86c55659797f6ee418fee30535072f65a82ed470d985f5cda5"
+      },
+      "reference": "docker.io/library/python:3.12.14-slim-trixie"
+    },
+    "ubuntu": {
+      "index": "sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78",
+      "manifests": {
+        "amd64": "sha256:61ebaa5cc23ca45450db85eac015435199ec569e28ec222ea13f2aed2110b8a6",
+        "arm64": "sha256:e03767b4dc7cb87fc57b1f119d40d9a997ecc5570dc6e22d57d6b7e333bbe78c"
+      },
+      "reference": "docker.io/library/ubuntu"
+    }
+  },
+  "schema": "open-harness-ubuntu-runtime-lock/1",
+  "supportedArchitectures": [
+    "arm64",
+    "amd64"
+  ],
+  "ubuntu": {
+    "chromiumDependencies": {
+      "amd64": [
+        "adwaita-icon-theme=50.0-1",
+        "gtk-update-icon-cache=4.22.4+ds-0ubuntu0.1",
+        "hicolor-icon-theme=0.18-2build1",
+        "libasound2-data=1.2.15.3-1ubuntu1.1",
+        "libasound2t64=1.2.15.3-1ubuntu1.1",
+        "libasyncns0=0.8-7",
+        "libatk-bridge2.0-0t64=2.60.4-0ubuntu0.1",
+        "libatk1.0-0t64=2.60.4-0ubuntu0.1",
+        "libcolord2=1.4.8-3",
+        "libdav1d7=1.5.3-1",
+        "libdouble-conversion3=3.4.0-1",
+        "libepoxy0=1.5.10-2build1",
+        "libflac14=1.5.0+ds-5",
+        "libgtk-3-0t64=3.24.52-0ubuntu1",
+        "libgtk-3-common=3.24.52-0ubuntu1",
+        "libharfbuzz-subset0=12.3.2-2",
+        "libminizip1t64=1:1.3.dfsg+really1.3.1-1ubuntu3.1",
+        "libmp3lame0=3.101~svn6525+dfsg-2",
+        "libmpg123-0t64=1.33.3-2",
+        "libnspr4=2:4.38.2-1ubuntu1",
+        "libnss3=2:3.120-1ubuntu2.1",
+        "libogg0=1.3.6-2",
+        "libopenh264-8=2.6.0+dfsg-2build1",
+        "libopus0=1.6.1-1",
+        "libpulse0=1:17.0+dfsg1-2ubuntu4",
+        "libsndfile1=1.2.2-4",
+        "libvorbis0a=1.3.7-3build2",
+        "libvorbisenc2=1.3.7-3build2",
+        "libwayland-client0=1.24.0-2",
+        "libwayland-cursor0=1.24.0-2",
+        "libwayland-egl1=1.24.0-2",
+        "libxdamage1=1:1.1.7-1",
+        "libxkbcommon0=1.13.1-1",
+        "libxnvctrl0=510.47.03-0ubuntu7",
+        "xdg-utils=1.2.1-2ubuntu2"
+      ],
+      "arm64": [
+        "adwaita-icon-theme=50.0-1",
+        "gtk-update-icon-cache=4.22.4+ds-0ubuntu0.1",
+        "hicolor-icon-theme=0.18-2build1",
+        "libasound2-data=1.2.15.3-1ubuntu1.1",
+        "libasound2t64=1.2.15.3-1ubuntu1.1",
+        "libasyncns0=0.8-7",
+        "libatk-bridge2.0-0t64=2.60.4-0ubuntu0.1",
+        "libatk1.0-0t64=2.60.4-0ubuntu0.1",
+        "libcolord2=1.4.8-3",
+        "libdav1d7=1.5.3-1",
+        "libdouble-conversion3=3.4.0-1",
+        "libepoxy0=1.5.10-2build1",
+        "libflac14=1.5.0+ds-5",
+        "libgtk-3-0t64=3.24.52-0ubuntu1",
+        "libgtk-3-common=3.24.52-0ubuntu1",
+        "libharfbuzz-subset0=12.3.2-2",
+        "libminizip1t64=1:1.3.dfsg+really1.3.1-1ubuntu3.1",
+        "libmp3lame0=3.101~svn6525+dfsg-2",
+        "libmpg123-0t64=1.33.3-2",
+        "libnspr4=2:4.38.2-1ubuntu1",
+        "libnss3=2:3.120-1ubuntu2.1",
+        "libogg0=1.3.6-2",
+        "libopenh264-8=2.6.0+dfsg-2build1",
+        "libopus0=1.6.1-1",
+        "libpulse0=1:17.0+dfsg1-2ubuntu4",
+        "libsndfile1=1.2.2-4",
+        "libvorbis0a=1.3.7-3build2",
+        "libvorbisenc2=1.3.7-3build2",
+        "libwayland-client0=1.24.0-2",
+        "libwayland-cursor0=1.24.0-2",
+        "libwayland-egl1=1.24.0-2",
+        "libxdamage1=1:1.1.7-1",
+        "libxkbcommon0=1.13.1-1",
+        "libxnvctrl0=510.47.03-0ubuntu7",
+        "xdg-utils=1.2.1-2ubuntu2"
+      ]
+    },
+    "curlRuntimeDependencies": [
+      "libnghttp3-9=1.12.0-1"
+    ],
+    "osPackageCount": 203,
+    "osPackagesFile": "ubuntu-os-packages.txt",
+    "osPackagesSha256": "412125b2cc346b4db3eadcb662d740060b1ed9ef3f8d14db86da048ac5c73d5b",
+    "snapshot": "20260929T180000Z"
+  },
+  "validation": {
+    "amd64": "This lock has not been built for AMD64. Base manifests and Debian package records are authenticated. Ubuntu package versions and finalPackages are derived from ARM64, plus libdrm-intel1 2.4.131-1 and libpciaccess0 0.18.1-1ubuntu4.1 (amd64), which an emulated AMD64 build of the previous lock sha256:78cacbef... installed as unpinned dependencies of the OS package list. Its package check reported no other difference; the build stopped there, so later checks did not run. The additions rest on that build log, not on retained signed index records. An AMD64 build of this lock must confirm the set, and fails closed on any difference.",
+    "arm64": "Inputs of root native ARM64 candidate sha256:19767a18...; this proposal itself has not been built."
+  }
+}
