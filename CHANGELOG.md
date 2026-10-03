@@ -8,6 +8,8 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ### Fixed
 
+- Fetch locked Debian browser packages from the signed snapshot at the reviewed input cutoff, so live mirror updates cannot make the pinned Hermes runtime unbuildable. Package identities and hashes remain enforced. (codex)
+
 - Refresh the coordinator and agent image dependencies, keep the coordinator as a Docker client without a redundant daemon, and require a full runtime-contract-6 rebuild. Image publication remains gated on security scans and platform acceptance. (codex)
 - Initialize each private desktop's accessibility session before applications launch, so browsers opened before the first computer-control call support clicking and typing; require runtime contract 6, retaining confirmed initialization for native Linux folder grants. (codex)
 - Keep computer control inside private per-agent desktops; block legacy native execution and probes, remove host-runtime installer fallbacks, and retain safe cleanup of saved native processes. (codex)

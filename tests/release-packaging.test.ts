@@ -67,6 +67,18 @@ test('self-hosted publication stays gated by verification and image scanning', (
   assert.doesNotMatch(desktop, /push:\s+tags:/);
 });
 
+test('coordinator ships a Docker client and checks application health', () => {
+  const root = join(import.meta.dirname, '..');
+  const dockerfile = readFileSync(join(root, 'Dockerfile.coordinator'), 'utf8');
+  const compose = readFileSync(join(root, 'compose.yaml'), 'utf8');
+  const runtime = dockerfile.slice(dockerfile.lastIndexOf('FROM node:'));
+  assert.match(runtime, /COPY --from=docker-cli \/usr\/local\/bin\/docker \/usr\/local\/bin\/docker/);
+  assert.doesNotMatch(runtime, /docker\.io|dockerd|apt-get|COPY .*docker-compose/);
+  assert.match(runtime, /^USER node$/m);
+  assert.match(compose, /127\.0\.0\.1:3000\/api\/health/);
+  assert.doesNotMatch(compose, /healthcheck:\s*\n\s*test: \["CMD", "curl"/);
+});
+
 test('desktop launches the live runtime and no user script launches mock chat', () => {
   const root = join(import.meta.dirname, '..');
   const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));

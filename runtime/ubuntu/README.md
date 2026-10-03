@@ -20,7 +20,12 @@ Ubuntu APT uses the fixed, signed `20260929T180000Z` snapshot after a pinned
 that every package index comes from that snapshot and restores any bootstrap
 package changes to their locked versions. If an exact input disappears or the
 snapshot cannot be verified, the build fails rather than accepting another
-version. Debian browser inputs remain independently pinned and verified.
+version. The Debian input stage uses the same reviewed cutoff in the signed
+Debian and Debian-security snapshot archives, with both binary and source indexes.
+As [Debian documents](https://snapshot.debian.org/#usage), historical snapshot
+Release expiry is disabled only for those sources; archive-keyring signatures and
+locked package versions, identities, sizes and hashes remain required. Live mirror
+updates therefore cannot remove the exact browser inputs from a later build.
 AMD64's Ubuntu package set still needs a completed, verified AMD64 image build.
 
 The portable ARM64 candidate built on September 29, 2026 and verified all 329

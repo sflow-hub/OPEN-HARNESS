@@ -16,6 +16,8 @@ Subcommands (all fail closed, exit 1, on any mismatch):
         re-verify D, then print the three .deb paths followed by the pinned Ubuntu packages Chromium needs
 """
 import argparse
+import datetime
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +39,23 @@ def records(lock, arch):
 def expected_identity(name, record, arch):
     return {'Package': name, 'Version': record['Version'], 'Architecture': arch,
             'SourceName': record.get('Source', name).split(' ')[0], 'SourceVersion': record['Version']}
+
+
+def snapshot_sources(lock):
+    # Both distributions use the reviewed input cutoff; package identities/hashes still come from the lock.
+    snapshot = lock['ubuntu']['snapshot']
+    require(isinstance(snapshot, str) and re.fullmatch(r'[0-9]{8}T[0-9]{6}Z', snapshot), 'invalid snapshot timestamp')
+    try:
+        datetime.datetime.strptime(snapshot, '%Y%m%dT%H%M%SZ')
+    except ValueError as error:
+        raise ohpkg.InputError('invalid snapshot timestamp') from error
+    require(lock['debian']['suite'] == 'trixie', 'unsupported Debian snapshot suite')
+    return '\n\n'.join('\n'.join([
+        'Types: deb deb-src', f'URIs: https://snapshot.debian.org/archive/{archive}/{snapshot}/',
+        f'Suites: {suites}', 'Components: main', 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg',
+        # Snapshot Release files expire, but APT still authenticates their signatures and the locked hashes.
+        'Check-Valid-Until: no',
+    ]) for archive, suites in [('debian', 'trixie trixie-updates'), ('debian-security', 'trixie-security')])
 
 
 def plan(lock, arch):
@@ -114,7 +133,7 @@ def fetch(lock, arch, out, run=subprocess.run, apt_lists='/var/lib/apt/lists', a
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('plan', 'fetch', 'verify', 'install-args'):
+    for name in ('configure-snapshot', 'plan', 'fetch', 'verify', 'install-args'):
         p = sub.add_parser(name)
         p.add_argument('--lock', required=True)
         p.add_argument('--arch', required=True)
@@ -124,7 +143,9 @@ def main(argv=None):
     sub.choices['verify'].add_argument('--metadata', required=True)
     args = parser.parse_args(argv)
     lock = ohpkg.load_lock(args.lock, args.arch)
-    if args.command == 'plan':
+    if args.command == 'configure-snapshot':
+        print(snapshot_sources(lock))
+    elif args.command == 'plan':
         print('\n'.join(plan(lock, args.arch)))
     elif args.command == 'fetch':
         fetch(lock, args.arch, args.out)

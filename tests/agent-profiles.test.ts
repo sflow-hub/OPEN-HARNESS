@@ -73,6 +73,8 @@ test('a running task keeps its snapshot; the next queued task uses the new profi
   assert.equal((await waitRun(first.id)).state, 'completed'); assert.equal((await waitRun(next.id)).state, 'failed');
   assert.deepEqual(JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')).allowedTools, ['mcp__open_harness__task']);
   assert.equal(readFileSync(join(state, 'agents/atlas/profile/SOUL.md'), 'utf8'), '');
+  const config = JSON.parse(readFileSync(join(state, 'agents/atlas/profile/config.yaml'), 'utf8'));
+  assert.deepEqual(config.approvals, { mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' });
 });
 test('disabling a connector removes its tools at execution even if individually selected', async () => {
   const p = await profile(); await save({ ...p, allowedTools: ['mcp_research_lookup'], connectors: [{ id: 'r', name: 'research', command: 'npx', args: [], secretRef: '', enabled: false }] });

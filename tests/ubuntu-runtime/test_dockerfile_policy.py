@@ -148,6 +148,9 @@ class DockerfilePolicy(unittest.TestCase):
                 self.assertNotIn(forbidden, body, name)
         self.assertIn('/etc/apt/sources.list.d/debian.sources', self.runs('debian-inputs')[0])
         self.assertIn('debian_inputs.py fetch', self.runs('debian-inputs')[0])
+        first = self.runs('debian-inputs')[0]
+        self.assertLess(first.index('debian_inputs.py configure-snapshot'), first.index('apt-get'))
+        self.assertLess(first.index('rm -rf /var/lib/apt/lists/*'), first.index('apt-get'))
         for _, keyword, argument in self.steps:
             self.assertFalse(keyword in ('COPY', 'ADD') and 'debian-inputs' in argument, 'Debian inputs are only bind-mounted')
         browser = self.runs('runtime')[3]

@@ -227,3 +227,28 @@ class DebianFetch(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SnapshotSources(unittest.TestCase):
+    def test_signed_snapshot_sources_keep_binary_and_source_packages(self):
+        lock = support.load_lock()
+        text = debian_inputs.snapshot_sources(lock)
+        snapshot = lock['ubuntu']['snapshot']
+        for archive in ('debian', 'debian-security'):
+            self.assertIn(f'https://snapshot.debian.org/archive/{archive}/{snapshot}/', text)
+        self.assertEqual(text.count('Types: deb deb-src'), 2)
+        self.assertEqual(text.count('Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg'), 2)
+        self.assertEqual(text.count('Check-Valid-Until: no'), 2)
+        for forbidden in ('trusted=yes', 'Allow-Insecure', 'deb.debian.org'):
+            self.assertNotIn(forbidden, text)
+
+    def test_invalid_snapshot_or_suite_is_rejected(self):
+        for snapshot in ('20260929T180000Z\nTrusted: yes', '20261329T180000Z', ''):
+            lock = support.load_lock()
+            lock['ubuntu']['snapshot'] = snapshot
+            with self.assertRaisesRegex(ohpkg.InputError, 'invalid snapshot timestamp'):
+                debian_inputs.snapshot_sources(lock)
+        lock = support.load_lock()
+        lock['debian']['suite'] = 'trixie\nTrusted: yes'
+        with self.assertRaisesRegex(ohpkg.InputError, 'unsupported Debian snapshot suite'):
+            debian_inputs.snapshot_sources(lock)

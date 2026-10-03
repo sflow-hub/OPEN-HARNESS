@@ -74,7 +74,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             architecture: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 110
+    timeout-minutes: 190
     permissions:
       contents: read
       packages: write
@@ -189,6 +189,23 @@ jobs:
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           exit-code: '1'
+      - name: Require the scanner and Python for the Debian-origin gate
+        run: |
+          trivy=$(command -v trivy) || { echo "Trivy is required for the Debian-origin gate." >&2; exit 1; }
+          test -x "$trivy"
+          python3 -I -B -c 'import sys; sys.exit(sys.version_info < (3, 11))'
+          echo "OPEN_HARNESS_TRIVY=$trivy" >> "$GITHUB_ENV"
+          echo "OPEN_HARNESS_TRIVY_DB=$RUNNER_TEMP/debian-origin-trivy" >> "$GITHUB_ENV"
+      - name: Download one vulnerability database for the Debian-origin gate
+        run: |
+          mkdir -p "$OPEN_HARNESS_TRIVY_DB"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP" "$OPEN_HARNESS_TRIVY" --config /dev/null image --cache-dir "$OPEN_HARNESS_TRIVY_DB" --download-db-only
+      - name: Gate the Debian-origin packages of the exact scanned Hermes image
+        timeout-minutes: 80
+        run: |
+          image=$(node -p "require('./release-images/scanned-images.json').images.hermes.localId")
+          python3 -I -B scripts/debian-origin-gate.py --image "$image" --arch '${{ matrix.architecture }}' --trivy "$OPEN_HARNESS_TRIVY" --cache-dir "$OPEN_HARNESS_TRIVY_DB" --out release-images/debian-origin-gate
+          node scripts/release-images.mjs verify-debian-origin-gate release-images/debian-origin-gate '${{ matrix.architecture }}' "$image"
       - name: Exercise real Hermes protocol and tool enforcement
         run: node --import tsx tests/real-hermes-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/release-hermes.log"
       - name: Verify per-agent files, grants and resource isolation
@@ -219,6 +236,9 @@ jobs:
           if-no-files-found: warn
           path: |
             release-images/scanned-images.json
+            release-images/debian-origin-gate/reports/
+            release-images/debian-origin-gate/steps/
+            release-images/debian-origin-gate/*.json
             release-images/engine-context/inputs.sha256
             ${{ runner.temp }}/release-*.log
             ${{ runner.temp }}/open-harness-real-smoke-*/evidence.json

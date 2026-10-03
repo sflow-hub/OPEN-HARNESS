@@ -2402,7 +2402,7 @@ establish tool/transport/state behavior, not model reasoning:
 - **Actual Docker gateway:** file tools, clarification, canonical task-board MCP dispatch,
   denied tools, distinct session IDs and prior-conversation context work. An explicitly manual
   approval test denies and then approves a flagged chmod; the file stays 0600 until approval,
-  then changes to 0666. The shipped `smart` guardian policy remains unchanged.
+  then changes to 0666. At that historical checkpoint, the shipped `smart` guardian policy remained unchanged; the October 3 decision below restores `manual`.
 - **Cold production Compose:** fresh private engine storage starts without a Hermes image;
   setup builds runtime contract 3 through the dashboard proxy in 227846 ms. The coordinator
   and data run as UID 1000. Saved credentials authenticate actual requests, rotate between runs
@@ -2569,14 +2569,16 @@ accepted `"approve"` too, which is exactly why this survived. Evidence, with a r
 after: a run paused in `waiting_approval` carrying the real command and its
 `world/other-writable permissions` finding; approving took the file from 644 to 777 and the agent
 reported it "was approved by the user"; denying left it at 644 and stopped the command. The gate
-was forced to `manual` for that pair of runs only, and `smart` is unchanged in the shipped code.
+was forced to `manual` for that pair of runs only; `smart` remained the default at that historical checkpoint. The October 3 decision below restores `manual` in shipped configuration.
 
-**One finding left for a decision, not fixed here.** With the shipped `approvals.mode: 'smart'`,
-Hermes hands each flagged command to an auxiliary "guardian" model rather than to the operator. On
-this machine it approved `chmod 777` on a bind-mounted host file silently, and it spends the
-operator's own key to make that judgement. `manual` — which gates only commands Hermes has already
-flagged, and is what the dashboard's approval UI exists for — is a one-word change in
-`runtime/profile-runtime.ts`. Worth deciding before the beta.
+**Decision resolved October 3, 2026.** At the time of this check, `approvals.mode: 'smart'`
+sent flagged commands to an auxiliary guardian model; it silently approved `chmod 777`
+on a bind-mounted host file and used the operator's provider key for that decision.
+The user selected `manual` for the public beta. Commit `81a41a8` restores manual
+approval in generated profiles and the bundled runner, so Hermes-flagged commands
+reach the operator's approval flow. Unattended and scheduled approvals remain denied.
+Manual mode does not request approval for every command; Hermes still decides which
+commands to flag. This policy change is not a new real-container acceptance result.
 
 Also confirmed incidentally: `POST /v1/onboarding/status` correctly refused a state directory that
 Docker cannot read (the probe named the real cause and pointed at the fix), and all five readiness
@@ -3214,3 +3216,96 @@ Root verified the before/after handler files byte-for-byte, compared the current
 The fresh full-soak preflight passed with 44,634,062,848 bytes free versus its 41,875,931,136-byte (39 GiB) start requirement. Ubuntu's sleep/suspend/hibernate targets were inactive and logind IdleAction was `ignore`; this Mac's AC sleep setting is zero. The operator was reminded to keep the Ubuntu runner and VM host awake and avoid other Docker workloads. Following the reviewed `SOAK-WINDOW.md`, launched detached window `amd64-soak-24h-window-20260930-v2` at `2026-09-30T23:40:29Z`; window PID `3853572`. Preflight, F-only handler registration and both postflight checks passed; controller `3853845` launched at `23:40:32Z` and fixture `3853927` is executing `--soak` as attempt `soak-with-browser-overrides-1`. All three Compose services were healthy at the first check. The full soak is **running, not passed**; its 24-hour clock starts after the Compose/restore preparation. The unchanged policy requires at least 288 cycles, no gap over ten minutes, and one planned restart after the midpoint. The heartbeat now follows this exact window every 30 minutes and will verify the final evidence and cleanup before recording success.
 
 This remains **emulated AMD64 with browser overrides and a scripted provider**. Clean-host real-provider acceptance, published engine-input manifest digests for both architectures, and the rejected protected release-workflow gate remain open. No publication or protected workflow mutation was performed.
+
+
+## October 3, 2026 — local launch-request audit (2026-10-03 13:40 MDT)
+
+The current checkout includes Claude's manual-approval delivery `81a41a8`.
+Codex regenerated `runtime/runner.mjs` with no further bundle diff and added an
+assertion on the generated profile's actual `config.yaml`: manual approvals,
+unattended denial and scheduled denial. The restored source guard remains.
+
+Removed test review: the pinned Ubuntu/Debian input and package-installation policy
+is covered by `tests/ubuntu-runtime`, so the removed single-stage Debian-base,
+old pip version and package-manager-removal assertions must not be restored.
+The coordinator intentionally includes reviewed npm and Buildx for setup; the
+old test forbidding CLI plugins/package managers was also obsolete. A replacement
+checks the Docker client, nonroot runtime, absence of a bundled daemon and the
+application health probe. The expired Trivy-exception count test stays removed;
+whole-image scans remain HIGH/CRITICAL plus secrets with failure exit codes and
+no exception file.
+
+**Final-image scans remain unverified here.** The configured Docker Desktop socket
+`/home/jarom/.docker/desktop/docker.sock` is absent outside the sandbox, and Trivy
+is not installed. This check neither starts Docker nor builds/scans an image.
+Historical zero-finding receipts apply only to their recorded images/databases;
+no current zero-HIGH/CRITICAL claim or scan exception was added.
+
+**September 30 full soak: result unavailable, not passed.** No receipt, journal,
+fixture evidence or cleanup record for `amd64-soak-24h-window-20260930-v2` was
+found in this checkout, including ignored files. This host has no SSH config;
+Claude's handoff reports no key for the historical runner `192.168.1.149`.
+The last committed record describes a launched run, not its final result. The
+remote artifacts are not declared lost. Retrieve and verify them before any
+recovery/relaunch; if unavailable or not bound to the final candidate, a new
+qualifying final-image soak is required. No second run was launched and remote
+container/handler cleanup remains unverified.
+
+**Workflow gate is proposed, not applied.**
+`work/release-review-20261003/debian-origin-workflow.patch` adds scanner/Python
+checks, a dedicated database download, the exact scanned-image Debian-origin
+check and receipt validation before runtime exercise/publication, and retained
+reports/steps/JSON evidence. All three whole-image scans remain unchanged; no
+new/re-versioned Actions, ignore files or weaker thresholds. The image-job budget
+increases from 110 to 190 minutes to accommodate the existing 75-minute gate
+with an 80-minute step limit. The actual workflow still fails its regression
+guard until the reviewed patch is approved and applied.
+
+Local verification for this delivery: Node suite 271 tests, 267 pass, one expected
+workflow-guard failure and three skips; Python package suite 158 tests, OK with
+31 evidence-dependent skips. TypeScript passes; lint passes with eight existing
+warnings; regenerated runner has no diff from Claude's delivery. The isolated
+candidate workflow passes all eight Debian-origin Node tests, YAML parsing,
+new-step shell syntax and `git apply --check`. No workflow change was applied.
+The initial production build failed after dependencies disappeared during another
+session's `npm ci`; the subsequent shared build result is recorded separately.
+Claude owns browser acceptance for its current onboarding/concurrency changes.
+
+
+## October 3, 2026 — gate applied and native runtime rebuild
+
+The user directed continuation after the concrete workflow-patch review/application
+question. The reviewed Debian-origin gate was applied without changing scan
+thresholds, Actions or permissions. The actual Node suite now passes: 268 passed,
+zero failed and three skipped; typecheck passes and lint has zero errors/eight
+existing warnings. Production dependency audit reports zero vulnerabilities.
+Claude's production build completed standalone output and React dependency copying.
+Claude records 124 browser passes and eight baseline-reproduced credential/UI
+regressions (four cases across desktop/mobile), which remain with the UI owner.
+Codex's separate-port browser attempt overlapped that fresh build and refused
+missing dist output; it is not acceptance evidence.
+
+Docker Desktop became available (29.5.3, native AMD64). The installed Hermes image
+`sha256:8e2da94ccd50708d383d791accc59c3ff49857cd8a15ac4a8c8b44619ba1fda8`
+is contract 2, not the required contract 7. A separate current-source review build
+failed safely: the live Debian signed index no longer included locked Chromium
+`154.0.8037.57-1~deb13u1`. An isolated signed snapshot probe at the reviewed cutoff
+`20260929T180000Z` confirmed the exact package SHA256
+`d70bab9fbcb7bfbb7227b9510fb5cf1f7290bd6d6af3dd168b19ba4cc9b8035d`.
+
+The Debian input stage now obtains signed binary/source indexes at that same
+reviewed cutoff via `debian_inputs.py configure-snapshot`. Only historical
+snapshot Release expiry is disabled, as documented by Debian; keyring signature,
+version, package/source identity, size and hash checks are retained. Ubuntu and
+Debian package pins/lock bytes are unchanged. Date and suite injection regressions
+and stage-order checks pass; the full Python package suite runs 160 tests, OK with
+31 retained-evidence-dependent skips. A new native AMD64 image build is in progress;
+this entry does not record image verification, scans, runtime acceptance or a
+replacement soak as passed.
+
+The scanner was extracted from immutable local image
+`sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969`:
+Trivy 0.74.0, binary SHA256
+`d89bcc6510a267f11b773398cbf1be5520ce39f9e8b6633178c4487f05b7d791`.
+Its dedicated vulnerability database was downloaded into the ignored review cache.
+No scan ignores were restored. The prior full soak remains unverified.

@@ -45,7 +45,9 @@ ARG BUILDARCH
 ARG OPEN_HARNESS_BUILD_MODE
 RUN --mount=type=bind,from=build-inputs,source=/opt/open-harness-build,target=/opt/open-harness-build \
     sh /opt/open-harness-build/helpers/check-native-platform.sh \
- && sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources \
+ && python3 /opt/open-harness-build/helpers/debian_inputs.py configure-snapshot \
+      --lock /opt/open-harness-build/lock/runtime-inputs.lock.json --arch "$TARGETARCH" > /etc/apt/sources.list.d/debian.sources \
+ && rm -rf /var/lib/apt/lists/* \
  && apt-get -o Acquire::Retries=0 update \
  && python3 /opt/open-harness-build/helpers/debian_inputs.py fetch \
       --lock /opt/open-harness-build/lock/runtime-inputs.lock.json --arch "$TARGETARCH" --out /out \
