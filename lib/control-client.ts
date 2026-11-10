@@ -74,6 +74,7 @@ export class ControlClient {
     const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
     return this.request<{ approvals: ApprovalItem[]; pendingCount: number }>(`/v1/approvals?${query}`);
   }
+  resolveApproval(runId: string, approvalId: string, decision: "approve" | "deny") { return this.request<{ ok: boolean }>(`/v1/runs/${encodeURIComponent(runId)}/approval`, { method: "POST", body: JSON.stringify({ approvalId, decision }) }); }
   async bootstrap() {
     const response = await fetch(`${base()}/v1/bootstrap`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     const body = await parseBody(response);
@@ -89,7 +90,7 @@ export class ControlClient {
       try { await this.bootstrap(); response = await send(); } catch { /* report the original 401 below */ }
     }
     const value = await parseBody(response) as T & { error?: string };
-    if (!response.ok) throw new Error(value.error || `Control service returned HTTP ${response.status}.`);
+    if (!response.ok) throw Object.assign(new Error(value.error || `Control service returned HTTP ${response.status}.`), { status: response.status });
     return value;
   }
   sandboxSelftest(id: string) { return this.request<{ result: SandboxResult }>(`/v1/agents/${encodeURIComponent(id)}/sandbox-selftest`, { method: 'POST', signal: AbortSignal.timeout(120_000) }); }

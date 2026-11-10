@@ -61,6 +61,7 @@ import CredentialManager, { CredentialSwitcher } from "../components/credential-
 import RoutineHistoryDrawer from "../components/routine-history-drawer";
 import GroupChatView from "../components/group-chat-view";
 import ComputersPage from "../components/computers-page";
+import ApprovalsInbox from "../components/approvals-inbox";
 import type { Routine } from "../lib/routine";
 import { fitsProvider, type CredentialRecord } from "../lib/credentials";
 import { profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
@@ -76,7 +77,7 @@ const MIGRATED_KEY = "open-harness.migrated.v1";
 // Kept apart from SETTINGS_KEY on purpose: the onboarding save rewrites that whole
 // blob, which would silently drop anything else stored alongside it.
 const NOTIFY_KEY = "open-harness.notify.v1";
-type View = "home" | "teams" | "chat" | "files" | "routines" | "groups" | "tasks" | "computers";
+type View = "home" | "teams" | "chat" | "files" | "routines" | "groups" | "tasks" | "computers" | "approvals";
 type ModelSettings = { provider: Provider; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
 const defaultSettings: ModelSettings = {
   provider: "xai",
@@ -169,6 +170,8 @@ export default function Home() {
   // A queue, not a slot. Two agents can pause at once, and the second request used to
   // overwrite the first — leaving a run blocked on an approval with no way to answer it.
   const [approvals, setApprovals] = useState<Array<{ approvalId: string; detail: string; runId: string; agentName: string }>>([]);
+  // Coordinator-wide, unlike the queue above, which only holds runs this page is following.
+  const [pendingApprovals, setPendingApprovals] = useState(0);
   const [inputMode, setInputMode] = useState<"steer" | "followup">("steer");
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [historyRoutine, setHistoryRoutine] = useState<Routine | null>(null);
@@ -513,6 +516,13 @@ export default function Home() {
       window.removeEventListener("beforeunload", beforeLeave);
     };
   }, []);
+  useEffect(() => {
+    if (!runtime) return;
+    const load = () => { if (!document.hidden) controlRef.current.listApprovals({ state: "pending", limit: 1 }).then(value => setPendingApprovals(value.pendingCount)).catch(() => {}); };
+    load();
+    const timer = window.setInterval(load, 15_000);
+    return () => window.clearInterval(timer);
+  }, [runtime, approvals.length]);
   useEffect(() => {
     if (notice) {
       const timeout = setTimeout(() => setNotice(""), 6500);
@@ -1132,6 +1142,15 @@ export default function Home() {
           <CalendarClock size={16} /> Routines <span>{routines.length || ""}</span>
         </button>
         <button
+          className={`nav-item ${view === "approvals" ? "active" : ""}`}
+          onClick={() => {
+            setView("approvals");
+            setMobileOpen(false);
+          }}
+        >
+          <ShieldCheck size={16} /> Approvals <span className={pendingApprovals ? "nav-alert-count" : ""}>{pendingApprovals || ""}</span>
+        </button>
+        <button
           className={`nav-item ${view === "groups" ? "active" : ""}`}
           onClick={() => {
             setView("groups");
@@ -1233,6 +1252,8 @@ export default function Home() {
                     ? "Routines"
                     : view === "groups"
                     ? "Group chats"
+                    : view === "approvals"
+                    ? "Approvals"
                     : view === "tasks"
                       ? "Tasks"
                     : view === "computers"
@@ -1965,6 +1986,7 @@ export default function Home() {
             )}
           </section>
         )}
+        {view === "approvals" && <ApprovalsInbox client={controlRef.current} refreshKey={approvals.length} onCount={setPendingApprovals} onResolved={approvalId => setApprovals(current => current.filter(item => item.approvalId !== approvalId))} />}
         {view === "groups" && <GroupChatView client={controlRef.current} agents={workspace.agents} onNotice={setNotice} />}
         {advancedFeatures && view === "computers" && <ComputersPage client={controlRef.current} agents={workspace.agents} onAddComputer={() => { setEditingAgentTab('computer'); setEditingAgent(agent); }} />}
       </main>
