@@ -9,6 +9,44 @@ against `SECURITY.md`; and a test matrix.
 
 All claims about current behavior cite `path:line`.
 
+## Implementation status (M3 waves A/B)
+
+This document is the full design; only part of it has shipped. Current state:
+
+**Shipped (wave A).**
+- The policy exists as a stored setting: `NetworkMode` / `NetworkPolicy` / `DEFAULT_NETWORK` on
+  `ComputerConfig` (`lib/agent-profile.ts:7`–`9`, `:18`), defaulting to `open` and spread over
+  older profiles (`draftProfile`, `lib/agent-profile.ts:117`). The launch path does read it, but
+  only through `containerSignature`, which folds in a **non-default** network policy
+  (`runtime/hermes.ts:266`–`268`); a change therefore recreates the container on the next idle
+  `ensureContainer` (`runtime/hermes.ts:314`–`319`). No egress restriction is applied — the
+  `docker run` vector still carries no `--network` flag (`runtime/hermes.ts:336`–`343`) — so the
+  field drives a rebuild, not enforcement.
+- Per-team shared folders are mounted additively: `${stateRoot}/teams/<teamId>/shared` →
+  `/workspace/teams/<teamId>` (`teamMountArgs`, `runtime/hermes.ts:294`), with the
+  signature-driven rebuild gated on the agent being idle (`shouldRebuildContainer`,
+  `runtime/hermes.ts:298`). The legacy global `/workspace/shared` (§1.2, `runtime/hermes.ts:341`)
+  is unchanged and still read-write for every agent.
+
+**Shipped (wave B).**
+- The sandbox self-test probe (§4) is wired up: `POST`/`GET /v1/agents/:id/sandbox-selftest` run
+  and return a result. The two-layer model holds — host-attested `docker inspect` checks are
+  authoritative, and the in-container probe `runtime/hermes/sandbox_selftest.py` runs via
+  `env -i … python -I -S` and only corroborates, so a contradiction between the two is reported as
+  `tampering_suspected` rather than a pass (§4). Paired runners are labelled `runner-attested`
+  (§4); direct/native access reports `not a sandbox` (§2.2, §4.2). Results are persisted in a
+  `sandbox_selftests` table and the run is audited (`sandbox.selftest`).
+
+**Pending (wave B+).**
+- Egress enforcement (§2, §3): the launch vector still has no `--network`/`--internal` and no
+  proxy/relay (`runtime/hermes.ts:336`–`343`), so every mode has open egress.
+- Read-only rootfs + `--tmpfs /tmp` (§4.1), so the writes-denied check can pass rather than
+  fail-by-design.
+- An explicit seccomp profile (§4.1) — only Docker's default applies today.
+- Sandbox self-test real-container verification (§4, §7): functional tests have run only on a
+  local rootful Docker, which is not a production isolation claim, and no network/team
+  real-runtime pass is recorded in `runtime/VERIFICATION.md`.
+
 ## 1. Current state (evidence)
 
 Container launch is `ensureContainer` (`runtime/hermes.ts:292`). The `docker run` argument
