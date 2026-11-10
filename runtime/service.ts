@@ -7,6 +7,7 @@ import { Profiles, ProfileError, validateModel, validateProfile, validId } from 
 import { discoverTools, discoverModels, nativeRuntimeProbe, prepareProfile, runtimeProbe } from "./profile-runtime";
 import { HANDOFF_TOOL, profileAgent, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
 import { saveRoutine, tickRoutines } from "./routines";
+import { Conversations, ConversationError } from "./conversations";
 import { SchemaTooNewError, Store, type RunRow } from "./db";
 import { SecretStore, SecretsUnavailableError } from "./secrets";
 import { Credentials, CredentialError } from "./credentials";
@@ -48,6 +49,7 @@ function openSecrets(file: string) {
 const credentials = new Credentials(store.db, secrets);
 const profiles = new Profiles(store.db);
 const teams = new TeamStore(store.db);
+const conversations = new Conversations(store.db, profiles, teams);
 const tasks = new TaskStore(store.db);
 store.runListener = run => tasks.syncRun(run);
 tasks.reconcile();
@@ -289,12 +291,32 @@ async function execute(run: RunRow) {
       : { controlUrl: `http://host.docker.internal:${port}` });
     const gateway = await gatewayFor(run.agent_id, snapshot.allowedTools, snapshot.computer);
     const listener = (value: any) => mapHermesEvent(run, value); gateway.on("event", listener); subscribed = { gateway, listener };
-    const session = run.session_id ? { session_id: run.session_id } : await gateway.request("session.create", { cwd: native ? join(root, 'shared') : "/workspace/shared", profile: "default" });
+    const seededSessionId = run.session_id;
+    const createSession = async () => {
+      const session = await gateway.request("session.create", { cwd: native ? join(root, 'shared') : "/workspace/shared", profile: "default" });
+      const id = String(session?.session_id || session?.id || "");
+      if (!id) throw new Error("Hermes did not return a session ID.");
+      return id;
+    };
+    let sessionId = seededSessionId || await createSession();
     if (store.getRun(run.id)?.state === "cancelled") return;
-    const sessionId = String(session?.session_id || session?.id || run.session_id || "");
-    if (!sessionId) throw new Error("Hermes did not return a session ID.");
-    store.setRun(run.id, { session_id: sessionId }); active.set(run.id, { gateway, sessionId });
-    const result = await gateway.submitPrompt(sessionId, run.prompt);
+    const recordSession = () => {
+      conversations.setSessionId(run.conversation_id, run.agent_id, sessionId);
+      store.setRun(run.id, { session_id: sessionId }); active.set(run.id, { gateway, sessionId });
+    };
+    recordSession();
+    let result;
+    try { result = await gateway.submitPrompt(sessionId, run.prompt); }
+    catch (error) {
+      if (!seededSessionId) throw error;
+      conversations.setSessionId(run.conversation_id, run.agent_id, null);
+      store.setRun(run.id, { session_id: null }); active.delete(run.id);
+      if (store.getRun(run.id)?.state === "cancelled" || (error as { interrupted?: boolean })?.interrupted) throw error;
+      sessionId = await createSession();
+      if (store.getRun(run.id)?.state === "cancelled") return;
+      recordSession();
+      result = await gateway.submitPrompt(sessionId, run.prompt);
+    }
     active.delete(run.id);
     const current = store.getRun(run.id);
     if (current?.state === "cancelled") return;
@@ -374,7 +396,7 @@ async function waitForRun(id: string, timeoutMs = 30 * 60 * 1000) {
   throw new Error("Delegated run is still active after 30 minutes. Its run ID remains available in Open Harness.");
 }
 
-function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number; deferStart?: boolean }) {
+function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number; deferStart?: boolean; internalConversation?: boolean }) {
   if (!input.agentId || !input.prompt?.trim()) throw new Error("agentId and prompt are required.");
   if (!profiles.get(input.agentId)) throw new ProfileError("Agent profile not found.", 404);
   const parent = input.parentRunId ? store.getRun(input.parentRunId) : undefined;
@@ -388,7 +410,24 @@ function createRun(input: { agentId: string; conversationId?: string; prompt: st
   if (store.queued(maxTaskQueue + 1).length >= maxTaskQueue) throw new TaskError(`The task queue is full (${maxTaskQueue}). Try again when work completes.`, 429);
   const stamp = new Date().toISOString();
   const run: RunRow = { id: crypto.randomUUID(), agent_id: input.agentId, conversation_id: input.conversationId || crypto.randomUUID(), prompt: input.prompt.trim(), state: "queued", session_id: null, parent_run_id: input.parentRunId || null, depth, created_at: stamp, updated_at: stamp, result: null, error: null };
-  store.createRun(run); event(run.id, "run.queued", { position: store.listRuns().filter(item => item.state === "queued").length }); if (!input.deferStart) void pump(); return run;
+  store.db.exec('SAVEPOINT create_run');
+  try {
+    const existing = store.db.prepare('SELECT id,agent_id FROM conversations WHERE id=?').get(run.conversation_id) as { id: string; agent_id: string } | undefined;
+    store.db.prepare("INSERT OR IGNORE INTO conversations(id,agent_id,title,kind,source,created_at,updated_at) VALUES(?,?,?,'direct',?,?,?)").run(run.conversation_id, run.agent_id, '', input.parentRunId || input.deferStart || input.internalConversation ? 'internal' : 'native', stamp, stamp);
+    if (!existing) {
+      store.db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id,participant_kind,participant_id,role,joined_at) VALUES(?,'user','user','owner',?)").run(run.conversation_id, stamp);
+      store.db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id,participant_kind,participant_id,role,joined_at) VALUES(?,'agent',?,'member',?)").run(run.conversation_id, run.agent_id, stamp);
+    } else {
+      const member = store.db.prepare("SELECT 1 FROM conversation_members WHERE conversation_id=? AND participant_kind='agent' AND participant_id=? AND removed_at IS NULL").get(run.conversation_id, run.agent_id);
+      // Legacy browser imports have no member rows until first use.
+      if (!member && existing.agent_id === run.agent_id && !store.db.prepare("SELECT 1 FROM conversation_members WHERE conversation_id=? AND participant_kind='agent'").get(run.conversation_id)) {
+        store.db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id,participant_kind,participant_id,role,joined_at) VALUES(?,'agent',?,'member',?),(?,'user','user','owner',?)").run(run.conversation_id, run.agent_id, stamp, run.conversation_id, stamp);
+      } else if (!member) throw new ConversationError('Agent is not a current conversation member.', 403);
+    }
+    if (input.conversationId) run.session_id = conversations.getSessionId(run.conversation_id, run.agent_id);
+    store.createRun(run); store.db.exec('RELEASE create_run');
+  } catch (error) { store.db.exec('ROLLBACK TO create_run; RELEASE create_run'); throw error; }
+  event(run.id, "run.queued", { position: store.listRuns().filter(item => item.state === "queued").length }); if (!input.deferStart) void pump(); return run;
 }
 function runResponse(run: RunRow) { const profile = profiles.runSnapshot(run.id) || profiles.get(run.agent_id); const machineId = profile?.computer.machineId || null; let machineConnection: string | null = null; if (machineId) { try { machineConnection = machines.get(machineId).status; } catch { machineConnection = 'revoked'; } } return { ...run, machine_id: machineId, machine_connection: machineConnection }; }
 
@@ -708,6 +747,23 @@ const server = createServer(async (req, res) => {
       if (action === "approve" && req.method === "POST") { const input = await body(req); return json(res, 200, tasks.approve(taskId, input.revision === undefined ? undefined : Number(input.revision))); }
       if (action === "runs" && req.method === "GET") return json(res, 200, { runs: tasks.getTask(taskId).runs });
     }
+    if (url.pathname === '/v1/conversations') {
+      if (req.method === 'POST') return json(res, 201, conversations.createConversation(await body(req)));
+      if (req.method === 'GET') return json(res, 200, { conversations: conversations.listConversations(url.searchParams.get('kind') ?? undefined) });
+    }
+    const conversationRoute = url.pathname.match(/^\/v1\/conversations\/([^/]+)(?:\/(members|messages)(?:\/([^/]+))?)?$/);
+    if (conversationRoute) {
+      const [, id, resource, memberId] = conversationRoute;
+      // These are operator routes; agent-scoped membership grants belong to the internal API.
+      if (!resource && req.method === 'GET') return json(res, 200, conversations.getConversation(id));
+      if (resource === 'members' && !memberId && req.method === 'POST') return json(res, 201, conversations.addMember(id, await body(req)));
+      if (resource === 'members' && memberId && req.method === 'DELETE') return json(res, 200, conversations.removeMember(id, memberId));
+      if (resource === 'messages' && !memberId && req.method === 'POST') {
+        const input = await body(req);
+        return json(res, 201, conversations.postMessage({ conversationId: id, sender: { kind: 'user', id: 'user' }, body: input.body, mentions: input.mentions, idempotencyKey: input.idempotencyKey, inReplyTo: input.inReplyTo }));
+      }
+      if (resource === 'messages' && !memberId && req.method === 'GET') return json(res, 200, { messages: conversations.listMessages(id, Number(url.searchParams.get('after') ?? 0), Number(url.searchParams.get('limit') ?? 100)) });
+    }
     if (req.method === "POST" && url.pathname === "/v1/runs") return json(res, 202, runResponse(createRun(await body(req))));
     if (req.method === "GET" && url.pathname === "/v1/runs") return json(res, 200, { runs: store.listRuns().map(runResponse) });
     const runMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)(?:\/(events|steer|stop|approval))?$/);
@@ -769,7 +825,7 @@ const server = createServer(async (req, res) => {
       const routine = store.db.prepare("SELECT * FROM schedules WHERE id=?").get(routineMatch[1]) as any;
       if (!routine) return json(res, 404, { error: "Routine not found." });
       if (routineMatch[2] === "history" && req.method === "GET") return json(res, 200, { history: store.db.prepare("SELECT schedule_runs.*,runs.state,runs.result,runs.error,runs.updated_at FROM schedule_runs JOIN runs ON runs.id=schedule_runs.run_id WHERE schedule_id=? ORDER BY scheduled_for DESC LIMIT 100").all(routine.id) });
-      if (req.method === "POST" && routineMatch[2] === "run") { const stamp = new Date().toISOString(), run = createRun({ agentId: routine.agent_id, prompt: routine.prompt }); store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, stamp); store.db.prepare("UPDATE schedules SET last_run_at=?,updated_at=? WHERE id=?").run(stamp, stamp, routine.id); return json(res, 202, run); }
+      if (req.method === "POST" && routineMatch[2] === "run") { const stamp = new Date().toISOString(), run = createRun({ agentId: routine.agent_id, prompt: routine.prompt, internalConversation: true }); store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, stamp); store.db.prepare("UPDATE schedules SET last_run_at=?,updated_at=? WHERE id=?").run(stamp, stamp, routine.id); return json(res, 202, run); }
       if (req.method === "POST" && routineMatch[2] === "toggle") { store.db.prepare("UPDATE schedules SET enabled=?,updated_at=? WHERE id=?").run(routine.enabled ? 0 : 1, new Date().toISOString(), routine.id); return json(res, 200, { enabled: !routine.enabled }); }
     }
     if (req.method === "POST" && url.pathname === "/internal/handoff") { const input = await body(req); const parent = store.listRuns().find(run => run.agent_id === internalAgent && ["running","waiting_approval","waiting_input"].includes(run.state)); if (!parent) return json(res, 409, { error: "The delegating agent has no active run." }); if (!internalAllowed(internalAgent, HANDOFF_TOOL, String(req.headers["x-open-harness-run"] || parent.id))) return json(res, 403, { error: "Delegation is disabled for this run." }); const targetId = String(input.agentId || ""); if (!internalAgent || !teams.sharesActiveTeam(internalAgent, targetId)) return json(res, 403, { error: "Named handoffs require both agents to share an active team." }); const child = createRun({ agentId: targetId, prompt: input.prompt, parentRunId: parent.id }); event(parent.id, "handoff.created", { childRunId: child.id, targetAgentId: targetId, prompt: input.prompt }); const result = await waitForRun(child.id); event(parent.id, "handoff.completed", { childRunId: child.id, targetAgentId: targetId, state: result.state }); return json(res, 200, { runId: result.id, state: result.state, result: result.result, error: result.error }); }
@@ -820,13 +876,13 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/internal/schedule") { if (!internalAllowed(internalAgent, ROUTINE_TOOL, String(req.headers["x-open-harness-run"] || ""))) return json(res, 403, { error: "Scheduling is disabled for this run." }); return json(res, 201, saveRoutine(store.db, { ...await body(req), agentId: internalAgent }, new Date(), undefined, true)); }
     return json(res, 404, { error: "Not found." });
-  } catch (error) { return json(res, error instanceof ProfileError || error instanceof TaskError || error instanceof TeamError || error instanceof MachineError || error instanceof CredentialError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
+  } catch (error) { return json(res, error instanceof ConversationError || error instanceof ProfileError || error instanceof TaskError || error instanceof TeamError || error instanceof MachineError || error instanceof CredentialError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
 });
 
 setInterval(() => {
   try {
     const now = new Date();
-    tickRoutines(store.db, now, routine => createRun({ agentId: routine.agent_id, prompt: routine.prompt }), (routine, error) => {
+    tickRoutines(store.db, now, routine => createRun({ agentId: routine.agent_id, prompt: routine.prompt, internalConversation: true }), (routine, error) => {
       if (error instanceof ProfileError) store.db.prepare("UPDATE schedules SET enabled=0,updated_at=? WHERE id=?").run(now.toISOString(), routine.id);
       console.error(`Routine ${routine.id} could not start: ${error instanceof Error ? error.message : "unknown error"}`);
     });
