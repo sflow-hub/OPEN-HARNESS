@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 
 const control = `http://127.0.0.1:${process.env.OPEN_HARNESS_TEST_PORT || 4317}`;
@@ -20,6 +20,13 @@ const activeRuns = async (request: APIRequestContext) => ((await (await request.
   .filter(run => run.agent_id === agent.id && ['queued', 'running', 'waiting_approval', 'waiting_input'].includes(run.state));
 const startRun = async (request: APIRequestContext, prompt: string) => expect((await request.post(control + '/v1/runs', { headers: await auth(request), data: { agentId: agent.id, conversationId: `approvals-${agent.id}-${Date.now()}`, prompt } })).status()).toBe(202);
 const pendingCount = async (request: APIRequestContext) => (await (await request.get(`${control}/v1/approvals?state=pending&agentId=${encodeURIComponent(agent.id)}`, { headers: await auth(request) })).json()).pendingCount as number;
+// Coordinator-wide, not agent-scoped: the nav badge reflects this, so other specs' pending work counts too.
+const globalPendingCount = async (request: APIRequestContext) => (await (await request.get(`${control}/v1/approvals?state=pending`, { headers: await auth(request) })).json()).pendingCount as number;
+// app/page.tsx renders 'Approvals N' from the global pending count, and plain 'Approvals' at zero.
+const expectBadgeMatchesGlobal = (nav: Locator, request: APIRequestContext) => expect(async () => {
+  const count = await globalPendingCount(request);
+  await expect(nav).toHaveAccessibleName(count ? `Approvals ${count}` : 'Approvals');
+}).toPass();
 const openNav = async (page: Page, mobile: boolean) => { if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click(); };
 
 test.beforeEach(async ({ request, page }, testInfo) => {
@@ -45,7 +52,7 @@ test.afterEach(async ({ request }) => {
   }).toBe(200);
 });
 
-test('lists a pending approval with a badge and moves it to history once approved', async ({ page }, testInfo) => {
+test('lists a pending approval with a badge and moves it to history once approved', async ({ page, request }, testInfo) => {
   const mobile = testInfo.project.name === 'mobile';
   await goLive(page);
   await page.locator('.agent-card').filter({ hasText: agent.name }).click();
@@ -55,7 +62,10 @@ test('lists a pending approval with a badge and moves it to history once approve
 
   await openNav(page, mobile);
   const nav = page.getByRole('button', { name: /^Approvals/ });
-  await expect(nav).toHaveAccessibleName('Approvals 1');
+  // This agent owns exactly one pending request; the badge counts every agent's, so just check it tracks the API.
+  await expect.poll(() => pendingCount(request)).toBe(1);
+  expect(await globalPendingCount(request)).toBeGreaterThanOrEqual(1);
+  await expectBadgeMatchesGlobal(nav, request);
   await nav.click();
 
   const item = page.getByRole('list', { name: 'Pending approvals' }).getByRole('listitem', { name: label() });
@@ -64,7 +74,8 @@ test('lists a pending approval with a badge and moves it to history once approve
   await expect(item).toContainText(/Requested (just now|\d+ min ago)/);
 
   await item.getByRole('button', { name: `Approve Tool request for ${agent.name}` }).click();
-  await expect(page.getByText('Nothing is waiting for you.')).toBeVisible();
+  await expect(item).toHaveCount(0);
+  await expect.poll(() => pendingCount(request)).toBe(0);
 
   await page.getByRole('button', { name: 'History', exact: true }).click();
   await expect(page.getByRole('button', { name: 'History', exact: true })).toHaveAttribute('aria-pressed', 'true');
@@ -74,7 +85,7 @@ test('lists a pending approval with a badge and moves it to history once approve
   await expect(answered).toContainText('Approved');
 
   await openNav(page, mobile);
-  await expect(nav).toHaveAccessibleName('Approvals');
+  await expectBadgeMatchesGlobal(nav, request);
 });
 
 test('an approval answered elsewhere is reported as no longer pending', async ({ page, request }, testInfo) => {
@@ -86,7 +97,8 @@ test('an approval answered elsewhere is reported as no longer pending', async ({
 
   await openNav(page, mobile);
   const nav = page.getByRole('button', { name: /^Approvals/ });
-  await expect(nav).toHaveAccessibleName('Approvals 1');
+  expect(await globalPendingCount(request)).toBeGreaterThanOrEqual(1);
+  await expectBadgeMatchesGlobal(nav, request);
   await nav.click();
   const item = page.getByRole('list', { name: 'Pending approvals' }).getByRole('listitem', { name: label() });
   await expect(item).toHaveCount(1);
@@ -100,7 +112,8 @@ test('an approval answered elsewhere is reported as no longer pending', async ({
   });
   await item.getByRole('button', { name: `Approve Tool request for ${agent.name}` }).click();
   await expect(page.getByRole('alert').filter({ hasText: 'This approval is no longer pending.' })).toBeVisible();
-  await expect(page.getByText('Nothing is waiting for you.')).toBeVisible();
+  await expect(item).toHaveCount(0);
+  await expect.poll(() => pendingCount(request)).toBe(0);
   await page.getByRole('button', { name: 'History', exact: true }).click();
   await expect(page.getByRole('list', { name: 'Approval history' }).getByRole('listitem', { name: label() })).toContainText('Approved');
 });
@@ -114,8 +127,9 @@ test('a denied approval moves to history and a slow history load never replaces 
   await openNav(page, mobile);
   await page.getByRole('button', { name: /^Approvals/ }).click();
   const pending = page.getByRole('list', { name: 'Pending approvals' });
-  await pending.getByRole('listitem', { name: label() }).getByRole('button', { name: `Deny Tool request for ${agent.name}` }).click();
-  await expect(page.getByText('Nothing is waiting for you.')).toBeVisible();
+  const denyItem = pending.getByRole('listitem', { name: label() });
+  await denyItem.getByRole('button', { name: `Deny Tool request for ${agent.name}` }).click();
+  await expect(denyItem).toHaveCount(0);
   await expect.poll(() => pendingCount(request)).toBe(0);
   // The next run is only admitted once the denied one has finished with the agent.
   await expect.poll(async () => (await activeRuns(request)).length).toBe(0);
@@ -145,7 +159,7 @@ test('a denied approval moves to history and a slow history load never replaces 
   await expect(item).toHaveCount(1);
   await expect(item).toContainText(/Requested (just now|\d+ min ago)/);
   await expect(item.getByRole('button', { name: `Approve Tool request for ${agent.name}` })).toBeVisible();
-  await expect(page.getByText('Denied')).toHaveCount(0);
+  await expect(item).not.toContainText('Denied');
 
   await page.unroute(isHistory);
   await page.getByRole('button', { name: 'History', exact: true }).click();
