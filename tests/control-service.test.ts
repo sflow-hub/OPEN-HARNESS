@@ -84,6 +84,24 @@ test("runs independently of event polling and replays stable events", async () =
   assert.deepEqual(replay.events.map((event: any) => event.seq), first.events.slice(2).map((event: any) => event.seq));
 });
 
+test("stops all active runs through the POST-only fixed route", async () => {
+  const run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_APPROVAL" }) });
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < deadline && (await request(`/v1/runs/${run.id}`)).state !== "waiting_approval") await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal((await request(`/v1/runs/${run.id}`)).state, "waiting_approval");
+
+  const get = await fetch(`${base}/v1/runs/stop-all`, { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(get.status, 404);
+  assert.deepEqual(await get.json(), { error: "Run not found." });
+  assert.equal((await request(`/v1/runs/${run.id}`)).state, "waiting_approval");
+
+  const response = await fetch(`${base}/v1/runs/stop-all`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.ok(result.stopped >= 1);
+  assert.ok(["completed","failed","interrupted","cancelled"].includes((await waitRun(run.id)).state));
+});
+
 test("pauses for approval and resumes only after an explicit decision", async () => {
   const run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_APPROVAL" }) });
   let approval: any;
