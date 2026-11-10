@@ -1,4 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { normalizeRoutine, type RoutineInput, type RoutineRun } from "./routine";
+
 export type RuntimeStatus = {
   token: string;
   mode: "live" | "test";
@@ -68,4 +70,11 @@ export class ControlClient {
   }
   createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string }) { return this.request<PersistentRun>("/v1/runs", { method: "POST", body: JSON.stringify(input) }); }
   events(runId: string, after: number) { return this.request<{ events: Array<{ seq: number; id: string; type: string; payload: any }>; run: PersistentRun }>(`/v1/runs/${runId}/events?after=${after}`); }
+  async listRoutines() { return (await this.request<{ routines: unknown[] }>("/v1/routines")).routines.map(normalizeRoutine); }
+  createRoutine(input: RoutineInput) { return this.request<{ id: string; nextRunAt: string }>("/v1/routines", { method: "POST", body: JSON.stringify(input) }); }
+  async updateRoutine(id: string, input: Partial<RoutineInput>) { const row = await this.request<{ nextRunAt?: string }>(`/v1/routines/${id}`, { method: "PUT", body: JSON.stringify(input) }); return { ...normalizeRoutine(row), ...(typeof row?.nextRunAt === "string" ? { nextRunAt: row.nextRunAt } : {}) }; }
+  deleteRoutine(id: string) { return this.request<{ ok: boolean }>(`/v1/routines/${id}`, { method: "DELETE" }); }
+  runRoutine(id: string) { return this.request<PersistentRun>(`/v1/routines/${id}/run`, { method: "POST" }); }
+  toggleRoutine(id: string) { return this.request<{ enabled: boolean }>(`/v1/routines/${id}/toggle`, { method: "POST" }); }
+  async routineHistory(id: string) { return (await this.request<{ history: RoutineRun[] }>(`/v1/routines/${id}/history`)).history; }
 }
