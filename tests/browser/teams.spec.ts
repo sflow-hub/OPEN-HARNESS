@@ -30,6 +30,10 @@ test('creates a visual team with multiple members and filters agents', async ({ 
   const teamCard = page.getByRole('button', { name: `Manage ${teamName}` });
   await expect(teamCard).toBeVisible();
   await expect(teamCard.getByText('2 members')).toBeVisible();
+  await teamCard.click();
+  await expect(page.getByRole('dialog').locator('code')).toHaveText(/^\/workspace\/teams\/[a-zA-Z0-9_-]+$/);
+  await expect(page.getByRole('dialog')).toContainText('Members share this folder read-write');
+  await page.getByRole('button', { name: 'Close team editor' }).click();
 
   if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Agents/ }).first().click();

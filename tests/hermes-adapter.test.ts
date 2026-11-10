@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { normalizeModels } from '../runtime/profile-runtime';
 import { createHash } from 'node:crypto';
 import { DEFAULT_COMPUTER, DEFAULT_NETWORK, type ComputerConfig } from '../lib/agent-profile';
-import { HermesGateway, lastWords, containerSignature } from '../runtime/hermes';
+import { HermesGateway, lastWords, containerSignature, teamMountArgs, shouldRebuildContainer } from '../runtime/hermes';
 
 class StreamingGateway extends HermesGateway {
   constructor(readonly submit: () => Promise<unknown> = async () => ({ status: 'streaming' })) { super('test'); }
@@ -64,4 +64,23 @@ test('default network keeps the legacy container signature while policy changes 
   for (const mode of ['none', 'allowlist'] as const) assert.notEqual(containerSignature({ ...selected, network: { mode, allow: [] } }, 'image'), legacy);
   assert.notEqual(containerSignature({ ...selected, network: { mode: 'open', allow: ['example.com'] } }, 'image'), legacy);
   assert.notEqual(containerSignature({ ...selected, network: { mode: 'allowlist', allow: ['example.com'] } }, 'image'), containerSignature({ ...selected, network: { mode: 'allowlist', allow: ['other.com'] } }, 'image'));
+});
+
+test('team mounts and signatures use sorted, validated ids without changing unassigned agents', () => {
+  assert.deepEqual(teamMountArgs('/state', []), []);
+  assert.deepEqual(teamMountArgs('/state', ['beta', 'alpha', 'beta']), ['-v', '/state/teams/alpha/shared:/workspace/teams/alpha', '-v', '/state/teams/beta/shared:/workspace/teams/beta']);
+  assert.equal(containerSignature(DEFAULT_COMPUTER, 'image', '/state', []), containerSignature(DEFAULT_COMPUTER, 'image', '/state'));
+  assert.equal(containerSignature(DEFAULT_COMPUTER, 'image', '/state', ['beta', 'alpha']), containerSignature(DEFAULT_COMPUTER, 'image', '/state', ['alpha', 'beta']));
+  assert.notEqual(containerSignature(DEFAULT_COMPUTER, 'image', '/state', ['alpha']), containerSignature(DEFAULT_COMPUTER, 'image', '/state'));
+  for (const id of ['../escape', '..', '.', '/absolute', 'team:ro', 'a/b', 'a\\b', '']) {
+    assert.throws(() => teamMountArgs('/state', [id]), /Invalid team id/);
+    assert.throws(() => containerSignature(DEFAULT_COMPUTER, 'image', '/state', [id]), /Invalid team id/);
+  }
+});
+
+test('signature changes defer container rebuilds until idle', () => {
+  assert.equal(shouldRebuildContainer('old', 'new', true), false);
+  assert.equal(shouldRebuildContainer('old', 'new', false), true);
+  assert.equal(shouldRebuildContainer('same', 'same', false), false);
+  assert.equal(shouldRebuildContainer('same', 'same', true), false);
 });

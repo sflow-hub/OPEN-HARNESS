@@ -80,6 +80,7 @@ async function request(path: string, init: RequestInit = {}, retry = false): Pro
   }
 }
 
+const busyAgents = new Set<string>();
 const active = new Map<string, { gateway: HermesGateway; sessionId: string; commandId: string }>();
 const admittedCommands = new Set<string>();
 type SpoolRecord = { id: string; path: string; body: unknown };
@@ -111,13 +112,15 @@ async function run(command: RunnerCommand) {
     prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator } : { controlUrl: coordinatorForContainer });
     const gateway = direct
       ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', HERMES_GATEWAY_SESSION: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } })
-      : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
+      : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer, command.payload.teamIds || [], () => busyAgents.has(profile.id)), profile.allowedTools);
+    busyAgents.add(profile.id);
     gateway.on('event', event => void emit(command, event)); await gateway.start();
     const session = await gateway.request('session.create', { cwd: direct ? shared : '/workspace/shared', profile: 'default' });
     const sessionId = String(session?.session_id || session?.id || ''); if (!sessionId) throw new Error('Hermes did not return a session ID.');
     active.set(payload.runId, { gateway, sessionId, commandId: command.id });
     const result = await gateway.submitPrompt(sessionId, payload.prompt); active.delete(payload.runId); await finish(command, result);
   } catch (error) { active.delete(payload.runId); await finish(command, undefined, error); }
+  finally { busyAgents.delete(profile.id); }
 }
 async function control(command: RunnerCommand) {
   try {
@@ -135,7 +138,7 @@ async function control(command: RunnerCommand) {
         const check = { action: 'computer', desktop: profile.computer.desktop };
         const result = profile.computer.desktop === 'existing'
           ? nativeRuntimeProbe(join(stateRoot, 'agents', profile.id, 'profile'), check)
-          : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), check);
+          : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer, command.payload.teamIds || [], () => busyAgents.has(profile.id)), check);
         if (!result.ok) throw new Error(String(result.message || 'Desktop control is not ready on the destination computer.'));
       }
       await finish(command, { ...imported, validated: true }); return;
@@ -151,11 +154,11 @@ async function control(command: RunnerCommand) {
         if (probeInput.action === 'connection' && !probeInput.apiKey) probeInput.apiKey = localSecrets[profile.effectiveModel.credentialRef] || '';
         if (probeInput.action === 'mcp' && probeInput.env) for (const name of Object.keys(probeInput.env)) if (!probeInput.env[name] && localSecrets[name]) probeInput.env[name] = localSecrets[name];
         if (direct) { const result = spawnSync(process.env.HERMES_PYTHON || 'python3', [join(import.meta.dirname, 'hermes', 'inspect_runtime.py')], { input: JSON.stringify(probeInput) + '\n', encoding: 'utf8', env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile') }, maxBuffer: 5_000_000, timeout: 25_000 }); if (result.status || !result.stdout) throw new Error(result.stderr || 'Native runtime probe failed.'); await finish(command, JSON.parse(result.stdout)); }
-        else await finish(command, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), probeInput));
+        else await finish(command, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer, command.payload.teamIds || [], () => busyAgents.has(profile.id)), probeInput));
         return;
       }
-      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', HERMES_GATEWAY_SESSION: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
-      if (command.kind === 'probe-tools') { const input = direct ? (() => { const result = spawnSync(process.env.HERMES_PYTHON || 'python3', [join(import.meta.dirname, 'hermes', 'inspect_runtime.py')], { input: '{"action":"catalog"}\n', encoding: 'utf8', env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile') }, maxBuffer: 5_000_000, timeout: 25_000 }); if (result.status || !result.stdout) throw new Error(result.stderr || 'Tool discovery failed.'); return JSON.parse(result.stdout); })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), { action: 'catalog' }); await finish(command, { source: 'runtime', tools: [...(input.tools || []).filter((tool: any) => tool.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }); return; }
+      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile'), HERMES_TUI: '1', HERMES_GATEWAY_SESSION: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer, command.payload.teamIds || [], () => busyAgents.has(profile.id)), []);
+      if (command.kind === 'probe-tools') { const input = direct ? (() => { const result = spawnSync(process.env.HERMES_PYTHON || 'python3', [join(import.meta.dirname, 'hermes', 'inspect_runtime.py')], { input: '{"action":"catalog"}\n', encoding: 'utf8', env: { ...process.env, HERMES_HOME: join(agentRoot, 'profile') }, maxBuffer: 5_000_000, timeout: 25_000 }); if (result.status || !result.stdout) throw new Error(result.stderr || 'Tool discovery failed.'); return JSON.parse(result.stdout); })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer, command.payload.teamIds || [], () => busyAgents.has(profile.id)), { action: 'catalog' }); await finish(command, { source: 'runtime', tools: [...(input.tools || []).filter((tool: any) => tool.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }); return; }
       await gateway.start(); try { await finish(command, await discoverModels(gateway)); } finally { await gateway.stop(); } return;
     }
     const live = active.get(String(command.payload.runId));

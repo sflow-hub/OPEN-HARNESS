@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { DEFAULT_NETWORK, type ComputerConfig } from '../lib/agent-profile';
 import { HERMES_IMAGE, RUNTIME_LABEL, classifyContract, imageContract } from './readiness';
+import { ensureTeamFolders, safeTeamIds } from "./teams";
 
 const FIRST_SETUP_MESSAGE = "Docker is ready, but the pinned Hermes runtime still needs its first-time setup.";
 const STALE_IMAGE_MESSAGE = "Docker is ready, but the agent runtime on this computer was built before a fix. Open Settings → Readiness and update it.";
@@ -262,9 +263,9 @@ export function stateSharing(stateRoot: string): SharingProbe {
 // documents as a supported operation -- the old container was reused with its mounts still
 // pointing at the previous path, Docker recreated that path empty, and every run died with
 // "Hermes gateway exited during startup" and a log line blaming the image.
-export function containerSignature(selected: ComputerConfig, imageId: string, stateRoot = '') {
+export function containerSignature(selected: ComputerConfig, imageId: string, stateRoot = '', teamIds: string[] = []) {
   // Omit the default policy so upgrades preserve existing open containers.
-  return createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...((selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}), imageId, stateRoot: stateRoot && resolve(stateRoot) })).digest('hex').slice(0, 24);
+  return createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...((selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}), ...(teamIds.length ? { teamIds: safeTeamIds(teamIds) } : {}), imageId, stateRoot: stateRoot && resolve(stateRoot) })).digest('hex').slice(0, 24);
 }
 // Short-lived so a rebuild from Settings takes effect without restarting the coordinator.
 let imageIdCache: { id: string; at: number } | null = null;
@@ -290,7 +291,16 @@ export function stopManagedContainers() {
   return ids;
 }
 
-export function ensureContainer(agentId: string, stateRoot: string, computer?: ComputerConfig) {
+export function teamMountArgs(stateRoot: string, teamIds: string[]) {
+  return safeTeamIds(teamIds).flatMap(id => ['-v', `${join(stateRoot, 'teams', id, 'shared')}:/workspace/teams/${id}`]);
+}
+
+export function shouldRebuildContainer(currentSignature: string, signature: string, isBusy: boolean) {
+  return currentSignature !== signature && !isBusy;
+}
+
+export function ensureContainer(agentId: string, stateRoot: string, computer?: ComputerConfig, teamIds: string[] = [], isBusy: () => boolean = () => false) {
+  teamIds = safeTeamIds(teamIds);
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
   const sharing = stateSharing(stateRoot);
   if (!sharing.ok) throw new Error(sharing.detail);
@@ -301,11 +311,11 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
   const selected = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, network: DEFAULT_NETWORK, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
-  const signature = containerSignature(selected, currentImageId(), stateRoot);
+  const signature = containerSignature(selected, currentImageId(), stateRoot, teamIds);
   const inspect = spawnSync("docker", ["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"open-harness.config\"}}", name], { encoding: "utf8", timeout: 10_000 });
   if (inspect.status === 0) {
     const [running, currentSignature] = inspect.stdout.trim().split(/\s+/);
-    if (currentSignature !== signature) {
+    if (shouldRebuildContainer(currentSignature, signature, isBusy())) {
       spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 });
     } else if (running !== "true") {
       const started = spawnSync("docker", ["start", name], { encoding: "utf8", timeout: 20_000 });
@@ -316,7 +326,8 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
     }
   }
   const profile = `${stateRoot}/agents/${safe}/profile`, privateDir = `${stateRoot}/agents/${safe}/private`, shared = `${stateRoot}/shared`;
-  const mounts: string[] = [];
+  ensureTeamFolders(stateRoot, teamIds);
+  const mounts: string[] = teamMountArgs(stateRoot, teamIds);
   if (selected.access === 'folders') selected.folders.forEach((folder, index) => {
     const source = isAbsolute(folder.path) ? folder.path : resolve(folder.path);
     if (!existsSync(source)) throw new Error(`Shared folder does not exist on this computer: ${folder.path}`);
