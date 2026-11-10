@@ -51,7 +51,7 @@ function openSecrets(file: string) {
 const credentials = new Credentials(store.db, secrets);
 const audit = new Audit(store.db);
 const profiles = new Profiles(store.db);
-const teams = new TeamStore(store.db);
+const teams = new TeamStore(store.db, root);
 const conversations = new Conversations(store.db, profiles, teams);
 const tasks = new TaskStore(store.db);
 const messaging = new Messaging(store, conversations, input => createRun(input));
@@ -171,12 +171,12 @@ async function dispatchSecrets(machineId: string, profile: AgentProfile, effecti
   if (!key) throw new MachineError('This computer has not published its encryption key yet. It is sent on every heartbeat, so wait a few seconds for it to check in, or pair it again.', 409);
   return Object.fromEntries(await Promise.all(Object.entries(plain).map(async ([name, value]) => [name, await encryptRunnerSecret(key, value)])));
 }
-async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) { const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input, encryptedSecrets: await dispatchSecrets(machine.id, profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
+async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) { const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { teamIds: teams.activeTeamIds(profile.id), profile: { ...profile, effectiveModel }, input, encryptedSecrets: await dispatchSecrets(machine.id, profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
 
 async function executeRemote(run: RunRow, snapshot: AgentProfile & { effectiveModel: ReturnType<Profiles['effective']> }) {
   const machine = machines.canAssign(snapshot.computer.machineId, run.agent_id);
   if (machine.status !== 'online') throw new Error(`${machine.name} is offline. This task will remain queued until its runner reconnects.`);
-  const command = machines.enqueue(machine.id, run.agent_id, 'run', { runId: run.id, prompt: run.prompt, snapshot, encryptedSecrets: await dispatchSecrets(machine.id, snapshot, snapshot.effectiveModel), coordinationToken: agentToken(run.agent_id) });
+  const command = machines.enqueue(machine.id, run.agent_id, 'run', { runId: run.id, prompt: run.prompt, teamIds: teams.activeTeamIds(run.agent_id), snapshot, encryptedSecrets: await dispatchSecrets(machine.id, snapshot, snapshot.effectiveModel), coordinationToken: agentToken(run.agent_id) });
   remoteActive.set(run.id, { machineId: machine.id, commandId: command.id });
   let offlineSince = 0;
   event(run.id, 'runner.dispatched', { commandId: command.id, machineId: machine.id, machineName: machine.name });
@@ -213,10 +213,10 @@ async function performTransfer(transfer: { id: string; agentId: string; sourceMa
       result = { ...importAgentFiles(root, transfer.agentId, resolvedBundle), validated: true };
       if (pending?.computer.desktop !== 'none' && pending && process.env.OPEN_HARNESS_MOCK !== '1') {
         const check = { action: 'computer', desktop: pending.computer.desktop };
-        const tested = pending.computer.desktop === 'existing' ? nativeRuntimeProbe(join(root, 'agents', pending.id, 'profile'), check) : await runtimeProbe(ensureContainer(pending.id, root, pending.computer), check);
+        const tested = pending.computer.desktop === 'existing' ? nativeRuntimeProbe(join(root, 'agents', pending.id, 'profile'), check) : await runtimeProbe(ensureContainer(pending.id, root, pending.computer, teams.activeTeamIds(pending.id), () => store.agentBusy(pending.id)), check);
         if (!tested.ok) throw new Error(String(tested.message || 'Desktop control is not ready on this computer.'));
       }
-    } else result = await waitRunnerCommand(machines.enqueue(transfer.destinationMachineId, transfer.agentId, 'import-agent', { transferId: transfer.id, bundle: resolvedBundle, profile: pending, requiredSecrets }).id) as { checksum: string; validated?: boolean };
+    } else result = await waitRunnerCommand(machines.enqueue(transfer.destinationMachineId, transfer.agentId, 'import-agent', { transferId: transfer.id, teamIds: teams.activeTeamIds(transfer.agentId), bundle: resolvedBundle, profile: pending, requiredSecrets }).id) as { checksum: string; validated?: boolean };
     machines.setTransfer(transfer.id, 'verifying', 'Verifying transferred files.'); if (result.checksum !== resolvedBundle.checksum) throw new Error('Destination checksum does not match the source.');
     if (transfer.pendingProfile) { profiles.applyTransferredProfile(transfer.pendingProfile); machines.reserve(transfer.sourceMachineId, transfer.agentId, false); machines.reserve(transfer.destinationMachineId, transfer.agentId, transfer.pendingProfile.computer.reserveMachine); }
     machines.setTransfer(transfer.id, 'completed', `Transfer verified (${resolvedBundle.files.length} files). Source data was preserved.`);
@@ -229,14 +229,15 @@ function internalAllowed(agentId: string | null, tool: string, runId?: string) {
   return Boolean(run && run.agent_id === agentId && ['running','waiting_approval','waiting_input'].includes(run.state) && profiles.runSnapshot(run.id)?.allowedTools.includes(tool));
 }
 
-async function gatewayFor(agentId: string, allowedTools: string[] | null = null, computer?: ComputerConfig) {
+async function gatewayFor(agentId: string, allowedTools: string[] | null = null, computer?: ComputerConfig, startingRunId?: string) {
   let gateway = gateways.get(agentId);
   if (gateway) return gateway;
   if (computer?.access === 'direct') {
     const agentRoot = join(root, 'agents', agentId), profileRoot = join(agentRoot, 'profile');
     gateway = new HermesGateway(`native-${agentId}`, allowedTools, { cwd: join(root, 'shared'), entry: join(import.meta.dirname, 'hermes', 'managed_entry.py'), env: { ...process.env, HERMES_HOME: profileRoot, HERMES_TUI: '1', HERMES_GATEWAY_SESSION: '1', PYTHONUNBUFFERED: '1', OPEN_HARNESS_POLICY_PATH: join(agentRoot, 'managed', 'policy.json') } });
   } else {
-    gateway = new HermesGateway(ensureContainer(agentId, root, computer), allowedTools);
+    // The run being prepared has not started using the container yet.
+    gateway = new HermesGateway(ensureContainer(agentId, root, computer, teams.activeTeamIds(agentId), () => store.listRuns().some(run => run.id !== startingRunId && run.agent_id === agentId && ["running", "waiting_approval", "waiting_input"].includes(run.state))), allowedTools);
   }
   gateway.on('log', (entry: { level?: string; message?: string }) => appendAgentLog(agentId, entry));
   gateways.set(agentId, gateway);
@@ -293,7 +294,7 @@ async function execute(run: RunRow) {
     prepareProfile(root, snapshot, snapshot.effectiveModel, secrets, agentToken(run.agent_id), run.id, native
       ? { cwd: join(root, 'shared'), coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlSocket: join(root, 'agents', run.agent_id, 'managed', 'coord.sock') }
       : { controlUrl: `http://host.docker.internal:${port}` });
-    const gateway = await gatewayFor(run.agent_id, snapshot.allowedTools, snapshot.computer);
+    const gateway = await gatewayFor(run.agent_id, snapshot.allowedTools, snapshot.computer, run.id);
     const listener = (value: any) => mapHermesEvent(run, value); gateway.on("event", listener); subscribed = { gateway, listener };
     const seededSessionId = run.session_id;
     const createSession = async () => {
@@ -545,7 +546,7 @@ const server = createServer(async (req, res) => {
         try {
           ensureProfileDirs(profile.id);
           const check = { action: 'computer', desktop: profile.computer.desktop };
-          const result = machineId === 'local' ? profile.computer.access === 'direct' ? nativeRuntimeProbe(join(root, 'agents', profile.id, 'profile'), check) : await runtimeProbe(ensureContainer(profile.id, root, profile.computer), check) : await runnerProbe(profile, 'probe-runtime', check);
+          const result = machineId === 'local' ? profile.computer.access === 'direct' ? nativeRuntimeProbe(join(root, 'agents', profile.id, 'profile'), check) : await runtimeProbe(ensureContainer(profile.id, root, profile.computer, teams.activeTeamIds(profile.id), () => store.agentBusy(profile.id)), check) : await runnerProbe(profile, 'probe-runtime', check);
           return json(res, 200, { ...checked, ok: Boolean(result.ok), message: String(result.message || checked.message), machine: checked.machine });
         } catch (error) { return json(res, 200, { ...checked, ok: false, message: error instanceof Error ? error.message : 'Computer access check failed.' }); }
       }
@@ -661,7 +662,7 @@ const server = createServer(async (req, res) => {
         const baseUrl = model.baseUrl || endpoints[model.provider];
         if (!baseUrl) return json(res, 200, { ok: false, message: 'This provider does not expose a compatible model-list endpoint. Model authentication will be checked by Hermes at task start.' });
         ensureProfileDirs(id);
-        try { return json(res, 200, profile.computer.machineId === 'local' ? await runtimeProbe(ensureContainer(id, root, profile.computer), { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' }) : await runnerProbe(profile, 'probe-runtime', { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' })); }
+        try { return json(res, 200, profile.computer.machineId === 'local' ? await runtimeProbe(ensureContainer(id, root, profile.computer, teams.activeTeamIds(id), () => store.agentBusy(id)), { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' }) : await runnerProbe(profile, 'probe-runtime', { action: 'connection', baseUrl, apiKey: secrets.environment()[model.credentialRef] || '' })); }
         catch (error) { return json(res, 200, { ok: false, message: error instanceof Error ? error.message : 'Connection failed.' }); }
       }
       if (action === 'connector-check' && req.method === 'POST') {
@@ -672,7 +673,7 @@ const server = createServer(async (req, res) => {
         if (tested.secretRef && !secrets.has(tested.secretRef)) return json(res, 200, { status: 'missing_credentials', error: `Add secret ${tested.secretRef}.`, tools: [] });
         try {
           ensureProfileDirs(id);
-          const result = process.env.OPEN_HARNESS_MOCK === '1' ? { status: 'connected', tools: [{ name: 'lookup', description: 'Mock connected tool' }] } : profile.computer.machineId === 'local' ? await runtimeProbe(ensureContainer(id, root, profile.computer), { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} }) : await runnerProbe(profile, 'probe-runtime', { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} });
+          const result = process.env.OPEN_HARNESS_MOCK === '1' ? { status: 'connected', tools: [{ name: 'lookup', description: 'Mock connected tool' }] } : profile.computer.machineId === 'local' ? await runtimeProbe(ensureContainer(id, root, profile.computer, teams.activeTeamIds(id), () => store.agentBusy(id)), { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} }) : await runnerProbe(profile, 'probe-runtime', { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} });
           const tools = (result.tools as Array<{ name: string; description: string }>).map(t => ({ id: `mcp_${tested.name}_${t.name}`, name: t.name, description: t.description, group: 'mcp', available: true }));
           const prior = store.db.prepare('SELECT json FROM tool_catalogs WHERE agent_id=?').get(id) as { json: string } | undefined;
           const catalog: ToolCatalog = prior ? JSON.parse(prior.json) : { source: 'runtime', tools: [] };

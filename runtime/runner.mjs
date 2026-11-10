@@ -1,9 +1,9 @@
 import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);
 
 // runtime/runner.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync5, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync6, readFileSync as readFileSync3, writeFileSync as writeFileSync5, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
 import { homedir, hostname, platform as platform2, arch } from "node:os";
-import { join as join4, resolve as resolve3 } from "node:path";
+import { join as join5, resolve as resolve3 } from "node:path";
 import { spawn as spawn4, spawnSync as spawnSync5 } from "node:child_process";
 
 // runtime/hermes.ts
@@ -11,8 +11,8 @@ import { spawn as spawn2, spawnSync as spawnSync2 } from "node:child_process";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { existsSync, mkdirSync as mkdirSync2, writeFileSync } from "node:fs";
+import { isAbsolute, join as join2, resolve } from "node:path";
 
 // lib/agent-profile.ts
 var DEFAULT_NETWORK = { mode: "open", allow: [] };
@@ -47,6 +47,21 @@ function imageContract(run2 = command) {
 var platform = ["linux", "darwin", "win32"].includes(process.platform) ? process.platform : "unknown";
 function command(name, args2, timeout = 7e3) {
   return spawnSync(name, args2, { encoding: "utf8", timeout });
+}
+
+// runtime/teams.ts
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+function safeTeamIds(teamIds) {
+  return [...new Set(teamIds.map((id) => {
+    if (typeof id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new Error("Invalid team id.");
+    return id;
+  }))].sort();
+}
+function ensureTeamFolders(stateRoot2, teamIds) {
+  const ids = safeTeamIds(teamIds), root = join(stateRoot2, "teams");
+  mkdirSync(root, { recursive: true, mode: 448 });
+  for (const id of ids) mkdirSync(join(root, id, "shared"), { recursive: true });
 }
 
 // runtime/hermes.ts
@@ -237,10 +252,10 @@ function stateSharing(stateRoot2) {
   if (sharingCache?.root === root) return sharingCache.value;
   let value;
   try {
-    const dir = join(root, ".mount-probe");
-    mkdirSync(dir, { recursive: true });
+    const dir = join2(root, ".mount-probe");
+    mkdirSync2(dir, { recursive: true });
     const token = randomUUID();
-    writeFileSync(join(dir, "canary"), token, { mode: 420 });
+    writeFileSync(join2(dir, "canary"), token, { mode: 420 });
     const result = spawnSync2("docker", [
       "run",
       "--rm",
@@ -259,8 +274,8 @@ function stateSharing(stateRoot2) {
   sharingCache = { root, value };
   return value;
 }
-function containerSignature(selected, imageId, stateRoot2 = "") {
-  return createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...(selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}, imageId, stateRoot: stateRoot2 && resolve(stateRoot2) })).digest("hex").slice(0, 24);
+function containerSignature(selected, imageId, stateRoot2 = "", teamIds = []) {
+  return createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...(selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}, ...teamIds.length ? { teamIds: safeTeamIds(teamIds) } : {}, imageId, stateRoot: stateRoot2 && resolve(stateRoot2) })).digest("hex").slice(0, 24);
 }
 var imageIdCache = null;
 function currentImageId() {
@@ -270,7 +285,14 @@ function currentImageId() {
   return imageIdCache.id;
 }
 var MANAGED_LABEL = "open-harness.managed";
-function ensureContainer(agentId, stateRoot2, computer) {
+function teamMountArgs(stateRoot2, teamIds) {
+  return safeTeamIds(teamIds).flatMap((id) => ["-v", `${join2(stateRoot2, "teams", id, "shared")}:/workspace/teams/${id}`]);
+}
+function shouldRebuildContainer(currentSignature, signature, isBusy) {
+  return currentSignature !== signature && !isBusy;
+}
+function ensureContainer(agentId, stateRoot2, computer, teamIds = [], isBusy = () => false) {
+  teamIds = safeTeamIds(teamIds);
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
   const sharing = stateSharing(stateRoot2);
   if (!sharing.ok) throw new Error(sharing.detail);
@@ -279,11 +301,11 @@ function ensureContainer(agentId, stateRoot2, computer) {
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
   const selected = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, network: DEFAULT_NETWORK, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
-  const signature = containerSignature(selected, currentImageId(), stateRoot2);
+  const signature = containerSignature(selected, currentImageId(), stateRoot2, teamIds);
   const inspect = spawnSync2("docker", ["inspect", "-f", '{{.State.Running}} {{index .Config.Labels "open-harness.config"}}', name], { encoding: "utf8", timeout: 1e4 });
   if (inspect.status === 0) {
     const [running, currentSignature] = inspect.stdout.trim().split(/\s+/);
-    if (currentSignature !== signature) {
+    if (shouldRebuildContainer(currentSignature, signature, isBusy())) {
       spawnSync2("docker", ["rm", "-f", name], { stdio: "ignore", timeout: 2e4 });
     } else if (running !== "true") {
       const started = spawnSync2("docker", ["start", name], { encoding: "utf8", timeout: 2e4 });
@@ -294,7 +316,8 @@ function ensureContainer(agentId, stateRoot2, computer) {
     }
   }
   const profile = `${stateRoot2}/agents/${safe}/profile`, privateDir = `${stateRoot2}/agents/${safe}/private`, shared = `${stateRoot2}/shared`;
-  const mounts = [];
+  ensureTeamFolders(stateRoot2, teamIds);
+  const mounts = teamMountArgs(stateRoot2, teamIds);
   if (selected.access === "folders") selected.folders.forEach((folder, index) => {
     const source = isAbsolute(folder.path) ? folder.path : resolve(folder.path);
     if (!existsSync(source)) throw new Error(`Shared folder does not exist on this computer: ${folder.path}`);
@@ -345,8 +368,8 @@ function ensureContainer(agentId, stateRoot2, computer) {
 
 // runtime/profile-runtime.ts
 import { spawn as spawn3, spawnSync as spawnSync3 } from "node:child_process";
-import { copyFileSync, mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, renameSync, chmodSync } from "node:fs";
-import { join as join2 } from "node:path";
+import { copyFileSync, mkdirSync as mkdirSync3, writeFileSync as writeFileSync2, renameSync, chmodSync } from "node:fs";
+import { join as join3 } from "node:path";
 var COORDINATION_TOOLS = [
   { id: TASK_TOOL, name: "Task board", group: "other", description: "Read and update assigned board tasks.", available: true },
   { id: HANDOFF_TOOL, name: "Hand off to another agent", group: "delegation", description: "Assign explicit task context to a named agent on a shared team.", available: true },
@@ -406,7 +429,7 @@ function runtimeProbe(container, input) {
 function nativeRuntimeProbe(profileHome, input) {
   const executable = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean).find((name) => spawnSync3(name, ["-c", "import hermes_cli, open_harness_policy"], { stdio: "ignore", timeout: 8e3 }).status === 0);
   if (!executable) throw new Error("Direct access needs the Hermes host runtime. Finish the direct-access setup on this computer.");
-  const result = spawnSync3(executable, [join2(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(input) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: profileHome }, maxBuffer: 5e6, timeout: 25e3 });
+  const result = spawnSync3(executable, [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(input) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: profileHome }, maxBuffer: 5e6, timeout: 25e3 });
   if (result.status || !result.stdout) throw new Error(result.stderr || "Direct computer access check failed.");
   const value = JSON.parse(result.stdout);
   if (value.error) throw new Error(String(value.error));
@@ -418,11 +441,11 @@ function atomic(path, data) {
   chmodSync(path, 384);
 }
 function prepareProfile(root, profile, effective, secrets, token, runId, options = {}) {
-  const dir = join2(root, "agents", profile.id), home = join2(dir, "profile"), managed = join2(dir, "managed");
-  for (const path of [home, managed, join2(dir, "private")]) mkdirSync2(path, { recursive: true });
+  const dir = join3(root, "agents", profile.id), home = join3(dir, "profile"), managed = join3(dir, "managed");
+  for (const path of [home, managed, join3(dir, "private")]) mkdirSync3(path, { recursive: true });
   const mcp = {};
-  const coordination = join2(managed, "coordination.mjs");
-  copyFileSync(join2(import.meta.dirname, "hermes", "coordination.mjs"), coordination);
+  const coordination = join3(managed, "coordination.mjs");
+  copyFileSync(join3(import.meta.dirname, "hermes", "coordination.mjs"), coordination);
   chmodSync(coordination, 384);
   if (profile.allowedTools.some((id) => COORDINATION_TOOLS.some((t) => t.id === id))) mcp.open_harness = { command: "node", args: [options.coordinationCommand || "/run/open-harness/coordination.mjs"], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}, ...options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {} } };
   const env = {};
@@ -444,10 +467,10 @@ function prepareProfile(root, profile, effective, secrets, token, runId, options
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: "${" + c.secretRef + "}" } : {} };
   }
   const config = { model: { default: effective.model, provider: hermesProvider, ...effective.baseUrl ? { base_url: effective.baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "smart", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, tools: { tool_search: { enabled: "off" } }, plugins: { enabled: ["open_harness_policy"] }, ...providers ? { providers } : {}, mcp_servers: mcp };
-  atomic(join2(home, "config.yaml"), JSON.stringify(config, null, 2));
-  atomic(join2(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
-  atomic(join2(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
-  atomic(join2(managed, "policy.json"), JSON.stringify({ runId, revision: profile.revision, allowedTools: profile.allowedTools }));
+  atomic(join3(home, "config.yaml"), JSON.stringify(config, null, 2));
+  atomic(join3(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
+  atomic(join3(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
+  atomic(join3(managed, "policy.json"), JSON.stringify({ runId, revision: profile.revision, allowedTools: profile.allowedTools }));
 }
 async function discoverModels(gateway) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { models: [{ id: "mock-atlas", provider: "mock", label: "Mock Atlas" }, { id: "mock-scout", provider: "mock", label: "Mock Scout" }] };
@@ -479,8 +502,8 @@ function normalizeModels(result) {
 
 // runtime/transfer-files.ts
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync2, lstatSync, mkdirSync as mkdirSync3, readdirSync, readFileSync, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname, join as join3, normalize, relative, resolve as resolve2 } from "node:path";
+import { existsSync as existsSync2, lstatSync, mkdirSync as mkdirSync4, readdirSync, readFileSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname, join as join4, normalize, relative, resolve as resolve2 } from "node:path";
 var allowedRoots = ["private", "profile/MEMORY.md", "profile/USER.md", "profile/skills"];
 function digest(data) {
   return createHash2("sha256").update(data).digest("hex");
@@ -493,7 +516,7 @@ function exportAgentFiles(stateRoot2, agentId) {
     const stat = lstatSync(path);
     if (stat.isSymbolicLink()) return;
     if (stat.isDirectory()) {
-      for (const name of readdirSync(path)) visit(join3(path, name));
+      for (const name of readdirSync(path)) visit(join4(path, name));
       return;
     }
     if (!stat.isFile()) return;
@@ -502,7 +525,7 @@ function exportAgentFiles(stateRoot2, agentId) {
     if (total > 2e7) throw new Error("Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.");
     files.push({ path: relative(agentRoot, path).replaceAll("\\", "/"), data: Buffer.from(data).toString("base64"), checksum: digest(data) });
   };
-  for (const path of allowedRoots) visit(join3(agentRoot, path));
+  for (const path of allowedRoots) visit(join4(agentRoot, path));
   files.sort((a, b) => a.path.localeCompare(b.path));
   return { files, checksum: digest(files.map((file) => `${file.path}:${file.checksum}`).join("\n")) };
 }
@@ -517,7 +540,7 @@ function importAgentFiles(stateRoot2, agentId, bundle) {
     const data = Buffer.from(file.data, "base64");
     total += data.length;
     if (total > 1e8 || digest(data) !== file.checksum) throw new Error("Transfer checksum validation failed.");
-    mkdirSync3(dirname(target), { recursive: true });
+    mkdirSync4(dirname(target), { recursive: true });
     writeFileSync3(target, data, { mode: 384 });
   }
   const checksum = digest([...bundle.files].sort((a, b) => a.path.localeCompare(b.path)).map((file) => `${file.path}:${file.checksum}`).join("\n"));
@@ -526,7 +549,7 @@ function importAgentFiles(stateRoot2, agentId, bundle) {
 }
 
 // runtime/secrets.ts
-import { chmodSync as chmodSync2, existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname2 } from "node:path";
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
@@ -588,7 +611,7 @@ var SecretStore = class {
   constructor(path) {
     this.path = path;
     this.backend = "restricted local file";
-    mkdirSync4(dirname2(path), { recursive: true });
+    mkdirSync5(dirname2(path), { recursive: true });
     this.markerPath = `${path.replace(/\.json$/, "")}.backend`;
     const recorded = existsSync3(this.markerPath) ? readFileSync2(this.markerPath, "utf8").trim() : "";
     const vaulted = loadVault(path);
@@ -722,13 +745,13 @@ function validateComputerTarget(profile, capabilities2, requiredSecrets = [], ha
 // runtime/runner.ts
 var args = /* @__PURE__ */ new Map();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith("--")) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith("--") ? "" : process.argv[++i] || "");
-var stateRoot = resolve3(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join4(homedir(), ".open-harness-runner"));
-var credentialPath = join4(stateRoot, "connection.json");
-var spool = join4(stateRoot, "spool");
-mkdirSync5(spool, { recursive: true });
+var stateRoot = resolve3(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join5(homedir(), ".open-harness-runner"));
+var credentialPath = join5(stateRoot, "connection.json");
+var spool = join5(stateRoot, "spool");
+mkdirSync6(spool, { recursive: true });
 var runnerSecrets;
 try {
-  runnerSecrets = new SecretStore(join4(stateRoot, "secrets.json"));
+  runnerSecrets = new SecretStore(join5(stateRoot, "secrets.json"));
 } catch (error) {
   console.error(error instanceof Error ? error.message : "The runner could not open its credential store.");
   process.exit(1);
@@ -821,10 +844,11 @@ async function request(path, init = {}, retry = false) {
     }
   }
 }
+var busyAgents = /* @__PURE__ */ new Set();
 var active = /* @__PURE__ */ new Map();
 var admittedCommands = /* @__PURE__ */ new Set();
 async function deliver(record) {
-  const file = join4(spool, `${record.id}.json`);
+  const file = join5(spool, `${record.id}.json`);
   if (!existsSync4(file)) writeFileSync5(file, JSON.stringify(record), { mode: 384 });
   await request(record.path, { method: "POST", body: JSON.stringify(record.body) }, true);
   if (existsSync4(file)) unlinkSync2(file);
@@ -832,7 +856,7 @@ async function deliver(record) {
 async function flushSpool() {
   for (const name of readdirSync2(spool).filter((name2) => name2.endsWith(".json"))) {
     try {
-      await deliver(JSON.parse(readFileSync3(join4(spool, name), "utf8")));
+      await deliver(JSON.parse(readFileSync3(join5(spool, name), "utf8")));
     } catch {
     }
   }
@@ -853,16 +877,17 @@ async function run(command3) {
   const payload = command3.payload;
   const profile = payload.snapshot, direct = profile.computer.access === "direct";
   try {
-    const agentRoot = join4(stateRoot, "agents", profile.id), shared = join4(stateRoot, "shared");
-    mkdirSync5(shared, { recursive: true });
+    const agentRoot = join5(stateRoot, "agents", profile.id), shared = join5(stateRoot, "shared");
+    mkdirSync6(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean);
     const availableSecrets = { ...runnerSecrets.environment(), ...process.env };
     const localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]]));
     const dispatched = await openDispatchedSecrets(payload.encryptedSecrets);
     const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...dispatched }) };
     const coordinatorForContainer = credentials.coordinator.replace("://localhost", "://host.docker.internal").replace("://127.0.0.1", "://host.docker.internal");
-    prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : { controlUrl: coordinatorForContainer });
-    const gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join4(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile"), HERMES_TUI: "1", HERMES_GATEWAY_SESSION: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join4(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
+    prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join5(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : { controlUrl: coordinatorForContainer });
+    const gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join5(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join5(agentRoot, "profile"), HERMES_TUI: "1", HERMES_GATEWAY_SESSION: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join5(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer, command3.payload.teamIds || [], () => busyAgents.has(profile.id)), profile.allowedTools);
+    busyAgents.add(profile.id);
     gateway.on("event", (event) => void emit(command3, event));
     await gateway.start();
     const session = await gateway.request("session.create", { cwd: direct ? shared : "/workspace/shared", profile: "default" });
@@ -875,6 +900,8 @@ async function run(command3) {
   } catch (error) {
     active.delete(payload.runId);
     await finish(command3, void 0, error);
+  } finally {
+    busyAgents.delete(profile.id);
   }
 }
 async function control(command3) {
@@ -897,17 +924,17 @@ async function control(command3) {
       const imported = importAgentFiles(stateRoot, command3.agentId, bundle);
       if (profile?.computer.desktop !== "none" && profile) {
         const check = { action: "computer", desktop: profile.computer.desktop };
-        const result = profile.computer.desktop === "existing" ? nativeRuntimeProbe(join4(stateRoot, "agents", profile.id, "profile"), check) : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), check);
+        const result = profile.computer.desktop === "existing" ? nativeRuntimeProbe(join5(stateRoot, "agents", profile.id, "profile"), check) : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer, command3.payload.teamIds || [], () => busyAgents.has(profile.id)), check);
         if (!result.ok) throw new Error(String(result.message || "Desktop control is not ready on the destination computer."));
       }
       await finish(command3, { ...imported, validated: true });
       return;
     }
     if (command3.kind.startsWith("probe-")) {
-      const profile = command3.payload.profile, direct = profile.computer.access === "direct", shared = join4(stateRoot, "shared"), agentRoot = join4(stateRoot, "agents", profile.id);
-      mkdirSync5(shared, { recursive: true });
+      const profile = command3.payload.profile, direct = profile.computer.access === "direct", shared = join5(stateRoot, "shared"), agentRoot = join5(stateRoot, "agents", profile.id);
+      mkdirSync6(shared, { recursive: true });
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env }, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]])), dispatched = await openDispatchedSecrets(command3.payload.encryptedSecrets), secretSource = { environment: () => ({ ...localSecrets, ...dispatched }) };
-      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command3.payload.coordinationToken || "", `probe-${command3.id}`, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : {});
+      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command3.payload.coordinationToken || "", `probe-${command3.id}`, direct ? { cwd: shared, coordinationCommand: join5(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : {});
       if (command3.kind === "probe-runtime") {
         const probeInput = { ...command3.payload.input || {} };
         if (probeInput.action === "computer") probeInput.desktop = profile.computer.desktop;
@@ -916,19 +943,19 @@ async function control(command3) {
           for (const name of Object.keys(probeInput.env)) if (!probeInput.env[name] && localSecrets[name]) probeInput.env[name] = localSecrets[name];
         }
         if (direct) {
-          const result = spawnSync5(process.env.HERMES_PYTHON || "python3", [join4(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
+          const result = spawnSync5(process.env.HERMES_PYTHON || "python3", [join5(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join5(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
           if (result.status || !result.stdout) throw new Error(result.stderr || "Native runtime probe failed.");
           await finish(command3, JSON.parse(result.stdout));
-        } else await finish(command3, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), probeInput));
+        } else await finish(command3, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer, command3.payload.teamIds || [], () => busyAgents.has(profile.id)), probeInput));
         return;
       }
-      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join4(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile"), HERMES_TUI: "1", HERMES_GATEWAY_SESSION: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join4(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
+      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join5(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join5(agentRoot, "profile"), HERMES_TUI: "1", HERMES_GATEWAY_SESSION: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join5(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer, command3.payload.teamIds || [], () => busyAgents.has(profile.id)), []);
       if (command3.kind === "probe-tools") {
         const input = direct ? (() => {
-          const result = spawnSync5(process.env.HERMES_PYTHON || "python3", [join4(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
+          const result = spawnSync5(process.env.HERMES_PYTHON || "python3", [join5(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join5(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
           if (result.status || !result.stdout) throw new Error(result.stderr || "Tool discovery failed.");
           return JSON.parse(result.stdout);
-        })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), { action: "catalog" });
+        })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer, command3.payload.teamIds || [], () => busyAgents.has(profile.id)), { action: "catalog" });
         await finish(command3, { source: "runtime", tools: [...(input.tools || []).filter((tool) => tool.group !== "cronjob").map(groupTool), ...COORDINATION_TOOLS] });
         return;
       }

@@ -1,5 +1,20 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { normalizeTeamInput, type Team, type TeamInput } from "../lib/team";
+
+export function safeTeamIds(teamIds: string[]) {
+  return [...new Set(teamIds.map(id => {
+    if (typeof id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new Error("Invalid team id.");
+    return id;
+  }))].sort();
+}
+
+export function ensureTeamFolders(stateRoot: string, teamIds: string[]) {
+  const ids = safeTeamIds(teamIds), root = join(stateRoot, "teams");
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  for (const id of ids) mkdirSync(join(root, id, "shared"), { recursive: true });
+}
 
 type Row = Record<string, unknown>;
 
@@ -8,7 +23,7 @@ export class TeamError extends Error {
 }
 
 export class TeamStore {
-  constructor(readonly db: DatabaseSync) {
+  constructor(readonly db: DatabaseSync, readonly stateRoot?: string) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS teams (
         id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL,
@@ -22,6 +37,7 @@ export class TeamStore {
       );
       CREATE INDEX IF NOT EXISTS idx_team_members_agent ON team_members(agent_id,team_id);
     `);
+    if (stateRoot) ensureTeamFolders(stateRoot, this.list().map(team => team.id));
   }
 
   private map(row: Row): Team {
@@ -71,6 +87,7 @@ export class TeamStore {
     try {
       this.db.prepare("INSERT INTO teams(id,revision,name,description,color,icon,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").run(id, 1, value.name, value.description, value.color, value.icon, now, now);
       this.replaceMembers(id, value.memberAgentIds);
+      if (this.stateRoot) ensureTeamFolders(this.stateRoot, [id]);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     return this.get(id)!;
@@ -87,6 +104,7 @@ export class TeamStore {
     try {
       this.db.prepare("INSERT INTO teams(id,revision,name,description,color,icon,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").run(teamId, 1, value.name, value.description, value.color, value.icon, now, now);
       this.replaceMembers(teamId, value.memberAgentIds);
+      if (this.stateRoot) ensureTeamFolders(this.stateRoot, [teamId]);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     return this.get(teamId)!;
@@ -126,6 +144,10 @@ export class TeamStore {
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     return this.get(teamId, true)!;
+  }
+
+  activeTeamIds(agentId: string) {
+    return safeTeamIds(this.list().filter(team => team.memberAgentIds.includes(agentId)).map(team => team.id));
   }
 
   isMember(teamId: string, agentId: string) {
