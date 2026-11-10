@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { normalizeRoutine, type RoutineInput, type RoutineRun } from "./routine";
 import type { Agent } from "./types";
+import { normalizeConversation, normalizeMember, normalizeMessage, normalizeScheduledRuns, type GroupChatInput, type MemberRole } from "./conversation";
 
 export type RuntimeStatus = {
   token: string;
@@ -81,4 +82,16 @@ export class ControlClient {
   runRoutine(id: string) { return this.request<PersistentRun>(`/v1/routines/${id}/run`, { method: "POST" }); }
   toggleRoutine(id: string) { return this.request<{ enabled: boolean }>(`/v1/routines/${id}/toggle`, { method: "POST" }); }
   async routineHistory(id: string) { return (await this.request<{ history: RoutineRun[] }>(`/v1/routines/${id}/history`)).history; }
+  async listGroupChats() { return (await this.request<{ conversations: unknown[] }>("/v1/conversations?kind=group")).conversations.map(normalizeConversation); }
+  async createGroupChat(input: GroupChatInput) { return normalizeConversation(await this.request("/v1/conversations", { method: "POST", body: JSON.stringify({ kind: "group", title: input.title, members: input.agentIds.map(id => ({ kind: "agent", id, role: "member" })), turnPolicy: "manual" }) })); }
+  async getConversation(id: string) { return normalizeConversation(await this.request(`/v1/conversations/${encodeURIComponent(id)}`)); }
+  async addConversationMember(id: string, agentId: string, role: Exclude<MemberRole, "owner"> = "member") { return normalizeMember(await this.request(`/v1/conversations/${encodeURIComponent(id)}/members`, { method: "POST", body: JSON.stringify({ kind: "agent", id: agentId, role }) })); }
+  async removeConversationMember(id: string, agentId: string) { return normalizeMember(await this.request(`/v1/conversations/${encodeURIComponent(id)}/members/${encodeURIComponent(agentId)}`, { method: "DELETE" })); }
+  // The caller keeps idempotencyKey across retries of the same draft, so a repeated send returns the stored message.
+  async postConversationMessage(id: string, input: { body: string; mentions?: string[]; idempotencyKey: string }) { const row = await this.request<{ scheduledRuns?: unknown }>(`/v1/conversations/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify(input) }); return { message: normalizeMessage(row), scheduledRuns: normalizeScheduledRuns(row.scheduledRuns) }; }
+  async listConversationMessages(id: string, after = 0, limit = 100) { return (await this.request<{ messages: unknown[] }>(`/v1/conversations/${encodeURIComponent(id)}/messages?after=${after}&limit=${limit}`)).messages.map(normalizeMessage); }
+  // Coordinators without halt/resume answer the generic "Not found." route miss; null lets the UI hide the control.
+  haltConversation(id: string) { return this.conversationControl<{ halted: boolean; stopped: number }>(id, "halt"); }
+  resumeConversation(id: string) { return this.conversationControl<Record<string, unknown>>(id, "resume"); }
+  private conversationControl<T>(id: string, action: "halt" | "resume") { return this.request<T>(`/v1/conversations/${encodeURIComponent(id)}/${action}`, { method: "POST" }).catch((error: unknown) => { if (error instanceof Error && error.message === "Not found.") return null; throw error; }); }
 }
