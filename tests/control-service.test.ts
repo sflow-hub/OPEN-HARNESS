@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
+import { Store } from "../runtime/db";
 
 // A generous budget: these loops only need to outlast a slow or loaded machine, and
 // `npm test --test-timeout` is the real backstop. Fixed iteration counts gave them four
@@ -89,8 +90,36 @@ test("pauses for approval and resumes only after an explicit decision", async ()
   const approvalDeadline = Date.now() + POLL_BUDGET_MS;
   while (Date.now() < approvalDeadline) { const events = await request(`/v1/runs/${run.id}/events?after=0`); approval = events.events.find((event: any) => event.type === "approval.request"); if (approval) break; await new Promise(resolve => setTimeout(resolve, 50)); }
   assert.ok(approval); assert.equal((await request(`/v1/runs/${run.id}`)).state, "waiting_approval");
+  assert.equal((await fetch(`${base}/v1/approvals`)).status, 401);
+  const scoped = createHmac("sha256", token).update("agent:atlas").digest("hex");
+  assert.equal((await fetch(`${base}/v1/approvals`, { headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas" } })).status, 401);
+  const inbox = await request('/v1/approvals?state=pending&agentId=atlas&limit=1');
+  assert.ok(inbox.pendingCount >= 1); assert.equal(inbox.approvals[0].id, approval.payload.approvalId); assert.equal(inbox.approvals[0].agentName, 'Atlas');
+
   await request(`/v1/runs/${run.id}/approval`, { method: "POST", body: JSON.stringify({ approvalId: approval.payload.approvalId, decision: "approve" }) });
+  const duplicate = await fetch(`${base}/v1/runs/${run.id}/approval`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ approvalId: approval.payload.approvalId, decision: 'approve' }) });
+  assert.equal(duplicate.status, 409); assert.match((await duplicate.json()).error, /already been resolved/);
+  const audit = await request(`/v1/audit?action=run.approval&targetId=${run.id}`);
+  assert.deepEqual(audit.events[0].detail, { decision: 'approve', approvalId: approval.payload.approvalId });
   assert.equal((await waitRun(run.id)).state, "completed");
+});
+
+test("rejects expired approvals without changing the row, audit or events", async () => {
+  const store = new Store(join(stateDir, "state.db"));
+  try {
+    const now = new Date().toISOString(), runId = crypto.randomUUID(), approvalId = crypto.randomUUID();
+    store.createRun({ id: runId, agent_id: "atlas", conversation_id: "c1", prompt: "", state: "completed", session_id: null, parent_run_id: null, depth: 0, created_at: now, updated_at: now, result: null, error: null });
+    store.createApproval(approvalId, runId, "expired-request", { tool_name: "terminal", command: "ls" });
+    const before = store.approval(approvalId);
+    const auditBefore = store.db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
+    const eventsBefore = store.db.prepare("SELECT * FROM events ORDER BY seq").all();
+    const response = await fetch(`${base}/v1/runs/${runId}/approval`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ approvalId, decision: "approve" }) });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error, "Approval expired because the run has ended.");
+    assert.deepEqual(store.approval(approvalId), before);
+    assert.deepEqual(store.db.prepare("SELECT * FROM audit_events ORDER BY seq").all(), auditBefore);
+    assert.deepEqual(store.db.prepare("SELECT * FROM events ORDER BY seq").all(), eventsBefore);
+  } finally { store.db.close(); }
 });
 
 test("separates private workspaces and supports shared files and run-now routines", async () => {
