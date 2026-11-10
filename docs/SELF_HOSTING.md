@@ -100,3 +100,11 @@ docker compose up -d --build
 ```
 
 If the destination volumes already contain data, move or archive them first rather than merging two installations.
+
+## Direct access opt-in
+
+Agents run in per-agent containers by default. Direct computer access — Hermes under the runner's OS account with no container boundary — is off by default and must be enabled in two places. The operator turns on **Workspace settings → Security → Allow direct computer access** (a confirmation is required and the change is audited), and each paired runner must additionally start with `OPEN_HARNESS_ALLOW_DIRECT=1` in its environment. A runner without that variable refuses direct runs even when the workspace gate is on. See `SECURITY.md` for the trust implications of granting it.
+
+## Audit log
+
+A selected set of actions is recorded to an append-only `audit_events` table in the coordinator database, which lives inside the `open-harness_harness-data` volume backed up above. Recorded today, all with actor `operator`: agent create/delete and profile saves, credential create/rotate/update/delete, workspace model-default changes, direct-access enable/disable, conversation changes, and machine reconnect/revoke; plus runner pairing with actor `runner`. The schema reserves `agent` and `system` actor kinds, but nothing emits them yet, so ordinary agent or system activity is not in the log. Read it with the operator token over `GET /v1/audit`, which supports `after`, `limit`, `action`, `targetKind`, and `targetId` query filters; the endpoint is operator-only and rejects agent `/internal/*` tokens.
