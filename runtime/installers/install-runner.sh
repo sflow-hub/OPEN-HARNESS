@@ -40,7 +40,7 @@ download() {
   curl -fL --retry 3 "$coordinator/v1/install/file?path=$1" -o "$install_dir/$1"
 }
 download "runtime/runner.mjs"
-for file in Dockerfile NOTICE.md container-init.sh coordination.mjs inspect_runtime.py managed_entry.py extension/open_harness_policy.py extension/pyproject.toml; do
+for file in Dockerfile NOTICE.md container-init.sh coordination.mjs inspect_runtime.py sandbox_selftest.py managed_entry.py extension/open_harness_policy.py extension/pyproject.toml; do
   download "runtime/hermes/$file"
 done
 chmod 700 "$install_dir/runtime/hermes/container-init.sh"

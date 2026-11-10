@@ -2191,3 +2191,11 @@ h1 span {
   .team-member-list { grid-template-columns: 1fr; }.team-members-head { align-items: stretch; flex-direction: column; }.team-members-head .search-box { width: 100%; }
   .computers-heading-actions { width: 100%; }.computers-heading-actions .light-button { flex: 1; }.computer-list { grid-template-columns: 1fr; }
 }
+
+.sandbox-selftest { margin-block: 12px; }
+.sandbox-selftest small { display: block; margin-top: 6px; }
+.sandbox-selftest ul { padding-left: 20px; font-size: 12px; overflow-wrap: anywhere; }
+.sandbox-badge { display: inline-block; border: 1px solid currentColor; border-radius: 8px; padding: 4px 8px; }
+.sandbox-green { color: #287245; }
+.sandbox-amber { color: #96620d; }
+.sandbox-red { color: #c13f3f; }

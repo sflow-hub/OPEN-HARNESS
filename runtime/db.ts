@@ -62,6 +62,10 @@ export class Store {
       `This Open Harness data folder was written by a newer version (database format ${found}; this build understands ${SCHEMA_VERSION}). ` +
       `Install the newer version again, or move ${path} aside to start with an empty workspace. Nothing was changed.`,
     );
+    this.db.exec(`CREATE TABLE IF NOT EXISTS sandbox_selftests (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, machine_id TEXT, runner_kind TEXT,
+      attestation TEXT, status TEXT, result_json TEXT NOT NULL, created_at TEXT NOT NULL
+    ); CREATE INDEX IF NOT EXISTS sandbox_selftests_agent ON sandbox_selftests(agent_id, created_at);`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL,

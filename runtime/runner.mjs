@@ -1,13 +1,151 @@
 import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);
 
+// runtime/sandbox-selftest.ts
+import { spawn } from "node:child_process";
+
+// runtime/sandbox-attest.ts
+import { posix } from "node:path";
+var CONTAINER_CHECKS = ["cap_drop_all", "no_new_privileges", "seccomp_not_unconfined", "not_privileged", "readonly_rootfs", "limits", "no_docker_socket_mount", "no_host_home_mount", "mounts_expected", "network_mode"];
+function attestContainer(inspect, expected) {
+  const h = inspect.HostConfig || {}, mounts = inspect.Mounts || [], options = h.SecurityOpt || [], { computer } = expected;
+  const root = posix.normalize(expected.stateRoot), own = `${root}/agents/${expected.agentId}`;
+  const allowed = /* @__PURE__ */ new Map([
+    [`${own}/managed`, { destination: "/run/open-harness", rw: false }],
+    [`${own}/profile`, { destination: "/home/hermes/.hermes", rw: true }],
+    [`${own}/private`, { destination: "/workspace/private", rw: true }],
+    [`${root}/shared`, { destination: "/workspace/shared", rw: true }]
+  ]);
+  for (const id of expected.teamIds || []) allowed.set(`${root}/teams/${id}/shared`, { destination: `/workspace/teams/${id}`, rw: true });
+  const managedSources = new Set(allowed.keys());
+  if (computer.access === "folders") computer.folders.forEach((folder, index) => allowed.set(posix.normalize(folder.path), { destination: `/workspace/mounts/folder-${index + 1}`, rw: folder.mode === "write" }));
+  const unexpected = mounts.filter((m) => {
+    const source = posix.normalize(m.Source), a = allowed.get(source);
+    if ((source === root || root.startsWith(`${source}/`) || source.startsWith(`${root}/`)) && !managedSources.has(source)) return true;
+    return !a || a.rw !== m.RW || a.destination !== m.Destination;
+  });
+  const networks = Object.values(inspect.NetworkSettings?.Networks || {}), internal = networks.length > 0 && networks.every((n) => n.Internal === true);
+  const network = h.NetworkMode || "unknown", mode = computer.network?.mode || "open";
+  const checks = {};
+  const check = (key, ok, detail) => {
+    checks[key] = { ok, detail };
+  };
+  check("cap_drop_all", Boolean(h.CapDrop?.some((c) => c.toUpperCase() === "ALL")) && !h.CapAdd?.length, `CapDrop=${JSON.stringify(h.CapDrop || [])}; CapAdd=${JSON.stringify(h.CapAdd || [])}`);
+  check("no_new_privileges", options.some((o) => /^no-new-privileges(?:(?:=|:)true)?$/.test(o)), `SecurityOpt=${JSON.stringify(options)}`);
+  check("seccomp_not_unconfined", !options.some((o) => /^seccomp[=:]unconfined$/.test(o)), options.find((o) => /^seccomp[=:]/.test(o)) || "Docker default seccomp profile");
+  check("not_privileged", h.Privileged === false, `Privileged=${h.Privileged}`);
+  check("readonly_rootfs", h.ReadonlyRootfs === true, h.ReadonlyRootfs ? "read-only image rootfs" : "writable image rootfs (hardening pending)");
+  check("limits", Number(h.PidsLimit) > 0 && h.Memory === Math.round(computer.resources.memoryMb) * 1024 * 1024 && h.NanoCpus === computer.resources.cpu * 1e9, `PidsLimit=${h.PidsLimit}; Memory=${h.Memory}; NanoCpus=${h.NanoCpus}; expected memory=${computer.resources.memoryMb} MB, cpu=${computer.resources.cpu}`);
+  check("no_docker_socket_mount", !mounts.some((m) => /(?:^|\/)docker\.sock(?:\/|$)/.test(m.Source) || /(?:^|\/)docker\.sock(?:\/|$)/.test(m.Destination)), "Mount sources and destinations checked for docker.sock");
+  check("no_host_home_mount", !mounts.some((m) => {
+    const s = posix.normalize(m.Source);
+    return s === "/" || s === "/root" || s === "/home" || s === "/Users" || /^\/(?:home|Users)\/[^/]+$/.test(s);
+  }), "Mount sources checked for host root and home directories");
+  check("mounts_expected", Array.isArray(inspect.Mounts) && unexpected.length === 0, unexpected.length ? `Unexpected mounts: ${unexpected.map((m) => `${m.Source}:${m.Destination}:${m.RW ? "rw" : "ro"}`).join(", ")}` : "Only expected mount sources, destinations and write flags");
+  check("network_mode", mode === "open" || network === "none" || internal ? true : null, `NetworkMode=${network}; profile network.mode=${mode}${mode !== "open" && network !== "none" && !internal ? "; not enforced yet" : internal ? "; host-inspected internal network" : ""}`);
+  return { checks };
+}
+
+// runtime/sandbox-selftest.ts
+var PROBE_CHECKS = ["writes_outside_writable_mounts_denied", "docker_socket_absent", "host_home_absent", "no_privilege_escalation", "cpu_mem_pids_limited"];
+function combineSandbox(checks, observations = {}, attestation = "host-attested") {
+  const combined = Object.fromEntries(Object.entries(checks).map(([key, value]) => [key, { ...value }]));
+  const corroboration = { readonly_rootfs: ["writes_outside_writable_mounts_denied"], no_docker_socket_mount: ["docker_socket_absent"], no_host_home_mount: ["host_home_absent"], limits: ["cpu_mem_pids_limited"], no_new_privileges: ["no_privilege_escalation"], cap_drop_all: ["no_privilege_escalation"], seccomp_not_unconfined: ["no_privilege_escalation"] };
+  for (const [key, names] of Object.entries(corroboration)) for (const name of names) {
+    const fact = combined[key], observation = observations[name];
+    const composite = ["no_privilege_escalation", "cpu_mem_pids_limited"].includes(name);
+    const allPrivilegeFacts = ["no_new_privileges", "cap_drop_all", "seccomp_not_unconfined"].every((key2) => combined[key2]?.ok === true);
+    const contradictsComposite = !composite || observation?.ok === true || name === "no_privilege_escalation" && allPrivilegeFacts || name === "cpu_mem_pids_limited";
+    if (fact && observation && fact.ok !== null && observation.ok !== null && fact.ok !== observation.ok && contradictsComposite) {
+      fact.tampering_suspected = true;
+      fact.detail += `; tampering_suspected: probe ${name} disagrees`;
+    }
+  }
+  const values = Object.values(combined), status = values.some((c) => c.ok === false || c.tampering_suspected) ? "red" : values.some((c) => c.ok === null) || Object.values(observations).some((c) => c.ok !== true) ? "amber" : "green";
+  return { probe: "sandbox-selftest/v1", runnerKind: "container", attestation, status, checks: combined, observations };
+}
+function directSandbox(attestation = "host-attested") {
+  return { probe: "sandbox-selftest/v1", runnerKind: "native", attestation, status: "amber", checks: Object.fromEntries([...CONTAINER_CHECKS, ...PROBE_CHECKS].map((key) => [key, { ok: null, detail: "not a sandbox (direct access)" }])) };
+}
+var SANDBOX_EXEC_ARGS = ["env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin", "python", "-I", "-S", "/opt/open-harness/sandbox_selftest.py"];
+function dockerJson(args2, input = "{}\n") {
+  return new Promise((resolve4, reject) => {
+    const child = spawn("docker", args2, { stdio: ["pipe", "pipe", "pipe"] });
+    const chunks = [];
+    let size = 0, failure;
+    const timer = setTimeout(() => {
+      failure = new Error("Sandbox check timed out.");
+      child.kill("SIGKILL");
+    }, 25e3);
+    child.stdout.on("data", (part) => {
+      size += part.length;
+      if (size > 1e6) {
+        failure = new Error("Sandbox check output exceeded its limit.");
+        child.kill("SIGKILL");
+      } else chunks.push(part);
+    });
+    child.stderr.resume();
+    child.stdin.on("error", () => {
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (failure || code) return reject(failure || new Error("Docker sandbox check failed."));
+      try {
+        resolve4(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch {
+        reject(new Error("Sandbox check returned invalid JSON."));
+      }
+    });
+    child.stdin.end(input);
+  });
+}
+function probeChecks(value) {
+  if (!value || typeof value !== "object" || !("probe" in value) || value.probe !== "sandbox-selftest/v1" || !("checks" in value) || !value.checks || typeof value.checks !== "object" || Array.isArray(value.checks)) throw new Error("Invalid sandbox probe response.");
+  const checks = value.checks;
+  if (!PROBE_CHECKS.every((key) => key in checks)) throw new Error("Incomplete sandbox probe response.");
+  for (const check of Object.values(value.checks)) if (!check || ![true, false, null].includes(check.ok) || typeof check.detail !== "string") throw new Error("Invalid sandbox probe check.");
+  return value.checks;
+}
+async function sandboxSelftest(container, expected, attestation = "host-attested", transport = dockerJson) {
+  const inspected = await transport(["inspect", container]);
+  if (!Array.isArray(inspected) || inspected.length !== 1 || !inspected[0]?.HostConfig) throw new Error("Invalid Docker inspect response.");
+  const containerInspect = inspected[0];
+  if (expected.computer.network?.mode !== "open" && containerInspect.HostConfig.NetworkMode !== "none") {
+    const networks = containerInspect.NetworkSettings?.Networks || {};
+    const names = Object.keys(networks);
+    for (const name of names) networks[name].Internal = false;
+    if (names.length) {
+      try {
+        const metadata = await transport(["network", "inspect", ...names]);
+        if (Array.isArray(metadata)) for (const name of names) {
+          const network = metadata.find((n) => n.Name === name && n.Id === networks[name].NetworkID);
+          networks[name].Internal = network?.Internal === true;
+        }
+      } catch {
+      }
+    }
+  }
+  const { checks } = attestContainer(inspected[0], expected);
+  let observations;
+  try {
+    observations = probeChecks(await transport(["exec", "-i", container, ...SANDBOX_EXEC_ARGS]));
+  } catch (error) {
+    observations = { probe_available: { ok: null, detail: error instanceof Error ? error.message : "Probe unavailable; rebuild the Hermes image." } };
+  }
+  return combineSandbox(checks, observations, attestation);
+}
+
 // runtime/runner.ts
 import { existsSync as existsSync4, mkdirSync as mkdirSync6, readFileSync as readFileSync3, writeFileSync as writeFileSync5, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
 import { homedir, hostname, platform as platform2, arch } from "node:os";
 import { join as join5, resolve as resolve3 } from "node:path";
-import { spawn as spawn4, spawnSync as spawnSync5 } from "node:child_process";
+import { spawn as spawn5, spawnSync as spawnSync5 } from "node:child_process";
 
 // runtime/hermes.ts
-import { spawn as spawn2, spawnSync as spawnSync2 } from "node:child_process";
+import { spawn as spawn3, spawnSync as spawnSync2 } from "node:child_process";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
@@ -27,7 +165,7 @@ var HANDOFF_TOOL = mcpToolId(COORDINATION_SERVER, "delegate_named_agent");
 var ROUTINE_TOOL = mcpToolId(COORDINATION_SERVER, "create_open_harness_routine");
 
 // runtime/readiness.ts
-import { spawn, spawnSync } from "node:child_process";
+import { spawn as spawn2, spawnSync } from "node:child_process";
 
 // lib/hermes-pin.ts
 var HERMES_RELEASE = "v2026.9.11";
@@ -94,7 +232,7 @@ var HermesGateway = class extends EventEmitter {
       return;
     }
     if (this.child && !this.child.killed) return;
-    this.child = this.native ? spawn2(this.native.python || process.env.HERMES_PYTHON || "python3", [this.native.entry], { cwd: this.native.cwd, env: this.native.env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32" }) : spawn2("docker", ["exec", "-i", ...GATEWAY_ENV, this.container, "python", "/opt/open-harness/managed_entry.py"], { stdio: ["pipe", "pipe", "pipe"] });
+    this.child = this.native ? spawn3(this.native.python || process.env.HERMES_PYTHON || "python3", [this.native.entry], { cwd: this.native.cwd, env: this.native.env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32" }) : spawn3("docker", ["exec", "-i", ...GATEWAY_ENV, this.container, "python", "/opt/open-harness/managed_entry.py"], { stdio: ["pipe", "pipe", "pipe"] });
     createInterface({ input: this.child.stdout }).on("line", (line) => {
       try {
         const value = JSON.parse(line);
@@ -224,7 +362,7 @@ var HermesGateway = class extends EventEmitter {
   }
   async stop() {
     if (process.env.OPEN_HARNESS_MOCK !== "1" && !this.native) await new Promise((resolve4, reject) => {
-      const child = spawn2("docker", ["stop", "--time", "2", this.container], { stdio: "ignore" });
+      const child = spawn3("docker", ["stop", "--time", "2", this.container], { stdio: "ignore" });
       child.once("error", () => reject(new Error("Could not stop the agent container. Check Docker.")));
       child.once("exit", (code) => code === 0 ? resolve4() : reject(new Error("Docker could not confirm the agent container stopped.")));
     });
@@ -367,7 +505,7 @@ function ensureContainer(agentId, stateRoot2, computer, teamIds = [], isBusy = (
 }
 
 // runtime/profile-runtime.ts
-import { spawn as spawn3, spawnSync as spawnSync3 } from "node:child_process";
+import { spawn as spawn4, spawnSync as spawnSync3 } from "node:child_process";
 import { copyFileSync, mkdirSync as mkdirSync3, writeFileSync as writeFileSync2, renameSync, chmodSync } from "node:fs";
 import { join as join3 } from "node:path";
 var COORDINATION_TOOLS = [
@@ -398,7 +536,7 @@ function groupTool(tool) {
 }
 function runtimeProbe(container, input) {
   return new Promise((resolve4, reject) => {
-    const child = spawn3("docker", ["exec", "-i", container, "python", "/opt/open-harness/inspect_runtime.py"], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn4("docker", ["exec", "-i", container, "python", "/opt/open-harness/inspect_runtime.py"], { stdio: ["pipe", "pipe", "pipe"] });
     let output2 = "";
     const timer = setTimeout(() => {
       child.kill();
@@ -766,7 +904,7 @@ function exitCode(command3, args2, timeout) {
         resolve4(code);
       }
     };
-    const child = spawn4(command3, args2, { stdio: "ignore", timeout, killSignal: "SIGKILL" });
+    const child = spawn5(command3, args2, { stdio: "ignore", timeout, killSignal: "SIGKILL" });
     child.on("error", () => settle(null));
     child.on("exit", (code) => settle(code));
   });
@@ -780,7 +918,7 @@ function output(command3, args2, timeout) {
         resolve4({ status, stdout });
       }
     };
-    const child = spawn4(command3, args2, { stdio: ["ignore", "pipe", "ignore"], timeout, killSignal: "SIGKILL" });
+    const child = spawn5(command3, args2, { stdio: ["ignore", "pipe", "ignore"], timeout, killSignal: "SIGKILL" });
     child.stdout.on("data", (chunk) => stdout += chunk);
     child.on("error", () => settle(null));
     child.on("exit", (code) => settle(code));
@@ -939,9 +1077,17 @@ async function control(command3) {
     if (command3.kind.startsWith("probe-")) {
       const profile = command3.payload.profile, direct = profile.computer.access === "direct", shared = join5(stateRoot, "shared"), agentRoot = join5(stateRoot, "agents", profile.id);
       mkdirSync6(shared, { recursive: true });
+      if (command3.kind === "probe-sandbox" && direct) {
+        await finish(command3, directSandbox("runner-attested"));
+        return;
+      }
       checkDirect(profile.computer.access);
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env }, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]])), dispatched = await openDispatchedSecrets(command3.payload.encryptedSecrets), secretSource = { environment: () => ({ ...localSecrets, ...dispatched }) };
       prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command3.payload.coordinationToken || "", `probe-${command3.id}`, direct ? { cwd: shared, coordinationCommand: join5(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : {});
+      if (command3.kind === "probe-sandbox") {
+        await finish(command3, await sandboxSelftest(ensureContainer(profile.id, stateRoot, profile.computer, command3.payload.teamIds || [], () => busyAgents.has(profile.id)), { computer: profile.computer, teamIds: command3.payload.teamIds || [], stateRoot, agentId: profile.id }, "runner-attested"));
+        return;
+      }
       if (command3.kind === "probe-runtime") {
         const probeInput = { ...command3.payload.input || {} };
         if (probeInput.action === "computer") probeInput.desktop = profile.computer.desktop;
