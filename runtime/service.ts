@@ -6,6 +6,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
 import { discoverTools, discoverModels, nativeRuntimeProbe, prepareProfile, runtimeProbe } from "./profile-runtime";
 import { HANDOFF_TOOL, profileAgent, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
+import { saveRoutine, tickRoutines } from "./routines";
 import { SchemaTooNewError, Store, type RunRow } from "./db";
 import { SecretStore, SecretsUnavailableError } from "./secrets";
 import { Credentials, CredentialError } from "./credentials";
@@ -734,7 +735,7 @@ const server = createServer(async (req, res) => {
     if (/^\/v1\/agents\/[^/]+\/connectors/.test(url.pathname)) return json(res, 410, { error: 'Connection settings moved into Agent settings. Reload the app.' });
     if (url.pathname === "/v1/files") { const { scope, dir } = workspaceDir(url); mkdirSync(dir, { recursive: true }); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = safeFile(dir, name); if (!existsSync(target)) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readFileSync(target, encoding), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(dir), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = safeFile(dir, String(input.name || "")); writeFileSync(target, content, { encoding, mode: 0o600 }); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = safeFile(dir, String(url.searchParams.get("name") || "")); if (existsSync(target)) unlinkSync(target); return json(res, 200, { ok: true }); } }
     if (req.method === "GET" && url.pathname === "/v1/routines") return json(res, 200, { routines: store.db.prepare("SELECT * FROM schedules ORDER BY created_at DESC").all() });
-    if (req.method === "POST" && url.pathname === "/v1/routines") { const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)); const next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, input.agentId, input.name, input.prompt, minutes, input.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone, 1, next, stamp.toISOString(), stamp.toISOString()); return json(res, 201, { id, nextRunAt: next }); }
+    if (req.method === "POST" && url.pathname === "/v1/routines") return json(res, 201, saveRoutine(store.db, await body(req), new Date()));
     // A routine with a typo, a wrong agent, or a runaway interval could previously only
     // be paused, never corrected or removed — so every mistake was permanent.
     const routineItem = url.pathname.match(/^\/v1\/routines\/([^/]+)$/);
@@ -747,24 +748,7 @@ const server = createServer(async (req, res) => {
         return json(res, 200, { ok: true });
       }
       if (req.method === "PUT") {
-        const input = await body(req), stamp = new Date().toISOString();
-        const name = input.name === undefined ? routine.name : String(input.name).trim().slice(0, 200);
-        const prompt = input.prompt === undefined ? routine.prompt : String(input.prompt).trim().slice(0, 20_000);
-        if (!name || !prompt) return json(res, 400, { error: "A routine needs a name and a task." });
-        const agentId = input.agentId === undefined ? routine.agent_id : String(input.agentId);
-        if (!profiles.list().some(profile => profile.id === agentId)) return json(res, 400, { error: "That agent no longer exists." });
-        // Clamped like the hosted route: an interval of 0 or a negative number would
-        // otherwise land as "every minute, forever".
-        const minutes = input.intervalMinutes === undefined
-          ? Number(routine.interval_minutes)
-          : Math.max(1, Math.min(525_600, Math.round(Number(input.intervalMinutes))));
-        if (!Number.isFinite(minutes)) return json(res, 400, { error: "Enter how often this should run, in minutes." });
-        // Re-base the next run so a shortened interval takes effect now rather than
-        // waiting out the old one.
-        const next = new Date(Date.now() + minutes * 60_000).toISOString();
-        store.db.prepare("UPDATE schedules SET agent_id=?,name=?,prompt=?,interval_minutes=?,next_run_at=?,updated_at=? WHERE id=?")
-          .run(agentId, name, prompt, minutes, next, stamp, routine.id);
-        return json(res, 200, { ...routine, agent_id: agentId, name, prompt, interval_minutes: minutes, next_run_at: next, updated_at: stamp });
+        return json(res, 200, saveRoutine(store.db, await body(req), new Date(), routine));
       }
     }
     const routineMatch = url.pathname.match(/^\/v1\/routines\/([^/]+)\/(run|toggle|history)$/);
@@ -821,43 +805,18 @@ const server = createServer(async (req, res) => {
       if (action === 'run') { if (task.ownerAgentId && task.ownerAgentId !== internalAgent && !profile.board.dispatch) return json(res, 403, { error: 'Starting another agent’s task requires Board: dispatch.' }); const board = tasks.getBoard(task.boardId); if (!board.settings.allowAgentDispatch) return json(res, 403, { error: 'Agent task dispatch is disabled for this board.' }); const started = tasks.start(taskId, { revision: task.revision, idempotencyKey: crypto.randomUUID() }, value => createRun({ ...value, deferStart: true })); void pump(); return json(res, 202, started); }
       return json(res, 400, { error: 'Unknown task action.' });
     }
-    if (req.method === "POST" && url.pathname === "/internal/schedule") { if (!internalAllowed(internalAgent, ROUTINE_TOOL, String(req.headers["x-open-harness-run"] || ""))) return json(res, 403, { error: "Scheduling is disabled for this run." }); const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)), next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, internalAgent, input.name, input.prompt, minutes, input.timezone || "UTC", 1, next, stamp.toISOString(), stamp.toISOString()); return json(res, 201, { id, nextRunAt: next }); }
+    if (req.method === "POST" && url.pathname === "/internal/schedule") { if (!internalAllowed(internalAgent, ROUTINE_TOOL, String(req.headers["x-open-harness-run"] || ""))) return json(res, 403, { error: "Scheduling is disabled for this run." }); return json(res, 201, saveRoutine(store.db, { ...await body(req), agentId: internalAgent }, new Date(), undefined, true)); }
     return json(res, 404, { error: "Not found." });
   } catch (error) { return json(res, error instanceof ProfileError || error instanceof TaskError || error instanceof TeamError || error instanceof MachineError || error instanceof CredentialError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
 });
 
-// createRun throws for an agent that no longer exists, for a full queue, and for depth
-// and cycle violations. An unguarded throw here escapes the timer callback and takes the
-// whole coordinator down, and because next_run_at is only advanced on success the same
-// routine is still due on restart — a crash loop with no log and no way out. Every
-// routine is therefore isolated, and a routine that can never succeed is disabled rather
-// than retried forever.
-function advanceRoutine(routine: any, now: Date) {
-  const next = new Date(now.getTime() + Number(routine.interval_minutes) * 60000).toISOString();
-  store.db.prepare("UPDATE schedules SET last_run_at=?,next_run_at=?,updated_at=? WHERE id=?").run(now.toISOString(), next, now.toISOString(), routine.id);
-}
-function runDueRoutine(routine: any, now: Date) {
-  const scheduledFor = routine.next_run_at;
-  if (store.db.prepare("SELECT 1 FROM schedule_runs WHERE schedule_id=? AND scheduled_for=?").get(routine.id, scheduledFor)) return;
-  try {
-    const run = createRun({ agentId: routine.agent_id, prompt: routine.prompt });
-    store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, scheduledFor);
-    advanceRoutine(routine, now);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Routine could not start.";
-    if (error instanceof ProfileError) {
-      store.db.prepare("UPDATE schedules SET enabled=0,updated_at=? WHERE id=?").run(now.toISOString(), routine.id);
-      console.error(`Routine ${routine.id} was disabled because its agent no longer exists: ${message}`);
-      return;
-    }
-    console.error(`Routine ${routine.id} could not start and will retry at its next interval: ${message}`);
-    advanceRoutine(routine, now);
-  }
-}
 setInterval(() => {
   try {
-    const now = new Date(), due = store.db.prepare("SELECT * FROM schedules WHERE enabled=1 AND next_run_at<=?").all(now.toISOString()) as any[];
-    for (const routine of due) runDueRoutine(routine, now);
+    const now = new Date();
+    tickRoutines(store.db, now, routine => createRun({ agentId: routine.agent_id, prompt: routine.prompt }), (routine, error) => {
+      if (error instanceof ProfileError) store.db.prepare("UPDATE schedules SET enabled=0,updated_at=? WHERE id=?").run(now.toISOString(), routine.id);
+      console.error(`Routine ${routine.id} could not start: ${error instanceof Error ? error.message : "unknown error"}`);
+    });
   } catch (error) {
     console.error(`The routine scheduler skipped this tick: ${error instanceof Error ? error.message : "unknown error"}`);
   }

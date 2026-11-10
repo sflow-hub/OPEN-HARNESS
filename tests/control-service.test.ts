@@ -443,3 +443,23 @@ test("the task tool accepts its fields nested, alongside the action, or as a JSO
     await waitRun(held.id);
   }
 });
+
+test("routine POST and PUT share validation and persist cron schedules", async () => {
+  const input = { agentId: 'atlas', name: 'Cron report', prompt: 'Write report', timezone: 'America/Denver', intervalMinutes: 60 };
+  const created = await request('/v1/routines', { method: 'POST', body: JSON.stringify(input) });
+  try {
+    for (const patch of [{ name: '' }, { prompt: '  ' }, { agentId: 'missing-agent' }, { intervalMinutes: 'Infinity' }, { timezone: 'bad/zone' }, { scheduleKind: 'cron', cronExpression: '60 * * * *' }]) {
+      for (const method of ['POST', 'PUT']) {
+        const response = await fetch(`${base}/v1/routines${method === 'PUT' ? `/${created.id}` : ''}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, ...patch }) });
+        assert.equal(response.status, 400);
+        assert.ok((await response.json() as { error: string }).error);
+      }
+    }
+    await request(`/v1/routines/${created.id}`, { method: 'PUT', body: JSON.stringify({ scheduleKind: 'cron', cronExpression: '30 9 * * 1-5', timezone: 'Asia/Tokyo' }) });
+    const routine = (await request('/v1/routines')).routines.find((item: any) => item.id === created.id);
+    assert.equal(routine.schedule_kind, 'cron');
+    assert.equal(routine.cron_expression, '30 9 * * 1-5');
+    assert.equal(routine.timezone, 'Asia/Tokyo');
+    assert.equal(routine.misfire_policy, 'run_once');
+  } finally { await request(`/v1/routines/${created.id}`, { method: 'DELETE' }); }
+});
