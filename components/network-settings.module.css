@@ -1,0 +1,39 @@
+.panel { display: grid; gap: 12px; margin: 20px 0; padding: 18px; border: 1px solid var(--line, #2b2d31); border-radius: 12px; color: #efefed; background: var(--panel, #191a1d); min-width: 0; }
+.panel h3, .panel h4, .panel p { margin: 0; }
+.panel p, .panel li, .panel small { line-height: 1.5; font-size: 13px; color: var(--muted, #96999f); overflow-wrap: anywhere; }
+.panel strong { color: #efefed; }
+.panel button { border: 1px solid var(--line, #2b2d31); background: #25272a; padding: 10px 12px; border-radius: 7px; font-size: 13px; color: inherit; }
+.panel button:disabled { opacity: .5; }
+.panel .primary { background: #2f4a2a; border-color: #46663f; }
+/* Specific enough to beat the settings dialog's stacked `.modal label` form styles. */
+.panel .toggle { display: flex; align-items: flex-start; gap: 12px; margin: 0; padding: 12px; border: 1px solid var(--line, #2b2d31); border-radius: 9px; cursor: pointer; }
+.panel .toggle input { flex: none; display: inline-block; width: 16px; height: 16px; margin: 2px 0 0; }
+.panel .toggle strong { font-size: 13px; }
+.panel .toggle small { display: block; margin-top: 3px; font-size: 12px; }
+.group { display: grid; gap: 10px; }
+.group summary { cursor: pointer; font-size: 13px; }
+.heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.machine { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line, #2b2d31); border-radius: 9px; }
+.machineName span { color: var(--muted, #96999f); }
+.agents { font-size: 12px; }
+.links, .history, .evidence { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.links li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; column-gap: 8px; }
+.links li small { grid-column: 2 / -1; color: #f3baa0; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: #6b6e74; }
+.links li[data-state="ok"] .dot { background: #7fc46b; }
+.links li[data-state="degraded"] .dot { background: #e2b54f; }
+.links li[data-state="failing"] .dot { background: #e2765a; }
+.linkLabel { color: #efefed; min-width: 0; }
+.linkState { font-size: 12px; text-align: right; }
+.change { display: grid; gap: 8px; padding: 12px; border: 1px solid #5a4a2a; border-radius: 9px; background: #211e17; }
+.changeTitle { color: #efefed !important; }
+.diff { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; font-size: 13px; }
+.diff dt { color: var(--muted, #96999f); }
+.diff dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; color: #e3e8df; }
+.evidence li { font-size: 12px; padding-left: 10px; border-left: 2px solid var(--line, #2b2d31); }
+.history li { display: grid; gap: 4px; padding: 10px 0; border-top: 1px solid var(--line, #2b2d31); justify-items: start; }
+.meta { font-size: 12px !important; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.panel .status { padding: 10px; background: #242526; border-radius: 7px; }
+.panel .error { color: #f3baa0; }
+@media (max-width: 520px) { .links li { grid-template-columns: 10px minmax(0, 1fr); } .linkState { grid-column: 2; text-align: left; } }

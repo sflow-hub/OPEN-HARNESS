@@ -18,7 +18,7 @@ const nextConfig: NextConfig = {
       "font-src 'self' data:",
       // Desktop chooses a free loopback coordinator port.
       // Tauri uses IPC for native APIs when this page is in its webview.
-      "connect-src 'self' http://127.0.0.1:* http://localhost:* ipc: http://ipc.localhost",
+      "connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* wss://127.0.0.1:* wss://localhost:* ipc: http://ipc.localhost",
       "object-src 'none'",
       "base-uri 'none'",
       "frame-ancestors 'none'",

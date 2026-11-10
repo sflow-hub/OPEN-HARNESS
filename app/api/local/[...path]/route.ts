@@ -21,7 +21,7 @@ const LOOPBACK_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 // caller's agent token and check its per-run tool grant. Anything else is closed.
 const PROXYABLE_ROOTS = new Set(['v1', 'internal']);
 function proxyable(path: string[]) {
-  return path.length > 0 && PROXYABLE_ROOTS.has(path[0]);
+  return path.length > 0 && PROXYABLE_ROOTS.has(path[0]) || path.length === 3 && path[0] === 'hooks' && path[1] === 'workflows';
 }
 
 // /v1/bootstrap returns the master control token, which authorizes arbitrary run
@@ -62,13 +62,18 @@ async function proxy(request: Request, context: Context) {
   const base = String(process.env.OPEN_HARNESS_INTERNAL_CONTROL_URL || 'http://127.0.0.1:4317').replace(/\/$/, '');
   const target = `${base}/${path.map(encodeURIComponent).join('/')}${incoming.search}`;
   const headers = new Headers();
-  for (const name of ['authorization', 'content-type', 'x-open-harness-machine', 'x-open-harness-agent', 'x-open-harness-run']) {
+  for (const name of ['authorization', 'content-type', 'idempotency-key', 'x-open-harness-machine', 'x-open-harness-agent', 'x-open-harness-run']) {
     const value = request.headers.get(name); if (value) headers.set(name, value);
   }
+  if(request.method==='POST'&&/^v1\/connections\/[^/]+\/authorize$/.test(path.join('/'))){const origin=request.headers.get('origin')||incoming.origin;try{headers.set('x-open-harness-connection-callback',new URL('/api/local/v1/connections/callback',origin).href);}catch{/* The coordinator validates the fallback callback. */}}
+  const binding=(request.headers.get('cookie')||'').split(';').map(part=>part.trim()).filter(part=>/^oh_oauth_[a-f0-9]{20}=[A-Za-z0-9_-]{43}$/.test(part)).join('; ');if(binding)headers.set('cookie',binding);
   try {
     if (request.method === 'POST' && path.join('/') === 'v1/onboarding/action') return await forwardSetup(request, target, headers);
-    const response = await fetch(target, { method: request.method, headers, body: ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer(), redirect: 'manual', cache: 'no-store' });
-    return new Response(response.body, { status: response.status, headers: { 'Content-Type': response.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+    const timeout = request.method === 'POST' && /^v1\/agents\/[^/]+\/desktop\/(take-control|release)$/.test(path.join('/')) ? 95_000 : 35_000;
+    const response = await fetch(target, { method: request.method, headers, body: ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer(), redirect: 'manual', cache: 'no-store', signal: AbortSignal.any([request.signal, AbortSignal.timeout(timeout)]) });
+    const outgoing = new Headers({ 'Content-Type': response.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    for (const cookie of response.headers.getSetCookie()) if(/^oh_oauth_[a-f0-9]{20}=/.test(cookie))outgoing.append('Set-Cookie', cookie);
+    return new Response(response.body, { status: response.status, headers: outgoing });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : 'The coordinator is unavailable.' }, { status: 502 });
   }
@@ -77,4 +82,5 @@ async function proxy(request: Request, context: Context) {
 export const GET = proxy;
 export const POST = proxy;
 export const PUT = proxy;
+export const PATCH = proxy;
 export const DELETE = proxy;

@@ -1,0 +1,31 @@
+import { test, expect } from "@playwright/test";
+import { initialWorkspace } from "../../lib/types";
+
+const control = `http://127.0.0.1:${process.env.OPEN_HARNESS_TEST_PORT || 4317}`;
+test("phone connection settings require configured HTTPS and expose a link only on request", async ({ page, request }, testInfo) => {
+  const { token } = await (await request.get(`${control}/v1/bootstrap`)).json();
+  await request.post(`${control}/v1/agents/sync`, { headers: { Authorization: `Bearer ${token}` }, data: { agents: initialWorkspace.agents } });
+  await page.addInitScript(() => localStorage.setItem("open-harness.onboarding.v1", "done"));
+  let links = 0;
+  await page.route("**/v1/availability", route => route.fulfill({ json: { deployment: "compose", publicUrl: "https://server.tailnet.ts.net", browserPairing: true, remoteReady: true } }));
+  await page.route("**/v1/browser/link", route => { links++; return route.fulfill({ json: { url: "https://server.tailnet.ts.net/#pair=fixture-one-use-code", expiresAt: new Date(Date.now() + 300_000).toISOString() } }); });
+  await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+  if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "Open navigation" }).click();
+  await page.getByRole("button", { name: /Settings/ }).first().click();
+  const panel = page.getByRole("region", { name: "Always-on access" });
+  await expect(panel.getByText(/coordinator and agent computer must stay powered on/)).toBeVisible();
+  expect(links).toBe(0);
+  await panel.getByRole("button", { name: "Create phone connection link" }).click();
+  await expect(panel.getByLabel("One-use phone connection link")).toHaveValue("https://server.tailnet.ts.net/#pair=fixture-one-use-code");
+  expect(links).toBe(1);
+  await panel.getByRole("button", { name: "Hide connection link" }).click();
+  await expect(panel.getByLabel("One-use phone connection link")).toHaveCount(0);
+  await expect(panel.getByText("Set up an always-on server")).toBeVisible();
+  await page.getByRole("button", { name: "Close settings" }).click();
+  await page.route("**/v1/availability", route => route.fulfill({ json: { deployment: "native", publicUrl: null, browserPairing: false, remoteReady: false } }));
+  if (testInfo.project.name === "mobile" && !await page.locator("aside.sidebar.open").isVisible()) await page.getByRole("button", { name: "Open navigation" }).click();
+  await page.getByRole("button", { name: /Settings/ }).first().click();
+  await expect(panel.getByText(/Configure authenticated HTTPS access/)).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Create phone connection link" })).toHaveCount(0);
+  expect(links).toBe(1);
+});

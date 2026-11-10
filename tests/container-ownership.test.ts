@@ -28,7 +28,7 @@ if (args[0] === 'inspect') {
   console.log(JSON.stringify(container));
 }
 if (args[0] === 'run' && args.includes('--rm')) {
-  const mount = args[args.indexOf('-v') + 1]; console.log(fs.readFileSync(mount.slice(0, -':/probe:ro'.length) + '/canary', 'utf8'));
+  const mount = args[args.indexOf('-v') + 1]; console.log(fs.readFileSync(mount.slice(0, -':/probe:ro'.length) + '/' + args.at(-1).split('/').at(-1), 'utf8'));
 }
 if (args[0] === 'ps' && state.psFailure) { console.error('cannot confirm container cleanup'); process.exit(1); }
 if (args[0] === 'version') console.log('29.0');

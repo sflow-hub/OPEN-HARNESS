@@ -1,12 +1,14 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, CircleAlert, ExternalLink, LoaderCircle, MonitorCog, Server, Sparkles, X } from 'lucide-react';
 import type { ModelChoice } from '../lib/agent-profile';
 import { ControlClient } from '../lib/control-client';
 import type { OnboardingStatus, ReadinessCheck } from '../lib/onboarding';
 import { PROVIDERS, type Provider } from '../lib/provider';
 import ModelPicker from './model-picker';
+import { CODEX_PROVIDER } from '../lib/codex';
+import type { SetupJob } from '../lib/product';
 
 type Props = {
   client: ControlClient;
@@ -45,8 +47,20 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
   const [modelId, setModelId] = useState(model.model || PROVIDERS[initialProvider].model);
   const [baseUrl, setBaseUrl] = useState(model.baseUrl || '');
   const [apiKey, setApiKey] = useState('');
+  const [codexRef,setCodexRef] = useState(model.provider === CODEX_PROVIDER ? model.credentialRef : '');
   const [secretNames, setSecretNames] = useState<string[]>([]);
   const [modelReady, setModelReady] = useState(false);
+  const [jobs, setJobs] = useState<SetupJob[]>([]), [taskVerified, setTaskVerified] = useState(false);
+  const checkedCallback=useRef(onRuntimeChecked),lastReady=useRef<boolean|null>(null);
+  useEffect(()=>{checkedCallback.current=onRuntimeChecked;},[onRuntimeChecked]);
+  useEffect(() => {
+    let live = true, timer: ReturnType<typeof setTimeout>;
+    const check = async () => {
+      try { const value = await client.request<OnboardingStatus & { setupJobs: SetupJob[]; taskVerified: boolean }>('/v1/readiness'); if (live) { setStatus(value); setJobs(value.setupJobs || []); setTaskVerified(Boolean(value.taskVerified));if(lastReady.current!==value.executionReady){lastReady.current=value.executionReady;checkedCallback.current?.(value);} } } catch { /* The explicit refresh and setup actions report connection failures. */ }
+      if (live) timer = setTimeout(check, 2500);
+    };
+    void check(); return () => { live = false; clearTimeout(timer); };
+  }, [client]);
 
   async function refresh() {
     setBusy('status'); setMessage('');
@@ -61,8 +75,8 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
   }, [client]);
 
   async function action(value: NonNullable<ReadinessCheck['action']>) {
-    setBusy(value); setMessage(value === 'prepare-runtime' ? 'Preparing the agent runtime. Keep Open Harness open; the first setup can take several minutes.' : 'Starting Docker…');
-    try { const result = await client.request<OnboardingStatus>('/v1/onboarding/action', { method: 'POST', body: JSON.stringify({ action: value }) }); setStatus(result); setMessage('Computer check completed.'); onRuntimeChecked?.(result); }
+    setBusy(value); setMessage(value === 'prepare-runtime' ? 'Preparing the agent runtime. Progress is saved; you can return to setup later.' : 'Starting Docker…');
+    try { const job = await client.request<SetupJob>('/v1/setup/jobs', { method: 'POST', body: JSON.stringify({ kind: value }) }); setJobs(current => [job, ...current]);setMessage(''); }
     catch (error) { setMessage(error instanceof Error ? error.message : 'Setup could not be completed.'); }
     finally { setBusy(''); }
   }
@@ -70,12 +84,13 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
   const savedKeyFor = (candidate: Provider) => candidate === model.provider && model.credentialRef ? model.credentialRef : keyFor(candidate);
   async function saveModel() {
     if (!modelId.trim()) { setMessage('Choose or enter a model.'); return; }
-    if (provider !== 'local' && !apiKey && !secretNames.includes(savedKeyFor(provider))) { setMessage('Paste an API key, or choose a local model server.'); return; }
+    if (provider === CODEX_PROVIDER && !codexRef) { setMessage('Sign in with ChatGPT before saving this provider.'); return; }
+    if (provider !== CODEX_PROVIDER && provider !== 'local' && !apiKey && !secretNames.includes(savedKeyFor(provider))) { setMessage('Paste an API key, or choose a local model server.'); return; }
     setBusy('model'); setMessage('Saving and testing the connection…');
-    const credentialRef = provider === 'local' ? '' : savedKeyFor(provider);
+    const credentialRef = provider === CODEX_PROVIDER ? codexRef : provider === 'local' ? '' : savedKeyFor(provider);
     const selected: ModelChoice = { provider, model: modelId.trim(), baseUrl: provider === 'local' ? baseUrl.trim() : '', credentialRef };
     try {
-      const test = await client.request<{ ok: boolean; message: string; model?: ModelChoice; revision?: number }>('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: selected, apiKey: apiKey || undefined, save: true, revision }) });
+      const test = await client.request<{ ok: boolean; message: string; model?: ModelChoice; revision?: number }>('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: selected, apiKey: provider === CODEX_PROVIDER ? undefined : apiKey || undefined, save: true, revision }) });
       if (!test.ok || !test.model) { setModelReady(false); setMessage(`${test.message} Your previous workspace model is still active.`); return; }
       if (test.model.credentialRef) setSecretNames(current => [...new Set([...current, test.model!.credentialRef])]);
       onModelSaved(test.model, test.revision ?? revision); setApiKey(''); setModelReady(true);
@@ -91,9 +106,10 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
     finally { setBusy(''); }
   }
 
+  const title = ['Welcome to Open Harness', selfHosted ? 'Check this server' : 'Check this computer', 'Connect your model', taskVerified ? 'You’re ready' : 'Verify a task'][step];
   return <div className="modal-backdrop onboarding-backdrop">
-    <section className="onboarding" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
-      <header><div><div className="eyebrow">FIRST-RUN SETUP</div><h2 id="onboarding-title">{['Welcome to Open Harness', selfHosted ? 'Check this server' : 'Check this computer', 'Connect your model', 'You’re ready'][step]}</h2></div><button type="button" aria-label="Set up later" onClick={onDismiss}><X size={19} /></button></header>
+    <section className="onboarding" role="dialog" aria-modal="true" aria-label={title} aria-labelledby="onboarding-title">
+      <header><div><div className="eyebrow">FIRST-RUN SETUP</div><h2 id="onboarding-title">{title}</h2></div><button type="button" aria-label="Set up later" onClick={onDismiss}><X size={19} /></button></header>
       <div className="onboarding-progress" aria-label={`Step ${step + 1} of 4`}>{[0,1,2,3].map(item => <span className={item <= step ? 'active' : ''} key={item} />)}</div>
 
       {step === 0 && <div className="onboarding-step">
@@ -105,6 +121,7 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
       {step === 1 && <div className="onboarding-step">
         <p className="onboarding-lead">These checks stay on {selfHosted ? 'your server' : 'your computer'}. Open Harness will tell you what it can fix and give you a direct link for anything you need to install.</p>
         <div className="onboarding-checks">{status?.checks.map(check => <CheckRow key={check.id} check={check} busy={Boolean(busy)} onAction={action} />)}</div>
+        {jobs.filter(job => job.kind !== 'verify-task' && (!['failed','interrupted'].includes(job.state) || !status || status.checks.some(check => check.action === job.kind))).slice(0, 3).map(job => <div key={job.id}><p role="status">{job.detail}</p>{['interrupted','failed'].includes(job.state) && <button disabled={Boolean(busy)} onClick={() => { void client.request(`/v1/setup/jobs/${job.id}/resume`, { method: 'POST', body: '{}' }).then(() => refresh()).catch(error => setMessage(error.message)); }}>Resume setup</button>}</div>)}
         {!status && !message && <p className="onboarding-working"><LoaderCircle className="spin" size={17} /> Checking this computer…</p>}
         {message && <p className="onboarding-message" role="status">{message}</p>}
         <div className="onboarding-actions"><button type="button" className="subtle-button" disabled={Boolean(busy)} onClick={refresh}>Check again</button><button type="button" className="light-button" disabled={!status?.executionReady || Boolean(busy)} onClick={() => { setMessage(''); setStep(modelReady ? 3 : 2); }}>{modelReady ? 'Finish setup' : 'Continue'} <ArrowRight size={14} /></button></div>
@@ -112,17 +129,20 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
       </div>}
 
       {step === 2 && <div className="onboarding-step">
-        <p className="onboarding-lead">Use an API key from a model provider, or connect a compatible model server running on your network.</p>
-        <label>Provider<select value={provider} onChange={event => { const next = event.target.value as Provider; setProvider(next); setModelId(PROVIDERS[next].model); setBaseUrl(''); setMessage(''); }}>{Object.entries(PROVIDERS).map(([id, value]) => <option key={id} value={id}>{value.label}</option>)}</select></label>
-        <ModelPicker client={client} provider={provider === 'local' ? (baseUrl.trim() ? provider : '') : (apiKey && status?.credentialMode !== 'runner') || secretNames.includes(savedKeyFor(provider)) ? provider : ''} credentialRef={provider === 'local' ? '' : savedKeyFor(provider)} apiKey={status?.credentialMode === 'runner' ? '' : apiKey} baseUrl={provider === 'local' ? baseUrl.trim() : ''} value={modelId} onChange={setModelId} />
-        {provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder={selfHosted ? 'https://models.example.com/v1' : 'http://127.0.0.1:11434/v1'} /><small>{selfHosted ? 'Enter an OpenAI-compatible API address that the coordinator and the agent containers can reach over the network. localhost, 127.0.0.1 and host.docker.internal on this computer are refused here.' : 'Enter the OpenAI-compatible API address shown by your model app.'}</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(savedKeyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a></small></label>}
+        <p className="onboarding-lead">Sign in with ChatGPT, use a provider API key, or connect a compatible model server on your network.</p>
+        <label>Provider<select value={provider} onChange={event => { const next = event.target.value as Provider; setProvider(next); setApiKey(''); setModelId(PROVIDERS[next].model); setBaseUrl(''); setMessage(''); }}>{Object.entries(PROVIDERS).map(([id, value]) => <option key={id} value={id}>{value.label}</option>)}</select></label>
+        <ModelPicker client={client} provider={provider === CODEX_PROVIDER ? provider : provider === 'local' ? (baseUrl.trim() ? provider : '') : (apiKey && status?.credentialMode !== 'runner') || secretNames.includes(savedKeyFor(provider)) ? provider : ''} credentialRef={provider === CODEX_PROVIDER ? codexRef : provider === 'local' ? '' : savedKeyFor(provider)} onCredentialChange={setCodexRef} apiKey={status?.credentialMode === 'runner' ? '' : apiKey} baseUrl={provider === 'local' ? baseUrl.trim() : ''} value={modelId} onChange={setModelId} />
+        {provider !== CODEX_PROVIDER && (provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder={selfHosted ? 'https://models.example.com/v1' : 'http://127.0.0.1:11434/v1'} /><small>{selfHosted ? 'Enter an OpenAI-compatible API address that the coordinator and the agent containers can reach over the network. localhost, 127.0.0.1 and host.docker.internal on this computer are refused here.' : 'Enter the OpenAI-compatible API address shown by your model app.'}</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(savedKeyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a></small></label>)}
         {message && <p className={`onboarding-message ${modelReady ? 'success' : ''}`} role="status">{message}</p>}
         <div className="onboarding-actions"><button type="button" className="subtle-button" onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</button><button type="button" className="light-button" disabled={busy === 'model'} onClick={saveModel}>{busy === 'model' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Save and test</button></div>
       </div>}
 
       {step === 3 && <div className="onboarding-step onboarding-done">
-        <span><Check size={34} /></span><h3>Open Harness is set up.</h3><p>Your first agent uses a private workspace on {selfHosted ? 'this server' : 'this computer'}. Advanced execution options remain available from Workspace settings.</p>
-        <button type="button" className="light-button" onClick={onFinished}>Start using Open Harness <ArrowRight size={15} /></button>
+        <span>{taskVerified ? <Check size={34} /> : <Sparkles size={34} />}</span><h3>{taskVerified ? 'Open Harness is set up.' : 'Check that real work completes.'}</h3><p>{taskVerified ? 'Your agent wrote a file and Open Harness independently read back the expected contents.' : 'Run a small model task that writes a unique file. Setup completes only after independent readback confirms the contents.'}</p>
+        {jobs.filter(job => job.kind === 'verify-task').slice(0, 2).map(job => <p key={job.id} role="status">{job.detail}</p>)}
+        {!taskVerified && <button type="button" className="light-button" disabled={Boolean(busy) || jobs.some(job => job.kind === 'verify-task' && ['queued','running'].includes(job.state))} onClick={() => { setBusy('verify-task'); void client.request<SetupJob>('/v1/setup/jobs', { method: 'POST', body: JSON.stringify({ kind: 'verify-task' }) }).then(job => setJobs(current => [job, ...current])).catch(error => setMessage(error.message)).finally(() => setBusy('')); }}>Run verification task</button>}
+        {message && <p role="status">{message}</p>}
+        <button type="button" className="light-button" disabled={!taskVerified} onClick={onFinished}>Start using Open Harness <ArrowRight size={15} /></button>
         <button type="button" className="subtle-button" onClick={onComputerSettings}>Review computer settings</button>
       </div>}
       {step < 3 && <footer>Your setup is saved as you go. You can close this window and return from Workspace settings.</footer>}

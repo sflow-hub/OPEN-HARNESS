@@ -36,7 +36,7 @@ export function issueBrowserPairing(stateRoot: string, ttlSeconds = 300, now = D
   if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > MAX_TTL_SECONDS) throw new Error('Browser connection expiry must be between 1 and 600 seconds.');
   const dir = directory(stateRoot, true);
   for (const name of readdirSync(dir)) {
-    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+    if (!/^[a-f0-9]{64}(?:\.used)?\.json$/.test(name)) continue;
     const path = join(dir, name), previous = record(path);
     if (previous && previous.expiresAt <= now) { try { unlinkSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }
   }
@@ -50,8 +50,9 @@ export function consumeBrowserPairing(stateRoot: string, code: unknown, now = Da
   try {
     const path = join(directory(stateRoot, false), `${hash(code)}.json`), saved = record(path);
     if (!saved || saved.issuedAt > now || saved.expiresAt <= now) return false;
-    // Only one caller can unlink this record, even across coordinator processes.
-    // Consume before returning the operator token; a crash requires a fresh link.
+    // Keep an exclusive claim until expiry: some shared filesystems acknowledge
+    // competing unlinks before their directory view has converged.
+    writeFileSync(path.replace(/\.json$/,'.used.json'),JSON.stringify(saved),{flag:'wx',mode:0o600});
     unlinkSync(path);
     return true;
   } catch { return false; }

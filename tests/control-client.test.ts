@@ -14,6 +14,25 @@ function stubFetch(handler: (url: string, init?: RequestInit) => Response | Prom
 }
 const ok = (body: unknown) => Response.json(body);
 
+test('a disconnected coordinator explains how to recover and does not replay sign-in', async () => {
+  let offline = true;
+  const stub = stubFetch(() => { if (offline) throw new TypeError('Failed to fetch'); return ok({ id: 'new-attempt' }); });
+  try {
+    const client = new ControlClient(); client.token = 'token';
+    await assert.rejects(client.request('/v1/codex/auth', { method: 'POST' }), /Cannot reach the Open Harness coordinator.*try again/);
+    assert.equal(stub.calls.length, 1);
+    offline = false;
+    assert.deepEqual(await client.request('/v1/codex/auth', { method: 'POST' }), { id: 'new-attempt' });
+  } finally { stub.restore(); }
+});
+
+test('request cancellation keeps its original error', async () => {
+  const aborted = new DOMException('The request was cancelled.', 'AbortError');
+  const stub = stubFetch(() => { throw aborted; });
+  try { await assert.rejects(new ControlClient().request('/v1/runs'), error => error === aborted); }
+  finally { stub.restore(); }
+});
+
 test('bootstrap reads its body once and keeps the token', async () => {
   const stub = stubFetch(() => ok({ token: 'control-token', mode: 'live' }));
   try {
@@ -224,4 +243,22 @@ test('a plain source dashboard is unchanged: no stored token, no header, and not
     assert.equal(stub.calls[0].authorization, '');
     assert.equal(store.size, 0);
   } finally { stub.restore(); }
+}));
+
+test('a stale managed workspace link falls back for both bootstrap and later requests', () => withStorage(async store => {
+  const previousMode = process.env.NEXT_PUBLIC_OPEN_HARNESS_CLOUD, previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  let location = new URL('https://workspace.example/?workspace=revoked&run=task-1#details');
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { get location() { return location; }, history: { replaceState(_state: unknown, _title: string, url: string) { location = new URL(url); } } } });
+  process.env.NEXT_PUBLIC_OPEN_HARNESS_CLOUD = '1';
+  const stub = stubFetch(url => url === '/cloud/v1/me' ? ok({ workspaces: [{ id: 'available' }] }) : ok({ mode: 'live' }));
+  try {
+    const client = new ControlClient(); await client.bootstrap(); await client.request('/v1/runs');
+    assert.equal(store.get('open-harness.cloud-workspace'), 'available');
+    assert.equal(location.href, 'https://workspace.example/?workspace=available&run=task-1#details');
+    assert.deepEqual(stub.calls.slice(1).map(call => call.url), ['https://workspace.example/cloud/v1/workspaces/available/runtime/v1/client-status', 'https://workspace.example/cloud/v1/workspaces/available/runtime/v1/runs']);
+  } finally {
+    stub.restore();
+    if (previousMode === undefined) delete process.env.NEXT_PUBLIC_OPEN_HARNESS_CLOUD; else process.env.NEXT_PUBLIC_OPEN_HARNESS_CLOUD = previousMode;
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow); else delete (globalThis as { window?: unknown }).window;
+  }
 }));

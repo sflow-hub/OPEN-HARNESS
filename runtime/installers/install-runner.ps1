@@ -30,7 +30,7 @@ function Get-RunnerFile([string]$Path) {
   Invoke-WebRequest "$Coordinator/v1/install/file?path=$([uri]::EscapeDataString($Path))" -Headers $Headers -OutFile $Destination
 }
 Get-RunnerFile "runtime/runner.mjs"
-@("Dockerfile", "NOTICE.md", "container-init.sh", "cua_compat.py", "coordination.mjs", "inspect_runtime.py", "managed_entry.py", "security-constraints.txt", "apply-security-overrides.py", "extension/open_harness_policy.py", "extension/pyproject.toml") | ForEach-Object { Get-RunnerFile "runtime/hermes/$_" }
+@("Dockerfile", "NOTICE.md", "container-init.sh", "browser_shutdown.py", "cua_compat.py", "coordination.mjs", "gateway-entry.mjs", "model-proxy.mjs", "inspect_runtime.py", "managed_entry.py", "security-constraints.txt", "apply-security-overrides.py", "extension/open_harness_policy.py", "extension/pyproject.toml") | ForEach-Object { Get-RunnerFile "runtime/hermes/$_" }
 
 @("helpers/check-native-platform.sh", "helpers/ubuntu-snapshot.sh", "helpers/check_packages.py", "helpers/curl_http3.py", "helpers/debian_inputs.py", "helpers/debian_origin.py", "helpers/elf_arch.py", "helpers/ohpkg.py", "lock/runtime-inputs.lock.json", "lock/ubuntu-os-packages.txt") | ForEach-Object { Get-RunnerFile "runtime/ubuntu/$_" }
 

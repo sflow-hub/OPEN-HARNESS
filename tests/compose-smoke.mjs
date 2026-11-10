@@ -20,6 +20,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { HERMES_IMAGE as DEFAULT_HERMES_IMAGE } from '../runtime/readiness.ts';
+import { desktopResourcePaths } from '../runtime/computer-runtime.ts';
 import { soakMode } from './helpers/soak-loop.mjs';
 import { runComposeSoak } from './helpers/compose-soak.mjs';
 import { monitorSoakContainers } from './helpers/soak-containers.mjs';
@@ -34,7 +35,7 @@ assert.notEqual(process.env.OPEN_HARNESS_MOCK, '1', 'Compose acceptance must exe
 // every exec unchanged.
 const browserOverrides = process.env.OPEN_HARNESS_BROWSER_OVERRIDES;
 assert.ok(browserOverrides === undefined || browserOverrides === 'emulated-amd64', 'OPEN_HARNESS_BROWSER_OVERRIDES may only be emulated-amd64.');
-const desktopHelper = ['python', '/workspace/shared/compose-desktop.py'];
+const desktopHelper = ['python', '/workspace/exchange/compose-desktop.py'];
 const helperEnvironment = { AGENT_BROWSER_EXECUTABLE_PATH: '/usr/lib/chromium/chromium', AGENT_BROWSER_ARGS: '--force-renderer-accessibility,--disable-gpu,--no-zygote,--disable-dev-shm-usage' };
 let helperOverrides = 0;
 const execOverrides = args => {
@@ -423,25 +424,32 @@ try {
   const peerRun = await api('/v1/runs', 'POST', { agentId: otherId, prompt: 'COMPOSE_SHUTDOWN: Keep the second private desktop alive for isolation checks.' });
   await waitRun(peerRun, { waitForInput: true });
   const nested = (id, args, timeout) => dc(['exec', '-T', 'docker', 'docker', 'exec', ...execOverrides(args), `open-harness-${id}`, ...args], timeout);
+  const desktopPaths = id => desktopResourcePaths(id, '/data', id === agentId ? saved.profile.computer : peerSaved.profile.computer);
+  const nestedDesktop = (id, args, timeout) => dc(['exec', '-T', 'docker', 'docker', 'exec', ...execOverrides(args), '-e', 'AGENT_BROWSER_PROFILE=/tmp/compose-browser-fixture', desktopPaths(id).name, ...args], timeout);
   for (const id of [agentId, otherId]) {
     const peer = id === agentId ? otherId : agentId;
-    const isolation = JSON.parse(await nested(id, ['python', '-c', `import json,os\nfrom pathlib import Path\nassert os.environ['DISPLAY']==':99'\nassert os.environ['DBUS_SESSION_BUS_ADDRESS']=='unix:path=/tmp/open-harness-session-bus'\nfor path in ['/data','/var/run/docker.sock','/run/open-harness-docker/docker.sock','/home/node','/data/agents/${peer}']:\n assert not Path(path).exists(),path\nPath('/workspace/private/desktop-owner.txt').write_text('${id}')\nprint(json.dumps({'privateOwner':'${id}','hostAndOtherAgentDenied':True}))`]));
+    const isolation = JSON.parse(await nested(id, ['python', '-c', `import json,os\nfrom pathlib import Path\nassert not os.environ.get('DISPLAY')\nassert not os.environ.get('DBUS_SESSION_BUS_ADDRESS')\nfor path in ['/tmp/.X11-unix/X99','/workspace/desktop','/data','/var/run/docker.sock','/run/open-harness-docker/docker.sock','/home/node','/data/agents/${peer}']:\n assert not Path(path).exists(),path\nPath('/workspace/private/desktop-owner.txt').write_text('${id}')\nprint(json.dumps({'privateOwner':'${id}','hostAndOtherAgentDenied':True}))`]));
     assert.equal(isolation.privateOwner, id);
     assert.equal(await nested(id, ['cat', '/workspace/shared/compose-verified.txt']), artifact.content.trim());
+    const desktopInfo = JSON.parse(await dc(['exec', '-T', 'docker', 'docker', 'inspect', desktopPaths(id).name]))[0];
+    assert.deepEqual(desktopInfo.Mounts.map(mount => mount.Destination).sort(), ['/workspace/desktop', '/workspace/exchange']);
+    assert.ok(desktopInfo.Mounts.every(mount => mount.Source.startsWith(`/data/computers/${desktopPaths(id).key}/`)));
+    await nestedDesktop(id, ['python', '-c', "import os; from pathlib import Path; assert os.environ['DISPLAY']==':99'; assert not Path('/workspace/private').exists(); assert not Path('/workspace/shared').exists(); assert not Path('/run/open-harness').exists(); assert not Path('/var/run/docker.sock').exists()"]);
   }
   await nested(agentId, ['python', '-c', "from pathlib import Path\nassert Path('/workspace/mounts/folder-1/host-proof.txt').read_text()=='COMPOSE_HOST_729'\ntry: Path('/workspace/mounts/folder-1/denied.txt').write_text('denied')\nexcept OSError: pass\nelse: raise AssertionError('Read-only export was writable')\nPath('/workspace/mounts/folder-2/agent-proof.txt').write_text('COMPOSE_GRANTED_WRITE_729')"]);
   assert.equal(readFileSync(join(writeFolder, 'agent-proof.txt'), 'utf8'), 'COMPOSE_GRANTED_WRITE_729');
   await nested(otherId, ['python', '-c', "from pathlib import Path\nassert not Path('/workspace/mounts/folder-1').exists()\nassert not Path('/workspace/mounts/folder-2').exists()\nassert not Path('/host-folders').exists()"]);
-  await api('/v1/files?scope=shared', 'POST', { name: 'compose-desktop.py', content: readFileSync(join(repository, 'tests/helpers/compose-desktop.py'), 'utf8') });
+  const desktopScript = readFileSync(join(repository, 'tests/helpers/compose-desktop.py'), 'utf8').replaceAll('/workspace/shared/', '/workspace/exchange/');
+  await nodeIn('open-harness', `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(join(desktopPaths(agentId).staging, 'compose-desktop.py'))},${JSON.stringify(desktopScript)});console.log('true');`);
   console.log('Checking real private desktop input, shared files, and isolation between two agents.');
-  const desktopOutput = await nested(agentId, ['python', '/workspace/shared/compose-desktop.py'], 150_000);
+  const desktopOutput = await nestedDesktop(agentId, desktopHelper, 150_000);
   const desktop = JSON.parse(desktopOutput.split('\n').findLast(line => line.startsWith('{') && line.includes('screenshotBytes')));
   assert.equal(desktop.clickReadback, 'CLICK_CONFIRMED_729');
   assert.equal(desktop.typeReadback, 'COMPOSE_DESKTOP_729');
-  assert.match(await nested(agentId, ['xwininfo', '-root', '-tree']), /Compose private desktop proof/);
-  assert.doesNotMatch(await nested(otherId, ['xwininfo', '-root', '-tree']), /Compose private desktop proof/);
-  const screenshot = await api('/v1/files?scope=shared&name=compose-desktop.png');
-  writeFileSync(join(root, 'compose-desktop.png'), Buffer.from(screenshot.content, 'base64'));
+  assert.match(await nestedDesktop(agentId, ['xwininfo', '-root', '-tree']), /Compose private desktop proof/);
+  assert.doesNotMatch(await nestedDesktop(otherId, ['xwininfo', '-root', '-tree']), /Compose private desktop proof/);
+  const screenshot = await nestedDesktop(agentId, ['python', '-c', "import base64;from pathlib import Path;print(base64.b64encode(Path('/workspace/exchange/compose-desktop.png').read_bytes()).decode())"]);
+  writeFileSync(join(root, 'compose-desktop.png'), Buffer.from(screenshot, 'base64'));
   const agentContainer = JSON.parse(await dc(['exec', '-T', 'docker', 'docker', 'inspect', 'open-harness-compose-smoke']))[0];
   const agentMounts = agentContainer.Mounts.map(mount => ({ source: mount.Source, destination: mount.Destination, type: mount.Type, writable: mount.RW })).sort((a, b) => a.destination.localeCompare(b.destination));
   // The exact source/destination set also excludes the Docker control socket,
@@ -470,6 +478,7 @@ try {
   assert.equal(stopped.State.Running, false); assert.equal(stopped.State.ExitCode, 0, 'The supervisor must finish graceful cleanup before Docker kills it.');
   assert.equal(await nestedRunning(), false, 'Coordinator shutdown must stop its real nested agent before DinD stops.');
   assert.equal(await dc(['exec', '-T', 'docker', 'docker', 'inspect', '-f', '{{.State.Running}}', `open-harness-${otherId}`]), 'false');
+  for (const id of [agentId, otherId]) assert.equal(await dc(['exec', '-T', 'docker', 'docker', 'inspect', '-f', '{{.State.Running}}', desktopPaths(id).name]), 'false');
   await dc(['stop', '--timeout', '30', 'fixture', 'docker'], 70_000);
   const oldVolume = config.volumes['harness-data'].name;
   const beforeManifest = JSON.parse(await volumeManifest(oldVolume));
@@ -517,7 +526,7 @@ try {
   assert.ok(restoredRequests.length && restoredRequests.every(request => request.fixtureCredential === 'rotated'), 'Real work after restore must use the saved rotated credential.');
   const restoredDesktopRun = await api('/v1/runs', 'POST', { agentId, prompt: 'COMPOSE_SHUTDOWN: Keep the restored private desktop alive for input verification.' });
   await waitRun(restoredDesktopRun, { waitForInput: true });
-  const restoredDesktopOutput = await nested(agentId, ['python', '/workspace/shared/compose-desktop.py'], 150_000);
+  const restoredDesktopOutput = await nestedDesktop(agentId, desktopHelper, 150_000);
   const restoredDesktop = JSON.parse(restoredDesktopOutput.split('\n').findLast(line => line.startsWith('{') && line.includes('screenshotBytes')));
   assert.equal(restoredDesktop.clickReadback, desktop.clickReadback); assert.equal(restoredDesktop.typeReadback, desktop.typeReadback);
   await api(`/v1/runs/${restoredDesktopRun.id}/stop`, 'POST', {});

@@ -1,0 +1,12 @@
+{$OPEN_HARNESS_PUBLIC_HOST} {
+  @control path /auth/* /cloud/* /relay/* /models/* /billing/* /connections/* /health/*
+  handle @control {
+    reverse_proxy control-plane:4400
+  }
+  handle {
+    reverse_proxy dashboard:3000
+  }
+}
+{$OPEN_HARNESS_IDENTITY_HOST} {
+  reverse_proxy keycloak:8080
+}

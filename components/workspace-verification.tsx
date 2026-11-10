@@ -1,0 +1,12 @@
+'use client';
+import {useCallback,useEffect,useState} from 'react';
+import type {ControlClient} from '../lib/control-client';
+import type {OnboardingStatus} from '../lib/onboarding';
+import type {SetupJob} from '../lib/product';
+type Readiness=OnboardingStatus&{taskVerified:boolean;setupJobs:SetupJob[]};
+export default function WorkspaceVerification({client}:{client:ControlClient}){
+  const [value,setValue]=useState<Readiness>(),[message,setMessage]=useState(''),[busy,setBusy]=useState(false);
+  const refresh=useCallback(()=>client.request<Readiness>('/v1/readiness').then(setValue),[client]);useEffect(()=>{let live=true,timer:ReturnType<typeof setTimeout>;const poll=async()=>{try{const next=await client.request<Readiness>('/v1/readiness');if(live)setValue(next);}catch(error){if(live)setMessage(error instanceof Error?error.message:'Could not check setup.');}if(live)timer=setTimeout(poll,5000);};void poll();return()=>{live=false;clearTimeout(timer);};},[client]);
+  const perform=async(kind:string)=>{setBusy(true);setMessage('');try{await client.request('/v1/setup/jobs',{method:'POST',body:JSON.stringify({kind})});await refresh();}catch(error){setMessage(error instanceof Error?error.message:'Could not start this setup check.');}finally{setBusy(false);}};
+  return <details className="assistant-card" open={value?.taskVerified===false}><summary>{value?.taskVerified?'Workspace setup verified':'Finish and verify workspace setup'}</summary><p>Setup is complete after a real model task writes a unique file and a separate readback matches it. Fixture results never count as live verification. Choose model access first; the check may use included usage or your provider key.</p>{value?.checks.map(check=><div key={check.id}><strong>{check.label} · {check.state}</strong><p>{check.detail}</p>{check.action&&<button disabled={busy} onClick={()=>void perform(check.action!)}>{check.actionLabel}</button>}{check.helpUrl&&<a href={check.helpUrl} target="_blank" rel="noreferrer">Setup instructions</a>}</div>)}<button disabled={busy||value?.setupJobs.some(job=>job.kind==='verify-task'&&['queued','running'].includes(job.state))} onClick={()=>void perform('verify-task')}>Run real file verification</button>{value?.setupJobs.filter(job=>job.kind==='verify-task'||!['failed','interrupted'].includes(job.state)||value.checks.some(check=>check.action===job.kind)).slice(0,3).map(job=><p key={job.id}>{job.state} · {job.detail}</p>)}{message&&<p role="status">{message}</p>}</details>;
+}

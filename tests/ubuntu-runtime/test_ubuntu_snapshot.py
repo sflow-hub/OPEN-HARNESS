@@ -18,6 +18,10 @@ BASE = {'libc6': '2.43-2ubuntu2.4', 'libssl3t64': '3.5.5-1ubuntu3.5', 'openssl-p
 LIVE = {'libssl3t64': '3.5.5-1ubuntu3.6', 'openssl-provider-legacy': '3.5.5-1ubuntu3.6', 'openssl': '3.5.5-1ubuntu3.6'}
 INDEX = ' 500 {uri} {suite}/main amd64 Packages\n     release v=26.04,o=Ubuntu,a={suite},n=resolute,l=Ubuntu,c=main,b=amd64\n'
 SUITES = ('resolute', 'resolute-updates', 'resolute-backports', 'resolute-security')
+SOURCES = ('Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports/\nSuites: resolute resolute-updates resolute-backports\n'
+           'Components: main universe restricted multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n'
+           'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports/\nSuites: resolute-security\n'
+           'Components: main universe restricted multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n')
 
 
 def policy(uri=f'https://snapshot.ubuntu.com/ubuntu/{SNAPSHOT}', extra=''):
@@ -42,7 +46,11 @@ elif 'update' in args:
     code = state['update'].get('snapshot' if snapshot else 'live', 0)
 elif 'install' in args:
     options = {i + 1 for i, arg in enumerate(args) if arg == '-o'}
-    for name, _, version in (arg.partition('=') for i, arg in enumerate(args) if '=' in arg and i not in options):
+    for name, separator, version in (arg.partition('=') for i, arg in enumerate(args) if ('=' in arg or arg == 'ca-certificates') and i not in options):
+        if name == 'ca-certificates' and not snapshot:
+            if separator and version != state['live_ca']:
+                sys.exit(100)
+            version = state['live_ca']
         if not (snapshot and name in state['ignore']):
             state['installed'][name] = version
         if name == 'ca-certificates' and not snapshot:
@@ -63,14 +71,17 @@ class SnapshotHelper(unittest.TestCase):
             (tools / name).write_text(f'#!{sys.executable}\n{FAKE}')
             (tools / name).chmod(0o755)
         (self.dir / 'etc/apt.conf.d').mkdir(parents=True)
+        (self.dir / 'etc/sources.list.d').mkdir()
         self.conf = self.dir / 'etc/apt.conf.d/99-open-harness-snapshot'
+        self.sources = self.dir / 'etc/sources.list.d/ubuntu.sources'
         self.env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', OH_APT_ETC=str(self.dir / 'etc'),
                         FAKE_APT_STATE=str(self.dir / 'state.json'))
 
-    def run_helper(self, snapshot=SNAPSHOT, pins=PINS, live=LIVE, index=None, update=None, ignore=()):
+    def run_helper(self, snapshot=SNAPSHOT, pins=PINS, live=LIVE, index=None, update=None, ignore=(), live_ca='20260601~26.04.2', sources=SOURCES):
         (self.dir / 'pins.txt').write_text(pins)
+        self.sources.write_text(sources)
         (self.dir / 'state.json').write_text(json.dumps({
-            'installed': BASE, 'live': live, 'policy': index or policy(), 'update': update or {}, 'ignore': list(ignore),
+            'installed': BASE, 'live': live, 'live_ca': live_ca, 'policy': index or policy(), 'update': update or {}, 'ignore': list(ignore),
             'calls': []}))
         result = subprocess.run(['sh', str(HELPER), snapshot, str(self.dir / 'pins.txt')],
                                 capture_output=True, text=True, env=self.env)
@@ -80,21 +91,36 @@ class SnapshotHelper(unittest.TestCase):
     def test_bootstrap_changes_are_reinstalled_from_the_snapshot_exactly(self):
         result, state, apt = self.run_helper()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.conf.read_text(), f'APT::Snapshot "{SNAPSHOT}";\nAPT::Update::Error-Mode "any";\n')
+        self.assertEqual(self.conf.read_text(), 'APT::Update::Error-Mode "any";\n')
+        self.assertEqual(self.sources.read_text(), SOURCES.replace('http://ports.ubuntu.com/ubuntu-ports/',
+                         f'https://snapshot.ubuntu.com/ubuntu/{SNAPSHOT}/'))
         self.assertEqual(apt, [
             ['-o', 'Acquire::Retries=0', '-o', 'APT::Update::Error-Mode=any', 'update'],
-            ['install', '-y', '--no-install-recommends', CA],
+            ['install', '-y', '--no-install-recommends', 'ca-certificates'],
             ['-o', 'Acquire::Retries=0', 'update'],
-            ['install', '-y', '--no-install-recommends', '--allow-downgrades', 'libssl3t64=3.5.5-1ubuntu3.5',
+            ['install', '-y', '--no-install-recommends', '--allow-downgrades', CA, 'libssl3t64=3.5.5-1ubuntu3.5',
              'openssl-provider-legacy=3.5.5-1ubuntu3.5', 'openssl=3.5.5-1ubuntu3.5']])
         self.assertEqual(state['installed'], {**BASE, 'ca-certificates': '20260601~26.04.1', 'openssl': '3.5.5-1ubuntu3.5'})
-        self.assertIn(f'APT::Snapshot {SNAPSHOT}; 3 package(s) reinstalled', result.stdout)
+        self.assertIn(f'snapshot {SNAPSHOT}; 4 package(s) reinstalled', result.stdout)
 
     def test_nothing_is_reinstalled_when_the_bootstrap_only_adds_its_pin(self):
-        result, state, apt = self.run_helper(live={})
+        result, state, apt = self.run_helper(live={}, live_ca=CA.split('=', 1)[1])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(apt), 3)
         self.assertEqual(state['installed'], {**BASE, 'ca-certificates': '20260601~26.04.1'})
+
+    def test_amd64_archive_and_security_sources_are_pinned_directly(self):
+        sources = SOURCES.replace('http://ports.ubuntu.com/ubuntu-ports/', 'http://archive.ubuntu.com/ubuntu/', 1)
+        sources = sources.replace('http://ports.ubuntu.com/ubuntu-ports/', 'http://security.ubuntu.com/ubuntu/')
+        result, _, _ = self.run_helper(sources=sources)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.sources.read_text(), SOURCES.replace('http://ports.ubuntu.com/ubuntu-ports/',
+                         f'https://snapshot.ubuntu.com/ubuntu/{SNAPSHOT}/'))
+
+    def test_foreign_source_uri_is_refused_before_bootstrap(self):
+        result, _, apt = self.run_helper(sources=SOURCES.replace('ports.ubuntu.com', 'unexpected.invalid'))
+        self.assertEqual((result.returncode, apt), (1, []))
+        self.assertIn('unsupported Ubuntu source URI', result.stderr)
 
     def test_indexes_outside_the_snapshot_are_refused_before_the_repair(self):
         live_index = INDEX.format(uri='http://archive.ubuntu.com/ubuntu', suite='resolute')
@@ -122,6 +148,12 @@ class SnapshotHelper(unittest.TestCase):
         result, state, _ = self.run_helper(ignore=('libssl3t64',))
         self.assertEqual(result.returncode, 1)
         self.assertEqual(state['installed']['libssl3t64'], '3.5.5-1ubuntu3.6')
+        self.assertIn('not the base state plus the pins', result.stderr)
+
+    def test_rotated_live_ca_must_be_restored_to_its_snapshot_pin(self):
+        result, state, _ = self.run_helper(ignore=('ca-certificates',))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(state['installed']['ca-certificates'], '20260601~26.04.2')
         self.assertIn('not the base state plus the pins', result.stderr)
 
     def test_failed_snapshot_update_stops_the_step(self):

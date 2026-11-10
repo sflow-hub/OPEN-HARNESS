@@ -1,0 +1,13 @@
+.panel { min-width: 0; }
+.panel > p { max-width: 720px; line-height: 1.6; color: var(--muted); }
+.panel label { display: grid; gap: 8px; margin: 0 0 18px; }
+.panel input:not([type=checkbox]), .panel select, .panel textarea { width: 100%; min-width: 0; }
+.panel textarea { resize: vertical; }
+.panel fieldset { min-width: 0; margin: 0 0 18px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.panel fieldset label { align-items: center; }
+.panel fieldset input { accent-color: var(--accent); }
+.panel legend { padding: 0 6px; color: var(--muted); }
+.form { max-width: 640px; }
+.panel button[aria-pressed=true] { background: var(--accent); color: var(--bg); }
+.panel article p { line-height: 1.6; margin: 8px 0 0; }
+.panel h2 { margin: 24px 0 16px; }

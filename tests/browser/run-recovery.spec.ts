@@ -18,7 +18,8 @@ async function seed(request: APIRequestContext) {
   await request.post(control + '/v1/agents/sync', { headers, data: { agents: initialWorkspace.agents } });
   for (const agent of initialWorkspace.agents) {
     const { profile } = await (await request.get(control + `/v1/agents/${agent.id}/profile`, { headers })).json();
-    await request.put(control + `/v1/agents/${agent.id}/profile`, { headers, data: { ...draftProfile(agent), revision: profile.revision } });
+    const saved=await request.put(control + `/v1/agents/${agent.id}/profile`, { headers, data: { ...draftProfile(agent), revision: profile.revision } });
+    expect(saved.ok(),await saved.text()).toBeTruthy();
   }
 }
 // The coordinator is shared by the whole suite, so a run one spec leaves waiting would be
@@ -74,7 +75,7 @@ test('sends a task and shows the agent working, then its reply', async ({ page, 
   // The prompt is in the transcript before the coordinator has answered, and the reply
   // placeholder says the agent is on it.
   await expect(page.locator('.transcript .message.user')).toContainText('Summarize my notes');
-  await expect(page.locator('.transcript .working')).toContainText(/Working on it|Queued/);
+  await expect(page.locator('.transcript .working')).toContainText('Thinking…');
   await expect(page.getByRole('button', { name: 'Stop run' })).toBeVisible();
   await expect(replies(page).last()).toContainText(MOCK_REPLY, { timeout: 15_000 });
   // Finished: the composer is back to plain sending.
@@ -124,8 +125,8 @@ test('a follow-up queued behind a running task is shown, then followed to its ow
   await page.getByRole('button', { name: 'Send followup' }).click();
   // The follow-up is in the transcript straight away, waiting its turn.
   await expect(page.locator('.transcript .message.user').nth(1)).toContainText('Then draft the announcement');
-  await expect(page.locator('.transcript .working').last()).toContainText('Queued behind the current task');
-  await expect(page.getByRole('status')).toContainText('Follow-up queued');
+  await expect(page.locator('.transcript .working').last()).toContainText('Queued…');
+  await expect(page.getByRole('status').filter({ hasText: 'Follow-up queued' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Approve once' }).click();
   // Both runs finish, each into its own reply, in order.

@@ -3218,6 +3218,41 @@ The fresh full-soak preflight passed with 44,634,062,848 bytes free versus its 4
 This remains **emulated AMD64 with browser overrides and a scripted provider**. Clean-host real-provider acceptance, published engine-input manifest digests for both architectures, and the rejected protected release-workflow gate remain open. No publication or protected workflow mutation was performed.
 
 
+### 2026-10-01 04:50 UTC — full-soak monitoring connection unavailable
+
+The authorized SSH helper timed out connecting to `192.168.1.149:22`; a second attempt bounded at 25 seconds also returned no remote output. The last successful check at about `2026-10-01T04:18:40Z` recorded 54 completed cycles, cycle 55 started, no failure records, and 29,401,317,376 bytes free. Neither the full-soak attempt nor its window had a final receipt then. The current result and cleanup state are **unknown**, not a pass or failure inferred from connectivity. No signals, recovery mutations, replacement window, unrelated Docker work, or protected workflow changes were made. The follow-up remains active to inspect the same window when the authorized connection returns. This remains emulated AMD64 with browser overrides and a scripted provider; release gates remain open.
+
+
+### 2026-10-01 05:18 UTC — monitoring connection restored
+
+The authorized SSH route is reachable again. The same full-soak journal records 66 completed cycles and a fresh resource sample at `2026-10-01T05:17:48Z`, with no failure records, unreadable lines or partial last line. The controller reports 29,397,573,632 bytes free; the original controller and fixture are alive. No final attempt or window receipt exists yet, so the 24-hour gate remains running and unpassed. No recovery or replacement run was needed. Scheduled monitoring continues for this emulated AMD64 run with browser overrides and a scripted provider.
+
+
+### 2026-10-01 09:19 UTC — monitoring connection unavailable again
+
+Two authorized SSH-helper attempts each timed out after 25 seconds without remote output. The last successful check recorded 108 completed cycles, a resource record at `2026-10-01T08:48:38Z`, no failure records and 29,374,066,688 bytes free. Final receipts were absent then. Current full-soak result and cleanup are unknown; connectivity alone establishes neither failure nor success. No runner mutation, stop signal or replacement window was attempted. The follow-up remains active on the same emulated AMD64 window with browser overrides and a scripted provider.
+
+
+### 2026-10-01 09:48 UTC — monitoring connection restored again
+
+The authorized SSH helper is reachable. The unchanged full-soak attempt records 120 completed cycles, a fresh resource sample at `2026-10-01T09:48:34Z`, no failure records and no unreadable or partial journal lines. Latest controller free space is 29,370,343,424 bytes. The original controller and fixture remain alive; neither final receipt exists. This remains an in-progress emulated AMD64 soak with browser overrides and a scripted provider. No runner mutation or replacement attempt was needed; scheduled monitoring continues.
+
+
+### 2026-10-01 11:48 UTC — planned midpoint restart completed
+
+The same full-soak journal reached 144 completed cycles and started its one planned restart at `2026-10-01T11:48:39.486Z`, after 43,202,166 ms of loop time. Root inspected the actual journal events: SIGTERM (`15`), exit code `0`, start and restart for the same coordinator container. `restart-complete` arrived at `11:48:47.304Z`, recording the completed run, served history and browser session preserved, with images and containers unchanged. The next agent run was created immediately afterwards. Latest controller free space was 29,362,630,656 bytes. No final receipt exists; this midpoint check is not a full-soak pass. Monitoring continues for emulated AMD64 with browser overrides and a scripted provider; no runner mutation was performed.
+
+
+### 2026-10-01 23:49 UTC — full 24-hour emulated soak passed and independently verified
+
+The full window `amd64-soak-24h-window-20260930-v2` and attempt `amd64-qemu-v2-d9e73374/soak-with-browser-overrides-1` both completed successfully at `2026-10-01T23:49:37Z`. Root independently reran the reviewed packet's evidence verifier against the saved journal and all four fixture evidence files within the recorded attempt time bounds; its complete output exactly matches the receipt. The unchanged policy qualified **289 alternating-agent cycles over 86,453,210 ms (24 hours 53 seconds)**, with 1,962 resource samples and one planned clean SIGTERM/exit-0 coordinator restart. The journal has 2,839 valid records. Cycle times were 44.85–83.49 seconds (median 49.48 seconds), maximum observation gap 83.49 seconds, and maximum wall/monotonic clock divergence 1.43 ms. The controller's minimum observed free space was 29,255,176,192 bytes, above the unchanged running floor. The Compose/empty-volume restore preparation and final fixture cleanup returned zero. The reviewed emulation timing recorded six retried reads and two reads over the native timing budget; this does not establish native/default timing behavior.
+
+All 151 reviewed packet payload hashes still match `SHA256SUMS` digest `c1ea25f2b88aa0d5f020a4326da9ead4781e0cfe312ff9ea1465bb5a8780f47b`. Root independently recomputed the complete staged source manifest as `301df52c21b843949c7de2fba8b78efcf1ef971827cf7d57cb98d5522e4abb7c`, verified the adopted session pins `0ee5c565b386a1de9cb5809984bc511c3b421705ec6b09738e846eb62bad3ca2`, and checked live image IDs and architectures: coordinator `sha256:ca82276ec2e5270c0b68e096430c15ba8b1e36ae4c78846f1947c722d82b8ff7` (AMD64), Hermes `sha256:88cfa852e05a7aa7feb6455b645a6fff4118bb99f57a1499b36897e5bfd06bfb` (AMD64), and accepted private engine `sha256:63004ab1782ee488ab8547b801c1beb186f86925d566cc8fd25f5d12609c020e` (ARM64). The attempt receipt SHA-256 is `d4c2d401eca48303831a1e2656f9d91a5fbf27965a4b58d083946d4a179934ab`; the window receipt SHA-256 is `d67f3d7ab7980775e3ca52d90f2cfff40b091398f3fbc8e78aaf96d7e4abaa2f`.
+
+Root compared before/after binfmt evidence byte-for-byte and independently compared the live kernel inventory with the original. The temporary entry, interpreter and interpreter directory are absent; Docker has zero remaining containers. The window journal records packet exit 0, successful rollback and final `ok: true`. No recovery action or replacement run was needed. Preserved the complete window, attempt and `sk1` fixture evidence together with session and packet provenance privately at `/Users/codeanddev/.local/state/open-harness-verification/emulated-soak-20260930/soak-24h-v2-evidence.tar.gz` (3,396,497 bytes; SHA-256 `3e84150ada0685dd3c008127a2f8fa9fc7711922075f8a41c49bb06283f9d1ce`). Every one of its 53 regular files was read back and matched its Ubuntu SHA-256; originals remain intact. The accompanying private `soak-24h-v2-archive-verification.json` records those hashes.
+
+This closes the **24-hour emulated AMD64 soak with browser overrides and a scripted provider** for this exact accepted source/image set. It is not native AMD64, default-browser or paid-model reasoning evidence. Clean-host real-provider acceptance, published engine-input manifest digests for both architectures, and the previously rejected protected release-workflow gate remain open; **MVP is not release-ready**. No publication or protected workflow mutation occurred. The `finish-open-harness-soak` follow-up is now paused after this verified result; the app confirmed status `PAUSED`.
+
 ## October 3, 2026 — local launch-request audit (2026-10-03 13:40 MDT)
 
 The current checkout includes Claude's manual-approval delivery `81a41a8`.
@@ -3371,3 +3406,1027 @@ Private local evidence is retained in `work/release-review-20261003/`:
 Claude was asked for independent review through COORDINATION.md. Runtime exercise,
 publication, clean-host acceptance/recovery and final soak remain blocked/pending;
 the September 30 final soak evidence remains unverified.
+
+October 29 persistent teammate workflows and delivery
+----------------------------------------------------
+
+Implemented in the working tree: private-server setup and one-use phone pairing,
+Web Push delivery, private-desktop observation and human takeover, redacted
+demonstration drafts, reviewed/tested workflows and skill publication, calendar
+and scoped webhook routines, team group conversations, opt-in shared browser
+profiles, bounded long polling, phase timings, and evidence-backed outcome review.
+The operator guide is `docs/TEAMMATE_WORKFLOWS.md`.
+
+Validation on this macOS checkout with Node v26.10.0:
+
+- `npm test`: 327 tests, 319 passed, eight skipped, zero failures (21.9 seconds).
+  Coverage includes workflow revision/test gates and DST behavior, webhook
+  authentication/idempotency, group dispatch rollback and restart reconciliation,
+  human-ownership/continuation recovery, notification persistence and retry,
+  credential revocation during a held runner poll, bounded desktop receipts,
+  and expired desktop input. The shipped Python desktop helper is exercised
+  with a fake clock/driver to verify that input expiring during capture never runs.
+- `npm run build`: passed, including standalone React dependency preparation.
+- `npx playwright test`: 194 passed across desktop and emulated iPhone layouts
+  (3.5 minutes). This includes phone pairing, notification setup, desktop controls,
+  shared-browser consent, workflow review/test/publication, groups and outcome
+  review. Mobile toolbar overflow and a sharing-save draft race were corrected.
+- Strict TypeScript compilation of all 142 canonical TypeScript inputs passed.
+  ESLint over 175 canonical source inputs passed with zero errors and five
+  pre-existing warnings in the real-upgrade fixture/smoke scripts.
+- `npm run runner:bundle` regenerated the committed standalone runner;
+  `git diff --check` passed.
+
+The ordinary `npm run typecheck` and `npm run lint` commands cannot complete on
+this shared-folder checkout: existing duplicate entries `components/agent-settings
+2.tsx`, `tests/runner-credential.test 2.ts`, and `tests/runtime-contract.test 2.ts`
+are enumerated but cannot be read. TypeScript reports TS6053 and ESLint reports
+an operating-system read error. The checks above used explicit canonical source
+lists; the duplicate entries and repository check configuration were not altered.
+
+Node/browser tests use the mock runtime or scripted fixtures. There is no Docker
+CLI on this host, so no new real container, shared Chromium login, remote desktop,
+or pinned-image acceptance is claimed. An opt-in real desktop/control/session
+smoke test was added to the runtime CI workflow but was not executed here. Actual
+iOS push delivery, a deployed private server, paid-model workflow quality, and
+comparative Grok Bot latency remain unverified. These changes do not resolve or
+replace the earlier image-security and soak evidence above. No cloud deployment,
+publication, paid inference, or runtime-image refresh was performed.
+
+November 2 complete-product implementation candidate
+---------------------------------------------------
+
+Implemented shared workspace identity and human roles, durable setup/readiness,
+the primary assistant and responsibilities, private app connections and scoped
+action review, teaching/repair drafts, checkpoints/reconciliation, runtime leases
+and preparation, desktop streaming, model/usage and billing contracts, encrypted
+migration, native client source and an evidence-gated release acceptance runner.
+Hermes remains behind its gateway adapter; its reasoning loop was not changed.
+The implementation/limits record is `docs/PRODUCT_IMPLEMENTATION_STATUS.md`.
+
+Security-sensitive changes include signed, short-lived human context forwarded by
+an authenticated outbound relay, separate browser/native sessions, human roles
+distinct from agent teams, a separate connection credential vault, stable provider
+identity checks on reconnection, reviewed connector grants, independent review of
+unclassified shell/browser actions, controller-bound desktop input, and run-bound
+platform model leases. Cloud clients receive no coordinator operator token, and
+platform model-provider keys remain outside agent containers. Authenticated shared
+execution rejects runners that cannot renew human actor authorization. These
+contracts passed fixture tests; actual deployed isolation remains an open gate.
+
+Validation on macOS:
+
+- Node v26.10.0, `npm test`: 357 tests, 349 passed, eight skipped, no failures
+  (22.2 seconds). Tests exercise mock Hermes/scripted providers, temporary SQLite
+  databases and PGlite. They cover human authorization, private connections,
+  immutable actions and uncertain effects, bounded tested grants, metering,
+  billing adjustments, migration and process/transport recovery.
+- A separate 368-file clean source checkout installed the lockfile with
+  `npm ci --ignore-scripts` using a temporary cache. After updating it to the
+  final source, the pinned Node v22.13.0 passed the same 357-test suite: 349 passed,
+  eight skipped, no failures or cancellations (23.1 seconds). Its typecheck,
+  vinext production build and standalone preparation also passed. The original
+  checkout's dirty changes and Git state were preserved.
+- Ordinary `npm run typecheck` passed. Ordinary `npm run lint` has zero errors and
+  five existing warnings in real-upgrade fixture/smoke scripts. The unreadable
+  duplicate shared-folder names described in the October 29 record are excluded,
+  together with generated output and the separate native subproject; none was
+  removed. The native subproject has its own typecheck.
+- `npm run build` passed, including standalone React dependency preparation.
+  The full Playwright run passed 196/196 checks in 4.3 minutes across desktop and
+  emulated iPhone layouts. Screenshot inspection also caught and corrected
+  assistant-card contrast, mobile select overflow and excessive initial history.
+  Fixture onboarding tests do not satisfy real-model setup verification.
+- `python3 tests/policy-extension-test.py`: nine passed. The runtime contract is
+  now 8. `npm run runner:bundle` regenerated the committed runner.
+- The final packaged coordinator, bundled with its dependencies and copied runtime
+  assets, started outside the source checkout on Node 22.13.0 and completed a mock
+  task without repository node_modules. Its test server and temporary state were
+  closed after the check.
+- Mobile typecheck and Expo iOS/Android JavaScript exports passed. These are not
+  signed native builds, native SDK-linking results or physical-device evidence.
+- Root npm audit reported 19 moderate advisories, zero high or critical.
+  `git diff --check` passed. Dependency audit is separate from image scanning.
+
+The Docker CLI was discovered inside Docker.app, but no daemon is reachable on
+this host. There is no new real container/image/desktop acceptance. The earlier
+image-security failures and unverified soak are neither resolved nor replaced by
+these checks. Contract-8 runtime images require fresh build, scan and acceptance
+receipts under the existing gates; no accepted release-image lock was fabricated.
+
+No production provider was selected or adapter implemented. Public managed
+provisioning remains gated. Real PostgreSQL/OIDC deployment, Google/GitHub
+registrations and Gmail verification, model rates, billing/push/signing credentials,
+dedicated accounts and physical devices remain deployment inputs. Tauri's
+dedicated managed-account sign-in still needs implementation and acceptance.
+The 180 live workflow trials, external-effect audits, fault injection, VM isolation,
+encrypted S3/fresh-host restoration, latency measurements, physical installation,
+notifications, updates/rollback, private alpha and invite-only beta remain required.
+No cloud deployment, paid inference, real third-party writes, publication, signed
+distribution or comparative product-latency acceptance was performed.
+
+November 2 Linux VM verification attempt
+---------------------------------------
+
+Tested the prepared native ARM64 Ubuntu VM through SSH, with Node 22.23.3,
+Python 3.12.3, Docker 29.8.1 and Compose 5.5.1. All 327 selected application,
+runtime, test and configuration source hashes matched the current working tree
+before and after testing. The native checkout was
+`/home/developer/open-harness-test-20261102-exrJd8`; evidence is preserved under
+`/home/developer/open-harness-evidence/20261102-linux-u3gaZZ` and copied locally
+to `/tmp/open-harness-linux-evidence-20261102/evidence.tar.gz`.
+
+- `npm test`: 357 tests, 354 passed, three skipped, zero failures. The runner
+  lifecycle test that intermittently failed during the earlier macOS run passed.
+- Typecheck, production build and standalone preparation passed. Lint passed
+  with the same five existing warnings. Python policy tests passed nine of nine.
+- Full Playwright suite: 196 passed across desktop and emulated phone layouts
+  in 4.4 minutes. This suite uses the mocked Hermes runtime.
+- A separate production dashboard and coordinator were started with
+  `OPEN_HARNESS_MOCK=0`, isolated state and no model credentials. Desktop and
+  mobile Chromium checks used real HTTP responses, observed no JavaScript
+  errors, and confirmed that onboarding disables Continue while runtime setup
+  is incomplete. Screenshots and readiness responses are in the evidence.
+- Python Ubuntu runtime suite: 162 tests, 31 evidence-dependent skips and
+  36 failing assertions/subtests. Release-gate fixtures still identify their
+  synthetic image as runtime contract 7 while readiness requires contract 8.
+- Actual `npm run harness:setup` failed during the native ARM64 image build:
+  the signed live Ubuntu archive no longer supplies the bootstrap pin
+  `ca-certificates=20260601~26.04.1`. `ubuntu-snapshot.sh` requests that version
+  before switching APT to the fixed snapshot; Dockerfile curl-builder exits 100.
+  No contract-8 runtime image was produced. The real Hermes smoke consequently
+  failed its initial image inspection. Existing contract-7 AMD64 images were
+  not substituted or relabeled.
+- Compose configuration validation passed with `runtimeExecuted:false`.
+  Real workflow, runner, sandbox, Chromium desktop/control and Compose execution
+  remain blocked by the missing current image. No test containers remained.
+
+This run establishes Linux app/build/browser behavior and an actual image-build
+blocker, not real agent execution or release acceptance. It does not replace the
+earlier image-security findings. No application code, package pins, trust checks
+or security gates were changed; no paid inference or external writes occurred.
+
+November 2 Linux runtime launch repair and real acceptance
+--------------------------------------------------------
+
+Resolved the setup failure above. The temporary CA bootstrap now uses the
+available package from the signed Ubuntu archive, then restores the exact locked
+CA/OpenSSL versions from the snapshot. Ubuntu source URLs are rewritten to the
+fixed snapshot while preserving their suites, components and archive keyring;
+foreign source URIs are rejected. APT's automatic origin-based snapshot routing
+could fetch live indexes after layer cleanup, so it is no longer used. A real
+empty-index diagnostic confirmed the locked curl dependency and all package
+indexes resolve only from the signed snapshot. Package pins and signature checks
+were not relaxed.
+
+Real testing also exposed and repaired the private socket's outdated endpoint
+allowlist, which rejected workspace/group and scoped review/receipt requests.
+Managed grants now carry the agent-scoped review transport independently of MCP
+tool enablement; profiles without coordination tools can request reviews without
+enabling additional tools. Agent ownership, token, active-run and tool-grant
+checks remain enforced. This changes private coordination transport and handling
+of scoped agent credentials, not dashboard/bootstrap authority.
+
+Desktop control now redirects driver output to a file-backed null stream so
+subprocess startup can obtain a file descriptor, and captures an active window
+before pointer input. Desktop screenshot coordinates are translated to that
+window, with out-of-window clicks refused. Redaction and post-capture expiry
+checks remain in place. Onboarding and workspace readiness hide failed setup
+history after its check is repaired, while retaining successful completion
+messages. Runtime-contract fixtures now identify contract 8. The standalone
+runner was regenerated from source.
+
+Final checks on the same native ARM64 Linux VM:
+
+- Runtime setup and the image's package, curl HTTP/3, native architecture/linkage
+  and Debian-browser inventory verification passed. Final contract-8 image:
+  `sha256:71101541c2decfd0e0a548b001ad4b0f054d88e1933f8c56b818e97da32c67ed`.
+- Node: 359 tests, 356 passed, three skipped, no failures or cancellations.
+  Typecheck, production build and standalone preparation passed; lint has zero
+  errors and the same five existing warnings.
+- Python Ubuntu runtime suite: 165 tests, 31 historical-evidence skips, no
+  failures. Policy middleware tests: ten passed. Desktop helper regressions:
+  four passed, including file-descriptor startup, expiry and coordinate handling.
+- Playwright: 198 passed across desktop and emulated phone layouts in 4.6
+  minutes, including the new failed-setup recovery regression. These tests use
+  mocked Hermes; separate real production UI checks below do not.
+- All six real smoke fixtures passed: Hermes gateway/tool loop, persistent
+  workflows, sandbox, private desktop, desktop control and installed runner.
+  Actual effects include file creation, clarification, authenticated task MCP,
+  approval denial/approval, memory/skill persistence, team delegation, scheduled
+  dispatch across coordinator restart, eight sandbox checks, screenshot/click/
+  type, shared-browser persistence and private-browser isolation, encrypted
+  runner credentials, restart/context/event replay and revocation. Fixtures use
+  scripted local providers, establishing real tool/transport behavior rather
+  than model reasoning or paid-provider quality.
+- The real production app was restarted with mock mode disabled after confirming
+  no active user task. The existing workspace and setup-job history were retained.
+  Doctor reports all checks ready, including private desktop and data sharing.
+  Actual desktop/mobile Chromium onboarding shows runtime ready and Continue
+  enabled, with no JavaScript errors. No model key was installed and the live
+  workspace's real file-verification gate was not fabricated or bypassed.
+
+Evidence is retained at
+`/home/developer/open-harness-evidence/20261102-runtime-repair-ymuNlO`. Automatic
+approval review rejected downloading a broad evidence archive because it could
+include sensitive workspace data; that archive was not copied locally. Seventeen
+repair source files were hash-matched between the working tree and Linux. Earlier
+failed attempts are retained alongside final results. One intermediate Node/
+browser overlap used a conflicting test port; final runs used separate ports and
+passed. Three Mac metadata files introduced by transfer were removed only from
+the isolated Linux checkout. No smoke containers or installed test runner service
+remained; the user-facing app remains running.
+
+Image security scanning, release publication, long soak, physical devices, live
+third-party accounts and paid-model quality were not established by this repair.
+Earlier security findings remain separate release gates. No paid inference,
+external account writes, release publication or signed distribution occurred.
+## Codex OAuth integration — November 3, 2026
+
+Added the separate `openai-codex` provider to setup, workspace settings, the
+credential store, and agent model selection. OAuth follows the documented OpenAI
+OSS registration flow: stable opaque host identity, fresh state/nonce/PKCE,
+issued-client reuse, signed ID-token validation, explicit ChatGPT plan scope,
+protected session storage, serialized refresh, and revocation on disconnect.
+The selected workspace model changes only after a completed live model test.
+
+Security boundary: account access/refresh/ID tokens stay in the coordinator vault
+or restricted secret file. Generated profiles, MCP environment variables, runner
+dispatch, browser metadata, diagnostics, and normal exports exclude the OAuth
+session. A private container loopback bridge forwards only Responses requests
+through the owning agent's existing authenticated transport; the coordinator
+requires its active run, snapshotted provider/model, account owner, and a runner
+that has not been revoked. Hosted provider tools and remote conversation state
+are refused. Responses use `store:false` and `stream:true`. The pinned Hermes
+native OAuth pool forces a legacy endpoint, so this integration uses its supported
+named custom Responses transport without changing the reasoning loop.
+
+Ubuntu ARM64 evidence: full Node suite 366 tests (363 passed, three existing
+skips), followed by eight focused OAuth/service checks on the final source;
+TypeScript, lint (five existing warnings), production build, and all 210 browser
+checks across desktop/phone passed. Existing real Hermes checks also passed
+approval denial/approval, context across runs, file effects and container cleanup.
+The installed runner fixture passed pairing, encrypted credentials/rotation,
+restart/context, MCP tools, memory/skills, revocation, and scoped service cleanup.
+
+The final real Codex fixture passed on image
+`sha256:f4d9c8ac0ef7b08215308192117e2793eb743053307560ddedb99f84fb19be07`:
+real coordinator + pinned Hermes container, signed fixture identity, an expiring
+access-token refresh, account model discovery, completed Responses streams, and
+an actual `write_file` effect with independent readback. Four model requests were
+served by the scripted local provider. Account tokens were absent from generated
+agent files and browser credential metadata. This establishes integration, not a
+real ChatGPT account's entitlement, live authorization, or model reasoning; no
+paid inference or user account session was used.
+
+Test checkout/logs: `/tmp/open-harness-codex-pSm4MD` on the Linux VM;
+final real fixture: `/tmp/open-harness-real-codex-Xxhwrt`. The image rebuild filled
+the VM disk and interrupted one regression attempt; unused build cache and
+unused test/probe images were removed, the rebuild completed, and affected checks
+were rerun successfully. User workspace data and agent containers were preserved.
+
+## ChatGPT sign-in connection recovery — November 7, 2026
+
+The browser showed `Failed to fetch` while starting local OAuth, before an OpenAI
+authorization request. Neither forwarded loopback port (17107 or 17317) was
+listening, and SSH to the saved Linux VM address initially timed out. Once the VM
+became reachable, both services were found stopped. They were restarted with the
+existing workspace state and loopback-only SSH forwarding was restored.
+
+Control requests now explain an unreachable coordinator and allow an explicit
+retry after reconnection without automatically replaying the sign-in POST.
+Twenty-four focused client/OAuth/service tests and ten desktop/mobile OAuth
+browser tests passed, including disconnect/reconnect recovery. Type checking,
+focused ESLint, and a production build passed in a temporary local source copy.
+The first socket tests were blocked by sandbox permissions and passed with
+loopback access; the shared-folder build failed to clean its generated output,
+so the build was verified in that temporary copy. These checks use fixture
+authorization, not a live ChatGPT account.
+
+The connection-error fix was subsequently built and installed on Linux; its
+client source hash matches the local checkout. All 24 focused tests passed on
+Linux. The installed browser UI successfully created a fresh authorization
+attempt and displayed Continue with ChatGPT without the fetch error. Account
+authorization remains for the operator to complete; live entitlement, token
+exchange, and paid inference were not claimed by this recovery check.
+
+## ChatGPT model-test input correction — November 7, 2026
+
+After the operator completed authorization, the account catalog loaded but the
+connection test returned HTTP 400. The test sent `input` as a string; ChatGPT
+plan usage requires an input array. The test now sends a user message array,
+with `store:false` and `stream:true`. The fixture rejects string input so this
+request-format error cannot pass the OAuth regression suite again.
+
+All eight focused OAuth/service checks passed on macOS and Linux; focused ESLint
+passed and installed source hashes matched. Only the idle coordinator was
+restarted, preserving the operator's saved session and workspace. Retrying Save
+and test in the actual dashboard completed a live `gpt-6.1-sol` request and
+reported Model connection is ready. This verifies account inference for the
+connection test; an actual Hermes agent task was not exercised by this check.
+
+## Live ChatGPT OAuth reconnect — November 8, 2026
+
+Verified the existing Linux coordinator in live mode through loopback-only SSH
+forwarding (dashboard 17107, coordinator 17317). The saved ChatGPT sign-in loaded
+eight account models and completed a `gpt-6.1-sol` connection test with HTTP 200.
+The test used `save:false`; workspace model settings were unchanged.
+
+Started Sign in with ChatGPT again in the dashboard for the existing account.
+OpenAI displayed the existing Open Harness identity and ChatGPT plan permissions.
+Continuing returned to the loopback callback, which displayed ChatGPT connected;
+the dashboard polling then displayed ChatGPT is connected. A second live
+`gpt-6.1-sol` connection test after this reconnect returned HTTP 200 and `ok:true`
+in approximately two seconds. This establishes fresh authorization, token
+exchange, dashboard completion, and model access for the existing registration.
+New-account registration and a Hermes agent task were not exercised.
+
+Local regression checks on Node 26.10.0: 23 focused OAuth/service/control-client
+tests passed, plus all ten desktop/mobile OAuth browser tests against the
+existing production build and an isolated mock coordinator. These fixture
+checks are separate from the live-account results above. No application source
+changes or service restarts were needed. Success screenshot:
+`/tmp/open-harness-chatgpt-oauth-success.jpg`.
+
+## Live Codex-backed agent file task — November 8, 2026
+
+Ran Atlas on the existing live Linux coordinator using its inherited workspace
+model, `openai-codex` / `gpt-6.1-sol`, and the saved ChatGPT credential. No profile
+or workspace model changes were required. Run
+`47aa59b0-e17a-44a6-827e-b4f09519ccf3` completed from 19:47:13 to 19:47:32 UTC.
+The applied profile event confirms the Codex provider and credential reference;
+the real Hermes session reports `custom:open-harness-chatgpt`, release
+`2026.9.11`, and three model calls.
+
+Atlas called `write_file` followed by `read_file` for
+`/workspace/shared/codex-agent-check-6bdfdb72-1842-4002-aee5-d8473b8eec9a.txt`.
+The 65-byte file contains
+`OPEN_HARNESS_CODEX_AGENT_OK_8e1ae5f3-6926-47ea-a778-ba373859a671`
+followed by a newline. An independent authenticated GET through `/v1/files`
+returned HTTP 200 and matched the expected bytes exactly. The run ended
+`completed`, with no error, pending approval, or pending input. The dashboard
+displayed both file tool results, the final matching report, and the created file.
+
+This check used live account inference through the actual Hermes agent/tool loop.
+Local evidence: `/tmp/open-harness-live-codex-agent-check.json`,
+`/tmp/open-harness-live-codex-agent-events.json`, and
+`/tmp/open-harness-live-codex-agent-success.jpg`. The conversation and proof file
+remain in the workspace for review. No application fixes or service restarts
+were needed.
+
+## Chat progress feedback and streaming updates — November 8, 2026
+
+Added immediate sending feedback and event-driven startup, thinking, tool-use,
+responding and finishing labels in agent conversations. Animated dots accompany
+active work; queued runs and requests awaiting operator input show static dots.
+Elapsed time updates inside the progress component, without re-rendering the
+whole conversation each second. Reduced-motion preferences disable the animation.
+Thinking events update the label only; their text is not rendered. Indicators
+remain visible during streamed replies and disappear at a terminal run state.
+Reconnect feedback now belongs to its own run.
+
+Streamed events from each received page are folded into one message update,
+replacing a conversation/message-list copy for every individual token. This
+adds no buffering delay. Existing streaming, cursor recovery, final-result
+reconciliation, draft preservation, and scroll anchoring remain covered.
+
+Validation on Node 26.10.0: full Node suite 362 passed / 8 platform skips;
+typecheck passed; lint passed with the five existing fixture warnings; production
+build passed. All 66 distinct desktop/mobile conversation-loading, loading-feedback
+and run-recovery checks passed. The first browser run had four outdated assertions
+for generic status text and a single page-wide status element; after updating
+those assertions, all 24 recovery checks passed on rerun. New desktop/mobile
+checks cover all progress phases, a 300-chunk reply, preserved composer drafts,
+operator waits, completion, and reduced motion. Both layouts were inspected.
+
+Logs: `/tmp/open-harness-chat-latency-{node,lint,build,browser,recovery}.log`.
+Screenshots: `/tmp/open-harness-chat-thinking-desktop.png` and
+`/tmp/open-harness-chat-thinking-mobile.png`. The shared-volume build cleanup
+failed once with ENOTEMPTY; its generated output was preserved under an ignored
+`.open-harness-build-output-latency-*` directory before rebuilding successfully.
+
+The preceding live agent task took 18.5 seconds, including about 2.7 seconds to
+gateway readiness and three model calls. This UI change was tested with fixtures
+and does not establish a new live-model latency result. The existing opt-in
+`OPEN_HARNESS_PREWARM=1` can prepare one idle private runtime for the next task;
+its live latency benefit was not measured here. No runtime settings, deployed
+Linux sources, provider settings, or model reasoning behavior were changed.
+
+## Measured chat latency improvements and Linux deployment — November 8, 2026
+
+Enabled prepared-runtime reuse on the existing live Linux coordinator and added
+an explicit Reply only choice to agent chat. Reply-only runs retain conversation
+history, snapshot an empty tool allowlist and no MCP connectors, and keep that
+restriction when queued across a restart or continued from a source run. Normal
+messages continue to use the saved agent profile. Bootstrap capabilities gate the
+new control so an older coordinator is not offered a mode it cannot enforce.
+
+Prepared runtimes now have a bounded idle lifetime (five minutes by default),
+serialize replacement with run admission, and are coordinated with settings
+probes, backups and shutdown. Only matching profile/model/credential/image/mount/
+connection identities are reused. An inactive run lease blocks idle model/tool
+dispatch. Database format 4 prevents an older coordinator from resuming a queued
+reply-only task with full profile tools. The automatic pre-upgrade database
+backup was verified as mode 0600 on Linux. Authentication, account credential
+storage, runner pairing and container isolation were not changed.
+
+Live sequential samples used Atlas, the existing ChatGPT sign-in, `gpt-6.1-sol`,
+the same short prompt, fresh conversations, and one model call per sample. Warm
+samples allowed five seconds between tasks for background preparation. The
+recorded medians were:
+
+| Mode | Samples | Startup | Prompt dispatch | First text | Full prompt tokens |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold, normal profile | 2 | 846 ms | 1,082 ms | 5,784.5 ms | 7,844 |
+| Warm, normal profile | 3 | 47 ms | 105 ms | 3,033 ms | 7,844 |
+| Warm, Reply only | 3 | 41 ms | 92 ms | 2,793 ms | 458 |
+
+Warm normal startup ranged from 47–57 ms. Warm reply-only first text ranged from
+2,655–2,856 ms. The normal warm set included a 10,666 ms first-text outlier;
+these small samples establish working startup reuse and a smaller prompt, not a
+provider latency guarantee. Reply-only reduced the benchmark prompt by about
+94%. Full prompt tokens were checked separately from uncached usage: one normal
+sample reported 164 uncached input tokens but 7,844 prompt tokens, with a 98%
+cache hit. Metrics now preserve prompt, uncached input and cached input counts,
+along with history size, model calls and granted tool count. Real Hermes
+`tool_id` values are also recognized in tool-duration measurements.
+
+Normal tool behavior was independently rechecked after the mode switch. Warm run
+`634b8595-94bd-4f19-a6e7-4629c112ea92` called `write_file` and `read_file` for
+`shared/latency-tools-5c4d9901-0524-4df2-94c4-e99eaaf534de.txt`. An independent
+coordinator file read matched `WARM_CODEX_TOOLS_OK_5c4d9901-0524-4df2-94c4-e99eaaf534de`
+plus a newline. A direct request to that agent's idle scoped model proxy returned
+HTTP 409 with its run lease inactive. The saved Atlas profile remained revision 1
+with all 16 tools. The deployed browser then completed real reply-only run
+`56d7b6d7-4b73-4167-a390-4f707fa0bfdd` with zero tools and normal run
+`920ae069-73f7-4091-9ba3-c7932a4df0d8` with 16 tools. Both returned their requested
+markers, and the browser was left with Reply only off.
+
+Validation: final full Node suite 366 passed / 8 platform skips; typecheck passed;
+lint passed with five existing fixture warnings; production build passed. All
+122 distinct targeted desktop/mobile browser checks passed after fixing a short
+phone viewport regression introduced by the additional composer row. The final
+68 chat/scroll/recovery checks passed on the rebuilt UI. Twelve focused latency,
+metrics and migration checks passed on Linux Node 22.23.3. Earlier local checks
+used Node 26.10.0. No model or reasoning-loop settings were changed.
+
+Coordinator sources and the production dashboard build were installed at
+`/home/developer/open-harness-test-20261102-exrJd8`, preserving the existing live
+state. Before each coordinator restart, active and queued task counts were zero.
+Source/build backups and deployment hash receipts are under
+`/home/developer/open-harness-evidence/20261108-latency/`. The installed package
+and lockfile hashes matched the local checkout. The dashboard is available at
+`http://127.0.0.1:17107/?controlPort=17317` through loopback-only SSH forwarding;
+the forwarding was detached so it survives the testing turn. Final health showed
+zero active/queued tasks and Atlas prepared for its next normal message.
+
+Local evidence: `/tmp/open-harness-latency-bench-results.json`,
+`/tmp/open-harness-latency-live-tools.json`, `/tmp/open-harness-latency-live-ui.json`,
+`/tmp/open-harness-latency-final-{node,build,lint,browser,chat-browser}.log`,
+`/tmp/open-harness-latency-linux-tests.log`, and
+`/tmp/open-harness-live-latency-success.jpg`. The benchmark script and results are
+also retained in the Linux evidence directory. Changes remain uncommitted; no
+release, image rebuild or publication was performed.
+
+
+## Assistant decisions, briefs and reusable work — November 8, 2026
+
+Implemented with Claude Desktop: prepared action previews and edits requiring fresh
+approval, finished-work cards with sources/artifacts and explicit review evidence,
+Today briefs, three guided starters, owner-only per-agent notes, workflow reuse and
+actor-scoped completion-notification preferences. Existing workflow review/testing,
+readiness, delegation limits and account approval paths remain in use.
+
+The coordinator now persists explicit result reports and starter lineage. Reported
+artifacts never imply operator acceptance. Older and recurring briefs retain their
+run timestamps; nested handoffs name their actual sender. Starter submission uses
+the ordinary durable idempotency path. Its prompts request unique filenames per
+execution, while references remain links to shared files rather than immutable
+artifact snapshots. Selected accounts guide the task without changing permissions.
+Gmail send previews derive plain text, recipients and attachment metadata from the
+canonical draft and retain integrity checks before sending.
+
+Authorization changes are limited to permitting existing workspace roles to read
+the starter catalog and their own notification preferences. Notes remain owner-only.
+Result reporting rechecks live run, tool and human-owner permission after reading
+the request body, including streamed bodies that finish after completion or
+revocation. Action edits create a new pending decision and cannot inherit approval.
+No bootstrap, credential-storage, runner-pairing or container boundary was relaxed.
+Hermes reasoning and the pinned version were not changed. The runner bundle was
+regenerated for revision-checked memory operations.
+
+Integrated local verification on Node 26.10.0:
+
+- Full Node suite: 409 passed, 8 platform skips, zero failures.
+- Typecheck passed; full lint passed with five existing fixture warnings. Final
+  changed-file lint passed without warnings.
+- Production build passed. Shared-volume ENOTEMPTY cleanup was resolved by
+  preserving the old generated output in `.open-harness-build-output-muse-320ebc82`.
+- Assistant, product entry, workflow and result-review Playwright specs: 22/22
+  desktop/mobile checks passed. The first pass exposed a fixture that incorrectly
+  counted the existing Atlas page-shell context probe as a new notes-panel read;
+  the corrected test returns 403 and asserts no assistant/selected-notes access.
+  Tests cover stale previews, scoped drafts, agent switching during delayed reads,
+  revision conflicts, save locking, older brief times, nested handoffs and fresh
+  approval after editing. Desktop/mobile screenshots were visually inspected.
+
+Evidence: `/tmp/open-harness-muse-{node,typecheck,lint,final-lint,build,browser}.log`
+and `/tmp/open-harness-muse-visuals/`. These checks use mock/scripted execution,
+fake OAuth responses and browser fixtures. They do not establish live Gmail or
+Calendar reliability, model quality or a refreshed Docker runtime. Rebuild the
+managed runtime before using the updated workspace-tool schema in existing agent
+containers. No deployment, paid inference, image publication or release occurred.
+
+
+## Continuous computer and human terminal — November 8, 2026
+
+Actual Ubuntu Linux ARM64 acceptance used Node 22.23.3, Python 3.12.3 and the
+pinned Hermes runtime, with a deterministic local provider where model transport
+was needed. No paid inference or real account credentials were used. These
+checks establish execution, control, policy and image transport behavior; they do
+not establish model reasoning quality or reliability on external websites.
+
+The v4 selective source archive contained 294 files (4,044,800 bytes), SHA-256
+`7fef0336176426772f54755347ba1e232f13777f22528de991359281ffbe9d6f`.
+It was staged at `/home/developer/open-harness-computer-20261108-a74f30c9` without
+local state, credentials, environment files, dependencies or symlinks. The exact
+per-file manifest is `evidence/source-v4.json`. Selected source identities:
+
+| Source | SHA-256 |
+| --- | --- |
+| `runtime/service.ts` | `f4e47b70078af6c99193c6644502b9fff600ec188c4c001e86a62a44aa6b5aa5` |
+| `runtime/runner.mjs` | `f6e9ca31a9b7332509de4d435f216cd9f0693fc39f8e3d5fecf8771d7e023b6e` |
+| `runtime/hermes/Dockerfile` | `baed3873324dae046114a26167d5bd0a8b513dd5679636d7f2593480b94a0bb4` |
+| `runtime/hermes/extension/open_harness_policy.py` | `85f1dcafd68af0c762fc323f0fd7dde5374a52927ae7f9b4f8273649b3201898` |
+
+The full default Docker target passed its package and native-architecture
+verification. Review image `open-harness-hermes:computer-20261108-a74f30c9`,
+**runtime contract 9**, had image ID
+`sha256:5de9c548e6551e614ef0a00842e487dd83e247ec901ece799d8503c2cd997991`.
+Its build log is `evidence/image-build-arm64-v3.log`; the final v4 source snapshot
+changed no image build inputs. The existing default
+`open-harness-hermes:2026.9.11` image remained unchanged at
+`sha256:f4d9c8ac0ef7b08215308192117e2793eb743053307560ddedb99f84fb19be07`
+(contract 8). This verification did not replace or publish the default image.
+
+Results at the v4 snapshot: **three actual-runtime fixtures passed, plus 13/13 Python policy
+tests**, all with exit status zero:
+
+- `tests/real-desktop-control-smoke.mjs`: actual screenshot, click and text input;
+  the same browser process and open page survive stopping the execution
+  container; detached execution stops; a private workspace file survives a
+  restart; explicitly shared browsers are reused and private browsers remain
+  separate. The result field `cliInstallPersists` verifies a persistent file,
+  not installation of a third-party package. Log: `evidence/desktop-control-v4.log`.
+- `tests/real-computer-transport-smoke.mjs`: the actual coordinator, bundled
+  paired runner and Docker passed remote screenshot/input, RFB duplex and human
+  PTY input/resize/output. A shell-written shared file survives handback, a
+  detached human heartbeat process stops and does not restart, and the live
+  browser page is retained without reloading. Spent tickets and tickets from
+  the previous ownership generation are rejected. Terminal markers are absent
+  from the durable runner command spool. Offline terminal revocation remains
+  pending across coordinator restart, then confirms after runner cleanup.
+  This fixture starts no model runs. Log: `evidence/computer-transport-v7.log`;
+  result: `evidence/computer-transport-e0aPqo/evidence/result.json`.
+- `tests/real-managed-computer-smoke.mjs`: actual Hermes made four scripted model
+  turns with the managed computer MCP tool and two broker reviews. Denied
+  navigation had no effect; approved navigation reached the fixture page once;
+  read-only capture required no additional review. The model request received
+  the actual 84,010-byte PNG through Hermes's native multimodal tool envelope.
+  Legacy `computer_use` mapped to the managed tool, competing native browser
+  tools were absent, and a completed run's capture request was rejected with
+  403. The local fixture explicitly declares vision support through Hermes's
+  supported configuration; this does not establish automatic vision detection
+  for arbitrary custom provider models. Log: `evidence/managed-computer-v5.log`;
+  result and capture: `evidence/managed-computer-jP27DG/`.
+- `tests/policy-extension-test.py`: 13/13 checks passed on Python 3.12.3,
+  including the exact granted capture adapter, active lease, bounded PNG header,
+  path tampering and link rejection. Log: `evidence/policy-python-v4.log`.
+
+Real checks exposed and resolved a CUA stdout descriptor incompatibility, missing
+initial vision capture before navigation, MCP image delivery that otherwise
+remained a media-path string, and first-use Docker bind directories created with
+unwritable ownership. The final fixtures above were rerun after those fixes.
+The image adapter stays within the managed tool middleware; Hermes's reasoning
+loop is unchanged.
+
+Sanitized evidence is retained locally at
+`work/computer-takeover-20261108/evidence/acceptance-index.json`, alongside the
+source manifests, selected logs, result JSON and fixture screenshot. All 27
+selected remote/local evidence files matched SHA-256 (`SHA256SUMS` and
+`copy-verification.json`). No runner/coordinator state directories, pairing tokens
+or credential files were copied. Remote originals remain under the staging
+folder. Test-owned containers were removed; unrelated existing containers and
+the separate architecture-verification builder were preserved.
+
+At this record's creation, the separate AMD64 emulated full-image build is still
+pending; no AMD64 runtime acceptance is claimed. The checks above do not cover
+logged-in browser session transfer between machines, live browser UI attachment
+to the real runner, or a single continuous real-model task spanning agent work,
+human takeover and a new follow-up run. Those combined flows are distinct from
+the protocol and runtime fixtures reported here. Existing release, upgrade,
+restore, soak and platform acceptance gates remain in force.
+
+
+### Follow-up: installed tools and a real agent/human continuation
+
+The v6 source archive, 299 files / 4,413,440 bytes, SHA-256
+`613453d84ef45f838e2d9b27308d33e6db2a76ed3ad3aba4a1cc3a3598b8fec2`, added
+sealed transfer transport and shutdown admission fencing. Its exact manifest is
+`work/computer-takeover-20261108/evidence/source-v6.json`; the bundled runner hash
+is `f7bca2ccd24727ae089be1f9000c0265d6967f6dff0ea17ade1cc773db4b6df3`.
+No image build inputs changed, so these checks used the same contract-9 image
+`sha256:5de9c548e6551e614ef0a00842e487dd83e247ec901ece799d8503c2cd997991`.
+
+Both expanded actual-runtime fixtures passed with exit status zero:
+
+- `computer-transport-v8.log` and `computer-transport-pduLJw/evidence/result.json`
+  verify an executable installed in the fixture's private execution container at
+  `/usr/local/bin/open-harness-fixture-cli`. Both the human PTY and ordinary
+  execution environment find it on PATH before and after handback. The exact
+  execution container is reused. This tests a synthetic installed executable,
+  without a package download or a claim that image upgrades preserve container
+  writable layers. All earlier paired transport, ticket, detached-job and offline
+  revocation assertions remain. Orderly coordinator/runner shutdown leaves no
+  test-owned execution or desktop container running before fixture cleanup.
+- `managed-computer-v6.log` and `managed-computer-hNtKxs/evidence.json` add the
+  complete actual Hermes → human → new Hermes continuation flow. The agent takes
+  a screenshot, then waits in a scripted model request. Taking control stops the
+  active run and execution container while preserving the live browser. A real
+  human PTY writes a shared result; Hand back and continue closes that PTY and
+  creates a different run with continuation lineage. That new Hermes run calls
+  `read_file`, consumes the saved result and completes. The execution container
+  is reused and the browser page does not reload. Diagnostics contain eight
+  main scripted model turns across the baseline and handoff checks; the
+  baseline retains its two broker reviews and delivered a 78,751-byte PNG.
+
+These results close the earlier installed-executable and combined agent/human
+continuation coverage gaps. They remain deterministic transport/runtime checks,
+with no paid inference. Forty-one selected evidence files, including the new
+results and the retained first cookie-transfer failure, match their remote
+SHA-256 hashes. Browser-session transfer is still awaiting a production graceful
+Chromium-close fix: an artificial normal-window-close diagnostic preserved the
+cookie, while the unmodified transfer initially lost a newly set cookie. That
+diagnostic is not counted as production transfer acceptance.
+
+### ARM64 v8 source and sealed browser transfer
+
+The v8 source snapshot supersedes the v4/v6 acceptance snapshots above. All 306
+staged source files match `evidence/source-v8.json`; the 4,474,880-byte selective
+archive has SHA-256
+`d1040a986357d7dc55025e63207e06d73649e4b7370cc8f263aee3a6cafd01a1`.
+The bundled runner hash is
+`8e84f8f5e7481bddfbe837aed40cf4b1a7e8d63c86871b6aae6856919dde4529`,
+and the service hash is
+`2083c8054c62f539a890c5ffd4e60e1eaf5c2510f02447865c58371b40821bfa`.
+
+Native ARM64 review image
+`open-harness-hermes:computer-cookie2-20261108-a74f30c9` has immutable ID
+`sha256:1bae7c5eb6faa215206743beae5ae86eba47b57e6ff1c4035baf67f1517ae733`
+and runtime contract **9**. Its full default build target passed the package,
+90-file ELF/linkage and 48-file Debian browser-origin checks. Build metadata,
+log and exact image-source manifest are in `evidence/cookie2-image-5c4f8d67af/`.
+The existing default image remains unchanged at `sha256:f4d9c8ac0ef7b08215308192117e2793eb743053307560ddedb99f84fb19be07`.
+
+**Four actual-runtime fixtures and 13/13 Python policy tests passed again on this
+source/image**, with exit status zero and no paid inference:
+
+| Check | Retained evidence |
+| --- | --- |
+| Split desktop/execution, CUA input, same-page continuity, private/shared isolation | `desktop-control-v5.log` |
+| Actual bundled paired runner, RFB/PTY, installed executable and exact execution-container reuse, detached-job cleanup, ticket rejection, offline revocation and both-role shutdown | `computer-transport-v9.log`; `computer-transport-ODnwSm/evidence/result.json` |
+| Actual Hermes managed MCP reviews/image delivery and agent → human PTY → distinct continuation reading the saved result | `managed-computer-v7.log`; `managed-computer-NFDtCq/evidence.json` |
+| Sealed private-browser transfer, local → paired → local | `computer-transfer-v3.log`; `computer-transfer-wfEY7l/evidence.json` |
+| Python policy middleware | `policy-python-v8.log` |
+
+The combined Hermes fixture made eight main scripted model turns, retained two
+broker reviews, and delivered a 78,607-byte PNG to the model. The real transfer
+fixture preserved a synthetic persistent HttpOnly cookie, local storage and a
+private file in both directions; neither destination page reseeds them. It
+identified the live managed Chromium process before every move, stopped and
+preserved the source, and retained the previous destination browser as a
+recoverable backup. Seven samples of the real durable completion spool, the
+coordinator command queue and completion HTTP bodies contained none of the
+synthetic private markers or their base64 encodings; the export completion used
+the destination-sealed envelope. This fixture starts no model runs.
+
+The first transfer failures exposed Chromium data not flushed by process
+termination and a flattened process-title mismatch. The final production helper
+identifies Chromium through `/proc/PID/exe`, checks its exact profile and process
+start time, sends PID-scoped `WM_DELETE_WINDOW`, and confirms normal exit before
+export. The acceptance fixture uses no close shortcut or diagnostic workaround.
+
+All 66 selected evidence files match the remote SHA-256 values in
+`work/computer-takeover-20261108/evidence/SHA256SUMS`. Test-owned containers were
+removed; runner/coordinator state, tokens and credentials were not copied.
+README now describes destination encryption, browser-session authority,
+preserved source data and the 20 MB managed-file / 50 MB combined transfer limits.
+
+The runtime CI workflow now runs the paired transport, real Hermes continuation
+and sealed-transfer fixtures, retains their selected evidence and performs
+workspace-label-scoped cleanup. These CI additions have not yet run remotely.
+Compose configuration validation passed locally; a full actual Compose rerun was
+deferred because its two separate private-engine image copies plus the reserved
+disk margin exceed the available space. Actual browser UI acceptance and the
+final-source AMD64 build are recorded separately when complete. Native AMD64,
+real third-party account behavior and existing release/upgrade/restore/soak
+gates are not established by these scripted fixtures.
+
+### Paired terminal admission and actual browser UI
+
+Actual UI attachment exposed a short race between terminal startup and a desktop
+operation. The runner now waits within the invitation deadline, reserves only
+startup, and checks ownership and a quiesce generation before admission. It does
+not hold the agent's operation slot for the lifetime of the human shell.
+
+This v9 source archive contains 306 files / 4,485,120 bytes, SHA-256
+`1d522420e077810eb521628ce3c42986f2ba385f7404d68c0ba0734d885631ed`;
+all staged files match `source-v9.json`. Its runner hash is
+`ad72127a05eb7937c25d0eac68379e5705e46b2933b638c3725bde6e08d6a769`.
+The runtime changes from v8 are limited to runner admission and its generated
+bundle; image inputs remain unchanged. The paired transport fixture passed
+again in `computer-transport-v10.log`, with result
+`computer-transport-9aFOpb/evidence/result.json`. Direct desktop, local scripted
+Hermes and sealed transfer results above remain explicitly tied to v8.
+
+The built app **349e466b-f8bb-4909-8c6d-1e9711fd69c2** also passed actual Chromium
+UI acceptance against the v9 coordinator and bundled Linux runner on image
+`sha256:1bae7c5eb6faa215206743beae5ae86eba47b57e6ff1c4035baf67f1517ae733`.
+The browser used real xterm and noVNC connections without routed/mock responses:
+live desktop pixels, terminal command output, terminal-tab state, human-file
+persistence, handback and retained browser session all passed. Opening the human
+shell did not grant CLI tools to the agent. Host checks confirmed both container
+roles stopped before cleanup. No model inference was used for this UI check.
+
+Selected UI evidence is under
+`work/computer-takeover-20261108/evidence/computer-ui-xFrZvE/`: `result.json`,
+`build-metadata.json`, `evidence/host-result.json` and three inspected screenshots.
+The build metadata records exact component/transport hashes; local browser
+artifacts and copied remote host artifacts are distinguished in the evidence
+ledger. Two expected preview-frame 409 responses occurred during ownership
+transitions; live streams and terminal completed without browser errors.
+
+Controller labels use a bounded display name from the verified signed workspace
+identity when available, with `You`, `Workspace owner` or `Workspace operator`
+fallbacks. This later display-only identity metadata change does not alter
+authorization, which continues to use the actor identity and role. It is covered
+by the final ordinary test suite below; the actual UI result above retains its
+recorded v9 source/build. The supported single-trusted-operator scope is unchanged.
+
+### Scripted Hermes on the paired Linux runner
+
+The same real-Hermes fixture now accepts
+`OPEN_HARNESS_REAL_MANAGED_COMPUTER_PAIRED=1`. It pairs the committed runner bundle
+with a separate state directory, assigns the agent to it and retains every local
+fixture assertion. This mode passed against the v9 runtime and unchanged cookie2
+image: `managed-computer-paired-v2.log`, with result and capture under
+`managed-computer-TkTLFN/`. Its test-only overlay is recorded in
+`managed-paired-fixture-source.json`; fixture SHA-256 is
+`b5633170186fb303b0a9c4f290de25f2f72419887736e02ca6769cb427bc68b6`.
+
+The actual paired Hermes worker made eight main scripted model turns, applied
+two broker reviews, denied the first navigation without loading the page, then
+navigated once after approval. A 78,699-byte PNG reached its model request. Human
+takeover stopped that active worker; the real paired PTY saved a file, and a
+distinct continuation used `read_file` to consume it. The execution container
+and live browser page remained the same. No paid inference was used. Together
+with the local v8 run, this establishes the scripted model/tool flow on both
+local and paired Linux execution paths.
+
+An initial paired-fixture attempt failed because its coordinator listened only
+on loopback, while the container callback uses the host Docker address. The
+paired fixture now exposes its isolated token-authenticated coordinator on a
+random host port; the default local fixture remains loopback-only. No production
+runtime behavior was changed to obtain this result. The initial failure is
+retained, and CI now invokes both fixture modes.
+
+At that point the evidence ledger contained **88 hashed files**: all **82 copied remote
+artifacts** match their source SHA-256 values, five UI artifacts were
+generated locally by the real browser check, and one local protocol-test log is
+retained. `copy-verification.json` lists that
+distinction. The actual UI result belongs to build
+`349e466b-f8bb-4909-8c6d-1e9711fd69c2`; a later cosmetic preview-error change was
+checked by a fresh build, 42 focused browser tests and then the full **274-test**
+browser suite, without claiming another actual-runner UI run. The final-source AMD64 image build remains pending at this
+record. Native AMD64 execution and full actual Compose acceptance remain outside
+these results.
+
+The managed-candidate terminal tunnel received a separate compatibility update
+after v9. `control-plane/server.ts` rewrites terminal tickets and binds each cloud
+upgrade to its stream kind; `control-plane/relay.ts` and
+`runtime/workspace-relay.ts` preserve text/binary frames, bound startup queues and
+enforce current membership before inbound input. The exact desktop/terminal
+ticket-path allowlist remains narrow. `tests/cloud-computer-stream.test.ts`
+passed **5/5** checks; combined with cloud-core the focused run passed **12/12**,
+and scoped ESLint passed. These tests use actual local WebSockets, the
+authenticated relay and PGlite membership storage with a test coordinator. They
+cover text/binary round trips, stream caps, ticket kind/origin/one-use, revoked
+and viewer rejection, and closure on revocation or disconnect. This is protocol
+evidence, not hosted deployment, production managed provisioning or an actual
+hosted PTY acceptance. Independent review identified and closed the zero-byte
+frame queue gap: both pending queues now cap 64 frames as well as 64 KiB, and
+local WebSocket setup has a 10-second deadline. Delayed-membership and stalled
+handshake regressions pass. The retained log is `managed-tunnel-protocol.log`.
+Hermes image inputs are unchanged.
+
+
+### Legacy browser migration and final native desktop follow-up
+
+The v10 source archive contains **308 files / 4,526,080 bytes**, SHA-256
+`21a10fcc3e458aab72191141c897236115ad2845592ca18e408b40c5c8578c1f`;
+all staged files matched `source-v10.json`. The runner bundle hash is
+`7c428d4c8e47dd5989f8a8152f1efb4cb58d1719a0e3bb4a9fb4ad6def238beb`,
+`computer-runtime.ts` is
+`a02a2da30b58ff1511aa377b412af15a9b2a86dae7748a0315069e67247827d8`,
+and `transfer-files.ts` is
+`891fbdc7014eae5f8dea25cd4cdb252b91a909a50b5502270391a06070efec28`.
+These actual checks retain the same contract 9 cookie2 image
+`sha256:1bae7c5eb6faa215206743beae5ae86eba47b57e6ff1c4035baf67f1517ae733`.
+
+Final isolation review found that the old browser copy could remain in an
+execution-mounted private HOME after migration. The version 2 migration now
+atomically archives that original outside execution mounts, retains a filtered
+backup and verifies the new desktop copy before recording completion. Interrupted
+or ambiguous migrations fail closed while preserving the available copies.
+Repair of an earlier completed migration requires unchanged recorded source and
+backup data plus confirmed idle old writers; later agent-created data is not
+silently removed. The new migration and transfer regressions passed **20/20**.
+
+Actual Docker fixture `tests/real-browser-migration-smoke.mjs` passed in
+`browser-migration-v1.log`, with results under `browser-migration-4iy0I8/`.
+It seeded only synthetic HttpOnly cookies and local storage, proved migration
+refuses a running legacy container, then confirmed the old container stopped.
+The original and filtered backup cookie checksums match, neither archive is
+mounted into execution, and the old private-HOME browser path is absent from
+an actual execution container. An unrelated private file remains. The new
+managed Chromium loaded the retained cookie and storage and produced a real
+capture. All test-owned containers were removed. CI now runs this fixture and
+retains only its log and selected JSON evidence with state-scoped cleanup.
+
+The unmodified sealed-transfer flow also passed again on v10 in
+`computer-transfer-v4.log`, with result `computer-transfer-lgijyE/evidence.json`.
+Local → paired → local moves retained the synthetic cookie, local storage and
+private file, stopped/preserved the source, and kept the destination backup.
+The command queue, completion body and seven actual spool samples contained no
+plaintext synthetic private markers or their base64 encodings. No model runs
+were created for these migration and transfer checks.
+
+The older native Hermes/CUA fixture passed in `native-desktop-v4.log`, with
+result and inspected screenshots under `open-harness-desktop-smoke-81xnvY/`.
+Its test-only overlay SHA-256 is
+`13efd30f453e11f041b09946ae069b9540b2766d95ef0dab3047751adf24fab2`,
+recorded in `native-desktop-fixture-source.json`. The fixture now closes its
+successful headless task with the pinned public `cleanup_browser` API before
+starting the independent headed capability session, and sends consistent
+headed/accessibility launch flags on every CLI command. It verifies the exact
+current URL. Earlier profile-lock and blank-tab setup failures are retained;
+no production behavior was changed or capability assertion removed. Real pixel
+click, accessibility token forwarding, stale-token refusal, typed-value readback,
+private-window/file isolation, shared files, container restart and desktop
+revocation all pass. The final screenshot visibly contains both click and typed
+readback markers. This fixture uses no model/provider inference.
+
+The final ordinary source checks passed **518 tests, 8 skipped, 0 failed**
+(526 total), TypeScript, production build, and ESLint with zero errors and five
+pre-existing warnings. The full browser suite passed **274/274**; subsequent
+backend-only migration/display metadata changes received a fresh build, typecheck
+and full Node suite without claiming another real-runner UI check. Final bundle
+regeneration was byte-identical to v10. Logs are retained under `local-checks/`.
+The source gates include the later signed display-name metadata and managed
+tunnel changes; actual runtime fixture scopes remain bound to their individual
+v8/v9/v10 manifests. The two changed real fixtures pass syntax and ESLint checks,
+and runtime CI YAML parses successfully.
+
+The final-source AMD64 image build remains pending. Native AMD64 execution,
+full actual Compose acceptance, hosted managed PTY/provisioning, real third-party
+accounts and paid model reasoning are not established by these results. The
+existing default runtime image remains unchanged; nothing was published.
+
+The updated evidence ledger contains **127 hashed files**: all **111 selected
+remote copies** match their remote SHA-256 values, five actual-browser artifacts
+were generated locally, and eleven local test/build logs are identified
+separately. `acceptance-index.json` maps every passing fixture to its source
+manifest and optional fixture overlay. Coordinator/runner databases, pairing
+material and real credentials are excluded from the copied evidence.
+
+
+### Read-only viewer ownership metadata
+
+A final plan check found that non-controlling operators could see computer
+ownership, but the workspace's read-only viewer role could not. The precise
+`GET /v1/agents/:id/desktop/status` path now returns a metadata-only response to
+an authenticated active viewer: machine summary, controller display name,
+ownership state/since and agent activity. It includes `readOnly: true`, an empty
+lease ID and false/empty capability defaults; ownership generations, controller
+identity, profile revision, draft content, teams and machine capabilities are
+omitted. This path does not request a write-capable actor identity. Desktop
+frames, streams, terminals and all control writes retain their previous role
+checks.
+
+The focused foundation/desktop/service run passed **21/21**, full TypeScript
+passed, and scoped ESLint passed. The HTTP fixture uses required signed relay
+identity, checks live activity and human ownership, rejects viewer frame/stream/
+terminal/takeover/release/input even with a copied valid lease ID, and rejects
+metadata reads after membership revocation. The existing owner restart and
+continuation assertions still pass. These checks are mocked-runtime authorization
+and response-contract evidence after v10, not a new real-container acceptance
+run. Logs are `local-checks/viewer-status-{focused,types,lint}.log`; the matching
+UI regression/build is recorded separately when complete.
+
+
+The matching viewer UI now renders only ownership/activity metadata and does not
+mount desktop frames, streams, control inputs or a terminal for read-only status.
+The final complete suite passed **519 tests, 8 skipped, 0 failed** (527 total),
+TypeScript, production build, and ESLint with zero errors and the same five
+pre-existing warnings. Full Playwright passed **278/278** desktop/mobile checks
+in 6.3 minutes, including viewer responses for active-agent and human-controlled
+states and assertions that no desktop-frame or terminal requests occur. The
+initial browser command stopped before running tests on the known shared-volume
+`dist` cleanup `ENOTEMPTY`; a retry after generated-output cleanup passed without
+source changes. Both command logs are retained.
+
+Final ordinary logs are `local-checks/{node-tests,types,lint,build}-final.log`
+and `local-checks/playwright-final-retry.log`; the initial build diagnostic is
+`local-checks/playwright-final.log`. `local-checks/viewer-final-source.json`
+records the exact later metadata/UI source and unchanged runner bundle. These
+source checks supersede the earlier 518/274 ordinary-suite counts. They do not
+replace the actual paired UI build `349e466b` evidence or its runtime manifests.
+The ledger now contains **137 hashed files**: 111 verified remote copies, five
+local actual-browser artifacts and 21 local test/build/source records. AMD64
+image-build acceptance is still pending; no additional real-container claims
+were made for this metadata-only follow-up.
+
+
+### Final AMD64 contract 9 image build and independent archive verification
+
+The final cookie2 image source has now passed a separate **emulated AMD64**
+build using the pinned official BuildKit/QEMU on the ARM64 Linux host. This
+closes the image-build gate that was pending in the earlier entries. It does
+not add native AMD64 computer, browser, terminal or handoff acceptance.
+
+The final 29-file source manifest SHA-256 is
+`dcd753314b77cb2187ad88079d3b478061e97a75d7134b2aff1340b855a239be`.
+It includes the same `browser_shutdown.py` and `container-init.sh` bytes used
+by the passing native ARM64 cookie2 image. One normally bounded final build
+invocation exited **0 in 506 seconds**. It reused completed curl/Hermes/OS
+layers; browser npm ran for 265.2 seconds and Debian verification inputs
+materialized for 32.2 seconds. The full default `verified-runtime` target ran
+its mandatory package, curl, ELF/linkage and Debian-origin checks.
+
+The embedded reports confirm **331 installed packages match 331 locked
+packages**, with no missing, changed or unexpected entries; **90 AMD64 ELF
+files** have the required architecture and resolved/static linkage; and the
+Debian browser-origin inventory records **48 files**. The embedded package
+report retains the lock's historical pre-build validation note. These observed
+successful checks supersede that note's prior absence of AMD64 build evidence;
+the source lock and image were not rewritten to change its history.
+
+Final artifact identities are:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| OCI image manifest | `6cc13e664e71225743c4dca3ae88683613bf20f46e40c3ed8868fe556469f7c4` |
+| OCI configuration | `c5ffb002cd3758023b0a00f9f38de5b2c5cd96c0f1e98b5b0b4e730a08210834` |
+| Complete 3,686,689,280-byte OCI archive | `ddba0a696dfa615d958b230d852209344633d5ca48b815166e798296c4385e10` |
+
+Independent read-only verification rehashed the archive and **25 referenced
+OCI blobs**, checking every descriptor's digest and size. It verified
+`linux/amd64`, runtime contract **9**, and the explicit **emulated** build label.
+Final-layer resolution matched both managed browser helpers to the frozen
+source. Following the installed CUA symlinks reaches
+`/opt/cua-driver/packages/releases/0.28.2-x86_64-unknown-linux-gnu/cua-driver`:
+the actual 50,559,360-byte executable is ELF64 little-endian, machine **62
+(AMD64)**, SHA-256
+`3739101d072bdfdd83b7e70b3a16d9271f6eb124e7c5e69b3406f20f0910a4ca`.
+The independent verifier initially needed support for a symlinked parent
+directory; its corrected read-only run passed without changing the image.
+
+The earlier original-source build is retained as a **diagnostic and cache
+warming run only**. Its Docker child completed with status 0 after a scoped
+watchdog extension, but its original timeout wrapper returned **124**. That
+receipt is not used as final-source acceptance. The normal exit-0 final build
+above used the final cookie2 context and its own completed archive and receipt.
+The minimum sampled free space was 6.929 GiB during the diagnostic and 8.548 GiB
+during the final build, with zero disk-monitor errors.
+
+Selected evidence is under
+`work/computer-takeover-20261108/evidence/amd64/`: the final build receipt,
+metadata, source manifest, full log, embedded reports, independent verification,
+copy receipt and scoped cleanup result; the original diagnostic is separate.
+The complete archive remains at
+`/Users/codeanddev/.local/state/open-harness-verification/amd64-computer-contract9/final-5c4f8d67af/image.oci.tar`.
+It was not loaded, retagged, deployed or published. After verification, only the
+task-owned builder, holder, cache and watchdogs were removed. Existing builders,
+binfmt registrations, running containers and images remain unchanged. The
+existing default image still resolves to
+`sha256:f4d9c8ac0ef7b08215308192117e2793eb743053307560ddedb99f84fb19be07`.
+
+The final evidence ledger contains **162 hashed files**: 111 verified remote
+copies, five local actual-browser artifacts, 21 earlier local check/source
+records, and 25 AMD64 build/inspection/copy records. All 24 copied AMD64 records
+match their source bytes; the additional copy receipt records those hashes.
+Native ARM64 runtime acceptance remains tied to its exact v8/v9/v10 manifests
+and image; the final ordinary source gates remain 519 Node passes/8 skips,
+278 browser passes, and successful types/build/lint. Native AMD64 execution,
+full actual Compose lifecycle, hosted managed provisioning/PTY, real external
+accounts and paid model reasoning remain outside this evidence.

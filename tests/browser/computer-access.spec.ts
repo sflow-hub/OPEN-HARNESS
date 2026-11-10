@@ -90,7 +90,7 @@ test('an agent can be given a private agent desktop from Computer settings, with
   const headers = await operator(request);
   const saved = await (await request.get(control + '/v1/agents/atlas/profile', { headers })).json();
   expect(saved.profile.computer).toMatchObject({ access: 'private', desktop: 'virtual' });
-  expect(saved.profile.allowedTools).toContain('computer_use');
+  expect(saved.profile.allowedTools).toContain('mcp__open_harness__computer');
   await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
   await expect(panel.getByText('Desktop control tools are switched on for this agent in Tools & connections.')).toBeVisible();
   // Reopening shows the choice as saved.

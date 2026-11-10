@@ -15,6 +15,7 @@ export type ComputerConfig = {
   folders: FolderGrant[];
   desktop: DesktopMode;
   reserveMachine: boolean;
+  browserSessionTeamId?: string;
   resources: { cpu: number; memoryMb: number; concurrency: number };
 };
 export type MachineInfo = {
@@ -22,7 +23,7 @@ export type MachineInfo = {
   id: string; name: string; platform: 'linux' | 'darwin' | 'win32' | 'unknown'; arch: string;
   status: 'online' | 'offline' | 'pairing' | 'revoked'; lastSeenAt: string | null;
   local: boolean; reservedAgentId: string | null; assignedAgents: number;
-  capabilities: { container: boolean; direct: boolean; desktop: boolean; virtualDesktop: boolean; detail?: string };
+  capabilities: { container: boolean; direct: boolean; desktop: boolean; virtualDesktop: boolean; detail?: string;protocol?:number;features?:string[] };
 };
 // Spread these defaults over whatever is stored rather than testing the stored object
 // directly: profiles saved before a permission existed must keep loading and saving.
@@ -75,6 +76,7 @@ export function mcpServerOf(id: string) {
 export const TASK_TOOL = mcpToolId(COORDINATION_SERVER, 'task');
 export const HANDOFF_TOOL = mcpToolId(COORDINATION_SERVER, 'delegate_named_agent');
 export const ROUTINE_TOOL = mcpToolId(COORDINATION_SERVER, 'create_open_harness_routine');
+export const COMPUTER_TOOL = mcpToolId(COORDINATION_SERVER, 'computer');
 const LEGACY_TOOL_IDS: Record<string, string> = {
   mcp_open_harness_task: TASK_TOOL,
   mcp_open_harness_delegate_named_agent: HANDOFF_TOOL,
@@ -93,18 +95,11 @@ export function normalizeToolIds(ids: string[], connectorNames: string[] = []): 
   });
 }
 
-// What a new agent can do before anyone opens its settings. A fresh agent used to be granted
-// only the task tool, so the first thing anyone asked it to do -- read something, write a file,
-// run a command -- it truthfully answered that it could not. These are the tools for doing work
-// inside its own container, named against the pinned Hermes catalogue.
-//
-// Deliberately absent, because they reach past that container or cost money on their own:
-// desktop control, delegation, scheduling, MCP connectors, and the third-party integrations.
-// Existing agents keep whatever they were given; an upgrade must not widen their access.
+// Command execution and desktop access require an explicit per-agent grant. Existing
+// profiles retain their saved selections; changing defaults must not rewrite consent.
 export const DEFAULT_TOOLS = [
   TASK_TOOL,
   'read_file', 'write_file', 'patch', 'search_files',
-  'terminal', 'process_manage',
   'execute_code',
   'memory', 'session_search',
   'skills_list', 'skill_view', 'skill_manage',
@@ -122,8 +117,9 @@ export function profileAgent(profile: AgentProfile, memory: string[] = []): Agen
 }
 export function runToolGrants(profile: AgentProfile): string[] {
   const servers = new Set([COORDINATION_SERVER, ...profile.connectors.filter(connector => connector.enabled).map(connector => connector.name)]);
-  return normalizeToolIds(profile.allowedTools, profile.connectors.map(connector => connector.name)).filter(id =>
-    ((isSandboxedComputer(profile.computer) && profile.computer.desktop === 'virtual') || id !== 'computer_use') &&
+  const desktop = isSandboxedComputer(profile.computer) && profile.computer.desktop === 'virtual';
+  return [...new Set(normalizeToolIds(profile.allowedTools, profile.connectors.map(connector => connector.name)).map(id => id === 'computer_use' ? COMPUTER_TOOL : id).filter(id =>
+    (desktop || id !== COMPUTER_TOOL) && (!desktop || !id.startsWith('browser_')) &&
     (!id.startsWith('mcp_') || servers.has(mcpServerOf(id) || ''))
-  );
+  ))];
 }

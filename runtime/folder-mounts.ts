@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { commandAsync } from './commands';
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -121,6 +122,42 @@ export function createVerifiedFolderContainer(args: string[], pinned: PinnedFold
         } else if (!/No such (?:object|container)/i.test(inspected.stderr)) throw new Error(inspected.error?.message || inspected.stderr.trim() || 'Docker could not check the incomplete creation.');
       }
       if (id) checked(command, ['rm', '-f', id], 20_000, 'Could not remove the unverified selected-folder container');
+    } catch (failure) { cleanupError = ` Cleanup could not be confirmed: ${failure instanceof Error ? failure.message : failure}`; }
+    throw new Error(`${error instanceof Error ? error.message : error}${cleanupError}`);
+  } finally { pinned.close(); }
+}
+
+async function checkedAsync(command: (args: string[], timeout: number) => Promise<DockerResult>, args: string[], timeout: number, description: string) {
+  const result = await command(args, timeout);
+  if (result.status !== 0) throw new Error(`${description}: ${result.error?.message || result.stderr.trim() || 'Docker did not complete the request.'}`);
+  return result.stdout.trim();
+}
+
+export async function createVerifiedFolderContainerAsync(args: string[], pinned: PinnedFolders, desktop: boolean, command: (args: string[], timeout: number) => Promise<DockerResult> = (args, timeout) => commandAsync('docker', args, timeout)) {
+  const attempt = randomUUID(), name = args[args.indexOf('--name') + 1];
+  let id = '';
+  try {
+    // Create first so every subsequent action and cleanup uses the immutable ID.
+    id = await checkedAsync(command, ['create', '--restart', 'no', '--entrypoint', '/usr/bin/tini', '--label', `${ATTEMPT_LABEL}=${attempt}`, ...args, '--', '/bin/sleep', 'infinity'], 30_000, 'Could not create the selected-folder container');
+    if (!CONTAINER_ID.test(id)) { id = ''; throw new Error('Docker did not return a valid selected-folder container ID.'); }
+    await checkedAsync(command, ['start', id], 20_000, 'Could not start the selected-folder container');
+    const result = await checkedAsync(command, ['exec', '--workdir', '/', id, '/usr/local/bin/python', '-I', '-S', '-c', FOLDER_VERIFIER, JSON.stringify(pinned.mounts.map(mount => mount.path))], 15_000, 'Could not verify selected folders');
+    verifyFolderMounts(pinned, result);
+    if (desktop) await checkedAsync(command, ['exec', '--workdir', '/', id, '/opt/open-harness/container-init.sh', '--init-only'], 45_000, 'Could not initialize the private desktop');
+    return id;
+  } catch (error) {
+    let cleanupError = '';
+    try {
+      // A timed-out create may have completed without returning its ID. Never
+      // remove by name: inspect the unique attempt label before recovering it.
+      if (!id && name) {
+        const inspected = await command(['inspect', '-f', '{{json .}}', name], 10_000);
+        if (inspected.status === 0) {
+          const candidate = JSON.parse(inspected.stdout);
+          if (candidate?.Config?.Labels?.[ATTEMPT_LABEL] === attempt && CONTAINER_ID.test(candidate.Id)) id = candidate.Id;
+        } else if (!/No such (?:object|container)/i.test(inspected.stderr)) throw new Error(inspected.error?.message || inspected.stderr.trim() || 'Docker could not check the incomplete creation.');
+      }
+      if (id) await checkedAsync(command, ['rm', '-f', id], 20_000, 'Could not remove the unverified selected-folder container');
     } catch (failure) { cleanupError = ` Cleanup could not be confirmed: ${failure instanceof Error ? failure.message : failure}`; }
     throw new Error(`${error instanceof Error ? error.message : error}${cleanupError}`);
   } finally { pinned.close(); }

@@ -1,0 +1,63 @@
+// Run against real-computer-ui-host.mjs through a loopback SSH forward, with the built app on a separate port.
+import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { chromium, expect as playwrightExpect } from '@playwright/test';
+
+assert.equal(process.env.OPEN_HARNESS_REAL_COMPUTER_UI, '1');
+const controlPort = Number(process.env.OPEN_HARNESS_UI_CONTROL_PORT || 4331), appPort = Number(process.env.OPEN_HARNESS_UI_APP_PORT || 3119), control = `http://127.0.0.1:${controlPort}`, fixtureUrl = process.env.OPEN_HARNESS_UI_FIXTURE_URL;
+const expect = playwrightExpect.configure({timeout:90000});
+assert.ok(fixtureUrl?.startsWith('http://'));
+const output = resolve(process.env.OPEN_HARNESS_UI_EVIDENCE || '/tmp/open-harness-real-computer-ui'); mkdirSync(output, { recursive: true });
+const browser = await chromium.launch({ headless: true }), context = await browser.newContext({ viewport: { width: 1440, height: 1100 }, deviceScaleFactor: 1 }), page = await context.newPage();
+page.setDefaultTimeout(90000);
+const errors = [], sockets = { terminal: 0, desktop: 0 }, requests = [];
+page.on('pageerror', error => errors.push(error.message));
+page.on('websocket', socket => { if (socket.url().includes('/v1/terminal-stream')) sockets.terminal++; if (socket.url().includes('/v1/desktop-stream')) sockets.desktop++; });
+page.on('response', response => { if (response.status() >= 400) requests.push({ status: response.status(), path: new URL(response.url()).pathname }); });
+await page.addInitScript(() => { localStorage.setItem('open-harness.onboarding.v1','done'); localStorage.setItem('open-harness.advanced.v1','on'); });
+const token = (await (await fetch(control + '/v1/bootstrap')).json()).token;
+const api = async path => { const response = await fetch(control + path, { headers: { Authorization: `Bearer ${token}` } }); assert.ok(response.ok); return response.json(); };
+let result, failure;
+try {
+  const machineName = (await api('/v1/agents/atlas/desktop/status')).machine.name;
+  await page.goto(`http://127.0.0.1:${appPort}/?controlPort=${controlPort}`);
+  await page.getByRole('button',{name:'Meet Atlas'}).click(); await page.getByRole('button',{name:'Open agent computer'}).click();
+  const panel = page.getByRole('dialog',{name:'Atlas’s computer'});
+  await expect(panel.getByLabel('Computer status')).toContainText(machineName);
+  const take = async () => { await panel.getByRole('button',{name:'Take control',exact:true}).click(); await panel.getByRole('button',{name:'Stop agent work and take control'}).click(); await expect(panel.getByTestId('computer-controller')).toHaveText('Control: You',{timeout:90000}); };
+  await take();
+  await expect(panel.getByRole('img',{name:'Current private agent desktop'})).toBeVisible({timeout:90000});
+  await panel.getByRole('button',{name:'Address bar',exact:true}).click();
+  await panel.getByLabel('Text for desktop').fill(fixtureUrl); await panel.getByRole('button',{name:'Type into desktop'}).click();
+  await expect(panel.getByLabel('Text for desktop')).toHaveValue(''); await panel.getByRole('button',{name:'Enter',exact:true}).click();
+  await panel.getByRole('button',{name:'Use live desktop'}).click();
+  await expect(panel.getByRole('status').filter({hasText:'Live desktop · view only'})).toBeVisible({timeout:90000});
+  await expect.poll(async () => panel.locator('canvas').evaluateAll(canvases => canvases.some(canvas => { const pixels = canvas.getContext('2d')?.getImageData(0,0,canvas.width,canvas.height).data; if (!pixels) return false; const colors = new Set(); for (let i = 0; i < pixels.length; i += 4000) colors.add(`${pixels[i]},${pixels[i+1]},${pixels[i+2]}`); return colors.size > 5; })),{timeout:30000}).toBe(true);
+  await panel.screenshot({path:join(output,'actual-linux-live-desktop.png')});
+  await panel.getByRole('tab',{name:'Terminal',exact:true}).click();
+  await expect(panel.getByRole('status').filter({hasText:`Connected to this agent’s workspace on ${machineName}.`})).toBeVisible({timeout:90000});
+  await panel.getByLabel('Terminal command').fill("printf 'ACTUAL_UI_TERMINAL_VERIFIED\\n' > ui-terminal-result.txt; cat ui-terminal-result.txt; uname -s; pwd");
+  await panel.getByRole('button',{name:'Run',exact:true}).click();
+  const terminal = panel.getByTestId('workspace-terminal-screen');
+  await expect(terminal).toContainText('ACTUAL_UI_TERMINAL_VERIFIED',{timeout:30000}); await expect(terminal).toContainText('Linux'); await expect(terminal).toContainText('/workspace/shared');
+  await panel.screenshot({path:join(output,'actual-linux-terminal.png')});
+  assert.equal(sockets.terminal,1);
+  await panel.getByRole('tab',{name:'Desktop',exact:true}).click(); await panel.getByRole('tab',{name:'Terminal',exact:true}).click();
+  await expect(terminal).toContainText('ACTUAL_UI_TERMINAL_VERIFIED'); assert.equal(sockets.terminal,1);
+  const before = await api('/v1/agents/atlas/profile'); assert.ok(!before.profile.allowedTools.includes('terminal'));
+  await panel.getByRole('button',{name:'Hand back, don’t continue'}).click();
+  await expect(panel.getByText(/Commands you left running were stopped/)).toBeVisible({timeout:90000}); await expect(terminal).toHaveCount(0);
+  assert.equal((await api('/v1/agents/atlas/desktop/status')).controlled,false);
+  await take(); assert.equal((await api('/v1/agents/atlas/desktop/status')).browserSessionPreserved,true);
+  await panel.getByRole('tab',{name:'Desktop',exact:true}).click();
+  await expect(panel.getByRole('status').filter({hasText:'Live desktop · view only'})).toBeVisible();
+  await panel.screenshot({path:join(output,'actual-linux-browser-after-handback.png')});
+  await panel.getByRole('button',{name:'Hand back, don’t continue'}).click();
+  await expect(panel.getByText(/Commands you left running were stopped/)).toBeVisible({timeout:90000});
+  assert.equal((await api('/v1/agents/atlas/desktop/status')).controlled,false); assert.equal(errors.length,0,JSON.stringify(errors));
+  result = { ok: true, mode: 'built app with real Chromium, xterm and noVNC against paired Linux Docker runner; no routed/mock responses; no model inference', realDesktopPixels:true, liveNoVnc:true, terminalConnected:true, terminalCommandRendered:true, terminalTabPreserved:true, humanShellDoesNotGrantAgentCli:true, handback:true, browserSessionPreserved:true, sockets, errors, requests };
+} catch (error) { failure = error; await page.screenshot({path:join(output,'failure.png'),fullPage:true}).catch(()=>{}); writeFileSync(join(output,'failure-dom.txt'),await page.locator('body').innerText().catch(()=>'')); }
+finally { writeFileSync(join(output,'result.json'),JSON.stringify(result || {ok:false,error:String(failure?.stack || failure),sockets,errors,requests},null,2)); await browser.close(); }
+if(failure)throw failure;
+console.log(JSON.stringify({...result,artifacts:output},null,2));

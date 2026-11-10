@@ -51,7 +51,9 @@ PROBE_USER = '1000:1000' if os.getuid() == 0 else f'{os.getuid()}:{os.getgid()}'
 STEPS = ['probe-component-root', 'probe-bind', 'component-scan', 'check-component', 'component-sbom', 'check-sbom',
          'sbom-scan', 'check-sbom-scan', 'make-negative', 'negative-scan', 'check-negative', 'image-scan', 'check-image']
 CHILD_ENV = {'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'DOCKER_CONFIG', 'PYTHONDONTWRITEBYTECODE'}
-SHELL_ENV = {'PWD', 'OLDPWD', 'SHLVL', '_'}  # set by the /bin/sh wrappers around the fakes
+FIXTURE_ENV = {'PWD', 'OLDPWD', 'SHLVL', '_'}  # set by the /bin/sh wrappers around the fakes
+if sys.platform == 'darwin':
+    FIXTURE_ENV.add('__CF_USER_TEXT_ENCODING')  # injected by the macOS Python fixture interpreter
 NODE = shutil.which('node')
 FOREIGN = {  # containers this invocation did not create; the gate must never touch them
     'f1' * 32: {'Id': 'f1' * 32, 'Name': '/oh-debian-origin-gate-0000000000000000-probe-component-root', 'Image': IMAGE,
@@ -102,7 +104,7 @@ class Fixture:
     """A checkout copy, a synthetic verified Hermes image root, a scanner database and the two fake CLIs."""
 
     def __init__(self, test, arch=ARCH):
-        self.dir = Path(tempfile.mkdtemp(prefix='oh-debian-gate-'))
+        self.dir = Path(tempfile.mkdtemp(prefix='oh-debian-gate-')).resolve()
         test.addCleanup(shutil.rmtree, self.dir, True)
         self.arch = arch
         self.repo, self.root, self.bin, self.cache = (self.dir / n for n in ('repo', 'image-root', 'bin', 'trivy-cache'))
@@ -153,7 +155,7 @@ class Fixture:
             wrapper.chmod(0o755)
         self.inspect = {'Id': IMAGE, 'RepoTags': ['open-harness-hermes:release-candidate'], 'RepoDigests': [], 'Os': 'linux',
                         'Architecture': arch, 'Created': '2026-09-29T00:00:00Z',
-                        'Config': {'User': 'hermes', 'Labels': {'dev.openharness.runtime': '7',
+                        'Config': {'User': 'hermes', 'Labels': {'dev.openharness.runtime': '9',
                                                                 'org.opencontainers.image.revision': 'a' * 40}},
                         'RootFS': {'Type': 'layers', 'Layers': ['sha256:' + '1' * 64]}}
         self.state = {'arch': arch, 'os': 'linux', 'dockerHost': DOCKER_HOST, 'python': sys.executable, 'lock': str(self.lock_path),
@@ -275,11 +277,11 @@ class GateSuccess(GateCase):
         self.assertEqual((receipt['schema'], receipt['ok'], receipt['architecture']), ('open-harness-debian-origin-gate/1', True, fixture.arch))
         # Image: the exact ID, native architecture and runtime contract, as docker image inspect reported it.
         self.assertEqual((receipt['image']['id'], receipt['image']['architecture'], receipt['image']['labels']['dev.openharness.runtime']),
-                         (IMAGE, fixture.arch, '7'))
+                         (IMAGE, fixture.arch, '9'))
         self.assertEqual(receipt['host']['docker']['Arch'], fixture.arch)
         # Sources, scanner and database identities, unchanged across the gate; the stale scan cache is never copied.
         self.assertEqual(receipt['sources']['files'], fixture.expected_sources())
-        self.assertEqual(receipt['sources']['runtimeContract'], '7')
+        self.assertEqual(receipt['sources']['runtimeContract'], '9')
         self.assertEqual(receipt['scanner']['sha256'], sha256(fixture.bin / 'trivy'))
         self.assertEqual(receipt['scanner']['version']['VulnerabilityDB'], fixture.metadata)
         database = receipt['database']
@@ -423,13 +425,13 @@ class GateSuccess(GateCase):
         self.assertFalse(marker.exists(), 'no hostile module or startup file ran')
         for entry in fixture.log('trivy'):
             allowed = CHILD_ENV | ({'DOCKER_HOST'} if entry['argv'][0] == 'image' else set())
-            self.assertLessEqual(set(entry['env']) - SHELL_ENV, allowed, entry['argv'][0])
+            self.assertLessEqual(set(entry['env']) - FIXTURE_ENV, allowed, entry['argv'][0])
             self.assertEqual(entry['cwd'], str(fixture.out / 'work/cwd'))
             if entry['argv'][0] == 'image':
                 self.assertEqual(entry['dockerHost'], DOCKER_HOST)
         for entry in fixture.log('docker'):
             if 'argv' in entry:
-                self.assertLessEqual(set(entry['env']) - SHELL_ENV, CHILD_ENV)
+                self.assertLessEqual(set(entry['env']) - FIXTURE_ENV, CHILD_ENV)
                 self.assertIsNone(entry['dockerHost'])
                 self.assertEqual(entry['dockerConfig'], str(fixture.out / 'work/docker-config'))
                 self.assertEqual(entry['argv'][:2], ['--host', DOCKER_HOST])
@@ -468,8 +470,8 @@ class GateRefusesBeforeAnyContainer(GateCase):
             (OTHER_IMAGE, None, 'image-inspect: docker exited 1'),
             (OTHER_IMAGE, lambda f: f.state['images'].update({OTHER_IMAGE: {'inspect': f.inspect, 'root': str(f.root)}}),
              f'docker resolved {OTHER_IMAGE} to {IMAGE}'),
-            (IMAGE, lambda f: f.inspect['Config']['Labels'].update({'dev.openharness.runtime': '6'}), "runtime contract is '6', not 7"),
-            (IMAGE, lambda f: f.inspect['Config']['Labels'].pop('dev.openharness.runtime'), 'runtime contract is None, not 7'),
+            (IMAGE, lambda f: f.inspect['Config']['Labels'].update({'dev.openharness.runtime': '8'}), "runtime contract is '8', not 9"),
+            (IMAGE, lambda f: f.inspect['Config']['Labels'].pop('dev.openharness.runtime'), 'runtime contract is None, not 9'),
             (IMAGE, lambda f: f.inspect.update(Architecture=OTHER_ARCH), f'the image is linux/{OTHER_ARCH}, not linux/{ARCH}'),
             (IMAGE, lambda f: f.inspect.update(Os='windows'), f'the image is windows/{ARCH}'),
         ]

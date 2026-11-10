@@ -1,3 +1,4 @@
+import {setupFixture} from './setup-fixture';
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { initialWorkspace } from '../../lib/types';
@@ -84,6 +85,7 @@ test('Computer settings stay available without Advanced features and offer only 
 });
 
 test('does not mark setup complete after a failed model check and supports retry', async ({ page }, testInfo) => {
+  await setupFixture(page);
   await page.route('**/v1/onboarding/model-test', route => {
     const input = route.request().postDataJSON();
     return route.fulfill({ json: { ok: true, message: 'Fixture provider accepted the model.', model: input.model, revision: input.revision + 1 } });
@@ -105,6 +107,9 @@ test('does not mark setup complete after a failed model check and supports retry
   await expect(setup.getByRole('status').filter({ hasText: 'API key was rejected' })).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'You’re ready' })).toHaveCount(0);
   await setup.getByRole('button', { name: 'Save and test' }).click();
+  await expect(page.getByRole('dialog',{name:'Verify a task'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Start using Open Harness'})).toBeDisabled();
+  await page.getByRole('button',{name:'Run verification task'}).click();
   await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeVisible();
 });
 

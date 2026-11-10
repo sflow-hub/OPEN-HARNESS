@@ -12,7 +12,7 @@ permissions:
 jobs:
   hermes-container:
     runs-on: ubuntu-24.04
-    timeout-minutes: 105
+    timeout-minutes: 145
     env:
       OPEN_HARNESS_HERMES_IMAGE: open-harness-hermes:ci
       OPEN_HARNESS_REAL_CONTAINER: '1'
@@ -72,6 +72,49 @@ jobs:
           TMPDIR: ${{ runner.temp }}
           OPEN_HARNESS_DESKTOP_SMOKE: '1'
         run: node --import tsx tests/real-desktop-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/desktop-smoke.log"
+      - name: Exercise human desktop control and shared browser persistence
+        timeout-minutes: 6
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+          OPEN_HARNESS_DESKTOP_CONTROL_SMOKE: '1'
+        run: node --import tsx tests/real-desktop-control-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/desktop-control-smoke.log"
+      - name: Exercise paired computer streams and durable terminal revocation
+        timeout-minutes: 6
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+          OPEN_HARNESS_REAL_COMPUTER_TRANSPORT: '1'
+        run: node --import tsx tests/real-computer-transport-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/computer-transport-smoke.log"
+      - name: Exercise real managed computer reviews and human continuation
+        timeout-minutes: 6
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+          OPEN_HARNESS_REAL_MANAGED_COMPUTER: '1'
+        run: node --import tsx tests/real-managed-computer-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/managed-computer-smoke.log"
+      - name: Exercise managed computer work and continuation on a paired runner
+        timeout-minutes: 6
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+          OPEN_HARNESS_REAL_MANAGED_COMPUTER: '1'
+          OPEN_HARNESS_REAL_MANAGED_COMPUTER_PAIRED: '1'
+        run: node --import tsx tests/real-managed-computer-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/managed-computer-paired-smoke.log"
+      - name: Exercise sealed browser-session transfers in both directions
+        timeout-minutes: 6
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+          OPEN_HARNESS_REAL_COMPUTER_TRANSFER: '1'
+        run: node --import tsx tests/real-computer-transfer-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/computer-transfer-smoke.log"
+      - name: Exercise legacy browser migration and execution mount isolation
+        timeout-minutes: 6
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+          OPEN_HARNESS_REAL_BROWSER_MIGRATION: '1'
+        run: node --import tsx tests/real-browser-migration-smoke.mjs 2>&1 | tee "$RUNNER_TEMP/browser-migration-smoke.log"
       - name: Exercise the production Compose stack and persistent state
         timeout-minutes: 25
         shell: bash
@@ -97,10 +140,26 @@ jobs:
             ${{ runner.temp }}/open-harness-workflows-*/evidence.json
             ${{ runner.temp }}/open-harness-workflows-*/diagnostics.json
             ${{ runner.temp }}/desktop-smoke.log
+            ${{ runner.temp }}/desktop-control-smoke.log
+            ${{ runner.temp }}/computer-transport-smoke.log
+            ${{ runner.temp }}/computer-transport-*/evidence/result.json
+            ${{ runner.temp }}/computer-transport-*/diagnostics.json
+            ${{ runner.temp }}/managed-computer-smoke.log
+            ${{ runner.temp }}/managed-computer-paired-smoke.log
+            ${{ runner.temp }}/managed-computer-*/evidence.json
+            ${{ runner.temp }}/managed-computer-*/diagnostics.json
+            ${{ runner.temp }}/managed-computer-*/managed-capture.png
+            ${{ runner.temp }}/computer-transfer-smoke.log
+            ${{ runner.temp }}/computer-transfer-*/evidence.json
+            ${{ runner.temp }}/computer-transfer-*/diagnostics.json
+            ${{ runner.temp }}/browser-migration-smoke.log
+            ${{ runner.temp }}/browser-migration-*/evidence.json
+            ${{ runner.temp }}/browser-migration-*/diagnostics.json
             ${{ runner.temp }}/open-harness-desktop-smoke-*/evidence.json
             ${{ runner.temp }}/open-harness-desktop-smoke-*/diagnostics.json
             ${{ runner.temp }}/open-harness-desktop-smoke-*/container.log
             ${{ runner.temp }}/open-harness-desktop-smoke-*/shared/*.png
+            ${{ runner.temp }}/open-harness-desktop-smoke-*/computers/*/staging/*.png
             ${{ runner.temp }}/compose-smoke.log
             ${{ runner.temp }}/open-harness-compose-smoke-*/evidence.json
             ${{ runner.temp }}/open-harness-compose-smoke-*/diagnostics.json
@@ -110,7 +169,27 @@ jobs:
             ${{ runner.temp }}/open-harness-compose-smoke-*/provider-requests.json
       - name: Remove only smoke-test containers
         if: always()
-        run: docker ps -aq --filter 'name=^/open-harness-real-smoke-' --filter 'name=^/open-harness-wf-(parent|child|clock)-' --filter 'name=^/oh-desktop-smoke-' | xargs -r docker rm -f
+        run: docker ps -aq --filter 'name=^/open-harness-real-smoke-' --filter 'name=^/open-harness-wf-(parent|child|clock)-' --filter 'name=^/oh-desktop-smoke-' --filter 'name=^/open-harness-desktop-control-' | xargs -r docker rm -f
+      - name: Remove only this job's computer fixture containers
+        if: always()
+        shell: bash
+        run: |
+          node --import tsx --input-type=module <<'NODE'
+          import { readdirSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { execFileSync } from 'node:child_process';
+          import { containerStateKey } from './runtime/hermes.ts';
+          for (const entry of readdirSync(process.env.RUNNER_TEMP, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const fixture = join(process.env.RUNNER_TEMP, entry.name);
+            const roots = /^(harness-desktop-control|browser-migration)-[A-Za-z0-9]+$/.test(entry.name) ? [fixture] : /^(computer-transport|managed-computer|computer-transfer)-[A-Za-z0-9]+$/.test(entry.name) ? [join(fixture, 'coordinator'), join(fixture, 'runner')] : [];
+            for (const root of roots) {
+              const key = containerStateKey(root);
+              const ids = execFileSync('docker', ['ps', '-aq', '--filter', 'label=open-harness.managed=1', '--filter', `label=open-harness.state=${key}`], { encoding: 'utf8' }).trim().split(/\s+/).filter(Boolean);
+              if (ids.length) execFileSync('docker', ['rm', '-f', ...ids], { stdio: 'inherit' });
+            }
+          }
+          NODE
       - name: Remove only this job's Compose acceptance projects
         if: always()
         shell: bash

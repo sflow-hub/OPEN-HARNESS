@@ -9,7 +9,7 @@ maturity and what's outstanding before a 1.0, not a scheduled feature list.
 | --- | --- |
 | Per-agent Docker container (default) | Most mature path. Container isolation is the primary security boundary; see [SECURITY.md](SECURITY.md). |
 | Selected folders | Compose grants exact explicitly exported roots with read-only/read-write ceilings. Native execution verifies folder identity before starting code and requires the same Linux kernel as Docker; cross-kernel native grants fail closed. |
-| Computer control | Private agent desktops run inside per-agent containers on Linux with Docker. Legacy native Direct / Existing desktop modes are blocked; use Computer settings to convert them. Host desktop isolation is not claimed. |
+| Computer control | Persistent private desktop services and separate stoppable execution containers require Linux with Docker. Desktop clients can supervise remotely. Legacy native Direct / Existing desktop modes are blocked; use Computer settings to convert them. Host desktop isolation is not claimed. |
 | Local browser / Docker Compose | Docker-and-browser is the MVP target. Linux ARM64 has real runtime evidence; AMD64 container execution is still required and may use recorded emulation. Physical Mac/Windows checks are follow-up compatibility work, not MVP gates. The coordinator and agents run in Linux containers, with browser pairing, explicit host-folder exports and prebuilt ARM64/AMD64 package gates. Publication and final package/restore evidence are tracked in `runtime/VERIFICATION.md`. |
 | Desktop app (Windows/macOS/Linux) | Deferred. Builds from source and the signed-release workflow exists, but no release secrets are provisioned and it is not part of the beta. |
 

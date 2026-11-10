@@ -14,7 +14,9 @@ import {
   Download,
   FileText,
   FolderOpen,
+  Monitor,
   KeyRound,
+  ListTodo,
   Menu,
   MessageSquare,
   Plus,
@@ -59,8 +61,20 @@ import AgentSettings from "../components/agent-settings";
 import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import TeamManager, { TeamBadge } from "../components/team-manager";
-import CredentialManager, { CredentialSwitcher } from "../components/credential-manager";
+import CredentialManager, { CredentialSwitcher, CredentialsPage } from "../components/credential-manager";
 import ModelPicker from "../components/model-picker";
+import { CODEX_PROVIDER } from "../lib/codex";
+import ConversationTranscript from "../components/conversation-transcript";
+import ChatProgress from "../components/chat-progress";
+import { applyChatEvents } from "../lib/chat-stream";
+import GroupConversations from "../components/group-conversations";
+import WorkflowManager from "../components/workflow-manager";
+import DeliverySettings from "../components/delivery-settings";
+import AvailabilitySettings from "../components/availability-settings";
+import NetworkSettings from "../components/network-settings";
+import RunReview, { PerformanceSummary } from "../components/run-review";
+import AssistantWorkspace from '../components/assistant-workspace';
+import { DesktopPanel } from "../components/desktop-panel";
 import { CREDENTIAL_PROVIDERS, modelForCredential, providerLabel, type CredentialRecord } from "../lib/credentials";
 import { isSandboxedComputer, profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
 import type { Team } from "../lib/team";
@@ -88,7 +102,7 @@ const MIGRATED_KEY = "open-harness.migrated.v1";
 // Kept apart from SETTINGS_KEY on purpose: the onboarding save rewrites that whole
 // blob, which would silently drop anything else stored alongside it.
 const NOTIFY_KEY = "open-harness.notify.v1";
-type View = "home" | "teams" | "chat" | "files" | "routines" | "tasks";
+type View = "assistant" | "home" | "teams" | "groups" | "chat" | "files" | "routines" | "tasks" | "credentials";
 type ModelSettings = { provider: string; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
 const defaultSettings: ModelSettings = {
   provider: "xai",
@@ -151,8 +165,9 @@ export default function Home() {
   const [workspace, setWorkspace] = useState<Workspace>(initialWorkspace);
   const [retiredTeams, setRetiredTeams] = useState<Team[]>([]);
   const [ready, setReady] = useState(false);
-  const [view, setView] = useState<View>("home");
-  const lastWorkspaceView = useRef<View>("home");
+  const [loadingHistory, setLoadingHistory] = useState(true);
+  const [view, setView] = useState<View>("assistant");
+  const navigated = useRef(false);
   const [selectedAgent, setSelectedAgent] = useState("atlas");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [settings, setSettings] = useState<ModelSettings>(defaultSettings);
@@ -172,6 +187,7 @@ export default function Home() {
   const [editingAgentTab, setEditingAgentTab] = useState<'profile' | 'computer'>('profile');
   const [mobileOpen, setMobileOpen] = useState(false);
   const [input, setInput] = useState("");
+  const [replyOnly, setReplyOnly] = useState(false);
   const [search, setSearch] = useState("");
   const [agentTeamFilter, setAgentTeamFilter] = useState("all");
   const [liveRuns, setLiveRuns] = useState<Record<string, PersistentRun>>({});
@@ -184,6 +200,11 @@ export default function Home() {
   const [routines, setRoutines] = useState<Array<Record<string, unknown>>>([]);
   const [routineDraft, setRoutineDraft] = useState<{ id?: string; name: string; prompt: string; agentId: string; intervalMinutes: number } | null>(null);
   const [routineBusy, setRoutineBusy] = useState(false);
+  const [reviewRun, setReviewRun] = useState<PersistentRun | null>(null);
+  const [desktopAgentId, setDesktopAgentId] = useState<string | null>(null);
+  const [workflowSourceRunId, setWorkflowSourceRunId] = useState<string>();
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>();
+  const watchControllers = useRef(new Set<AbortController>());
   // MEMORY.md and SKILL.md are multi-section Markdown documents; window.prompt cannot
   // realistically edit either, and there was no way to write a skill by hand at all.
   const [docEditor, setDocEditor] = useState<
@@ -201,7 +222,7 @@ export default function Home() {
   } | null>(null);
 
   const [notice, setNotice] = useState("");
-  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectingRuns, setReconnectingRuns] = useState<Record<string, boolean>>({});
   const [offline, setOffline] = useState("");
   const [retrying, setRetrying] = useState(false);
   // The Docker-backed install hands its operator token only to a browser that arrives with
@@ -213,6 +234,7 @@ export default function Home() {
   // one exchange by the next connection attempt.
   const pendingPairCode = useRef("");
   const runtimeRefresh = useRef(0);
+  const runtimeFilesRequest = useRef(0);
   // What the first-run guide last reported the runtime to be, kept until a bootstrap answer
   // agrees: a re-read requested for another reason (closing the guide) carries it on.
   const runtimeExpectation = useRef<boolean | null>(null);
@@ -222,7 +244,7 @@ export default function Home() {
   const controlRef = useRef(new ControlClient());
   const followed = useRef(new Set<string>());
   const sending = useRef(new Set<string>());
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const [submissions, setSubmissions] = useState<Record<string, string>>({});
   const uploadRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -231,6 +253,9 @@ export default function Home() {
   const conversation = workspace.conversations.find(
     (c) => c.id === conversationId,
   );
+  const submitting = conversationId ? submissions[conversationId] : undefined;
+  const composerRef = useRef({ conversationId, agentId: agent.id });
+  useLayoutEffect(() => { composerRef.current = { conversationId, agentId: agent.id }; }, [conversationId, agent.id]);
   const file = workspace.files.find((f) => f.id === selectedFile);
   // The deterministic adapter exists for automated tests only. Treating it as a
   // connected runtime let a source preview display canned prose as an agent reply.
@@ -251,6 +276,19 @@ export default function Home() {
   // one queued. `running` is about this conversation only; other agents keep working.
   const activeRun = conversationRuns.find((run) => run.state !== "queued") || conversationRuns[0] || null;
   const running = Boolean(activeRun);
+  const replyOnlyAvailable = runtime?.features?.includes('reply-only') === true;
+  const replyOnlyMode = replyOnlyAvailable && (activeRun ? Boolean(activeRun.reply_only) : replyOnly);
+  // Starting Hermes is most of the wait before a first word. Someone who has started typing
+  // is about to send, so the runtime starts then instead of after Send. Throttled per agent;
+  // the coordinator decides whether it can, and a refusal changes nothing on screen.
+  const preparedAt = useRef(new Map<string, number>());
+  const prepareComposer = () => {
+    if (!connected || running || !runtime?.features?.includes('agent-prepare')) return;
+    const key = `${agent.id}:${replyOnlyMode}`, last = preparedAt.current.get(key) || 0;
+    if (Date.now() - last < 60_000) return;
+    preparedAt.current.set(key, Date.now());
+    void controlRef.current.prepareAgent(agent.id, replyOnlyMode).catch(() => {});
+  };
   const anyRunning = live.length > 0;
   const busyAgents = new Set(live.map((run) => run.agent_id));
   // Everything any live run is waiting on, as the coordinator last reported it. Derived
@@ -272,6 +310,9 @@ export default function Home() {
       ...w,
       conversations: w.conversations.map((c) => (c.id === id ? update(c) : c)),
     }));
+  }
+  function setRunReconnecting(id: string, value: boolean) {
+    setReconnectingRuns(current => { const next = { ...current }; if (value) next[id] = true; else delete next[id]; return next; });
   }
   // Puts a run the coordinator knows about into its conversation — creating the
   // conversation, or just the run's two messages, when this client has not seen it — and
@@ -392,7 +433,7 @@ export default function Home() {
       .finally(() => {
         followed.current.delete(run.id);
         setLiveRuns((current) => { const next = { ...current }; delete next[run.id]; return next; });
-        if (!followed.current.size) setReconnecting(false);
+        setRunReconnecting(run.id, false);
       });
   }
   useEffect(() => {
@@ -401,7 +442,8 @@ export default function Home() {
     const layoutTimer = window.setTimeout(matchLayout, 0);
     narrow.addEventListener("change", matchLayout);
     try {
-      const saved = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
+      // Managed workspaces hydrate from their authenticated coordinator, never another account's browser cache.
+      const saved = controlRef.current.managed ? null : localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
       // Hydrate browser-only persistence after the server-rendered first frame.
       if (saved) {
         const parsed = normalizeWorkspace(JSON.parse(saved));
@@ -415,7 +457,8 @@ export default function Home() {
       }
       if (localStorage.getItem(NOTIFY_KEY) === "on" && typeof Notification !== "undefined" && Notification.permission === "granted") setNotifyWhenDone(true);
       setAdvancedFeatures(localStorage.getItem(ADVANCED_KEY) !== "off");
-      const prefs = localStorage.getItem(SETTINGS_KEY);
+      if(!controlRef.current.managed&&localStorage.getItem(ONBOARDING_KEY)==='done'&&localStorage.getItem('open-harness.assistant-home')!=='1')setView('home');
+      const prefs = controlRef.current.managed ? null : localStorage.getItem(SETTINGS_KEY);
       if (prefs) {
         const p = JSON.parse(prefs);
         if (Object.hasOwn(PROVIDERS, p.provider) && typeof p.model === "string") {
@@ -430,17 +473,23 @@ export default function Home() {
       );
     }
     setReady(true);
+    const watchers = watchControllers.current;
     return () => {
       window.clearTimeout(layoutTimer);
       narrow.removeEventListener("change", matchLayout);
+      for (const controller of watchers) controller.abort();
     };
   }, []);
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
     let retryTimer = 0;
+    let connectionEpoch = 0;
     const connect = async () => {
       const client = controlRef.current;
+      const epoch = ++connectionEpoch;
+      const isCurrent = () => !cancelled && epoch === connectionEpoch;
+      setLoadingHistory(true);
       // The launcher opens http://localhost:3000/#pair=<code>. The code is read once, taken
       // out of the address bar before anything else happens, and exchanged only with this
       // page's own coordinator. A browser that already holds a token keeps working even if
@@ -456,60 +505,80 @@ export default function Home() {
         try { await client.pair(decodeURIComponent(code)); }
         catch (error) { linkFailure = error instanceof Error ? error.message : "This browser connection link is invalid or expired."; }
       }
+      if (!isCurrent()) return;
       try {
         const status = await client.bootstrap();
-        if (cancelled) return;
+        if (!isCurrent()) return;
         setPairing({ state: "none", message: "" });
         setRuntime(status);
-        const synced = await client.request<{ agents: Agent[] }>("/v1/agents/sync", {
+        if(client.managed){const requestedDesktop=new URL(window.location.href).searchParams.get('desktop');if(requestedDesktop&&/^[A-Za-z0-9_-]+$/.test(requestedDesktop))setDesktopAgentId(requestedDesktop);}
+        const synced = client.managed ? await client.request<{agents:Agent[]}>('/v1/client-agents') : await client.request<{ agents: Agent[] }>("/v1/agents/sync", {
           method: "POST",
           body: JSON.stringify({ agents: workspace.agents }),
         });
-        if (localStorage.getItem(MIGRATED_KEY) !== 'done') {
+        if (!isCurrent()) return;
+        workspaceRef.current = { ...workspaceRef.current, agents: synced.agents };
+        setWorkspace(current => ({ ...current, agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })) }));
+        if (!client.managed && localStorage.getItem(MIGRATED_KEY) !== 'done') {
           await client.request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) });
           localStorage.setItem(MIGRATED_KEY, 'done');
         }
-        if (workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspace.teams }) });
-        const teamResult = await client.request<{ teams: Team[] }>("/v1/teams?includeRetired=1");
-        if (!cancelled) {
-          workspaceRef.current = { ...workspaceRef.current, agents: synced.agents };
-          setWorkspace(current => ({ ...current, teams: teamResult.teams.filter(team => !team.retiredAt), agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })) }));
-          setRetiredTeams(teamResult.teams.filter(team => Boolean(team.retiredAt)));
-          const defaults = await client.request<{ model: ModelChoice; revision: number }>("/v1/workspace/model/import", {
+        if (!isCurrent()) return;
+        // These reads have no dependency on one another. In particular, a slow settings
+        // or credential response must not hold up history and reattaching active work.
+        await Promise.all([
+          (async () => {
+            if (!client.managed && workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspace.teams }) });
+            const { teams } = await client.request<{ teams: Team[] }>("/v1/teams?includeRetired=1");
+            if (!isCurrent()) return;
+            setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) }));
+            setRetiredTeams(teams.filter(team => Boolean(team.retiredAt)));
+          })(),
+          (client.managed ? client.request<{model:ModelChoice;revision:number}>('/v1/workspace/model') : client.request<{ model: ModelChoice; revision: number }>("/v1/workspace/model/import", {
             method: "POST",
             body: JSON.stringify({ model: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || "", credentialRef: settings.credentialRef || "" } }),
-          });
-          const saved = { provider: defaults.model.provider as Provider, model: defaults.model.model, baseUrl: defaults.model.baseUrl, credentialRef: defaults.model.credentialRef };
-          // This can land after Workspace settings was opened, even typed in. It is the
-          // saved model, what the form is compared against; an edit already made stays.
-          const form = settingsRef.current;
-          if (!form.open || JSON.stringify(form.settings) === form.baseline) setSettings(saved);
-          setSettingsBaseline(JSON.stringify(saved));
-          setWorkspaceModelRevision(defaults.revision);
-          if (localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
-        }
-        try { const saved = await client.request<{ credentials: CredentialRecord[] }>("/v1/credentials"); if (!cancelled) setCredentials(saved.credentials); } catch {}
-        const [{ routines: savedRoutines }, { runs }, history] = await Promise.all([
-          client.request<{ routines: Array<Record<string, unknown>> }>(
-            "/v1/routines",
-          ),
-          client.request<{ runs: PersistentRun[] }>("/v1/runs"),
-          client.conversations(),
+          })).then(defaults => {
+            if (!isCurrent()) return;
+            const saved = { provider: defaults.model.provider as Provider, model: defaults.model.model, baseUrl: defaults.model.baseUrl, credentialRef: defaults.model.credentialRef };
+            // An edit made while this response was in flight must keep its draft.
+            const form = settingsRef.current;
+            if (!form.open || JSON.stringify(form.settings) === form.baseline) setSettings(saved);
+            setSettingsBaseline(JSON.stringify(saved));
+            setWorkspaceModelRevision(defaults.revision);
+            if (!client.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
+          }),
+          client.request<{ credentials: CredentialRecord[] }>("/v1/credentials")
+            .then(saved => { if (isCurrent()) setCredentials(saved.credentials); }).catch(() => {}),
+          client.request<{ routines: Array<Record<string, unknown>> }>("/v1/routines")
+            .then(saved => { if (isCurrent()) setRoutines(saved.routines); }),
+          client.managed ? refreshRuntimeFiles().catch(() => {}) : Promise.resolve(),
+          Promise.all([client.request<{ runs: PersistentRun[] }>("/v1/runs"), client.conversations()]).then(([{ runs }, history]) => {
+            if (!isCurrent()) return;
+            hydrateHistory(history.conversations);
+            const liveNow = runs.filter(run => !run.parent_run_id && isLiveRun(run));
+            for (const run of liveNow) attachRun(run);
+            // A late response may reattach work, but must not undo the user's navigation.
+            if (liveNow[0] && !navigated.current) {
+              setSelectedAgent(liveNow[0].agent_id);
+              setConversationId(liveNow[0].conversation_id);
+              setView("chat");
+            }
+            const notificationRun = new URL(window.location.href).searchParams.get("run");
+            const notified = notificationRun && (runs.find(run => run.id === notificationRun) || history.conversations.flatMap(item => item.runs).find(run => run.id === notificationRun));
+            if (notified && !navigated.current) {
+              attachRun(notified); setSelectedAgent(notified.agent_id); setConversationId(notified.conversation_id); setView("chat");
+              const clean = new URL(window.location.href); clean.searchParams.delete("run"); window.history.replaceState(null, "", clean);
+            }
+            setLoadingHistory(false);
+          }),
         ]);
-        if (!cancelled) {
-          setRoutines(savedRoutines);
-          hydrateHistory(history.conversations);
-          const liveNow = runs.filter(run => !run.parent_run_id && isLiveRun(run));
-          for (const run of liveNow) attachRun(run);
-          if (liveNow[0]) {
-            setSelectedAgent(liveNow[0].agent_id);
-            setConversationId(liveNow[0].conversation_id);
-            setView("chat");
-          }
-        }
-        if (!cancelled) setOffline("");
+        if (isCurrent()) { setOffline(""); connectAttempt.current = 0; }
       } catch (error) {
-        if (cancelled) return;
+        if (!isCurrent()) return;
+        // Promise.all rejects before its other requests finish. Late answers from this
+        // failed attempt must not overwrite the next attempt's successful refresh.
+        connectionEpoch++;
+        setLoadingHistory(false);
         if (error instanceof PairingRequiredError) {
           // Not an outage: the coordinator is there and refused an unpaired browser. Only a
           // fresh link from the launcher changes that, so there is nothing to retry on a timer.
@@ -519,7 +588,7 @@ export default function Home() {
         setOffline(error instanceof Error ? error.message : "The local agent runtime is unavailable.");
         // First run needs the guide most when nothing is reachable yet, and the gate for it
         // used to sit inside the success path.
-        if (localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
+        if (!client.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
         // Back off, but keep trying: starting the coordinator should be enough to recover
         // without reloading the page.
         const wait = Math.min(30_000, 2_000 * 2 ** Math.min(connectAttempt.current++, 4));
@@ -593,7 +662,7 @@ export default function Home() {
   }, [runtime, selectedAgent]);
   // Surface storage failures from the external persistence operation.
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || controlRef.current.managed) return;
     const save = () => {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(storable(workspace)));
@@ -610,9 +679,6 @@ export default function Home() {
     window.addEventListener("pagehide", save);
     return () => { window.clearTimeout(timer); window.removeEventListener("pagehide", save); };
   }, [workspace, settings, ready]);
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [conversation?.messages]);
   // Agents run for minutes and the whole point is that you go and do something else.
   // Only interrupt when the page is actually out of view — a notification for something
   // the user is already looking at is noise.
@@ -796,57 +862,20 @@ export default function Home() {
       tone: workspace.agents.length % 3,
     });
   }
-  function handleEvent(
-    event: RunEvent,
+  function handleEvents(
+    events: RunEvent[],
     cid: string,
     mid: string,
-    agentId: string,
+    cursor: number,
   ) {
-    if (event.type === "memory")
-      setWorkspace((w) => ({
-        ...w,
-        agents: w.agents.map((a) =>
-          a.id === agentId ? { ...a, memory: event.memory } : a,
-        ),
-      }));
-    else if (
-      event.type === "text" ||
-      event.type === "activity" ||
-      event.type === "error"
-    )
-      updateConversation(cid, (c) => ({
-        ...c,
-        messages: c.messages.map((m) =>
-          m.id !== mid
-            ? m
-            : event.type === "text"
-              ? { ...m, content: m.content + event.text }
-              : event.type === "error"
-                ? {
-                    ...m,
-                    content: m.content + `\n\n${event.message}`,
-                    error: true,
-                    activities: m.activities?.map((a) =>
-                      a.status === "running" ? { ...a, status: "error" } : a,
-                    ),
-                  }
-                : {
-                    ...m,
-                    activities: [
-                      ...(m.activities || []).filter(
-                        (a) => a.id !== event.activity.id,
-                      ),
-                      event.activity,
-                    ],
-                  },
-        ),
-      }));
+    updateConversation(cid, current => ({ ...current, messages: current.messages.map(message => message.id === mid ? applyChatEvents(message, events, cursor) : message) }));
   }
   async function refreshRuntimeFiles() {
-    if (!runtime) return;
+    const epoch = ++runtimeFilesRequest.current, files = workspaceRef.current.files;
     const result = await controlRef.current.request<{
       files: Array<{ name: string; size: number; updatedAt: string; encoding: "utf8" | "base64"; mimeType: string }>;
     }>("/v1/files?scope=shared");
+    if (epoch !== runtimeFilesRequest.current) return;
     const loaded: Artifact[] = [];
     for (const meta of result.files.slice(0, 40)) {
       if (meta.size > 1_000_000) continue;
@@ -856,7 +885,8 @@ export default function Home() {
         encoding: "utf8" | "base64";
         mimeType: string;
       }>(`/v1/files?scope=shared&name=${encodeURIComponent(meta.name)}`);
-      const existing = workspace.files.find((item) => item.name === meta.name);
+      if (epoch !== runtimeFilesRequest.current) return;
+      const existing = files.find((item) => item.name === meta.name);
       loaded.push({
         id: existing?.id || uid(),
         name: meta.name,
@@ -867,7 +897,9 @@ export default function Home() {
         mimeType: record.mimeType,
       });
     }
-    setWorkspace((current) => ({ ...current, files: loaded }));
+    // A later refresh wins, and an upload, deletion, or import made while these reads
+    // were in flight keeps its local state instead of being replaced by an older list.
+    setWorkspace(current => epoch === runtimeFilesRequest.current && current.files === files ? { ...current, files: loaded } : current);
   }
   const EVENT_PAGE = 500;
   async function followRun(
@@ -881,27 +913,34 @@ export default function Home() {
     // but the run is not shown as live and nobody is notified about it.
     track = true,
   ) {
+    const controller = new AbortController();
+    watchControllers.current.add(controller);
+    try {
     let cursor = startCursor;
     let receivedStreamText = hasExistingText;
     let consecutiveFailures = 0;
+    let awaitingDecision = run.state === "waiting_approval" || run.state === "waiting_input";
     // A reply that already has text but no cursor got that text from the stored result,
     // not from this client's own stream. Playing the deltas into it from the start would
     // say everything twice; the terminal reconciliation below is what it needs.
     const replayText = !(startCursor === 0 && hasExistingText && !track);
-    while (true) {
+    while (!controller.signal.aborted) {
       // The run lives on the coordinator, not here. A dropped fetch — a sleeping
       // laptop, a coordinator restart, a blip — used to end this loop and leave the
       // agent working with nothing watching it. Retry with backoff instead, and only
       // give up once it is clear the coordinator is really gone.
       let snapshot;
+      const requestedAt = performance.now();
       try {
-        snapshot = await controlRef.current.events(run.id, cursor);
-        if (consecutiveFailures) { setReconnecting(false); setNotice("Reconnected. Still following this task."); }
+        snapshot = await controlRef.current.events(run.id, cursor, { signal: controller.signal, waitMs: awaitingDecision ? 2000 : 25000 });
+        awaitingDecision = snapshot.run.state === "waiting_approval" || snapshot.run.state === "waiting_input";
+        if (consecutiveFailures) { setRunReconnecting(run.id, false); setNotice("Reconnected. Still following this task."); }
         consecutiveFailures = 0;
       } catch (error) {
+        if (controller.signal.aborted) return run;
         consecutiveFailures += 1;
-        if (consecutiveFailures > 10) { setReconnecting(false); throw error; }
-        setReconnecting(true);
+        if (consecutiveFailures > 10) { setRunReconnecting(run.id, false); throw error; }
+        setRunReconnecting(run.id, true);
         await new Promise(resolve => setTimeout(resolve, Math.min(8000, 500 * 2 ** (consecutiveFailures - 1))));
         continue;
       }
@@ -912,18 +951,27 @@ export default function Home() {
         const stillPending = new Set([...(snapshot.run.pendingApprovals || []).map((item) => item.approvalId), ...(snapshot.run.pendingInputs || []).map((item) => item.inputId)]);
         setAnswered((current) => current.some((entry) => entry.runId === run.id && !stillPending.has(entry.id)) ? current.filter((entry) => entry.runId !== run.id || stillPending.has(entry.id)) : current);
       }
+      const updates: RunEvent[] = [];
       for (const item of snapshot.events) {
         cursor = Math.max(cursor, item.seq);
         const payload = item.payload || {};
         if (item.type === "message.delta") {
           const text = String(payload.text || payload.delta || payload.content || "");
-          if (text && replayText) { receivedStreamText = true; handleEvent({ type: "text", text }, cid, mid, agentId); }
+          if (text && replayText) { receivedStreamText = true; updates.push({ type: "text", text }, { type: "progress", phase: "responding" }); }
         } else if (item.type === "message.complete") {
           const text = String(payload.text || payload.content || "");
           if (text && !receivedStreamText && replayText) {
             receivedStreamText = true;
-            handleEvent({ type: "text", text }, cid, mid, agentId);
+            updates.push({ type: "text", text });
           }
+          updates.push({ type: "progress", phase: "finishing" });
+        } else if (item.type === "run.phase") {
+          const phase = String(payload.phase || '');
+          if (['profile-ready', 'gateway-ready'].includes(phase)) updates.push({ type: 'progress', phase: 'starting' });
+          else if (phase === 'prompt-dispatched') updates.push({ type: 'progress', phase: 'thinking' });
+          else if (phase === 'execution-finished') updates.push({ type: 'progress', phase: 'finishing' });
+        } else if (item.type === "thinking.delta") {
+          updates.push({ type: 'progress', phase: 'thinking' });
         } else if (
           item.type === "tool.start" ||
           item.type === "tool.generating" ||
@@ -931,7 +979,7 @@ export default function Home() {
         ) {
           // The mock names these id/preview; the real gateway sends tool_id and a context
           // that can be an object. Both have to land in the same activity row.
-          handleEvent(
+          updates.push(
             {
               type: "activity",
               activity: {
@@ -941,12 +989,9 @@ export default function Home() {
                 status: "running",
               },
             },
-            cid,
-            mid,
-            agentId,
           );
         } else if (item.type === "tool.complete") {
-          handleEvent(
+          updates.push(
             {
               type: "activity",
               activity: {
@@ -956,9 +1001,7 @@ export default function Home() {
                 status: payload.error ? "error" : "done",
               },
             },
-            cid,
-            mid,
-            agentId,
+            { type: 'progress', phase: 'thinking' },
           );
         } else if (item.type === "approval.request") {
           // The banner itself comes from the run's pending list; this is only the nudge for
@@ -968,27 +1011,18 @@ export default function Home() {
           notifyDone(`${agentNameFor(agentId)} has a question`, describe(payload.question ?? payload.prompt ?? payload.message, "Your agent needs an answer to continue."));
         } else if (item.type === "run.failed" || item.type === "run.interrupted") {
           const message = String(payload.error || "Run interrupted.");
-          handleEvent({ type: "error", message }, cid, mid, agentId);
+          updates.push({ type: "error", message });
           notifyDone(`${agentNameFor(agentId)} stopped`, message);
         } else if (item.type === "run.cancelled") {
           // A stop used to leave an empty reply behind, as if the agent had said nothing.
-          handleEvent({ type: "error", message: payload.stoppedWithParent ? "Stopped along with the task that delegated it." : "Stopped. Your completed work is saved." }, cid, mid, agentId);
+          updates.push({ type: "error", message: payload.stoppedWithParent ? "Stopped along with the task that delegated it." : "Stopped. Your completed work is saved." });
         } else if (item.type === "run.completed" && payload.result && !receivedStreamText && replayText) {
           receivedStreamText = true;
-          handleEvent(
-            { type: "text", text: String(payload.result) },
-            cid,
-            mid,
-            agentId,
-          );
+          updates.push({ type: "text", text: String(payload.result) });
         }
       }
       if (snapshot.events.length) {
-        updateConversation(cid, current => ({
-          ...current,
-          messages: current.messages.map(message =>
-            message.id === mid ? { ...message, eventCursor: cursor } : message),
-        }));
+        handleEvents(updates, cid, mid, cursor);
       }
       if (["completed", "failed", "interrupted", "cancelled"].includes(snapshot.run.state)) {
         // A run that finished while nobody was watching can have more events than one
@@ -1015,16 +1049,17 @@ export default function Home() {
             return { ...message, content, settled: true, error: message.error || Boolean(final.error) || final.state !== "completed", activities: message.activities?.map(activity => activity.status === "running" ? { ...activity, status: final.state === "completed" ? "done" : "error" } : activity) };
           }),
         }));
-        await refreshRuntimeFiles().catch(() => {});
+        // Deliverables can be large or numerous; a finished task releases the composer
+        // immediately while its files refresh independently.
+        void refreshRuntimeFiles().catch(() => {});
         if (track && final.state === "completed") notifyDone(`${agentNameFor(agentId)} finished`, "Your task is done. Open Harness to see the result.");
         return final;
       }
-      // A hidden tab still has a live run, but nobody is reading it. task-manager.tsx
-      // already backs off the same way; polling twice a second behind another window
-      // just burns the coordinator and re-renders this page for no one. A phone polls
-      // slower still, on a radio and a battery; the event cursor means nothing is missed.
-      await new Promise((resolve) => setTimeout(resolve, document.hidden ? 4000 : 500));
+      // Older coordinators return immediately instead of holding an empty event request.
+      if (!snapshot.events.length && performance.now() - requestedAt < 200) await new Promise(resolve => setTimeout(resolve, document.hidden ? 1000 : 350));
     }
+    return run;
+    } finally { watchControllers.current.delete(controller); }
   }
   async function send(text = input) {
     const prompt = text.trim();
@@ -1033,14 +1068,26 @@ export default function Home() {
       setNotice("Agent chat is disabled in automated test mode. Start Open Harness without mock mode to run a real agent.");
       return;
     }
-    const cid = conversationId || uid();
+    const cid = conversationId || composerRef.current.conversationId || uid();
     if (sending.current.has(cid)) return;
     const agentId = agent.id;
+    const beginSending = (label: string) => {
+      sending.current.add(cid);
+      setSubmissions(current => ({ ...current, [cid]: label }));
+    };
+    const finishSending = () => {
+      sending.current.delete(cid);
+      setSubmissions(current => { const next = { ...current }; delete next[cid]; return next; });
+    };
+    const clearSentDraft = () => {
+      if (composerRef.current.conversationId === cid && composerRef.current.agentId === agentId)
+        setInput(current => current.trim() === prompt ? "" : current);
+    };
     // Steering and follow-ups go to this conversation's own run — never to whatever some
     // other agent is doing. A run that is only queued has nothing to steer yet.
     if (activeRun) {
       const steer = inputMode === "steer" && activeRun.state !== "queued";
-      sending.current.add(cid);
+      beginSending(steer ? "Sending guidance…" : "Sending follow-up…");
       try {
         if (steer) {
           await controlRef.current.request(`/v1/runs/${activeRun.id}/steer`, {
@@ -1049,8 +1096,8 @@ export default function Home() {
           });
           setNotice("Guidance queued for the next tool boundary.");
         } else {
-          const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt });
-          updateConversation(cid, (c) => ({
+          const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt, ...(replyOnlyMode ? { replyOnly: true } : {}) });
+          updateConversation(cid, (c) => c.messages.some(message => message.runId === run.id) ? c : ({
             ...c,
             messages: [...c.messages, { id: promptId(run), role: "user", content: prompt }, { id: replyId(run), runId: run.id, role: "assistant", content: "", activities: [] }],
             updatedAt: now(),
@@ -1058,11 +1105,11 @@ export default function Home() {
           follow(run, cid, replyId(run), agentId);
           setNotice("Follow-up queued behind the current task.");
         }
-        setInput("");
+        clearSentDraft();
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "Could not send guidance.");
       } finally {
-        sending.current.delete(cid);
+        finishSending();
       }
       return;
     }
@@ -1073,10 +1120,12 @@ export default function Home() {
       );
       return;
     }
-    sending.current.add(cid);
-    setInput("");
+    beginSending("Sending…");
     const userMessage = { id: uid(), role: "user" as const, content: prompt };
     if (!conversationId) {
+      // Repeated submits in the same render share this id; explicitly opening another
+      // new conversation clears it at commit and is free to submit its own task.
+      composerRef.current = { conversationId: cid, agentId };
       setWorkspace((w) => ({
         ...w,
         conversations: [
@@ -1090,16 +1139,20 @@ export default function Home() {
     }
     {
       try {
-        const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt });
+        const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt, ...(replyOnlyMode ? { replyOnly: true } : {}) });
         // The reply appears once the coordinator has accepted the run, so its id can be
         // derived from the run's and a reload finds the same message.
-        updateConversation(cid, (c) => ({ ...c, messages: [...c.messages, { id: replyId(run), runId: run.id, role: "assistant", content: "", activities: [] }] }));
+        updateConversation(cid, (c) => ({ ...c, messages: [
+          ...c.messages.filter(m => m.id !== promptId(run)).map(m => m.id === userMessage.id ? { ...m, id: promptId(run) } : m),
+          ...(c.messages.some(m => m.runId === run.id) ? [] : [{ id: replyId(run), runId: run.id, role: "assistant" as const, content: "", activities: [] }]),
+        ] }));
         follow(run, cid, replyId(run), agentId);
+        clearSentDraft();
       } catch (error) {
         const message = error instanceof Error ? error.message : "Something went wrong.";
         updateConversation(cid, (c) => ({ ...c, messages: [...c.messages, { id: uid(), role: "assistant", content: message, error: true, activities: [] }] }));
       } finally {
-        sending.current.delete(cid);
+        finishSending();
       }
       return;
     }
@@ -1150,12 +1203,6 @@ export default function Home() {
       setAnswering("");
     }
   };
-  // What to show under a reply that has no text yet, which depends on where its run is.
-  const pendingLabel = (run: PersistentRun) =>
-    run.state === "queued" ? "Queued behind the current task…"
-      : run.state === "waiting_approval" ? "Waiting for your approval…"
-        : run.state === "waiting_input" ? "Waiting for your answer…"
-          : reconnecting ? "Reconnecting — your agent is still working…" : "Working on it…";
   async function upload(files: FileList | null) {
     if (!files) return;
     const additions: Artifact[] = [];
@@ -1275,7 +1322,7 @@ export default function Home() {
     || (agentTeamFilter === "unassigned" ? !workspace.teams.some(team => team.memberAgentIds.includes(candidate.id)) : workspace.teams.find(team => team.id === agentTeamFilter)?.memberAgentIds.includes(candidate.id)));
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" onPointerDownCapture={() => { navigated.current = true; }} onKeyDownCapture={() => { navigated.current = true; }}>
       {mobileOpen && (
         <button
           className="mobile-overlay"
@@ -1309,6 +1356,8 @@ export default function Home() {
           <kbd>⌘ K</kbd>
         </div>
         <div className="nav-label">WORKSPACE</div>
+        <button className={`nav-item ${view === 'assistant' ? 'active' : ''}`} onClick={() => { setView('assistant'); setMobileOpen(false); }}><Bot size={16} /> Assistant</button>
+        {advancedFeatures && <button className={`nav-item ${view === "tasks" ? "active" : ""}`} aria-current={view === "tasks" ? "page" : undefined} onClick={() => { setView("tasks"); setMobileOpen(false); }}><ListTodo size={16} /> Tasks</button>}
         <button
           className={`nav-item ${view === "home" ? "active" : ""}`}
           onClick={() => {
@@ -1346,6 +1395,8 @@ export default function Home() {
         >
           <CalendarClock size={16} /> Routines <span>{routines.length || ""}</span>
         </button>
+        {advancedFeatures && <button className={`nav-item ${view === "groups" ? "active" : ""}`} onClick={() => { setView("groups"); setMobileOpen(false); }}><MessageSquare size={16} /> Group conversations</button>}
+        <button className={`nav-item ${view === "credentials" ? "active" : ""}`} aria-current={view === "credentials" ? "page" : undefined} onClick={() => { setView("credentials"); setMobileOpen(false); }}><KeyRound size={16} /> Credentials</button>
         <div className="nav-label">YOUR AGENTS</div>
         <div className="sidebar-scroll">
           {workspace.agents
@@ -1398,11 +1449,11 @@ export default function Home() {
         </div>
         <div className="sidebar-bottom">
           <span className={`status-dot ${offline || pairing.state !== "none" ? "offline" : connected || testMode ? "" : "pending"}`} />
-          {testMode ? "Automated test mode" : pairing.state !== "none" ? "Browser not paired" : offline ? "Not connected" : connected ? "Agent runtime ready" : "Agent runtime needs setup"}
+          {testMode ? "Automated test mode" : pairing.state !== "none" ? "Browser not paired" : offline ? "Not connected" : !runtime ? "Connecting…" : connected ? "Agent runtime ready" : "Agent runtime needs setup"}
           <button onClick={() => openSettings()}>
             <Settings size={15} /> Settings <span>↗</span>
           </button>
-          <div className="local-note">Saved on this device</div>
+          <div className="local-note" aria-live="polite">{runtime && loadingHistory ? "Refreshing conversations…" : "Saved on this device"}</div>
         </div>
       </aside>
       <main className="main">
@@ -1418,27 +1469,30 @@ export default function Home() {
             Workspace{" "}
             <span className="breadcrumb">
               /{" "}
-              {view === "home"
+              {view === 'assistant' ? 'Assistant' : view === "home"
                 ? "Agents"
                 : view === "teams"
                   ? "Teams"
+                : view === "groups"
+                  ? "Group conversations"
                 : view === "files"
                   ? "Files"
                   : view === "routines"
                     ? "Routines"
                     : view === "tasks"
                       ? "Tasks"
+                    : view === "credentials"
+                      ? "Credentials"
                       : agent.name}
             </span>
           </span>
-          {advancedFeatures && <nav className="top-tabs" aria-label="Main workspace">
-            <button className={view !== "tasks" ? "active" : ""} onClick={() => { if (view === "tasks") setView(lastWorkspaceView.current); }}>Workspace</button>
-            <button className={view === "tasks" ? "active" : ""} onClick={() => { if (view !== "tasks") lastWorkspaceView.current = view; setView("tasks"); }}>Tasks</button>
-          </nav>}
           <span className="badge">Open source · Yours to shape</span>
         </header>
+        {view === 'assistant' && <AssistantWorkspace client={controlRef.current} ready={Boolean(runtime)} agents={workspace.agents} onProfile={applySavedProfile} onOpenRun={openTaskRun} onWorkflow={id => { setSelectedWorkflowId(id); setWorkflowSourceRunId(''); setView('routines'); }} />}
         {advancedFeatures && view === "tasks" && <TaskManager agents={workspace.agents} teams={[...workspace.teams, ...retiredTeams]} client={controlRef.current} onOpenRun={openTaskRun} />}
         {advancedFeatures && view === "teams" && <TeamManager agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onChanged={teams => { setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) })); setRetiredTeams(teams.filter(team => Boolean(team.retiredAt))); }} />}
+        {advancedFeatures && view === "groups" && <GroupConversations agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onOpenRun={openTaskRun} />}
+        {view === "credentials" && <CredentialsPage client={controlRef.current} onChanged={setCredentials} />}
         {view === "home" && (
           <section className="home-content">
             <div className="eyebrow">YOUR PERSONAL AGENT WORKSPACE</div>
@@ -1488,13 +1542,13 @@ export default function Home() {
                       ? "Working on your task"
                       : needsComputerSettings(a)
                         ? "Needs new computer settings"
-                        : "Ready when you are"}
+                        : !runtime?.runtime.available ? 'Needs setup' : "Ready when you are"}
                     <span>→</span>
                   </div>
                 </button>
                 <button className="agent-card-settings" onClick={() => setEditingAgent({ ...a })} aria-label={`Edit ${a.name} profile`} title="Agent settings"><SlidersHorizontal size={16} /></button>
                 <div className="agent-card-tools">
-                  <CredentialSwitcher agent={a} credentials={credentials} workspaceRef={settings.credentialRef || ""} workspaceProvider={settings.provider} client={controlRef.current} running={busyAgents.has(a.id)} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
+                  <CredentialSwitcher onCredentialsChanged={setCredentials} agent={a} credentials={credentials} workspaceRef={settings.credentialRef || ""} workspaceProvider={settings.provider} client={controlRef.current} running={busyAgents.has(a.id)} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
                 </div>
                 </div>
               ))}
@@ -1528,12 +1582,25 @@ export default function Home() {
             <section className="chat-main">
               <div className="chat-toolbar">
                 <Avatar agent={agent} />
-                <div>
+                <div className="chat-agent-identity">
                   <strong>{agent.name}</strong>
                   <small>{agent.role}</small>
                 </div>
-                <CredentialSwitcher agent={agent} credentials={credentials} workspaceRef={settings.credentialRef || ""} workspaceProvider={settings.provider} client={controlRef.current} running={running} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
+                <CredentialSwitcher onCredentialsChanged={setCredentials} agent={agent} credentials={credentials} workspaceRef={settings.credentialRef || ""} workspaceProvider={settings.provider} client={controlRef.current} running={running} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
                 <div className="toolbar-actions">
+                  <button className="toolbar-computer" title={`Open ${agent.name}’s computer: watch its desktop, take control, or use a workspace terminal`} aria-label="Open agent computer" onClick={() => setDesktopAgentId(agent.id)}><Monitor size={18} /><span>Computer</span></button>
+                  <button title="Review task result" aria-label="Review task result" onClick={async () => {
+                    try { const { conversations } = await controlRef.current.conversations(); const latest = conversations.find(item => item.id === conversationId && item.agentId === agent.id)?.runs.filter(item => !isLiveRun(item)).at(-1); if (latest) setReviewRun(latest); else setNotice("Finish a task in this conversation before reviewing its result."); }
+                    catch (error) { setNotice(error instanceof Error ? error.message : "Could not load this task."); }
+                  }}><ShieldCheck size={18} /></button>
+                  <button title="Save as workflow" aria-label="Save as workflow" onClick={async () => {
+                    try {
+                      const { conversations } = await controlRef.current.conversations();
+                      const completed = conversations.find(item => item.id === conversationId && item.agentId === agent.id)?.runs.filter(item => item.state === "completed").at(-1);
+                      if (!completed) { setNotice("Finish a task in this conversation before saving its workflow."); return; }
+                      setWorkflowSourceRunId(completed.id); setSelectedWorkflowId(undefined); setView("routines");
+                    } catch (error) { setNotice(error instanceof Error ? error.message : "Could not load this task."); }
+                  }}><CalendarClock size={18} /></button>
                   <button
                     title="New conversation"
                     aria-label="New conversation"
@@ -1558,8 +1625,11 @@ export default function Home() {
                   </button>
                 </div>
               </div>
-              <div className="transcript" aria-live="polite">
-                {!conversation?.messages.length ? (
+              <ConversationTranscript
+                conversationId={conversation?.id ?? `new:${agent.id}`}
+                messages={conversation?.messages ?? []}
+                scrollToEndOn={submitting}
+                empty={
                   <div className="chat-welcome">
                     <Avatar agent={agent} large />
                     <div className="eyebrow">{agent.role}</div>
@@ -1588,8 +1658,8 @@ export default function Home() {
                       ))}
                     </div>
                   </div>
-                ) : (
-                  conversation.messages.map((m) => (
+                }
+                renderMessage={m => (
                     <article className={`message ${m.role}`} key={m.id}>
                       <div className="message-heading">
                         {m.role === "assistant" ? (
@@ -1652,17 +1722,13 @@ export default function Home() {
                       <div className={m.error ? "message-error" : ""}>
                         <Markdown>{m.content}</Markdown>
                       </div>
-                      {!m.content && m.runId && liveRuns[m.runId] && (
-                        <div className="working">
-                          <LoaderCircle size={13} className="spin" />
-                          {pendingLabel(liveRuns[m.runId])}
-                        </div>
+                      {m.runId && liveRuns[m.runId] && isLiveRun(liveRuns[m.runId]) && (
+                        <ChatProgress key={m.runId} run={liveRuns[m.runId]} phase={m.progress} activities={m.activities} hasText={Boolean(m.content)} reconnecting={Boolean(reconnectingRuns[m.runId])} />
                       )}
                     </article>
-                  ))
                 )}
-                <div ref={bottomRef} />
-              </div>
+                footer={submitting && <ChatProgress label={submitting} />}
+              />
               <div className="composer-wrap">
                 <form
                   className="composer"
@@ -1673,7 +1739,8 @@ export default function Home() {
                 >
                   <textarea
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
+                    onChange={(e) => { setInput(e.target.value); if (e.target.value.trim()) prepareComposer(); }}
+                    onFocus={prepareComposer}
                     placeholder={`Message ${agent.name}…`}
                     aria-label={`Message ${agent.name}`}
                     maxLength={30000}
@@ -1689,6 +1756,12 @@ export default function Home() {
                       }
                     }}
                   />
+                  {replyOnlyAvailable && <div className="composer-options">
+                    <label title="Answer from this conversation without tools. Turn this off for tasks that need files, web access or actions.">
+                      <input type="checkbox" checked={replyOnlyMode} disabled={running || Boolean(submitting)} onChange={event => setReplyOnly(event.target.checked)} />
+                      Reply only <span>Answer without tools</span>
+                    </label>
+                  </div>}
                   <div className="composer-bottom">
                     <button
                       type="button"
@@ -1731,7 +1804,7 @@ export default function Home() {
                         <button
                           className="send-button"
                           type="submit"
-                          disabled={!input.trim()}
+                          disabled={!input.trim() || Boolean(submitting)}
                           aria-label={`Send ${inputMode}`}
                         >
                           <ArrowUp size={18} />
@@ -1768,7 +1841,7 @@ export default function Home() {
                       <button
                         className="send-button"
                         type="submit"
-                        disabled={!input.trim() || !ready}
+                        disabled={!input.trim() || !ready || Boolean(submitting)}
                         aria-label="Send message"
                       >
                         <ArrowUp size={18} />
@@ -1777,9 +1850,9 @@ export default function Home() {
                   </div>
                 </form>
                 <div className="composer-note">
-                  {running
+                  {submitting || (running
                     ? "This task continues if you close the browser. Send guidance or queue a follow-up."
-                    : "Enter to send · Shift + Enter for a new line · Files are shared with all your agents"}
+                    : "Enter to send · Shift + Enter for a new line · Files are shared with all your agents")}
                 </div>
                 {needsComputerSettings(agent) && (
                   <div className="approval-banner computer-blocked-banner" role="alert">
@@ -2097,6 +2170,7 @@ export default function Home() {
                 <Plus size={14} /> New routine
               </button>
             </div>
+            <WorkflowManager client={controlRef.current} agents={workspace.agents} fromRunId={workflowSourceRunId} selectedWorkflowId={selectedWorkflowId} onOpenRun={openTaskRun} />
             {!routines.length ? (
               <div className="files-empty">
                 <CalendarClock size={40} />
@@ -2395,6 +2469,7 @@ export default function Home() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="settings-title"
+            aria-label="Workspace settings"
             onClick={(e) => e.stopPropagation()}
           >
             {confirmCloseSettings && (
@@ -2440,8 +2515,8 @@ export default function Home() {
                   {[...new Set([...CREDENTIAL_PROVIDERS.map(item => item.id).filter(Boolean), settings.provider])].map(id => <option value={id} key={id}>{providerLabel(id)}</option>)}
                 </select>
               </label>
-              <ModelPicker client={controlRef.current} provider={settings.provider} credentialRef={settings.credentialRef} baseUrl={settings.baseUrl} value={settings.model} label="Workspace model" onChange={model => setSettings(current => ({ ...current, model }))} />
-              <label>
+              <ModelPicker client={controlRef.current} provider={settings.provider} credentialRef={settings.credentialRef} baseUrl={settings.baseUrl} value={settings.model} label="Workspace model" onCredentialChange={ref => { setSettings(current => ({ ...current, credentialRef: ref })); void controlRef.current.request<{ credentials: CredentialRecord[] }>("/v1/credentials").then(value => setCredentials(value.credentials)).catch(() => {}); }} onChange={model => setSettings(current => ({ ...current, model }))} />
+              {settings.provider !== CODEX_PROVIDER && <label>
                 Credential
                 <select
                   value={settings.credentialRef || ""}
@@ -2457,7 +2532,7 @@ export default function Home() {
                   <option value="__manage">＋ Manage credentials…</option>
                 </select>
                 <small>Agents using “Use workspace default” run on this credential.</small>
-              </label>
+              </label>}
               {settings.provider === "local" && <label>Model API base URL<input value={settings.baseUrl || ""} onChange={e => setSettings(current => ({ ...current, baseUrl: e.target.value }))} placeholder="https://models.example.com/v1" /><small>Use an address reachable from the agent container.</small></label>}
               <p className="muted small">Only agents using “Use workspace default” follow these changes. Agents with their own model keep it.</p>
             </fieldset>
@@ -2471,7 +2546,7 @@ export default function Home() {
                   setAdvancedFeatures(enabled);
                   if (!enabled) {
                     setAgentTeamFilter("all");
-                    if (["teams", "tasks"].includes(view)) setView("home");
+                    if (["teams", "groups", "tasks"].includes(view)) setView("home");
                   }
                   localStorage.setItem(ADVANCED_KEY, enabled ? "on" : "off");
                 }}
@@ -2479,6 +2554,10 @@ export default function Home() {
               <span><strong>Advanced features</strong><small>Show teams, task boards, MCP connections, and computer reservations and resource limits. Turn this off for a simpler workspace of agents, conversations and files.</small></span>
             </label>
             <div className="settings-divider" />
+            <DeliverySettings client={controlRef.current} />
+            <AvailabilitySettings client={controlRef.current} />
+            <NetworkSettings client={controlRef.current} />
+            <PerformanceSummary client={controlRef.current} />
             <h3>Your data stays with you</h3>
             <p className="muted small">
               Hermes state, skills, schedules, run events, and working files are
@@ -2590,6 +2669,8 @@ export default function Home() {
         setOnboardingOpen(false);
         refreshRuntime();
       }} onRuntimeChecked={status => refreshRuntime(status.executionReady)} />}
+      {reviewRun && <RunReview client={controlRef.current} run={reviewRun} onClose={() => setReviewRun(null)} onRepair={run => { setReviewRun(null); openTaskRun(run, 'Repair task result'); }} />}
+      {desktopAgentId && <DesktopPanel agentId={desktopAgentId} agentName={workspace.agents.find(item => item.id === desktopAgentId)?.name} client={controlRef.current} onClose={() => setDesktopAgentId(null)} onWorkflowCreated={id => { setDesktopAgentId(null); setSelectedWorkflowId(id); setWorkflowSourceRunId(undefined); setView("routines"); }} />}
       {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} credentialCatalog={credentials} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
       {file && (
         <div className="modal-backdrop" onClick={() => setSelectedFile(null)}>

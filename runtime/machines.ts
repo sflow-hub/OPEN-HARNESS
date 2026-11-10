@@ -23,6 +23,7 @@ function publicKey(value: unknown) {
 }
 
 export class Machines {
+  onCommand?: (machineId: string) => void;
   constructor(readonly db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS machines (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL, arch TEXT NOT NULL,
@@ -146,7 +147,7 @@ export class Machines {
     if (profile?.computer.desktop === 'virtual' && !machine.capabilities.virtualDesktop) issues.push('Private virtual desktops are available on Linux runners only.');
     return { ok: !issues.length, message: issues.length ? issues.join(' ') : `${machine.name} is ready for this agent.`, machine };
   }
-  enqueue(machineId: string, agentId: string | null, kind: string, payload: unknown) { this.checkSandbox(payload); const command = { id: crypto.randomUUID(), machineId, agentId, kind, state: 'queued', createdAt: now() }; this.db.prepare('INSERT INTO runner_commands VALUES(?,?,?,?,?,?,?,?,?,?)').run(command.id, machineId, agentId, kind, JSON.stringify(payload), command.state, command.createdAt, null, null, null); return command; }
+  enqueue(machineId: string, agentId: string | null, kind: string, payload: unknown) { this.checkSandbox(payload); const command = { id: crypto.randomUUID(), machineId, agentId, kind, state: 'queued', createdAt: now() }; this.db.prepare('INSERT INTO runner_commands VALUES(?,?,?,?,?,?,?,?,?,?)').run(command.id, machineId, agentId, kind, JSON.stringify(payload), command.state, command.createdAt, null, null, null); this.onCommand?.(machineId); return command; }
   command(id: string) { const row = this.db.prepare('SELECT * FROM runner_commands WHERE id=?').get(id) as CommandRow | undefined; if (!row) return null; let runId = ''; try { runId = String((JSON.parse(row.payload_json) as { runId?: unknown })?.runId || ''); } catch { runId = ''; } return { id: row.id, machineId: row.machine_id, agentId: row.agent_id, kind: row.kind, state: row.state, runId, result: row.result_json ? JSON.parse(row.result_json) : null }; }
   // Ownership of the command is not enough: without pinning the run as well, any paired
   // runner could post approval or clarification events against an unrelated agent's run
@@ -160,11 +161,14 @@ export class Machines {
     const rows = this.db.prepare("SELECT * FROM runner_commands WHERE machine_id=? AND state='queued' ORDER BY created_at LIMIT 10").all(machineId) as CommandRow[];
     const leased = now(), commands = [];
     for (const row of rows) {
+      // A sealed transfer can fill the bounded response; deliver it without other durable commands.
+      if(row.kind==='import-agent'&&commands.length)break;
       const payload = JSON.parse(row.payload_json);
       try { this.checkSandbox(payload); }
       catch (error) { this.finish(machineId, row.id, { error: error instanceof Error ? error.message : UNSANDBOXED_COMPUTER_MESSAGE }, true); continue; }
       this.db.prepare("UPDATE runner_commands SET state='leased',leased_at=? WHERE id=? AND state='queued'").run(leased, row.id);
       commands.push({ id: row.id, agentId: row.agent_id, kind: row.kind, payload, createdAt: row.created_at });
+      if(row.kind==='import-agent')break;
     }
     return commands;
   }
@@ -175,7 +179,7 @@ export class Machines {
     const row = this.db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(commandId) as { payload_json: string } | undefined;
     try {
       const payload = JSON.parse(row?.payload_json || '{}') as Record<string, unknown>;
-      delete payload.secrets; delete payload.encryptedSecrets; delete payload.bundle; delete payload.encrypted;
+      delete payload.secrets; delete payload.encryptedSecrets; delete payload.bundle; delete payload.sealedTransfer; delete payload.encrypted;
       return JSON.stringify(payload);
     } catch { return '{}'; }
   }

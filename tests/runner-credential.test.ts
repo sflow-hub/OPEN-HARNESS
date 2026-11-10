@@ -30,7 +30,7 @@ test('paired runner decrypts a dashboard credential into its local vault', async
     response.setHeader('Content-Type', 'application/json');
     if (request.url === '/v1/runner/pair') { publicKey = body.encryptionPublicKey; pairedAt = Date.now(); response.end(JSON.stringify({ machineId: 'machine-secret-test', token: 'runner-token' })); return; }
     if (request.url === '/v1/runner/heartbeat') { response.end(JSON.stringify({ ok: true })); return; }
-    if (request.url === '/v1/runner/commands') {
+    if (new URL(request.url || '/', 'http://runner.test').pathname === '/v1/runner/commands') {
       if (!firstPollAt) firstPollAt = Date.now();
       if (!delivered) {
         const encrypted = await encryptRunnerSecret(publicKey, cleartext); delivered = true;

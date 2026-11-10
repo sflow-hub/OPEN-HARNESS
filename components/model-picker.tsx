@@ -2,10 +2,13 @@
 
 import { useEffect, useId, useState } from 'react';
 import type { ControlClient } from '../lib/control-client';
+import { CODEX_PROVIDER } from '../lib/codex';
+import CodexSignIn from './codex-sign-in';
 
-export default function ModelPicker({ client, provider, credentialRef = '', baseUrl = '', apiKey = '', value, onChange, label = 'Model' }: {
+export default function ModelPicker({ client, provider, credentialRef = '', baseUrl = '', apiKey = '', value, onChange, onCredentialChange, label = 'Model' }: {
   client: ControlClient; provider: string; credentialRef?: string; baseUrl?: string; apiKey?: string;
   value: string; onChange: (value: string) => void; label?: string;
+  onCredentialChange?: (ref: string) => void;
 }) {
   const id = useId();
   const [refresh, setRefresh] = useState(0);
@@ -26,6 +29,7 @@ export default function ModelPicker({ client, provider, credentialRef = '', base
     return () => { cancelled = true; clearTimeout(timer); };
   }, [client, provider, credentialRef, baseUrl, apiKey, source]);
   return <div className="model-picker">
+    {provider === CODEX_PROVIDER && onCredentialChange && <CodexSignIn client={client} credentialRef={credentialRef} onConnected={onCredentialChange} />}
     <label>{label}<input aria-label={label} list={id} value={value} onChange={event => onChange(event.target.value)} placeholder="Choose a model or enter its exact ID" autoComplete="off" />
       <datalist id={id}>{catalog.models.map(model => <option key={model} value={model} />)}</datalist>
     </label>

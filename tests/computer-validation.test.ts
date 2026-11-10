@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { draftProfile, runToolGrants } from '../lib/agent-profile';
+import { COMPUTER_TOOL, draftProfile, runToolGrants } from '../lib/agent-profile';
 import { validateProfile } from '../runtime/profiles';
 import { ensureContainer } from '../runtime/hermes';
 import { nativeRuntimeProbe } from '../runtime/profile-runtime';
@@ -35,7 +35,7 @@ test('folder mounts reject links in the selected path and its parents', t => {
 test('no-desktop runs cannot dispatch the computer-use tool', () => {
   const selected = { ...profile, allowedTools: ['computer_use', 'terminal'] };
   assert.deepEqual(runToolGrants(selected), ['terminal']);
-  assert.deepEqual(runToolGrants({ ...selected, computer: { ...selected.computer, desktop: 'virtual' } }), ['computer_use', 'terminal']);
+  assert.deepEqual(runToolGrants({ ...selected, computer: { ...selected.computer, desktop: 'virtual' } }), [COMPUTER_TOOL, 'terminal']);
 });
 
 test('legacy native access is refused before execution regardless of advertised capabilities', () => {

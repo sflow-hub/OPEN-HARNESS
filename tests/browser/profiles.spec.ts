@@ -1,3 +1,4 @@
+import {setupFixture} from './setup-fixture';
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 import { draftProfile } from '../../lib/agent-profile';
@@ -24,6 +25,7 @@ test('never presents deterministic test output as a real agent reply', async ({ 
 });
 
 test('guides first-time users through computer and model readiness', async ({ page }, testInfo) => {
+  await setupFixture(page);
   await page.route('**/v1/onboarding/model-test', route => {
     const input = route.request().postDataJSON();
     return route.fulfill({ json: { ok: true, message: 'Fixture provider accepted the model.', model: input.model, revision: input.revision + 1 } });
@@ -39,6 +41,9 @@ test('guides first-time users through computer and model readiness', async ({ pa
   await expect(page.getByRole('dialog', { name: 'Connect your model' })).toBeVisible();
   await page.getByRole('dialog', { name: 'Connect your model' }).getByLabel('API key').fill('test-key');
   await page.getByRole('button', { name: 'Save and test' }).click();
+  await expect(page.getByRole('dialog',{name:'Verify a task'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Start using Open Harness'})).toBeDisabled();
+  await page.getByRole('button',{name:'Run verification task'}).click();
   await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeVisible();
   await page.getByRole('button', { name: 'Start using Open Harness' }).click();
   await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeHidden();
@@ -126,6 +131,8 @@ test('keyboard tab navigation and phone layout keep save controls visible', asyn
   await page.keyboard.press('ArrowRight');
   await expect(panel.getByRole('tab', { name: 'Computer', exact: true })).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('ArrowRight');
+  await expect(panel.getByRole('tab', { name: 'Harness', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('ArrowRight');
   await expect(panel.getByRole('tab', { name: 'Model', exact: true })).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('End');
   await expect(panel.getByRole('tab', { name: 'Tools & connections' })).toHaveAttribute('aria-selected', 'true');
@@ -209,6 +216,22 @@ test('a stale save keeps the draft and can load the winning revision', async ({ 
   await expect(panel.getByLabel('Role', { exact: true })).toHaveValue('Saved elsewhere');
 });
 
+test('opens the task board from the sidebar and returns to agents', async ({ page, isMobile }) => {
+  const sidebar = page.locator('aside.sidebar');
+  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await sidebar.getByRole('button', { name: 'Tasks', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
+  await expect(page.locator('header').getByRole('button', { name: 'Tasks', exact: true })).toHaveCount(0);
+  if (isMobile) {
+    await expect(page.getByRole('button', { name: 'Close navigation' })).toBeHidden();
+    await page.getByRole('button', { name: 'Open navigation' }).click();
+  }
+  await expect(sidebar.getByRole('button', { name: 'Tasks', exact: true })).toHaveAttribute('aria-current', 'page');
+  await sidebar.getByRole('button', { name: /^Agents/ }).click();
+  await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeHidden();
+});
+
 test('creates, filters, and moves an agent task across desktop and phone layouts', async ({ page, request }, testInfo) => {
   const boardName = `Release board ${testInfo.project.name}`;
   const title = `Prepare release notes ${testInfo.project.name}`;
@@ -219,6 +242,7 @@ test('creates, filters, and moves an agent task across desktop and phone layouts
     data: { name: teamName, description: '', color: 'blue', icon: 'writing', memberAgentIds: ['atlas', 'scout'] },
   });
   await page.reload();
+  if (await page.getByRole('button', { name: 'Open navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'New project', exact: true }).click();
@@ -257,6 +281,7 @@ test('creates, renames, duplicates, and deletes a project', async ({ page }, tes
   const name = `Launch plan ${testInfo.project.name}`;
   const renamed = `${name} v2`;
   const cardFor = (project: string) => page.locator('.project-card').filter({ has: page.getByRole('textbox', { name: `Rename ${project}` }) });
+  if (await page.getByRole('button', { name: 'Open navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await page.getByRole('button', { name: 'Projects', exact: true }).click();
 
@@ -296,6 +321,7 @@ test('creates, renames, duplicates, and deletes a project', async ({ page }, tes
 // without pause, tearing the open dropdown out of the DOM before a choice could land.
 test('the project picker switches between projects and holds the choice', async ({ page }, testInfo) => {
   const name = `Picker project ${testInfo.project.name}`;
+  if (await page.getByRole('button', { name: 'Open navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await page.getByRole('button', { name: 'Projects', exact: true }).click();
   await page.getByRole('button', { name: 'New project', exact: true }).first().click();
@@ -332,6 +358,7 @@ test('the project picker switches between projects and holds the choice', async 
 test('the task view polls on a timer instead of refetching continuously', async ({ page }) => {
   let requests = 0;
   page.on('request', request => { if (request.url().includes('/v1/tasks')) requests += 1; });
+  if (await page.getByRole('button', { name: 'Open navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await page.waitForTimeout(6000);
   expect(requests, `saw ${requests} task requests in six seconds`).toBeLessThanOrEqual(4);

@@ -91,13 +91,13 @@ test('remote ownership survives coordinator restart, encrypted input and late ev
   const f = await fixture(), keys = await generateRunnerKeyPair();
   try {
     const pairing = await f.request('/v1/machines', 'POST', { name: 'Remote computer', platform: 'linux' });
-    const paired = await f.request('/v1/runner/pair', 'POST', { code: pairing.code, name: 'Remote', platform: 'linux', arch: 'x64', capabilities: { container: true, direct: true, desktop: false, virtualDesktop: true }, encryptionPublicKey: keys.publicKey });
+    const paired = await f.request('/v1/runner/pair', 'POST', { code: pairing.code, name: 'Remote', platform: 'linux', arch: 'x64', capabilities: { container: true, direct: true, desktop: false, virtualDesktop: true, features:['workspace-tools','scoped-tool-review','run-leases','browser-state-transfer','sealed-agent-transfer'] }, encryptionPublicKey: keys.publicKey });
     const headers = { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId };
     const runner = (path: string, method = 'GET', data?: unknown) => f.request(path, method, data, headers);
     const profile = (await f.request('/v1/agents/remote/profile')).profile;
     await f.request('/v1/agents/remote/profile', 'PUT', { ...profile, computer: { ...profile.computer, machineId: paired.machineId } });
     const importing = await until(() => runner('/v1/runner/commands'), value => value.commands.some((c: any) => c.kind === 'import-agent'), 'transfer');
-    for (const command of importing.commands) await runner(`/v1/runner/commands/${command.id}/complete`, 'POST', { result: { checksum: command.payload.bundle.checksum, validated: true } });
+    for (const command of importing.commands) await runner(`/v1/runner/commands/${command.id}/complete`, 'POST', { result: { checksum: command.payload.sealedTransfer.checksum, validated: true } });
     await until(() => f.request('/v1/agents/remote/profile'), value => value.profile.computer.machineId === paired.machineId, 'assigned');
     const first = await f.run('remote', 'Run remotely', 'remote-chat');
     const commands = await until(() => runner('/v1/runner/commands'), value => value.commands.some((c: any) => c.kind === 'run'), 'dispatch');

@@ -4,12 +4,14 @@
 // symptom was "Hermes gateway exited during startup" on every containerized run.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { GROUP_CHAT_TOOL } from '../lib/group-chat';
+import { WORKSPACE_TOOL } from '../lib/product';
 import { COORDINATION_TOOLS, prepareProfile } from '../runtime/profile-runtime';
 import { hermesApprovalDecision } from '../runtime/hermes';
-import { DEFAULT_BOARD, DEFAULT_COMPUTER, HANDOFF_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
+import { COMPUTER_TOOL, DEFAULT_BOARD, DEFAULT_COMPUTER, HANDOFF_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
 
 const model: ModelChoice = { provider: 'custom', model: 'some-model', credentialRef: 'SOME_KEY', baseUrl: 'http://localhost:9/v1' };
 const profile: AgentProfile = {
@@ -32,6 +34,19 @@ test('the agent config enables the policy plugin as a list Hermes can read', () 
   const config = writeConfig();
   assert.ok(Array.isArray(config.plugins?.enabled), 'plugins.enabled must be an array');
   assert.ok(config.plugins.enabled.includes('open_harness_policy'));
+});
+
+test('tool review retains scoped transport without enabling coordination tools', () => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-contract-'));
+  prepareProfile(root, profile, model, { environment: () => ({}) }, 'review-token', 'run-review', { controlSocket: '/run/test.sock', reviewUnclassified: true });
+  const config = JSON.parse(readFileSync(join(root, 'agents', profile.id, 'profile/config.yaml'), 'utf8'));
+  const policy = JSON.parse(readFileSync(join(root, 'agents', profile.id, 'managed/policy.json'), 'utf8'));
+  assert.equal(config.mcp_servers.open_harness, undefined);
+  assert.deepEqual(policy.allowedTools, ['terminal']);
+  assert.equal(policy.coordination.OPEN_HARNESS_AGENT_ID, profile.id);
+  assert.equal(policy.coordination.OPEN_HARNESS_AGENT_TOKEN, 'review-token');
+  assert.equal(policy.coordination.OPEN_HARNESS_CONTROL_SOCKET, '/run/test.sock');
+  assert.equal(policy.coordination.OPEN_HARNESS_RUN_ID, 'run-review');
 });
 
 test('the agent config still carries the selected model and endpoint', () => {
@@ -127,8 +142,8 @@ test('coordination tools are named the way Hermes registers them', () => {
   // model is shown a tool the policy will refuse; and every tool it grants must exist there.
   const offered = readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs'), 'utf8')
     .match(/^\s*name: "([a-z_]+)",$/gm)!.map(line => line.split('"')[1]);
-  assert.deepEqual(offered.map(name => mcpToolId('open_harness', name)).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL].sort());
-  assert.deepEqual(COORDINATION_TOOLS.map(tool => tool.id).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL].sort());
+  assert.deepEqual(offered.map(name => mcpToolId('open_harness', name)).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, COMPUTER_TOOL].sort());
+  assert.deepEqual(COORDINATION_TOOLS.map(tool => tool.id).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, COMPUTER_TOOL].sort());
 });
 
 // A grant saved by an earlier version must keep working. This renames; it must never widen.
@@ -151,6 +166,21 @@ test('the agent runs the checkout copy of the coordination server', () => {
   assert.deepEqual(config.mcp_servers.open_harness.args, ['/run/open-harness/coordination.mjs']);
   const shipped = join(root, 'agents', profile.id, 'managed', 'coordination.mjs');
   assert.equal(readFileSync(shipped, 'utf8'), readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs'), 'utf8'));
+});
+
+test('both runner installers supply the scripts required by a freshly prepared profile', t => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-installer-contract-')); t.after(() => rmSync(root, {recursive:true,force:true}));
+  const directory = join(import.meta.dirname, '..', 'runtime', 'installers');
+  const shell = readFileSync(join(directory,'install-runner.sh'),'utf8'), powershell = readFileSync(join(directory,'install-runner.ps1'),'utf8');
+  const shellFiles = shell.match(/for file in ([^\n]+); do\n  download "runtime\/hermes\/\$file"/)?.[1].split(/\s+/);
+  const powershellList = powershell.match(/@\(([^\n]+)\) \| ForEach-Object \{ Get-RunnerFile "runtime\/hermes\/\$_" \}/)?.[1];
+  assert.ok(shellFiles && powershellList, 'Both installers must declare their runtime files.');
+  const powershellFiles = [...powershellList.matchAll(/"([^"]+)"/g)].map(match=>match[1]);
+  assert.deepEqual([...shellFiles].sort(),powershellFiles.sort(),'Fresh runner installations must receive the same runtime files.');
+  prepareProfile(root, profile, model, {environment:()=>({})}, 'token', 'run-1');
+  const scripts = readdirSync(join(root,'agents',profile.id,'managed')).filter(name=>name.endsWith('.mjs'));
+  assert.ok(scripts.includes('gateway-entry.mjs') && scripts.includes('model-proxy.mjs'));
+  for (const script of scripts) assert.ok(shellFiles.includes(script), `The installer is missing the profile dependency ${script}.`);
 });
 
 // Hermes answers an approval with once | session | always | deny and reads anything else as a

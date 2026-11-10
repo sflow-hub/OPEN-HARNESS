@@ -91,6 +91,21 @@ test('a finished command stops carrying the credentials it was dispatched with',
   assert.equal(machines.command(command.id)?.runId, 'run-1');
 });
 
+test('sealed imports are leased alone and later imports remain queued until another poll', () => {
+  const db = database(), machines = new Machines(db);
+  try {
+    const commands = [machines.enqueue('local', 'atlas', 'stop', {}), machines.enqueue('local', 'atlas', 'import-agent', { sealedTransfer: { encrypted: 'ciphertext-only' } }), machines.enqueue('local', 'scout', 'import-agent', { sealedTransfer: { encrypted: 'ciphertext-only' } }), machines.enqueue('local', 'scout', 'stop', {})];
+    commands.forEach((command, index) => db.prepare('UPDATE runner_commands SET created_at=? WHERE id=?').run(`2026-11-08T00:00:0${index}.000Z`, command.id));
+    for (let index = 0; index < commands.length; index++) {
+      assert.deepEqual(machines.poll('local').map(command => command.id), [commands[index].id]);
+      assert.equal(machines.command(commands[index].id)?.state, 'leased');
+      for (const pending of commands.slice(index + 1)) assert.equal(machines.command(pending.id)?.state, 'queued');
+    }
+    machines.finish('local', commands[1].id, { checksum: 'verified' });
+    assert.doesNotMatch(String(db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(commands[1].id)?.payload_json), /sealedTransfer|ciphertext-only/);
+  } finally { db.close(); }
+});
+
 test('old runners cannot advertise native access or receive a persisted unsafe command', () => {
   const db = database(), machines = new Machines(db);
   try {

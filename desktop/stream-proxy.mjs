@@ -1,0 +1,11 @@
+import {createServer,request} from 'node:http';
+import {connect} from 'node:net';
+import {resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
+export function dashboardProxy({appPort=3001,controlPort=4317}={}){
+  const sockets=new Set(),server=createServer((req,res)=>{const upstream=request({hostname:'127.0.0.1',port:appPort,path:req.url,method:req.method,headers:req.headers},response=>{res.writeHead(response.statusCode||502,response.headers);response.pipe(res);});upstream.once('error',()=>{if(!res.headersSent)res.writeHead(502,{'Content-Type':'text/plain'});res.end('The workspace dashboard is reconnecting.');});req.once('aborted',()=>upstream.destroy());res.once('close',()=>upstream.destroy());req.pipe(upstream);});
+  server.on('connection',socket=>{sockets.add(socket);socket.once('close',()=>sockets.delete(socket));});
+  server.on('upgrade',(req,socket,head)=>{if(!/^\/api\/local\/v1\/(?:desktop|terminal)-stream\?ticket=[A-Za-z0-9_-]{43}$/.test(req.url||''))return socket.destroy();const upstream=connect(controlPort,'127.0.0.1');sockets.add(upstream);upstream.once('close',()=>sockets.delete(upstream));upstream.once('error',()=>socket.destroy());socket.once('error',()=>upstream.destroy());socket.once('close',()=>upstream.destroy());upstream.setTimeout(req.url.includes('/terminal-stream')?1810000:310000,()=>upstream.destroy());upstream.once('connect',()=>{const headers=[`GET ${req.url.slice('/api/local'.length)} HTTP/1.1`,`Host: 127.0.0.1:${controlPort}`];for(const name of ['upgrade','connection','sec-websocket-key','sec-websocket-version','sec-websocket-extensions','sec-websocket-protocol','origin'])if(typeof req.headers[name]==='string')headers.push(`${name}: ${req.headers[name]}`);upstream.write(headers.join('\r\n')+'\r\n\r\n');if(head.length)upstream.write(head);socket.pipe(upstream).pipe(socket);});});
+  return {server,close(){for(const socket of sockets)socket.destroy();server.close();}};
+}
+if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){const proxy=dashboardProxy();proxy.server.listen(Number(process.env.PORT||3000),process.env.HOST||'0.0.0.0');for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>proxy.close());}

@@ -9,7 +9,7 @@ await build({
   platform: 'node',
   format: 'esm',
   target: 'node22',
-  packages: 'external',
+  packages: 'bundle',
   sourcemap: false,
   banner: { js: "import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);" },
 });

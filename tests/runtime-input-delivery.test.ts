@@ -13,7 +13,7 @@ import { decryptRunnerSecret, generateRunnerKeyPair } from '../lib/runner-crypto
 
 let child: ChildProcess, stateDir: string, base: string, port: number, token: string;
 let db: DatabaseSync, runner: any, run: any, command: any;
-const capabilities = { container: true, direct: true, desktop: false, virtualDesktop: false };
+const capabilities = { container: true, direct: true, desktop: false, virtualDesktop: false, features:['workspace-tools','scoped-tool-review','run-leases'] };
 let keys: Awaited<ReturnType<typeof generateRunnerKeyPair>>;
 async function start() {
   child = spawn(process.execPath, ['--import', 'tsx', 'runtime/service.ts'], { cwd: join(import.meta.dirname, '..'), env: { ...process.env, OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_DISABLE_OS_VAULT: '1', OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: stateDir }, stdio: 'pipe' });

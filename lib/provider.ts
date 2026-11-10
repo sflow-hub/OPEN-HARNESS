@@ -1,6 +1,7 @@
 export const PROVIDERS = {
   xai: { label: "xAI", baseURL: "https://api.x.ai/v1", model: "grok-4.6" },
   openai: { label: "OpenAI", baseURL: "https://api.openai.com/v1", model: "gpt-5.4" },
+  'openai-codex': { label: 'Codex (ChatGPT OAuth)', baseURL: '', model: '' },
   openrouter: {
     // Never blank: an empty default left first-run setup demanding an exact model ID with
     // nothing to suggest one. Auto routes to a working model and can be changed after.

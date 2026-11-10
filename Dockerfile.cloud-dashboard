@@ -1,0 +1,15 @@
+ARG NODE_IMAGE
+FROM ${NODE_IMAGE} AS builder
+WORKDIR /source
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY . .
+ENV NEXT_PUBLIC_OPEN_HARNESS_CLOUD=1
+RUN npm run build
+FROM ${NODE_IMAGE}
+WORKDIR /opt/open-harness
+COPY --from=builder /source/dist/standalone ./
+ENV PORT=3000 HOST=0.0.0.0
+USER node
+EXPOSE 3000
+CMD ["node", "server.js"]

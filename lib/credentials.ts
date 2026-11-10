@@ -56,7 +56,8 @@ export function refFromLabel(label: string, taken: (ref: string) => boolean) {
 export function fitsProvider(credential: { provider: string }, provider: string) {
   return !credential.provider || !provider || credential.provider === provider;
 }
-export function describeCredential(credential: { length: number; fingerprint: string }) {
+export function describeCredential(credential: { length: number; fingerprint: string; provider?: string }) {
+  if (credential.provider === 'openai-codex') return 'ChatGPT sign-in';
   const parts = [credential.length ? `${credential.length} chars` : '', credential.fingerprint].filter(Boolean);
   return parts.join(' · ');
 }
@@ -75,6 +76,7 @@ export const CREDENTIAL_PROVIDERS: Array<{ id: string; label: string }> = [
   { id: '', label: 'Any provider' },
   { id: 'xai', label: 'xAI' },
   { id: 'openai', label: 'OpenAI' },
+  { id: 'openai-codex', label: 'Codex (ChatGPT OAuth)' },
   { id: 'openrouter', label: 'OpenRouter' },
   { id: 'anthropic', label: 'Anthropic' },
   { id: 'local', label: 'Local / custom server' },

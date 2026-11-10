@@ -15,10 +15,14 @@ to the Ubuntu image.
 The lock records the reviewed input selection and evidence-bound architecture
 corrections. Its `validation` field describes what each architecture has actually
 verified; detailed execution evidence belongs in `runtime/VERIFICATION.md`.
-Ubuntu APT uses the fixed, signed `20260929T180000Z` snapshot after a pinned
-`ca-certificates` bootstrap from the signed live archive. The helper verifies
+Ubuntu APT uses the fixed, signed `20260929T180000Z` snapshot after a temporary
+`ca-certificates` bootstrap from the signed live archive. That bootstrap uses the
+available archive version so rotation of older packages cannot prevent setup;
+the final CA package must still match its exact snapshot pin. The helper verifies
 that every package index comes from that snapshot and restores any bootstrap
-package changes to their locked versions. If an exact input disappears or the
+package changes to their locked versions. Explicit snapshot source URLs keep later
+image layers pinned after cached indexes are removed, on both architectures.
+If an exact input disappears or the
 snapshot cannot be verified, the build fails rather than accepting another
 version. The Debian input stage uses the same reviewed cutoff in the signed
 Debian and Debian-security snapshot archives, with both binary and source indexes.

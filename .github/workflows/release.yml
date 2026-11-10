@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 defaults:
   run:
@@ -37,6 +38,15 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm ci
+      - name: Require complete product acceptance for this exact revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTANCE_RUN_ID: ${{ vars.OPEN_HARNESS_ACCEPTANCE_RUN_ID }}
+          OPEN_HARNESS_ACCEPTANCE_REVISION: ${{ github.sha }}
+        run: |
+          test -n "$ACCEPTANCE_RUN_ID"
+          gh run download "$ACCEPTANCE_RUN_ID" --name release-experience-evidence --dir "$RUNNER_TEMP/experience-evidence"
+          npm run acceptance -- report --evidence "$RUNNER_TEMP/experience-evidence/release-evidence.json"
       - run: npm audit --omit=dev --audit-level=high
       - name: Install required release archive tools
         run: |

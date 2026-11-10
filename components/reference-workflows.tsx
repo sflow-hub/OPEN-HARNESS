@@ -1,0 +1,7 @@
+'use client';
+import {useState} from 'react';
+import {referenceWorkflows,workflowGoal} from '../lib/reference-workflows';
+export default function ReferenceWorkflows({onUse}:{onUse(goal:string):void}){
+  const [id,setId]=useState<string>(referenceWorkflows[0].id),[parameters,setParameters]=useState<Record<string,string>>({}),workflow=referenceWorkflows.find(item=>item.id===id)!;
+  return <details className="assistant-card"><summary>Start from a workflow example</summary><p>Choose a goal, supply its inputs, and review the result at its destination. These examples still need your account permissions and task approvals.</p><label>Workflow example<select value={id} onChange={event=>{setId(event.target.value);setParameters({});}}>{referenceWorkflows.map(item=><option key={item.id} value={item.id}>{item.track} · {item.title}</option>)}</select></label>{workflow.parameters.map(parameter=><label key={parameter}>{parameter.replace(/([A-Z])/g,' $1').replace(/^./,letter=>letter.toUpperCase())}<input value={parameters[parameter]||''} maxLength={1000} onChange={event=>setParameters({...parameters,[parameter]:event.target.value})} /></label>)}<p>Check the outcome:</p><ul>{workflow.checks.map(check=><li key={check}>{check}</li>)}</ul><button type="button" disabled={workflow.parameters.some(key=>!parameters[key]?.trim())} onClick={()=>onUse(workflowGoal(id,parameters))}>Use this goal</button></details>;
+}

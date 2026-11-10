@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 
 export type RunState =
@@ -30,7 +30,8 @@ export type RunRow = {
 // Bump when a release changes the schema in a way an older build would mishandle. It is
 // recorded in PRAGMA user_version, which is how a downgrade is detected: an older binary
 // opening a newer database cannot know which columns and tables it must keep filling.
-export const SCHEMA_VERSION = 2;
+// Older coordinators would resume queued reply-only tasks with the full profile grant.
+export const SCHEMA_VERSION = 4;
 
 // Whole-database steps for an upgrade, keyed by the version they bring the file to.
 // Column additions for a single store's own tables stay in that store, because it creates
@@ -55,6 +56,7 @@ export class Store {
 
   constructor(path: string, recover = true) {
     mkdirSync(dirname(path), { recursive: true });
+    const existing = path !== ':memory:' && existsSync(path) && statSync(path).size > 0;
     this.db = new DatabaseSync(path);
     const found = Number((this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version || 0);
     if (found > SCHEMA_VERSION) {
@@ -63,6 +65,10 @@ export class Store {
         `This Open Harness data folder was written by a newer version (database format ${found}; this build understands ${SCHEMA_VERSION}). ` +
         `Install the newer version again, or move ${path} aside to start with an empty workspace. Nothing was changed.`,
       );
+    }
+    if (existing && found < SCHEMA_VERSION) {
+      const backup = `${path}.before-v${SCHEMA_VERSION}-${Date.now()}.backup`;
+      this.db.prepare('VACUUM INTO ?').run(backup); chmodSync(backup, 0o600);
     }
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
     this.db.exec(`

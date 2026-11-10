@@ -144,7 +144,7 @@ const fs = require('node:fs'), args = process.argv.slice(2), file = ${JSON.strin
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\n');
 if (args[0] === 'image') console.log(args.includes('{{.Id}}') ? 'sha256:test' : '${RUNTIME_CONTRACT}');
 if (args[0] === 'run' && args.includes('--rm')) {
-  const mount = args[args.indexOf('-v') + 1]; console.log(fs.readFileSync(mount.slice(0, -':/probe:ro'.length) + '/canary', 'utf8'));
+  const mount = args[args.indexOf('-v') + 1]; console.log(fs.readFileSync(mount.slice(0, -':/probe:ro'.length) + '/' + args.at(-1).split('/').at(-1), 'utf8'));
 }
 if (args[0] === 'inspect') {
   if (!state.container || ![state.container.Id, state.container.Name].includes(args.at(-1))) { console.error('No such container'); process.exit(1); }

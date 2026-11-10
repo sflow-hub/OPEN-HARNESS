@@ -22,7 +22,7 @@ RUN npm ci
 COPY . .
 ENV NEXT_PUBLIC_OPEN_HARNESS_SELF_HOSTED=1
 RUN npm run build && npm run runner:bundle \
-  && npx esbuild runtime/service.ts --bundle --platform=node --format=esm --target=node22 --packages=external --banner:js="import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);" --outfile=runtime/service.mjs \
+  && npx esbuild runtime/service.ts --bundle --platform=node --format=esm --target=node22 --packages=bundle --banner:js="import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);" --outfile=runtime/service.mjs \
   && npx esbuild runtime/browser-pair-cli.ts --bundle --platform=node --format=esm --target=node22 --outfile=runtime/browser-pair.mjs
 
 FROM node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
@@ -55,7 +55,7 @@ COPY --from=builder /source/runtime/service.mjs /source/runtime/runner.mjs /sour
 COPY --from=builder /source/runtime/hermes ./runtime/hermes
 COPY --from=builder /source/runtime/ubuntu ./runtime/ubuntu
 COPY --from=builder /source/runtime/installers ./runtime/installers
-COPY --from=builder /source/desktop/supervisor.mjs ./supervisor.mjs
+COPY --from=builder /source/desktop/supervisor.mjs /source/desktop/stream-proxy.mjs ./
 # Shared-folder checkouts can give copied source files owner-only permissions.
 RUN chmod -R a+rX /opt/open-harness \
   && mkdir -p /data && chown node:node /data

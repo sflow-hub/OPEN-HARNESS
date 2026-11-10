@@ -1,3 +1,4 @@
+import {setupFixture} from './setup-fixture';
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 import { draftProfile } from '../../lib/agent-profile';
@@ -61,6 +62,7 @@ test('an inheriting agent offers credentials for its effective workspace provide
 });
 
 test('runtime preparation can outlast ordinary control requests', async ({ page }) => {
+  let prepared=false;await setupFixture(page,{status:()=>({executionReady:prepared,checks:[prepared?{id:'agent-runtime',label:'Hermes runtime',state:'ready',detail:'Prepared slowly.'}:{id:'agent-runtime',label:'Hermes runtime',state:'missing',detail:'Runtime image missing.',action:'prepare-runtime',actionLabel:'Prepare runtime'}]}),prepare:async()=>{await new Promise(resolve=>setTimeout(resolve,250));prepared=true;},detail:'Runtime preparation finished.'});
   await page.route('**/v1/onboarding/status', async route => {
     const response = await route.fetch();
     const status = await response.json();
@@ -110,6 +112,7 @@ test('workspace Save and test keeps a rejected model draft without committing it
 test('task labels can be typed one comma at a time', async ({ page }) => {
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
+  if (await page.getByRole('button', { name: 'Open navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'New task', exact: true }).click();
@@ -137,6 +140,7 @@ test('the runtime label follows a successful set-up action without a reload, and
     const body = await response.json();
     await route.fulfill({ response, json: { ...body, mode: 'live', runtime: { available: prepared, version: prepared ? '29.0.0' : null, message: prepared ? 'Docker is ready.' : 'The agent runtime is not prepared yet.' } } });
   });
+  await setupFixture(page,{status,prepare:()=>{if(failNext){failNext=false;throw new Error('The agent runtime image could not be built.');}prepared=true;}});
   await page.route('**/v1/onboarding/status', route => route.fulfill({ json: status() }));
   await page.route('**/v1/onboarding/action', async route => {
     if (failNext) { failNext = false; return route.fulfill({ status: 500, json: { error: 'The agent runtime image could not be built.' } }); }
@@ -166,7 +170,7 @@ test('the runtime label follows a successful set-up action without a reload, and
   await expect(page.getByText('Agent runtime needs setup')).toBeVisible();
   // A successful one is reflected as soon as the guide is closed — no reload.
   await runSetup();
-  await expect(page.getByText('Computer check completed.')).toBeVisible();
+  await expect(page.getByText('This setup step completed.')).toBeVisible();
   await page.getByRole('button', { name: 'Set up later' }).click();
   await openNav();
   await expect(page.getByText('Agent runtime ready')).toBeVisible();
@@ -185,6 +189,7 @@ test('the runtime label still becomes ready when the guide is dismissed before t
     const available = prepared && ++staleReads > 2;
     await route.fulfill({ response, json: { ...body, mode: 'live', runtime: { available, version: available ? '29.0.0' : null, message: available ? 'Docker is ready.' : 'The agent runtime is not prepared yet.' } } });
   });
+  await setupFixture(page,{status,prepare:()=>{prepared=true;}});
   await page.route('**/v1/onboarding/status', route => route.fulfill({ json: status() }));
   await page.route('**/v1/onboarding/action', async route => { prepared = true; await route.fulfill({ json: status() }); });
   const openNav = async () => { if (await page.getByRole('button', { name: 'Open navigation' }).isVisible() && !await page.getByRole('button', { name: 'Close navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click(); };
@@ -196,7 +201,7 @@ test('the runtime label still becomes ready when the guide is dismissed before t
   await page.getByRole('button', { name: 'Run setup again' }).click();
   await page.getByRole('button', { name: 'Use this computer' }).click();
   await page.getByRole('button', { name: 'Set up agent runtime' }).click();
-  await expect(page.getByText('Computer check completed.')).toBeVisible();
+  await expect(page.getByText('This setup step completed.')).toBeVisible();
   await page.getByRole('button', { name: 'Set up later' }).click();
   await openNav();
   await expect(page.getByText('Agent runtime ready')).toBeVisible({ timeout: 12_000 });

@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Open Harness",
+    "slug": "open-harness",
+    "version": "0.4.0",
+    "scheme": "openharness",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "dev.openharness.mobile",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "dev.openharness.mobile",
+      "permissions": [
+        "POST_NOTIFICATIONS"
+      ]
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-notifications",
+      "expo-web-browser",
+      "expo-iap"
+    ],
+    "experiments": {
+      "tsconfigPaths": true
+    }
+  }
+}

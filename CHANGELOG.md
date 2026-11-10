@@ -6,7 +6,26 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ## [Unreleased]
 
+### Added
+
+- Add a per-agent Computer panel with live desktop takeover, a private interactive terminal, persistent terminal consent, and confirmed permission revocation. Preserve existing grants and keep human terminal access separate from agent permissions. (claude, codex)
+- Separate persistent Linux desktops from stoppable execution containers, preserving live browser pages across handoffs while stopping detached commands. Add ownership-checked managed computer tools, ephemeral runner streams, destination-encrypted transfers and runtime contract 9. (codex)
+
+- Add prepared decision previews and edits requiring fresh approval, finished-work cards with artifacts and review evidence, a Today brief, three guided starters, agent-scoped notes, workflow reuse and completion-notification preferences to the assistant workspace. (claude, codex)
+
+- Add a Harness tab to Agent settings for choosing which agent program runs each agent (Hermes or OpenCode), with a review of the tools and features that change before switching. OpenCode runs once the coordinator provides it. (claude)
+
+- Add an optional Reply only mode that retains conversation history while disabling tools and MCP connections for that task; record full prompt tokens separately from cached input usage. (codex)
+
+- Show animated chat status for sending, startup, thinking, tool use and streamed replies, with elapsed time and reduced-motion support. Apply streamed event batches in one message update to reduce UI work. (codex)
+
+- Add a Credentials tab to the sidebar: a searchable, filterable, sortable list of saved credentials, an add flow that starts by choosing the service, and one form with Connection and Details panes for creating, editing, rotating and deleting. Saved values stay write-only; settings panels open the same repository as a dialog. (claude)
+
 ### Fixed
+
+- Reuse a matching prepared private runtime between chat turns, expire unused preparation, and coordinate cleanup with active tasks, settings probes, backups and shutdown. Keep the newest reply visible on short phone viewports. (codex)
+
+- Count agents inheriting the workspace credential in its usage, and require explicit deletion when an active task still uses a credential after its agent switches away. (codex)
 
 - Fetch locked Debian browser packages from the signed snapshot at the reviewed input cutoff, so live mirror updates cannot make the pinned Hermes runtime unbuildable. Package identities and hashes remain enforced. (codex)
 

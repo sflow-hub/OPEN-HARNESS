@@ -75,6 +75,17 @@ test('no endpoint ever returns a stored value', async () => {
   await request('/v1/credentials/LEAK_PROBE?force=1', 'DELETE');
 });
 
+test('workspace credential usage counts inheriting agents once, including connector overlap', async () => {
+  const before = await profile('scout');
+  const connector = { id: 'usage-overlap', name: 'usage-overlap', command: 'echo', args: [], secretRef: 'XAI_API_KEY', enabled: false };
+  await save({ ...before, model: { ...before.model, inherit: true }, connectors: [...before.connectors, connector] });
+  const record = await request<CredentialRecord>('/v1/credentials/XAI_API_KEY');
+  assert.equal(record.usage.agentCount, 2);
+  assert.equal(record.usage.uses.filter(use => use.kind === 'workspace-default').length, 1);
+  assert.equal(record.usage.uses.filter(use => use.kind === 'agent-model').length, 0);
+  await save({ ...before, revision: (await profile('scout')).revision });
+});
+
 test('the control token is never exposed, adopted, or deletable', async () => {
   const before = (await request<{ token: string }>('/v1/bootstrap')).token;
   assert.ok(!(await list()).credentials.some(c => c.ref === 'controlToken'));
@@ -154,10 +165,21 @@ test('switching a credential mid-run applies to the next task only', async () =>
   const atlas = await profile('atlas');
   await save({ ...atlas, model: { inherit: false, provider: 'mock', model: 'm', credentialRef: 'SHARED_SPARE', baseUrl: '' } });
   const other = await request<CredentialRecord>('/v1/credentials', 'POST', { label: 'Next task key', provider: 'mock', value: 'next-task-value' });
-  const run = await request<PersistentRun>('/v1/runs', 'POST', { agentId: 'atlas', prompt: 'long' });
+  const run = await request<PersistentRun>('/v1/runs', 'POST', { agentId: 'atlas', prompt: 'MOCK_SLOW' });
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while ((await request<PersistentRun>(`/v1/runs/${run.id}`)).state !== 'running') {
+    assert.ok(Date.now() < deadline, 'the original credential must be snapshotted before switching');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   await request(`/v1/agents/atlas/credential`, 'PUT', { ref: other.ref });
   const response = await request<ProfileResponse>('/v1/agents/atlas/profile');
   assert.equal(response.profile.model.credentialRef, other.ref);
+  const refused = await raw('/v1/credentials/SHARED_SPARE', 'DELETE');
+  assert.equal(refused.status, 409);
+  const { usage } = await refused.json() as { usage: CredentialUsage };
+  assert.equal(usage.uses.length, 0);
+  assert.equal(usage.activeRuns, 1);
+  assert.equal((await raw(`/v1/credentials/SHARED_SPARE?reassignTo=${other.ref}`, 'DELETE')).status, 409, 'reassignment cannot move an active snapshot');
   await waitRun(run.id);
   // The frozen run snapshot keeps the credential the run started on.
   assert.equal((await request<PersistentRun & { snapshot?: unknown }>(`/v1/runs/${run.id}`)).state, 'completed');

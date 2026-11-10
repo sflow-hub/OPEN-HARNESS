@@ -47,6 +47,7 @@ export function supervise(entries, shutdownMs = 20_000) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   process.exitCode = await supervise([
     { entry: '/opt/open-harness/runtime/service.mjs', cwd: '/opt/open-harness/runtime', env: { OPEN_HARNESS_PORT: '4317', OPEN_HARNESS_MOCK: '0' } },
-    { entry: '/opt/open-harness/app/server.js', cwd: '/opt/open-harness/app', env: { PORT: '3000', HOST: '0.0.0.0' } },
+    { entry:'/opt/open-harness/stream-proxy.mjs',cwd:'/opt/open-harness',env:{PORT:'3000',HOST:'0.0.0.0'} },
+    { entry: '/opt/open-harness/app/server.js', cwd: '/opt/open-harness/app', env: { PORT: '3001', HOST: '127.0.0.1' } },
   ]);
 }

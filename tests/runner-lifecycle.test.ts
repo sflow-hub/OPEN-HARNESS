@@ -46,19 +46,28 @@ test('runner cleans gateways, protects active profiles, seeds history, and decry
   writeFileSync(executable, `#!${process.execPath}
 const fs = require('node:fs');
 const args = process.argv.slice(2);
+const stateFile=process.env.FAKE_GATEWAY_LOG+'.docker.json';
+const containers=fs.existsSync(stateFile)?JSON.parse(fs.readFileSync(stateFile,'utf8')):{};
+const found=Object.entries(containers).find(([name,value])=>name===args.at(-1)||value.Id===args.at(-1));
+const persist=()=>fs.writeFileSync(stateFile,JSON.stringify(containers));
 if (args[0] === 'image') { console.log(args.includes('{{.Id}}') ? 'sha256:test' : '${RUNTIME_CONTRACT}'); process.exit(0); }
 if (args[0] === 'version') { console.log('29.0'); process.exit(0); }
-if (args[0] === 'inspect') { console.error('Error: No such object'); process.exit(1); }
+if (args[0] === 'inspect') { if(found){console.log(JSON.stringify(found[1]));process.exit(0);}console.error('Error: No such object'); process.exit(1); }
 if (args[0] === 'run') {
- if (args.includes('--rm')) { const mount = args[args.indexOf('-v')+1]; console.log(fs.readFileSync(mount.slice(0,-':/probe:ro'.length)+'/canary','utf8')); }
+ if (args.includes('--rm')) { const mount = args[args.indexOf('-v')+1]; console.log(fs.readFileSync(mount.slice(0,-':/probe:ro'.length)+'/'+args.at(-1).split('/').at(-1),'utf8')); }
+ else {const labels={};for(let n=0;n<args.length;n++)if(args[n]==='--label'){const index=args[n+1].indexOf('=');labels[args[n+1].slice(0,index)]=args[n+1].slice(index+1);}const id=require('node:crypto').randomBytes(32).toString('hex');containers[args[args.indexOf('--name')+1]]={Id:id,State:{Running:true},Config:{Labels:labels}};persist();console.log(id);}
  process.exit(0);
 }
 if (args[0] === 'stop') {
+ if(found){found[1].State.Running=false;persist();}
  if (fs.existsSync(process.env.FAKE_GATEWAY_LOG)) for (const line of fs.readFileSync(process.env.FAKE_GATEWAY_LOG,'utf8').trim().split('\\n').filter(Boolean)) {
   const row=JSON.parse(line); if (row.type==='started') { try { process.kill(row.pid,'SIGTERM'); } catch {} }
  }
  process.exit(0);
 }
+if(args[0]==='start'&&found){found[1].State.Running=true;persist();console.log(found[1].Id);process.exit(0);}
+if(args[0]==='rm'&&found){delete containers[found[0]];persist();process.exit(0);}
+if(args[0]==='ps'){console.log(Object.values(containers).filter(value=>value.State.Running).map(value=>value.Id).join('\\n'));process.exit(0);}
 if (args[0] !== 'exec') process.exit(0);
 const log = value => fs.appendFileSync(process.env.FAKE_GATEWAY_LOG, JSON.stringify(value) + '\\n');
 const send = value => console.log(JSON.stringify(value));

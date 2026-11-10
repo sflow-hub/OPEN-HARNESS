@@ -28,6 +28,11 @@ test('coordination crosses a long workspace path and rejects other agents and AP
   }
   try {
     assert.equal(await call('/internal/handoff'), 200);
+    for (const path of ['/internal/workspace', '/internal/group-chat', '/internal/review-tool', '/internal/tool-receipt']) {
+      assert.equal(await call(path), 200);
+      assert.equal(await call(path, 'scout'), 403);
+    }
+    assert.equal(await call('/internal/review-tool?bypass=1'), 403);
     assert.equal(await call('/internal/schedule', 'scout'), 403);
     assert.equal(await call('/v1/agents/atlas/profile'), 403);
   } finally { await socket.close(); }

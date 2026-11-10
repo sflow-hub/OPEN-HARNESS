@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { SecretStore } from './secrets';
 import { validateModel } from './profiles';
 import { CREDENTIAL_LABEL_MAX, CREDENTIAL_REF, CREDENTIAL_REF_LEGACY, labelFromRef, refFromLabel, WELL_KNOWN, type CredentialDraft } from '../lib/credentials';
+import { CODEX_PROVIDER } from '../lib/codex';
 
 export class CredentialError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
 export type CredentialRow = { ref: string; label: string; provider: string; model: string; base_url: string; fingerprint: string; length: number; created_at: string; updated_at: string; last_used_at: string | null };
@@ -61,10 +62,10 @@ export class Credentials {
     if (provider && !/^[a-z0-9][a-z0-9_-]{0,99}$/.test(provider)) throw new CredentialError('Invalid provider.');
     return provider;
   }
-  private checkValue(input: unknown) {
+  private checkValue(input: unknown, oauth = false) {
     const value = String(input ?? '');
     if (!value.trim()) throw new CredentialError('Paste the credential value.');
-    if (value.length > VALUE_MAX) throw new CredentialError('That value is too long to store.');
+    if (value.length > (oauth ? 64000 : VALUE_MAX)) throw new CredentialError('That value is too long to store.');
     return value;
   }
 
@@ -77,8 +78,9 @@ export class Credentials {
   has(ref: string) { return Boolean(this.db.prepare('SELECT ref FROM credentials WHERE ref=?').get(ref)); }
   present(ref: string) { return this.secrets.has(ref); }
 
-  create(draft: CredentialDraft): CredentialRow {
-    const value = this.checkValue(draft.value), provider = this.checkProvider(draft.provider ?? WELL_KNOWN[String(draft.ref ?? '')]?.provider);
+  create(draft: CredentialDraft, oauth = false): CredentialRow {
+    const value = this.checkValue(draft.value, oauth), provider = this.checkProvider(draft.provider ?? WELL_KNOWN[String(draft.ref ?? '')]?.provider);
+    if (provider === CODEX_PROVIDER && !oauth) throw new CredentialError('Use Sign in with ChatGPT to add this provider.');
     const model = draft.model ?? '';
     const connection = validateModel({ provider: provider || 'custom', model: model === '' ? 'unspecified' : model, baseUrl: draft.baseUrl ?? '', credentialRef: '' });
     const label = this.checkLabel(draft.label || labelFromRef(String(draft.ref ?? '')));
@@ -96,14 +98,15 @@ export class Credentials {
     const current = this.row(ref);
     const label = patch.label === undefined ? current.label : this.checkLabel(patch.label, ref);
     const provider = patch.provider === undefined ? current.provider : this.checkProvider(patch.provider);
+    if ((provider === CODEX_PROVIDER || current.provider === CODEX_PROVIDER) && provider !== current.provider) throw new CredentialError('A ChatGPT sign-in cannot be converted to an API key. Add a new credential instead.');
     const model = patch.model ?? current.model, baseUrl = patch.baseUrl ?? current.base_url;
     validateModel({ provider: provider || 'custom', model: model === '' ? 'unspecified' : model, baseUrl, credentialRef: '' });
     this.db.prepare('UPDATE credentials SET label=?,provider=?,model=?,base_url=?,updated_at=? WHERE ref=?').run(label, provider, model.trim(), baseUrl, new Date().toISOString(), ref);
     return this.row(ref);
   }
-  rotate(ref: string, input: unknown): CredentialRow {
-    this.row(ref);
-    const value = this.checkValue(input);
+  rotate(ref: string, input: unknown, oauth = false): CredentialRow {
+    if (this.row(ref).provider === CODEX_PROVIDER && !oauth) throw new CredentialError('Sign in with ChatGPT again to replace this session.');
+    const value = this.checkValue(input, oauth);
     this.secrets.set(ref, value);
     this.db.prepare('UPDATE credentials SET fingerprint=?,length=?,updated_at=? WHERE ref=?').run(this.fingerprint(value), value.length, new Date().toISOString(), ref);
     return this.row(ref);

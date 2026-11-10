@@ -2,6 +2,15 @@ name: Signed desktop release candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      image_lock_url:
+        description: Accepted release image-lock.json asset URL for this exact source revision
+        required: true
+        type: string
+      image_lock_sha256:
+        description: Reviewed SHA256 from the accepted release checksums
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -38,6 +47,12 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
       - run: npm ci
+      - name: Download the accepted runtime manifest
+        run: node scripts/fetch-release-lock.mjs "$IMAGE_LOCK_URL" "$IMAGE_LOCK_SHA256" release-image-lock.json
+        shell: bash
+        env:
+          IMAGE_LOCK_URL: ${{ inputs.image_lock_url }}
+          IMAGE_LOCK_SHA256: ${{ inputs.image_lock_sha256 }}
       - run: node desktop/fetch-node.mjs ${{ matrix.target }}
       - name: Import Windows code-signing certificate
         if: runner.os == 'Windows'
@@ -65,6 +80,7 @@ jobs:
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ env.WINDOWS_CERTIFICATE_THUMBPRINT }}
       - run: npm run desktop:build -- --target ${{ matrix.target }}
         env:
+          OPEN_HARNESS_RELEASE_IMAGE_LOCK: release-image-lock.json
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}

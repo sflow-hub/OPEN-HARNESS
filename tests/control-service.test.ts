@@ -68,6 +68,7 @@ test('runner installers supply the Dockerfile file inputs through the restricted
     assert.ok(dockerfile.includes(`COPY ${directory}/ `));
     inputs.push(...readdirSync(join(repo, directory)).filter(name => statSync(join(repo, directory, name)).isFile()).map(name => `${directory}/${name}`));
   }
+  inputs.push('runtime/hermes/browser_shutdown.py');
   assert.ok(inputs.length > 0);
   const powershell = await (await fetch(`${base}/v1/install/runner.ps1`)).text();
   for (const path of inputs) {
@@ -142,7 +143,7 @@ test('context edits share Hermes memory files and legacy notes cannot overwrite 
 test("runs independently of event polling and replays stable events", async () => {
   await request("/v1/agents/sync", { method: "POST", body: JSON.stringify({ agents: [{ id: "atlas", name: "Atlas", role: "Generalist", instructions: "Own the result.", config: { model: "mock" } }] }) });
   const saved = await request("/v1/agents/atlas/profile");
-  await request("/v1/agents/atlas/profile", { method: "PUT", body: JSON.stringify({ ...saved.profile, allowedTools: ["terminal"] }) });
+  await request("/v1/agents/atlas/profile", { method: "PUT", body: JSON.stringify({ ...saved.profile, allowedTools: ["terminal"], terminalConsent: true }) });
   const run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", conversationId: "c1", prompt: "MOCK_SLOW create and execute a script" }) });
   await new Promise(resolve => setTimeout(resolve, 1000));
   assert.equal((await request(`/v1/runs/${run.id}`)).state, "completed");
