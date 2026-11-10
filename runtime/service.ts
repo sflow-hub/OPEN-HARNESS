@@ -55,6 +55,8 @@ function openSecrets(file: string) {
 const credentials = new Credentials(store.db, secrets);
 const audit = new Audit(store.db);
 const profiles = new Profiles(store.db);
+// Clear history left by agents deleted before inbox cleanup was introduced.
+store.db.prepare('DELETE FROM approvals WHERE run_id IN (SELECT r.id FROM runs r JOIN agent_tombstones t ON t.agent_id=r.agent_id)').run();
 const teams = new TeamStore(store.db, root);
 const conversations = new Conversations(store.db, profiles, teams);
 const tasks = new TaskStore(store.db);
@@ -593,8 +595,9 @@ const server = createServer(async (req, res) => {
       if (machines.transferring(id)) throw new MachineError('Wait for this agent’s computer transfer to finish before deleting it.', 409);
       const machineId = profiles.get(id)?.computer.machineId;
       profiles.delete(id);
+      const removedApprovals = store.db.prepare('DELETE FROM approvals WHERE run_id IN (SELECT id FROM runs WHERE agent_id=?)').run(id).changes;
       if (machineId) machines.reserve(machineId, id, false);
-      audit.record({ actorKind: 'operator', action: 'agent.delete', targetKind: 'agent', targetId: id });
+      audit.record({ actorKind: 'operator', action: 'agent.delete', targetKind: 'agent', targetId: id, detail: { removedApprovals: Number(removedApprovals) } });
       return json(res, 200, { ok: true, id });
     }
     if (req.method === "GET" && url.pathname === "/v1/agents") return json(res, 200, { agents: profiles.list().map(p => profileAgent(p)) });
