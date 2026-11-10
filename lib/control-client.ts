@@ -3,6 +3,11 @@ import { normalizeRoutine, type RoutineInput, type RoutineRun } from "./routine"
 import type { Agent } from "./types";
 import { normalizeConversation, normalizeMember, normalizeMessage, normalizeScheduledRuns, type GroupChatInput, type MemberRole } from "./conversation";
 
+export type AuditEvent = {
+  seq: number; id: string; at: string; actorKind: "operator" | "agent" | "runner" | "system";
+  actorId: string | null; action: string; targetKind: string | null; targetId: string | null; detail: unknown;
+};
+
 export type RuntimeStatus = {
   token: string;
   mode: "live" | "test";
@@ -52,6 +57,10 @@ async function parseBody(response: Response) {
 
 export class ControlClient {
   token = "";
+  async listAuditEvents(filters: { after?: number; limit?: number; action?: string; targetKind?: string; targetId?: string } = {}) {
+    const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+    return (await this.request<{ events: AuditEvent[] }>(`/v1/audit?${query}`)).events;
+  }
   async bootstrap() {
     const response = await fetch(`${base()}/v1/bootstrap`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     const body = await parseBody(response);
