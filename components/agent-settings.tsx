@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Cpu, FileText, LoaderCircle, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, UserRound, X, Cable, MonitorCog, Server, Folder, Copy, CircleStop, FolderKanban } from 'lucide-react';
+import type { SandboxResult } from '../runtime/sandbox-selftest';
 import { ControlClient } from '../lib/control-client';
 import { DEFAULT_MODEL, TOOL_GROUPS, draftProfile, type AgentProfile, type MachineInfo, type ModelCatalog, type ModelChoice, type ProfileResponse, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
 import { initialWorkspace, type Agent } from '../lib/types';
@@ -42,6 +43,9 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
   const [machines, setMachines] = useState<MachineInfo[]>([]);
   const [computerBusy, setComputerBusy] = useState(false);
   const [computerStatus, setComputerStatus] = useState('');
+  const [sandbox, setSandbox] = useState<SandboxResult | null>(null);
+  const [sandboxBusy, setSandboxBusy] = useState(false);
+  useEffect(() => { let live = true; client.sandboxHistory(agent.id).then(value => { if (live) setSandbox(value.latest?.result || null); }).catch(() => {}); return () => { live = false; }; }, [client, agent.id]);
   const [showPairing, setShowPairing] = useState(false);
   const [pairPlatform, setPairPlatform] = useState<'linux' | 'darwin' | 'win32'>('linux');
   const [pairName, setPairName] = useState('');
@@ -210,6 +214,13 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
         {activeRevision !== null && <div className="profile-info">This agent is working with revision {activeRevision}. Changes you save will apply to its next task.</div>}
         {tab === 'profile' && <><div className="profile-section-heading"><h3>A familiar face. A clear purpose.</h3><p>Give your agent an identity you can recognize across your workspace.</p></div><div className="profile-two-columns"><label>Name<input autoFocus maxLength={30} value={draft.name} onChange={e => edit({ name: e.target.value })} placeholder="Atlas" /></label><label>Role<input maxLength={60} value={draft.role} onChange={e => edit({ role: e.target.value })} placeholder="Research partner" /></label></div><label>Short description<textarea rows={3} maxLength={180} value={draft.description} onChange={e => edit({ description: e.target.value })} placeholder="What should this agent help you with?" /></label><fieldset className="profile-colors"><legend>Avatar color</legend>{['Sage', 'Blue', 'Amber', 'Violet', 'Rose', 'Teal'].map((color, tone) => <label className={`profile-color tone-${tone}`} key={color} title={color}><input type="radio" name="avatar-color" aria-label={color} checked={draft.tone === tone} onChange={() => edit({ tone })} /><span>{draft.tone === tone && <Check size={18} />}</span></label>)}</fieldset><div className="profile-info">Memories, skills, conversations, and files stay with this agent when you edit its profile.</div></>}
         {tab === 'computer' && <>
+          <div className="sandbox-selftest">
+            <button type="button" disabled={loading || sandboxBusy || JSON.stringify(draft.computer) !== JSON.stringify(JSON.parse(baseline).computer)} onClick={async () => { setSandboxBusy(true); setError(''); try { setSandbox((await client.sandboxSelftest(agent.id)).result); } catch (error) { setError(errorText(error)); } finally { setSandboxBusy(false); } }}>{sandboxBusy ? 'Checking sandbox…' : 'Verify sandbox'}</button>
+            <small>Checks the saved computer settings. Save computer changes before verifying.</small>
+            {draft.computer.access === 'direct' && <p>not a sandbox (direct access)</p>}
+            {sandbox && <><p role="status" className={`sandbox-badge sandbox-${sandbox.status}`}>{sandbox.status} · {sandbox.attestation}{sandbox.runnerKind === 'native' ? ' · not a sandbox' : ''}</p><ul>{Object.entries(sandbox.checks).map(([name, check]) => <li key={name}><strong>{name.replaceAll('_', ' ')}</strong>: {check.ok === null ? 'Unknown' : check.ok ? 'Pass' : 'Fail'} — {check.detail}</li>)}</ul>{sandbox.observations && Object.keys(sandbox.observations).length > 0 && <details><summary>In-container observations (corroboration)</summary><ul>{Object.entries(sandbox.observations).map(([name, check]) => <li key={name}>{name.replaceAll('_', ' ')}: {check.ok === null ? 'Unknown' : check.ok ? 'Pass' : 'Fail'} — {check.detail}</li>)}</ul></details>}</>}
+          </div>
+
           <div className="profile-section-heading"><h3><Server size={19} /> Choose where this agent works.</h3><p>Run it here, on a VPS, or on a computer you own. Several agents can use one runner while keeping separate private storage.</p></div>
           <div className="computer-heading"><h4>Where it runs</h4><button type="button" className="subtle-button" onClick={() => { setShowPairing(true); setPairing(null); }}><Plus size={14} /> Add computer</button></div>
           <label>Connected computer<select aria-label="Connected computer" value={draft.computer.machineId} onChange={e => editComputer({ machineId: e.target.value })}>{machines.map(machine => <option value={machine.id} key={machine.id}>{machine.name} · {platformName(machine.platform)} · {machine.status}</option>)}</select></label>

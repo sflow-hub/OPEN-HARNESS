@@ -1,3 +1,4 @@
+import type { SandboxResult } from '../runtime/sandbox-selftest';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { normalizeRoutine, type RoutineInput, type RoutineRun } from "./routine";
 import type { Agent } from "./types";
@@ -79,6 +80,8 @@ export class ControlClient {
     if (!response.ok) throw new Error(value.error || `Control service returned HTTP ${response.status}.`);
     return value;
   }
+  sandboxSelftest(id: string) { return this.request<{ result: SandboxResult }>(`/v1/agents/${encodeURIComponent(id)}/sandbox-selftest`, { method: 'POST', signal: AbortSignal.timeout(120_000) }); }
+  sandboxHistory(id: string) { return this.request<{ latest: { result: SandboxResult } | null }>(`/v1/agents/${encodeURIComponent(id)}/sandbox-selftest`); }
   async listAgents() { return (await this.request<{ agents: Agent[] }>("/v1/agents")).agents; }
   async createAgent(input: { name: string; role?: string; description?: string; prompt?: string; id?: string }) { return (await this.request<{ agent: Agent }>("/v1/agents", { method: "POST", body: JSON.stringify(input) })).agent; }
   deleteAgent(id: string) { return this.request<{ ok: true; id: string }>(`/v1/agents/${encodeURIComponent(id)}`, { method: "DELETE" }); }

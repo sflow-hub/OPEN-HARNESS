@@ -2168,3 +2168,11 @@ h1 span {
   .teams-content { padding: 34px 18px 70px; }.teams-heading { align-items: flex-start; flex-direction: column; }.teams-heading .light-button { width: 100%; justify-content: center; }
   .team-member-list { grid-template-columns: 1fr; }.team-members-head { align-items: stretch; flex-direction: column; }.team-members-head .search-box { width: 100%; }
 }
+
+.sandbox-selftest { margin-block: 12px; }
+.sandbox-selftest small { display: block; margin-top: 6px; }
+.sandbox-selftest ul { padding-left: 20px; font-size: 12px; overflow-wrap: anywhere; }
+.sandbox-badge { display: inline-block; border: 1px solid currentColor; border-radius: 8px; padding: 4px 8px; }
+.sandbox-green { color: #287245; }
+.sandbox-amber { color: #96620d; }
+.sandbox-red { color: #c13f3f; }

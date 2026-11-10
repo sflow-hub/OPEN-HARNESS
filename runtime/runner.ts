@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { directSandbox, sandboxSelftest } from './sandbox-selftest';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, unlinkSync } from 'node:fs';
 import { homedir, hostname, platform, arch } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -13,7 +14,7 @@ import { decryptRunnerSecret, generateRunnerKeyPair, type EncryptedRunnerSecret 
 import { validateComputerTarget } from './computer-validation';
 
 type Credentials = { coordinator: string; machineId: string; token: string; encryptionPublicKey: string; encryptionPrivateKey: string };
-type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'store-secret'; payload: any };
+type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'probe-sandbox' | 'store-secret'; payload: any };
 const args = new Map<string,string>();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith('--')) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith('--') ? '' : process.argv[++i] || '');
 const stateRoot = resolve(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join(homedir(), '.open-harness-runner'));
@@ -145,9 +146,13 @@ async function control(command: RunnerCommand) {
     }
     if (command.kind.startsWith('probe-')) {
       const profile = command.payload.profile as AgentProfile & { effectiveModel: any }, direct = profile.computer.access === 'direct', shared = join(stateRoot, 'shared'), agentRoot = join(stateRoot, 'agents', profile.id); mkdirSync(shared, { recursive: true });
+      if (command.kind === 'probe-sandbox' && direct) { await finish(command, directSandbox('runner-attested')); return; }
       checkDirect(profile.computer.access);
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env } as Record<string,string>, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter(name => availableSecrets[name]).map(name => [name, availableSecrets[name]])), dispatched = await openDispatchedSecrets(command.payload.encryptedSecrets as Record<string, EncryptedRunnerSecret> | undefined), secretSource = { environment: () => ({ ...localSecrets, ...dispatched }) };
       prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command.payload.coordinationToken || '', `probe-${command.id}`, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator } : {});
+      if (command.kind === 'probe-sandbox') {
+        await finish(command, await sandboxSelftest(ensureContainer(profile.id, stateRoot, profile.computer, command.payload.teamIds || [], () => busyAgents.has(profile.id)), { computer: profile.computer, teamIds: command.payload.teamIds || [], stateRoot, agentId: profile.id }, 'runner-attested')); return;
+      }
       if (command.kind === 'probe-runtime') {
         const probeInput = { ...(command.payload.input || {}) } as any;
         if (probeInput.action === 'computer') probeInput.desktop = profile.computer.desktop;

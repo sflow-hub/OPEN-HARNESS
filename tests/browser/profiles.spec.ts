@@ -330,3 +330,12 @@ test('direct access stays disabled until the operator confirms the security togg
   expect(enabled.allowDirectAccess).toBe(true);
   await request.put(control + '/v1/workspace/security', { headers, data: { allowDirectAccess: false, revision: enabled.revision } });
 });
+
+test('Computer tab verifies sandbox with an explicit mock attestation badge', async ({ page }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
+  await panel.getByRole('button', { name: 'Verify sandbox', exact: true }).click();
+  await expect(panel.locator('.sandbox-badge')).toHaveText('red · mock');
+  await expect(panel.getByText('writable image rootfs (hardening pending)', { exact: false })).toBeVisible();
+});

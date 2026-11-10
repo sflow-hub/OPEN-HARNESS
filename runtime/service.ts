@@ -4,6 +4,7 @@ import { appendFileSync, mkdirSync, writeFileSync, readdirSync, readFileSync, re
 import { resolve, join } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
+import { directSandbox, mockSandbox, sandboxSelftest, type SandboxResult } from './sandbox-selftest';
 import { discoverTools, discoverModels, nativeRuntimeProbe, prepareProfile, runtimeProbe } from "./profile-runtime";
 import { HANDOFF_TOOL, MESSAGE_TOOL, profileAgent, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
 import { saveRoutine, tickRoutines } from "./routines";
@@ -171,7 +172,7 @@ async function dispatchSecrets(machineId: string, profile: AgentProfile, effecti
   if (!key) throw new MachineError('This computer has not published its encryption key yet. It is sent on every heartbeat, so wait a few seconds for it to check in, or pair it again.', 409);
   return Object.fromEntries(await Promise.all(Object.entries(plain).map(async ([name, value]) => [name, await encryptRunnerSecret(key, value)])));
 }
-async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) { profiles.checkDirect(profile.computer); const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { teamIds: teams.activeTeamIds(profile.id), profile: { ...profile, effectiveModel }, input, encryptedSecrets: await dispatchSecrets(machine.id, profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
+async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models' | 'probe-sandbox', input?: unknown) { profiles.checkDirect(profile.computer); const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { teamIds: teams.activeTeamIds(profile.id), profile: { ...profile, effectiveModel }, input, encryptedSecrets: await dispatchSecrets(machine.id, profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
 
 async function executeRemote(run: RunRow, snapshot: AgentProfile & { effectiveModel: ReturnType<Profiles['effective']> }) {
   const machine = machines.canAssign(snapshot.computer.machineId, run.agent_id);
@@ -474,7 +475,7 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/v1/install/file') {
       const requested = String(url.searchParams.get('path') || '').replaceAll('\\', '/');
-      const allowed = new Set(['runtime/runner.mjs', 'runtime/hermes/Dockerfile', 'runtime/hermes/NOTICE.md', 'runtime/hermes/container-init.sh', 'runtime/hermes/coordination.mjs', 'runtime/hermes/inspect_runtime.py', 'runtime/hermes/managed_entry.py', 'runtime/hermes/extension/open_harness_policy.py', 'runtime/hermes/extension/pyproject.toml']);
+      const allowed = new Set(['runtime/runner.mjs', 'runtime/hermes/Dockerfile', 'runtime/hermes/NOTICE.md', 'runtime/hermes/container-init.sh', 'runtime/hermes/coordination.mjs', 'runtime/hermes/inspect_runtime.py', 'runtime/hermes/sandbox_selftest.py', 'runtime/hermes/managed_entry.py', 'runtime/hermes/extension/open_harness_policy.py', 'runtime/hermes/extension/pyproject.toml']);
       if (!allowed.has(requested)) return json(res, 404, { error: 'Runner file not found.' });
       const target = requested === 'runtime/runner.mjs' ? join(import.meta.dirname, 'runner.mjs') : join(import.meta.dirname, requested.slice('runtime/'.length));
       if (!existsSync(target)) return json(res, 503, { error: 'The standalone runner bundle is unavailable. Run npm run runner:bundle on this source installation.' });
@@ -616,7 +617,7 @@ const server = createServer(async (req, res) => {
       if (req.method === "GET") return json(res, 200, profiles.defaults());
       if (req.method === "PUT") { const input = await body(req); const result = profiles.setDefaults(input.model, input.revision); audit.record({ actorKind: 'operator', action: 'workspace.model.update' }); return json(res, 200, result); }
     }
-    const profileMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(profile|credential|tools|models|connection-check|connector-check)$/);
+    const profileMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(profile|credential|tools|models|connection-check|connector-check|sandbox-selftest)$/);
     if (profileMatch) {
       const id = validId(decodeURIComponent(profileMatch[1])), action = profileMatch[2];
       const profile = profiles.get(id);
@@ -631,6 +632,23 @@ const server = createServer(async (req, res) => {
         return json(res, 200, profileResponse(saved));
       }
       if (!profile) return json(res, 404, { error: 'Agent profile not found.' });
+      if (action === 'sandbox-selftest') {
+        if (req.method === 'GET') {
+          const history = store.db.prepare('SELECT id, agent_id, machine_id, runner_kind, attestation, status, result_json, created_at FROM sandbox_selftests WHERE agent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 20').all(id).map(row => { const { result_json, ...metadata } = row; return { ...metadata, result: JSON.parse(String(result_json)) }; });
+          return json(res, 200, { latest: history[0] || null, history });
+        }
+        if (req.method === 'POST') {
+          const attestation = process.env.OPEN_HARNESS_MOCK === '1' ? 'mock' : profile.computer.machineId === 'local' ? 'host-attested' : 'runner-attested';
+          const result = profile.computer.access === 'direct' ? directSandbox(attestation) : attestation === 'mock' ? mockSandbox() : profile.computer.machineId === 'local'
+            ? await sandboxSelftest(ensureContainer(id, root, profile.computer, teams.activeTeamIds(id), () => store.agentBusy(id)), { computer: profile.computer, teamIds: teams.activeTeamIds(id), stateRoot: root, agentId: id })
+            : { ...await runnerProbe(profile, 'probe-sandbox') as SandboxResult, attestation: 'runner-attested' as const };
+          const record = { id: crypto.randomUUID(), agent_id: id, machine_id: profile.computer.machineId, runner_kind: result.runnerKind, attestation: result.attestation, status: result.status, created_at: new Date().toISOString(), result };
+          store.db.prepare('INSERT INTO sandbox_selftests (id, agent_id, machine_id, runner_kind, attestation, status, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, id, record.machine_id, record.runner_kind, record.attestation, record.status, JSON.stringify(result), record.created_at);
+          audit.record({ actorKind: 'operator', action: 'sandbox.selftest', targetKind: 'agent', targetId: id, detail: { status: result.status, attestation: result.attestation } });
+          return json(res, 200, record);
+        }
+        return json(res, 405, { error: 'Use GET or POST for sandbox checks.' });
+      }
       if (action === 'credential' && req.method === 'PUT') {
         const input = await body(req);
         if (input.inherit) return json(res, 200, profileResponse(profiles.save({ ...profile, model: { ...profile.model, inherit: true } })));
