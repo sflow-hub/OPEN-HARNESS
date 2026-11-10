@@ -55,6 +55,8 @@ import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import TeamManager, { TeamBadge } from "../components/team-manager";
 import CredentialManager, { CredentialSwitcher } from "../components/credential-manager";
+import RoutineHistoryDrawer from "../components/routine-history-drawer";
+import type { Routine } from "../lib/routine";
 import { fitsProvider, type CredentialRecord } from "../lib/credentials";
 import { profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
 import type { Team } from "../lib/team";
@@ -160,8 +162,9 @@ export default function Home() {
   // overwrite the first — leaving a run blocked on an approval with no way to answer it.
   const [approvals, setApprovals] = useState<Array<{ approvalId: string; detail: string; runId: string; agentName: string }>>([]);
   const [inputMode, setInputMode] = useState<"steer" | "followup">("steer");
-  const [routines, setRoutines] = useState<Array<Record<string, unknown>>>([]);
-  const [routineDraft, setRoutineDraft] = useState<{ id?: string; name: string; prompt: string; agentId: string; intervalMinutes: number } | null>(null);
+  const [routines, setRoutines] = useState<Routine[]>([]);
+  const [historyRoutine, setHistoryRoutine] = useState<Routine | null>(null);
+  const [routineDraft, setRoutineDraft] = useState<{ id?: string; name: string; prompt: string; agentId: string; intervalMinutes: number; cronSchedule?: string } | null>(null);
   const [routineBusy, setRoutineBusy] = useState(false);
   // MEMORY.md and SKILL.md are multi-section Markdown documents; window.prompt cannot
   // realistically edit either, and there was no way to write a skill by hand at all.
@@ -300,10 +303,8 @@ export default function Home() {
           if (localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
         }
         try { const saved = await client.request<{ credentials: CredentialRecord[] }>("/v1/credentials"); if (!cancelled) setCredentials(saved.credentials); } catch {}
-        const [{ routines: savedRoutines }, { runs }] = await Promise.all([
-          client.request<{ routines: Array<Record<string, unknown>> }>(
-            "/v1/routines",
-          ),
+        const [savedRoutines, { runs }] = await Promise.all([
+          client.listRoutines(),
           client.request<{ runs: PersistentRun[] }>("/v1/runs"),
         ]);
         if (!cancelled) {
@@ -421,8 +422,7 @@ export default function Home() {
   };
 
   const refreshRoutines = async () => {
-    const result = await controlRef.current.request<{ routines: Array<Record<string, unknown>> }>("/v1/routines");
-    setRoutines(result.routines);
+    setRoutines(await controlRef.current.listRoutines());
   };
   const saveRoutine = async () => {
     if (!routineDraft) return;
@@ -430,9 +430,11 @@ export default function Home() {
     if (!name || !prompt) { setNotice("Give the routine a name and a task."); return; }
     setRoutineBusy(true);
     try {
-      const payload = JSON.stringify({ name, prompt, agentId: routineDraft.agentId, intervalMinutes: routineDraft.intervalMinutes, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
-      if (routineDraft.id) await controlRef.current.request(`/v1/routines/${routineDraft.id}`, { method: "PUT", body: payload });
-      else await controlRef.current.request("/v1/routines", { method: "POST", body: payload });
+      // Updates leave timezone and schedule kind to the server: resending the browser's
+      // timezone would shift a cron routine saved elsewhere, and cron routines have no interval.
+      const fields = { name, prompt, agentId: routineDraft.agentId };
+      if (routineDraft.id) await controlRef.current.updateRoutine(routineDraft.id, routineDraft.cronSchedule ? fields : { ...fields, intervalMinutes: routineDraft.intervalMinutes });
+      else await controlRef.current.createRoutine({ ...fields, intervalMinutes: routineDraft.intervalMinutes, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
       await refreshRoutines();
       setRoutineDraft(null);
       setNotice(routineDraft.id ? "Routine updated." : "Routine created.");
@@ -1809,19 +1811,22 @@ export default function Home() {
             ) : (
               <div className="file-table">
                 {routines.map((routine) => (
-                  <div className="file-table-row" key={String(routine.id)}>
+                  <div className="file-table-row" key={routine.id}>
                     <div className="file-name">
                       <CalendarClock size={20} />
                       <span>
-                        {String(routine.name)}
+                        {routine.name}
                         <small>
-                          {agentNameFor(String(routine.agent_id))}
-                          {" · "}every {formatInterval(Number(routine.interval_minutes))}
-                          {" · "}next {new Date(String(routine.next_run_at)).toLocaleString()}
+                          {agentNameFor(routine.agent_id)}
+                          {" · "}
+                          {routine.schedule_kind === "cron"
+                            ? `cron ${routine.cron_expression || "(no expression)"}${routine.timezone ? ` (${routine.timezone})` : ""}`
+                            : `every ${formatInterval(routine.interval_minutes)}`}
+                          {routine.next_run_at && <>{" · "}next {new Date(routine.next_run_at).toLocaleString()}</>}
                         </small>
                         <small>
                           {routine.last_run_at
-                            ? `Last run ${new Date(String(routine.last_run_at)).toLocaleString()}`
+                            ? `Last run ${new Date(routine.last_run_at).toLocaleString()}`
                             : "Has not run yet"}
                         </small>
                       </span>
@@ -1833,7 +1838,7 @@ export default function Home() {
                       className="subtle-button"
                       onClick={async () => {
                         try {
-                          await controlRef.current.request(`/v1/routines/${String(routine.id)}/run`, { method: "POST" });
+                          await controlRef.current.runRoutine(routine.id);
                           // The server stamps last_run_at and next_run_at; without this the
                           // row keeps showing the schedule it had before you pressed the button.
                           await refreshRoutines();
@@ -1847,12 +1852,20 @@ export default function Home() {
                     </button>
                     <button
                       className="subtle-button"
+                      aria-label={`History for ${routine.name}`}
+                      onClick={() => setHistoryRoutine(routine)}
+                    >
+                      History
+                    </button>
+                    <button
+                      className="subtle-button"
                       onClick={() => setRoutineDraft({
-                        id: String(routine.id),
-                        name: String(routine.name),
-                        prompt: String(routine.prompt),
-                        agentId: String(routine.agent_id),
-                        intervalMinutes: Number(routine.interval_minutes) || 1440,
+                        id: routine.id,
+                        name: routine.name,
+                        prompt: routine.prompt,
+                        agentId: routine.agent_id,
+                        intervalMinutes: routine.interval_minutes,
+                        cronSchedule: routine.schedule_kind === "cron" ? `${routine.cron_expression || "(no expression)"}${routine.timezone ? ` (${routine.timezone})` : ""}` : undefined,
                       })}
                     >
                       Edit
@@ -1860,7 +1873,7 @@ export default function Home() {
                     <button
                       onClick={async () => {
                         try {
-                          await controlRef.current.request(`/v1/routines/${String(routine.id)}/toggle`, { method: "POST" });
+                          await controlRef.current.toggleRoutine(routine.id);
                           await refreshRoutines();
                         } catch (error) {
                           setNotice(error instanceof Error ? error.message : "Could not change that routine.");
@@ -1871,11 +1884,11 @@ export default function Home() {
                     </button>
                     <button
                       className="danger-text"
-                      aria-label={`Delete routine ${String(routine.name)}`}
+                      aria-label={`Delete routine ${routine.name}`}
                       onClick={async () => {
-                        if (!window.confirm(`Delete the routine “${String(routine.name)}”? Its schedule and history are removed.`)) return;
+                        if (!window.confirm(`Delete the routine “${routine.name}”? Its schedule and history are removed.`)) return;
                         try {
-                          await controlRef.current.request(`/v1/routines/${String(routine.id)}`, { method: "DELETE" });
+                          await controlRef.current.deleteRoutine(routine.id);
                           await refreshRoutines();
                           setNotice("Routine deleted.");
                         } catch (error) {
@@ -1997,7 +2010,9 @@ export default function Home() {
                   ))}
                 </select>
               </label>
-              <label>
+              {routineDraft.cronSchedule ? (
+                <p className="muted small">Runs on the cron schedule {routineDraft.cronSchedule}. Saving keeps that schedule.</p>
+              ) : <label>
                 Run every
                 <select
                   value={String(routineDraft.intervalMinutes)}
@@ -2012,7 +2027,7 @@ export default function Home() {
                 <small className="muted">
                   Counted from the last run, not from a clock time — a daily routine drifts if you also run it by hand.
                 </small>
-              </label>
+              </label>}
             </div>
             <div className="modal-footer">
               <button className="subtle-button" disabled={routineBusy} onClick={() => setRoutineDraft(null)}>Cancel</button>
@@ -2022,6 +2037,15 @@ export default function Home() {
             </div>
           </section>
         </div>
+      )}
+      {historyRoutine && (
+        <RoutineHistoryDrawer
+          key={historyRoutine.id}
+          routine={historyRoutine}
+          agentName={agentNameFor(historyRoutine.agent_id)}
+          client={controlRef.current}
+          onClose={() => setHistoryRoutine(null)}
+        />
       )}
       <input
         type="file"
