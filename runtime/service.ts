@@ -171,7 +171,7 @@ async function dispatchSecrets(machineId: string, profile: AgentProfile, effecti
   if (!key) throw new MachineError('This computer has not published its encryption key yet. It is sent on every heartbeat, so wait a few seconds for it to check in, or pair it again.', 409);
   return Object.fromEntries(await Promise.all(Object.entries(plain).map(async ([name, value]) => [name, await encryptRunnerSecret(key, value)])));
 }
-async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) { const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input, encryptedSecrets: await dispatchSecrets(machine.id, profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
+async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) { profiles.checkDirect(profile.computer); const machine = machines.canAssign(profile.computer.machineId, profile.id); if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409); const effectiveModel = profiles.effective(profile); return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input, encryptedSecrets: await dispatchSecrets(machine.id, profile, effectiveModel), coordinationToken: agentToken(profile.id) }).id); }
 
 async function executeRemote(run: RunRow, snapshot: AgentProfile & { effectiveModel: ReturnType<Profiles['effective']> }) {
   const machine = machines.canAssign(snapshot.computer.machineId, run.agent_id);
@@ -213,6 +213,7 @@ async function performTransfer(transfer: { id: string; agentId: string; sourceMa
       result = { ...importAgentFiles(root, transfer.agentId, resolvedBundle), validated: true };
       if (pending?.computer.desktop !== 'none' && pending && process.env.OPEN_HARNESS_MOCK !== '1') {
         const check = { action: 'computer', desktop: pending.computer.desktop };
+        profiles.checkDirect(pending.computer);
         const tested = pending.computer.desktop === 'existing' ? nativeRuntimeProbe(join(root, 'agents', pending.id, 'profile'), check) : await runtimeProbe(ensureContainer(pending.id, root, pending.computer), check);
         if (!tested.ok) throw new Error(String(tested.message || 'Desktop control is not ready on this computer.'));
       }
@@ -230,6 +231,7 @@ function internalAllowed(agentId: string | null, tool: string, runId?: string) {
 }
 
 async function gatewayFor(agentId: string, allowedTools: string[] | null = null, computer?: ComputerConfig) {
+  if (computer) profiles.checkDirect(computer);
   let gateway = gateways.get(agentId);
   if (gateway) return gateway;
   if (computer?.access === 'direct') {
@@ -267,6 +269,7 @@ async function execute(run: RunRow) {
     const profile = profiles.get(run.agent_id);
     if (!profile) throw new Error("Agent profile not found. Open Agent settings and save this agent.");
     const snapshot = profiles.snapshot(run.id, profile);
+    profiles.checkDirect(snapshot.computer);
     credentials.touch([snapshot.effectiveModel.credentialRef, ...snapshot.connectors.filter(c => c.enabled).map(c => c.secretRef)]);
     const assigned = machines.canAssign(snapshot.computer.machineId, run.agent_id);
     event(run.id, "run.started", { runId: run.id, agentId: run.agent_id, machineId: assigned.id, machineName: assigned.name });
@@ -545,6 +548,7 @@ const server = createServer(async (req, res) => {
         try {
           ensureProfileDirs(profile.id);
           const check = { action: 'computer', desktop: profile.computer.desktop };
+          profiles.checkDirect(profile.computer);
           const result = machineId === 'local' ? profile.computer.access === 'direct' ? nativeRuntimeProbe(join(root, 'agents', profile.id, 'profile'), check) : await runtimeProbe(ensureContainer(profile.id, root, profile.computer), check) : await runnerProbe(profile, 'probe-runtime', check);
           return json(res, 200, { ...checked, ok: Boolean(result.ok), message: String(result.message || checked.message), machine: checked.machine });
         } catch (error) { return json(res, 200, { ...checked, ok: false, message: error instanceof Error ? error.message : 'Computer access check failed.' }); }
@@ -602,6 +606,11 @@ const server = createServer(async (req, res) => {
       if (profiles.defaults().revision) return json(res, 200, profiles.defaults());
       const result = profiles.setDefaults(input.model, 0); audit.record({ actorKind: 'operator', action: 'workspace.model.update' }); return json(res, 200, result);
     }
+    if (url.pathname === '/v1/workspace/security') {
+      if (!authenticated(req)) return json(res, 403, { error: 'Only the operator can change workspace security.' });
+      if (req.method === 'GET') return json(res, 200, profiles.security());
+      if (req.method === 'PUT') { const input = await body(req), result = profiles.setSecurity(input.allowDirectAccess, input.revision, input.confirm); audit.record({ actorKind: 'operator', action: result.allowDirectAccess ? 'workspace.direct_access.enable' : 'workspace.direct_access.disable' }); return json(res, 200, result); }
+    }
     if (url.pathname === "/v1/workspace/model") {
       if (req.method === "GET") return json(res, 200, profiles.defaults());
       if (req.method === "PUT") { const input = await body(req); const result = profiles.setDefaults(input.model, input.revision); audit.record({ actorKind: 'operator', action: 'workspace.model.update' }); return json(res, 200, result); }
@@ -613,6 +622,7 @@ const server = createServer(async (req, res) => {
       if (action === 'profile' && req.method === 'PUT') {
         const input = await body(req); if (input.id !== id) throw new ProfileError('Profile ID does not match the selected agent.');
         const current = profiles.get(id), desired = validateProfile(input); if (machines.transferring(id)) throw new MachineError('This agent is already transferring. Wait for it to finish before editing its computer.', 409); machines.canAssign(desired.computer.machineId, id);
+        profiles.checkDirect(desired.computer);
         const moving = Boolean(current && current.computer.machineId !== desired.computer.machineId), saved = profiles.save(moving ? { ...desired, computer: current!.computer } : desired); ensureProfileDirs(id);
         if (moving) { const pending = { ...desired, revision: saved.revision }; machines.reserve(desired.computer.machineId, id, desired.computer.reserveMachine); void performTransfer(machines.transfer(id, current!.computer.machineId, desired.computer.machineId, pending)); }
         else machines.reserve(saved.computer.machineId, id, saved.computer.reserveMachine);
@@ -630,6 +640,7 @@ const server = createServer(async (req, res) => {
       if (action === 'profile' && req.method === 'GET') return json(res, 200, profileResponse(profile));
       if (action === 'tools' && req.method === 'GET') {
         ensureProfileDirs(id);
+        profiles.checkDirect(profile.computer);
         const catalog = profile.computer.machineId === 'local' ? await discoverTools(id, root, profile) : await runnerProbe(profile, 'probe-tools') as ToolCatalog;
         if (!catalog.tools.some(tool => tool.id === MESSAGE_TOOL)) catalog.tools.push({ id: MESSAGE_TOOL, name: 'Conversation messages', group: 'other', description: 'Post messages and read or acknowledge your inbox.', available: true });
         if (catalog.source === 'unavailable') {

@@ -41,6 +41,22 @@ async function run(prompt: string, agentId = 'atlas') { return request<Persisten
 test.before(async () => { await start(); await request('/v1/agents/sync', 'POST', { agents: ['atlas','scout'].map(id => ({ id, name: id, role: 'Assistant', description: 'A durable profile', tone: 1, instructions: 'Keep context.', memory: [] })) }); });
 test.after(async () => { if (child && child.exitCode === null) { const exited = new Promise(r => child.once('exit', r)); child.kill('SIGTERM'); await exited; } });
 
+test('direct access requires confirmed operator opt-in and is checked again at run start', async () => {
+  const off = await request<{ allowDirectAccess: boolean; revision: number }>('/v1/workspace/security');
+  assert.equal(off.allowDirectAccess, false);
+  const original = await profile(), direct = { ...original, computer: { ...original.computer, access: 'direct' as const } };
+  await assert.rejects(save(direct), { status: 403 });
+  await assert.rejects(request('/v1/workspace/security', 'PUT', { allowDirectAccess: true, revision: off.revision }), { status: 400 });
+  const on = await request<{ revision: number }>('/v1/workspace/security', 'PUT', { allowDirectAccess: true, revision: off.revision, confirm: true });
+  await assert.rejects(request('/v1/workspace/security', 'PUT', { allowDirectAccess: false, revision: off.revision }), { status: 409 });
+  const audit = await request<{ events: { actorKind: string }[] }>('/v1/audit?action=workspace.direct_access.enable');
+  assert.equal(audit.events.at(-1)?.actorKind, 'operator');
+  await save(direct);
+  await request('/v1/workspace/security', 'PUT', { allowDirectAccess: false, revision: on.revision });
+  const refused = await waitRun((await run('Do not execute native work')).id);
+  assert.equal(refused.state, 'failed'); assert.match(refused.error || '', /Direct computer access is disabled/);
+  await save({ ...original, revision: (await profile()).revision });
+});
 test('independent model overrides survive workspace updates and stale browser sync', async () => {
   const atlas = await profile(), scout = await profile('scout');
   await save({ ...atlas, model: { inherit: false, provider: 'mock', model: 'atlas-model', credentialRef: '', baseUrl: '' }, prompt: { enabled: true, text: 'Atlas custom system prompt' }, allowedTools: ['terminal'] });

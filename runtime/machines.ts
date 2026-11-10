@@ -98,7 +98,7 @@ export class Machines {
     const pairing = this.db.prepare('SELECT * FROM machine_pairings WHERE code_hash=?').get(hash(code)) as { id: string; name: string; platform: string; expires_at: string; used_at: string | null } | undefined;
     if (!pairing || pairing.used_at || Date.parse(pairing.expires_at) <= Date.now()) throw new MachineError('This pairing code is invalid, expired, or already used.', 410);
     const id = `machine-${crypto.randomUUID()}`, token = Buffer.from(randomBytes(32)).toString('base64url'), stamp = now();
-    const capabilities = input.capabilities && typeof input.capabilities === 'object' ? input.capabilities : { container: true, direct: true, desktop: false, virtualDesktop: pairing.platform === 'linux' };
+    const capabilities = input.capabilities && typeof input.capabilities === 'object' ? input.capabilities : { container: true, direct: false, desktop: false, virtualDesktop: pairing.platform === 'linux' };
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare('UPDATE machine_pairings SET used_at=? WHERE id=? AND used_at IS NULL').run(stamp, pairing.id);

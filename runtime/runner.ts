@@ -43,6 +43,8 @@ function output(command: string, args: string[], timeout: number) {
     child.stdout.on('data', chunk => stdout += chunk); child.on('error', () => settle(null)); child.on('exit', code => settle(code));
   });
 }
+const allowDirect = process.env.OPEN_HARNESS_ALLOW_DIRECT === '1';
+function checkDirect(access: string) { if (access === 'direct' && !allowDirect) throw new Error('Direct computer access is disabled on this runner. Start it with OPEN_HARNESS_ALLOW_DIRECT=1 to opt in.'); }
 async function probeCapabilities(): Promise<Capabilities> {
   const [container, python] = await Promise.all([
     // An image built before a fix must not advertise container capability; the coordinator
@@ -50,7 +52,7 @@ async function probeCapabilities(): Promise<Capabilities> {
     process.env.OPEN_HARNESS_MOCK === '1' ? true : output('docker', ['image', 'inspect', '-f', `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE], 5_000).then(result => classifyContract(result) === 'current'),
     Promise.all(pythons.map(async name => (await exitCode(name, ['-c', 'import hermes_cli, open_harness_policy'], 8_000)) === 0)).then(found => found.some(Boolean)),
   ]);
-  return { container, direct: python, desktop: Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === 'darwin' || process.platform === 'win32'), virtualDesktop: process.platform === 'linux' && container, detail: python ? 'Hermes host runtime is installed.' : 'Install the Hermes host runtime to enable direct access.' };
+  return { container, direct: allowDirect && python, desktop: Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === 'darwin' || process.platform === 'win32'), virtualDesktop: process.platform === 'linux' && container, detail: !allowDirect ? 'Direct access requires the local opt-in OPEN_HARNESS_ALLOW_DIRECT=1.' : python ? 'Hermes host runtime is installed.' : 'Install the Hermes host runtime to enable direct access.' };
 }
 // Heartbeats send the last known value and refresh in the background; only pairing and
 // import-agent validation wait for a fresh probe.
@@ -98,6 +100,7 @@ async function run(command: RunnerCommand) {
   const payload = command.payload as { runId: string; prompt: string; snapshot: AgentProfile & { effectiveModel: any }; encryptedSecrets?: Record<string, EncryptedRunnerSecret>; coordinationToken: string };
   const profile = payload.snapshot, direct = profile.computer.access === 'direct';
   try {
+    checkDirect(profile.computer.access);
     const agentRoot = join(stateRoot, 'agents', profile.id), shared = join(stateRoot, 'shared'); mkdirSync(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean);
     const availableSecrets = { ...runnerSecrets.environment(), ...process.env } as Record<string,string>;
@@ -122,6 +125,7 @@ async function control(command: RunnerCommand) {
     if (command.kind === 'export-agent') { await finish(command, exportAgentFiles(stateRoot, command.agentId)); return; }
     if (command.kind === 'import-agent') {
       const profile = command.payload.profile as AgentProfile | undefined;
+      if (profile) checkDirect(profile.computer.access);
       if (profile) validateComputerTarget(profile, await capabilities(), Array.isArray(command.payload.requiredSecrets) ? command.payload.requiredSecrets.map(String) : [], name => runnerSecrets.has(name) || Boolean(process.env[name]));
       // The coordinator always inlines the bundle with the command; there is no separate fetch.
       const bundle = command.payload.bundle;
@@ -138,6 +142,7 @@ async function control(command: RunnerCommand) {
     }
     if (command.kind.startsWith('probe-')) {
       const profile = command.payload.profile as AgentProfile & { effectiveModel: any }, direct = profile.computer.access === 'direct', shared = join(stateRoot, 'shared'), agentRoot = join(stateRoot, 'agents', profile.id); mkdirSync(shared, { recursive: true });
+      checkDirect(profile.computer.access);
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env } as Record<string,string>, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter(name => availableSecrets[name]).map(name => [name, availableSecrets[name]])), dispatched = await openDispatchedSecrets(command.payload.encryptedSecrets as Record<string, EncryptedRunnerSecret> | undefined), secretSource = { environment: () => ({ ...localSecrets, ...dispatched }) };
       prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command.payload.coordinationToken || '', `probe-${command.id}`, direct ? { cwd: shared, coordinationCommand: join(import.meta.dirname, 'hermes', 'coordination.mjs'), controlUrl: credentials.coordinator } : {});
       if (command.kind === 'probe-runtime') {
