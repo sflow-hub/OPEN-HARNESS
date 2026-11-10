@@ -25,6 +25,8 @@ def load_grant():
     return _GRANT
 
 def permitted(name):
+    if name == 'mcp__open_harness__read_inbox':
+        name = 'mcp__open_harness__post_message'
     return isinstance(name, str) and name in load_grant()
 
 def tool_execution(tool_name=None, args=None, next_call=None, **kwargs):

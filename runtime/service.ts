@@ -5,8 +5,9 @@ import { resolve, join } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
 import { discoverTools, discoverModels, nativeRuntimeProbe, prepareProfile, runtimeProbe } from "./profile-runtime";
-import { HANDOFF_TOOL, profileAgent, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
+import { HANDOFF_TOOL, MESSAGE_TOOL, profileAgent, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
 import { saveRoutine, tickRoutines } from "./routines";
+import { Messaging, MAX_DELEGATIONS } from "./messaging";
 import { Conversations, ConversationError } from "./conversations";
 import { SchemaTooNewError, Store, type RunRow } from "./db";
 import { SecretStore, SecretsUnavailableError } from "./secrets";
@@ -51,7 +52,8 @@ const profiles = new Profiles(store.db);
 const teams = new TeamStore(store.db);
 const conversations = new Conversations(store.db, profiles, teams);
 const tasks = new TaskStore(store.db);
-store.runListener = run => tasks.syncRun(run);
+const messaging = new Messaging(store, conversations, input => createRun(input));
+store.runListener = run => { tasks.syncRun(run); messaging.onRun(run); };
 tasks.reconcile();
 const machines = new Machines(store.db);
 const importedWorkspace = store.db.prepare("SELECT payload_json FROM migrations WHERE key='browser-v1'").get() as { payload_json: string } | undefined;
@@ -386,16 +388,6 @@ async function stopRunTree(runId: string) {
   return { stopped, failures };
 }
 
-async function waitForRun(id: string, timeoutMs = 30 * 60 * 1000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const run = store.getRun(id); if (!run) throw new Error("Delegated run disappeared.");
-    if (["completed", "failed", "interrupted", "cancelled"].includes(run.state)) return run;
-    await new Promise(resolve => setTimeout(resolve, 500));
-  }
-  throw new Error("Delegated run is still active after 30 minutes. Its run ID remains available in Open Harness.");
-}
-
 function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number; deferStart?: boolean; internalConversation?: boolean }) {
   if (!input.agentId || !input.prompt?.trim()) throw new Error("agentId and prompt are required.");
   if (!profiles.get(input.agentId)) throw new ProfileError("Agent profile not found.", 404);
@@ -404,7 +396,7 @@ function createRun(input: { agentId: string; conversationId?: string; prompt: st
   if (depth > 2) throw new Error("Delegation depth is limited to two.");
   if (parent) {
     const ancestors = new Set<string>([parent.agent_id]); let cursor = parent;
-    while (cursor.parent_run_id) { const previous = store.getRun(cursor.parent_run_id); if (!previous) break; ancestors.add(previous.agent_id); cursor = previous; }
+    while (cursor.parent_run_id || messaging.lineage(cursor.id).anchor) { const previous = store.getRun(cursor.parent_run_id || messaging.lineage(cursor.id).anchor!); if (!previous) break; ancestors.add(previous.agent_id); cursor = previous; }
     if (ancestors.has(input.agentId)) throw new Error("Cyclic agent handoffs are not allowed.");
   }
   if (store.queued(maxTaskQueue + 1).length >= maxTaskQueue) throw new TaskError(`The task queue is full (${maxTaskQueue}). Try again when work completes.`, 429);
@@ -627,6 +619,7 @@ const server = createServer(async (req, res) => {
       if (action === 'tools' && req.method === 'GET') {
         ensureProfileDirs(id);
         const catalog = profile.computer.machineId === 'local' ? await discoverTools(id, root, profile) : await runnerProbe(profile, 'probe-tools') as ToolCatalog;
+        if (!catalog.tools.some(tool => tool.id === MESSAGE_TOOL)) catalog.tools.push({ id: MESSAGE_TOOL, name: 'Conversation messages', group: 'other', description: 'Post messages and read or acknowledge your inbox.', available: true });
         if (catalog.source === 'unavailable') {
           const cached = store.db.prepare('SELECT json FROM tool_catalogs WHERE agent_id=?').get(id) as { json: string } | undefined;
           if (cached) { catalog.tools = (JSON.parse(cached.json) as ToolCatalog).tools.map(t => ({ ...t, available: false, reason: catalog.error })); catalog.source = 'cached'; }
@@ -751,16 +744,24 @@ const server = createServer(async (req, res) => {
       if (req.method === 'POST') return json(res, 201, conversations.createConversation(await body(req)));
       if (req.method === 'GET') return json(res, 200, { conversations: conversations.listConversations(url.searchParams.get('kind') ?? undefined) });
     }
-    const conversationRoute = url.pathname.match(/^\/v1\/conversations\/([^/]+)(?:\/(members|messages)(?:\/([^/]+))?)?$/);
+    const conversationRoute = url.pathname.match(/^\/v1\/conversations\/([^/]+)(?:\/(members|messages|halt|resume)(?:\/([^/]+))?)?$/);
     if (conversationRoute) {
       const [, id, resource, memberId] = conversationRoute;
       // These are operator routes; agent-scoped membership grants belong to the internal API.
+      if ((resource === 'halt' || resource === 'resume') && req.method === 'POST') {
+        conversations.getConversation(id); store.db.prepare('UPDATE conversations SET auto_turns_enabled=? WHERE id=?').run(resource === 'resume' ? 1 : 0, id);
+        let stopped = 0; if (resource === 'halt') for (const run of (store.db.prepare("SELECT * FROM runs WHERE conversation_id=? AND state IN ('queued','running','waiting_approval','waiting_input')").all(id) as RunRow[]).filter(r => messaging.isTurn(r.id))) stopped += (await stopRunTree(run.id)).stopped;
+        return json(res, 200, resource === 'halt' ? { halted: true, stopped } : { resumed: true });
+      }
       if (!resource && req.method === 'GET') return json(res, 200, conversations.getConversation(id));
       if (resource === 'members' && !memberId && req.method === 'POST') return json(res, 201, conversations.addMember(id, await body(req)));
       if (resource === 'members' && memberId && req.method === 'DELETE') return json(res, 200, conversations.removeMember(id, memberId));
       if (resource === 'messages' && !memberId && req.method === 'POST') {
         const input = await body(req);
-        return json(res, 201, conversations.postMessage({ conversationId: id, sender: { kind: 'user', id: 'user' }, body: input.body, mentions: input.mentions, idempotencyKey: input.idempotencyKey, inReplyTo: input.inReplyTo }));
+        const message = conversations.postMessage({ conversationId: id, sender: { kind: 'user', id: 'user' }, body: input.body, mentions: input.mentions, idempotencyKey: input.idempotencyKey, inReplyTo: input.inReplyTo });
+        const c = conversations.getConversation(id), mentions = JSON.parse(message.mentions_json) as string[];
+        const scheduledRuns = c.kind === 'group' ? messaging.schedule(id, mentions.length ? mentions : c.members.filter(m => m.participant_kind === 'agent').map(m => m.participant_id)) : [];
+        void pump(); return json(res, 201, { ...message, scheduledRuns });
       }
       if (resource === 'messages' && !memberId && req.method === 'GET') return json(res, 200, { messages: conversations.listMessages(id, Number(url.searchParams.get('after') ?? 0), Number(url.searchParams.get('limit') ?? 100)) });
     }
@@ -828,7 +829,31 @@ const server = createServer(async (req, res) => {
       if (req.method === "POST" && routineMatch[2] === "run") { const stamp = new Date().toISOString(), run = createRun({ agentId: routine.agent_id, prompt: routine.prompt, internalConversation: true }); store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, stamp); store.db.prepare("UPDATE schedules SET last_run_at=?,updated_at=? WHERE id=?").run(stamp, stamp, routine.id); return json(res, 202, run); }
       if (req.method === "POST" && routineMatch[2] === "toggle") { store.db.prepare("UPDATE schedules SET enabled=?,updated_at=? WHERE id=?").run(routine.enabled ? 0 : 1, new Date().toISOString(), routine.id); return json(res, 200, { enabled: !routine.enabled }); }
     }
-    if (req.method === "POST" && url.pathname === "/internal/handoff") { const input = await body(req); const parent = store.listRuns().find(run => run.agent_id === internalAgent && ["running","waiting_approval","waiting_input"].includes(run.state)); if (!parent) return json(res, 409, { error: "The delegating agent has no active run." }); if (!internalAllowed(internalAgent, HANDOFF_TOOL, String(req.headers["x-open-harness-run"] || parent.id))) return json(res, 403, { error: "Delegation is disabled for this run." }); const targetId = String(input.agentId || ""); if (!internalAgent || !teams.sharesActiveTeam(internalAgent, targetId)) return json(res, 403, { error: "Named handoffs require both agents to share an active team." }); const child = createRun({ agentId: targetId, prompt: input.prompt, parentRunId: parent.id }); event(parent.id, "handoff.created", { childRunId: child.id, targetAgentId: targetId, prompt: input.prompt }); const result = await waitForRun(child.id); event(parent.id, "handoff.completed", { childRunId: child.id, targetAgentId: targetId, state: result.state }); return json(res, 200, { runId: result.id, state: result.state, result: result.result, error: result.error }); }
+    if (['/internal/message', '/internal/inbox', '/internal/inbox/ack'].includes(url.pathname)) {
+      if (!internalAllowed(internalAgent, MESSAGE_TOOL, String(req.headers['x-open-harness-run'] || '') || undefined)) return json(res, 403, { error: 'Messaging is disabled for this run.' });
+      const agent = internalAgent!;
+      if (req.method === 'GET' && url.pathname === '/internal/inbox') return json(res, 200, messaging.inbox(agent, url.searchParams.get('conversationId') || undefined));
+      if (req.method === 'POST' && url.pathname === '/internal/inbox/ack') { messaging.ack(agent, (await body(req)).messageIds); return json(res, 200, { acknowledged: true }); }
+      if (req.method === 'POST' && url.pathname === '/internal/message') {
+        const input = await body(req), c = conversations.getConversation(input.conversationId);
+        if (c.members.some(m => m.participant_kind === 'agent' && m.participant_id !== agent && !teams.sharesActiveTeam(agent, m.participant_id))) return json(res, 403, { error: 'Agents must share an active team.' });
+        return json(res, 201, conversations.postMessage({ conversationId: input.conversationId, sender: { kind: 'agent', id: agent }, body: input.body, mentions: input.mentions, idempotencyKey: input.idempotencyKey }));
+      }
+    }
+    if (req.method === 'POST' && url.pathname === '/internal/handoff') {
+      const input = await body(req), runId = String(req.headers['x-open-harness-run'] || '');
+      const parent = runId ? store.getRun(runId) : store.listRuns().find(run => run.agent_id === internalAgent && ['running','waiting_approval','waiting_input'].includes(run.state));
+      if (!parent) return json(res, 409, { error: 'The delegating agent has no active run.' });
+      if (!internalAllowed(internalAgent, HANDOFF_TOOL, parent.id)) return json(res, 403, { error: 'Delegation is disabled for this run.' });
+      const targetId = String(input.agentId || '');
+      if (!internalAgent || !teams.sharesActiveTeam(internalAgent, targetId)) return json(res, 403, { error: 'Named handoffs require both agents to share an active team.' });
+      if ((store.db.prepare('SELECT COUNT(*) n FROM runs WHERE parent_run_id=?').get(parent.id) as { n: number }).n >= MAX_DELEGATIONS) return json(res, 429, { error: 'Delegation limit reached for this run.' });
+      const child = createRun({ agentId: targetId, prompt: input.prompt, parentRunId: parent.id, deferStart: true });
+      const conversationId = messaging.delegationConversation(parent, child);
+      conversations.postMessage({ conversationId, sender: { kind: 'agent', id: parent.agent_id }, body: child.prompt, originRunId: parent.id, idempotencyKey: `delegation-request:${child.id}` });
+      event(parent.id, 'handoff.created', { childRunId: child.id, targetAgentId: targetId, prompt: input.prompt });
+      void pump(); return json(res, 202, { childRunId: child.id, conversationId, state: 'queued' });
+    }
     if (req.method === "POST" && url.pathname === "/internal/task") {
       const input = await body(req), runId = String(req.headers['x-open-harness-run'] || '');
       if (!internalAllowed(internalAgent, TASK_TOOL, runId)) return json(res, 403, { error: 'Task board access is disabled for this run.' });
@@ -902,6 +927,8 @@ server.on("error", error => {
   else console.error(`The coordinator could not listen on ${bind}:${port}: ${error.message}`);
   process.exit(1);
 });
+messaging.bootSweep();
+void pump();
 server.listen(port, bind, () => console.log(`Open Harness coordinator listening on http://${bind}:${port}`));
 // Without these the coordinator exits silently when anything throws outside a request —
 // a timer callback, a detached promise — leaving no record of why the service stopped.

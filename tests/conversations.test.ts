@@ -135,7 +135,7 @@ test('conversation HTTP contract and explicit per-member session resume in mock 
     assert.equal(((await request('/v1/conversations?kind=group')).conversations as unknown[]).length, 1);
     const message = await request(`/v1/conversations/${id}/messages`, 'POST', { body: '@atlas hello', idempotencyKey: 'one' }, 201);
     assert.equal((await request(`/v1/conversations/${id}/messages`, 'POST', { body: 'retry', idempotencyKey: 'one' }, 201)).id, message.id);
-    assert.deepEqual((await request('/v1/runs')).runs, []);
+    assert.deepEqual([...new Set(((await request('/v1/runs')).runs as { agent_id: string; conversation_id: string }[]).map(run => `${run.agent_id}:${run.conversation_id}`))], [`atlas:${id}`]);
     assert.deepEqual((await request(`/v1/conversations/${id}/messages?after=${message.seq}`)).messages, []);
     assert.equal(((await request(`/v1/conversations/${id}`)).members as unknown[]).length, 3);
     await request(`/v1/conversations/${id}/members/scout`, 'DELETE');

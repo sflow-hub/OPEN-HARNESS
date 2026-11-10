@@ -8,7 +8,7 @@ export type MessageRow = { seq: number; id: string; conversation_id: string; sen
 
 export class Conversations {
   constructor(readonly db: DatabaseSync, readonly profiles: { get(id: string): { name: string } | null | undefined }, readonly teams?: { sharesActiveTeam(a: string, b: string): boolean }) {}
-  private transaction<T>(fn: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const result = fn(); this.db.exec('COMMIT'); return result; } catch (error) { this.db.exec('ROLLBACK'); throw error; } }
+  private transaction<T>(fn: () => T): T { this.db.exec('SAVEPOINT conversation_write'); try { const result = fn(); this.db.exec('RELEASE conversation_write'); return result; } catch (error) { this.db.exec('ROLLBACK TO conversation_write; RELEASE conversation_write'); throw error; } }
   private row(id: string) { const row = this.db.prepare('SELECT * FROM conversations WHERE id=?').get(id) as ConversationRow | undefined; if (!row) throw new ConversationError('Conversation not found.', 404); return row; }
   private members(id: string) { return this.db.prepare('SELECT * FROM conversation_members WHERE conversation_id=? AND removed_at IS NULL ORDER BY joined_at,rowid').all(id) as MemberRow[]; }
   private validateMember(member: MemberInput) {
@@ -91,6 +91,9 @@ export class Conversations {
       for (const member of members) if (member.role !== 'observer' && !(member.participant_kind === input.sender.kind && member.participant_id === input.sender.id)) this.db.prepare('INSERT INTO message_deliveries(message_id,recipient_kind,recipient_id,created_at,updated_at) VALUES(?,?,?,?,?)').run(id, member.participant_kind, member.participant_id, stamp, stamp);
       this.touch(input.conversationId); return this.db.prepare('SELECT * FROM messages WHERE id=?').get(id) as MessageRow;
     });
+  }
+  postSystem(conversation: string, body: string, key: string) {
+    this.db.prepare("INSERT OR IGNORE INTO messages(id,conversation_id,sender_kind,sender_id,sender_name,body,idempotency_key,created_at) VALUES(?,?,'system','system','System',?,?,?)").run(crypto.randomUUID(), conversation, body, key, new Date().toISOString());
   }
   listMessages(id: string, afterSeq = 0, limit = 100) {
     this.row(id); if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new ConversationError('Invalid message cursor or limit.');
