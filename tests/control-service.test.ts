@@ -467,7 +467,7 @@ test("routine POST and PUT share validation and persist cron schedules", async (
 });
 
 test('group messages schedule mentions or all speakers and halt/resume controls admission', async () => {
-  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: [{ id: 'msg-a', name: 'Msg A', role: 'Generalist' }, { id: 'msg-b', name: 'Msg B', role: 'Generalist' }] }) });
+  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: [{ id: 'msg-a', name: 'Msg A', role: 'Generalist', instructions: '', config: { model: 'mock' } }, { id: 'msg-b', name: 'Msg B', role: 'Generalist', instructions: '', config: { model: 'mock' } }] }) });
   const group = await request('/v1/conversations', { method: 'POST', body: JSON.stringify({ kind: 'group', members: [{ kind: 'agent', id: 'msg-a' }, { kind: 'agent', id: 'msg-b' }] }) });
   const post = (body: string) => request(`/v1/conversations/${group.id}/messages`, { method: 'POST', body: JSON.stringify({ body }) });
   const directed = await post('@msg-a please answer');
