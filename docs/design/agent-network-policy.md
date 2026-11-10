@@ -101,7 +101,7 @@ rebuild rather than silently applying to nothing.
 | --- | --- | --- |
 | `open` | `--add-host host.docker.internal:host-gateway` only (today's vector, `runtime/hermes.ts:325`) | Unrestricted (current behavior) |
 | `allowlist` | Attach to a per-agent **internal** user-defined bridge (`docker network create --internal`), plus an egress proxy container dual-homed on that network *and* an egress-capable network; container env `HTTP(S)_PROXY`/`NO_PROXY`; DNS pinned to the proxy | Only the effective model endpoint + `allow` hosts reachable, via the proxy; everything else refused |
-| `none` | On Linux Engine: `--network none` + the coordinator unix socket only. On Docker Desktop (socket refused, `runtime/service.ts:280`–`285`): per-agent `--internal` network + a dual-homed relay pinned to exactly the coordinator `host:port` (and the model endpoint, see below) | No egress except the coordinator and the model endpoint |
+| `none` | On Linux Engine, two sound shapes (a bare `--network none` reaches neither the model endpoint, §3, nor any relay): **(a)** per-agent `--internal` network + a dual-homed relay pinned to exactly the model endpoint, keeping the coordinator unix socket for coordination; or **(b)** bare `--network none` + socket **only** when inference is relayed through the coordinator over that socket, so the container needs no model route. On Docker Desktop (socket refused, `runtime/service.ts:280`–`285`): per-agent `--internal` network + a dual-homed relay pinned to exactly the coordinator `host:port` and the model endpoint | No egress except the coordinator and the model endpoint — reached via the relay, or, under (b), the model via the coordinator relay |
 
 **The model endpoint is not optional, in any mode.** Hermes performs inference *from inside the
 container*: the provider key is written into the profile `.env`
@@ -160,11 +160,18 @@ The enforcement differs by where the agent runs, and the earlier draft conflated
 - **Local container, Linux Engine (the supported install):** the coordinator socket is mounted
   into the container read-only (`-v .../managed:/run/open-harness:ro`, `runtime/hermes.ts:328`)
   and is tried first (`runtime/hermes/coordination.mjs:52`). A unix socket has no IP surface, so
-  the strongest shape is `--network none` **plus** that socket: the agent literally has no route
-  off the box, yet still reaches the coordinator through the filesystem object. No proxy is
-  involved, and no `host.docker.internal` URL is needed or works (the 127.0.0.1 listener is not on
-  the bridge gateway, §1.4). This is the simplest option Docker actually enforces, and the one
-  `none` should use wherever the socket is reachable.
+  `--network none` **plus** that socket gives the agent no route off the box while it still reaches
+  the coordinator through the filesystem object — no proxy, and no `host.docker.internal` URL (the
+  127.0.0.1 listener is not on the bridge gateway, §1.4). **But that shape reaches *only* the
+  coordinator, not the model endpoint**, which §2.1 requires in every mode because Hermes infers
+  from inside the container. So bare `--network none` + socket is sound **only** when inference is
+  relayed through the coordinator over that same socket (the coordinator-relay option, §9), leaving
+  the container with no direct model route. When inference is *not* relayed, Linux Engine `none`
+  must instead use a per-agent `--internal` network plus a dual-homed relay pinned to exactly the
+  model endpoint, still keeping the socket for coordination (§2.1 row `none`, shape (a)). Reserve
+  bare `--network none` for the relayed-inference case; otherwise the agent fails at its first model
+  call, reintroducing finding B1 on the supported install — which the §7 test plan's real-inference
+  assertion is there to catch.
 - **Local container, Docker Desktop:** the bind-mounted socket is visible but refuses every
   connection (`runtime/service.ts:280`–`285`, `runtime/hermes/coordination.mjs:48`–`60`), so
   `--network none` would strand the agent. Here `none` instead uses a per-agent `--internal`
@@ -245,7 +252,7 @@ The in-container behavioral probe emits:
 ### 4.1 What each check actually tests (and the evidence it maps to)
 
 - **Denied writes outside writable mounts.** The intended writable paths are **four** categories,
-  not three: `/workspace/private`, `/workspace/shared` (or per-team, §6), `/home/hermes/.hermes`
+  not three: `/workspace/private`, `/workspace/shared` (or per-team, §5), `/home/hermes/.hermes`
   (the profile mount, read-write), and any write-mode folder grants (`runtime/hermes.ts:319`–
   `323`, `:329`). **Caveat the first draft got wrong:** the launch vector passes no `--read-only`
   flag (`runtime/hermes.ts:324`–`331`), so the image's root filesystem — `/tmp`, `/home/hermes`,
@@ -437,14 +444,17 @@ without it the image rootfs is writable and the row is fail-by-design.
 
 Specific tests:
 - **Unit:** policy → `docker run`/network argument builder emits `--internal` network + dual-homed
-  proxy (incl. the model endpoint) for `allowlist`; `--network none` + socket on Linux Engine, or
-  the dual-homed relay on Docker Desktop, for `none`; today's vector for `open`. Signature changes
-  on policy change (`runtime/hermes.ts:303`). Per-team mount list excludes non-member teams
-  (`runtime/teams.ts`), includes member teams, honors `:ro`.
+  proxy (incl. the model endpoint) for `allowlist`; for `none` on Linux Engine, either `--internal`
+  + a model-endpoint relay with the socket, or bare `--network none` + socket **only** when
+  inference is relayed through the coordinator (§2.1 row `none`, §3); the dual-homed relay on Docker
+  Desktop; today's vector for `open`. Signature changes on policy change (`runtime/hermes.ts:303`).
+  Per-team mount list excludes non-member teams (`runtime/teams.ts`), includes member teams, honors
+  `:ro`.
 - **HTTP/integration (mock + real):** run the self-test probe and assert the JSON per cell above;
   assert a `none` agent can still call `/internal/*` (coordinator reachable) **and** complete one
-  real inference call (model endpoint reachable, §2.1) while a canary host and a rogue DNS
-  resolver time out/refuse; cross-check every cell against `docker inspect` (host-attested, §4).
+  real inference call — the model reached via the model-endpoint relay, or, under the relayed
+  shape, via the coordinator (model endpoint reachable, §2.1, §3) — while a canary host and a rogue
+  DNS resolver time out/refuse; cross-check every cell against `docker inspect` (host-attested, §4).
 - **Chaos/restart:** managed network + proxy containers are reaped by the `MANAGED_LABEL` sweep
   on shutdown (`runtime/hermes.ts:285`–`288`); assert no orphaned networks/proxies after
   stop-all, consistent with the process-tree-termination guarantee (`SECURITY.md:11`, in-scope
@@ -458,8 +468,9 @@ Specific tests:
 1. **Policy field + `open` default + self-test probe (read-only).** Add `network` to
    `ComputerConfig`, ship `sandbox_selftest.py`, surface results in the UI. No egress change yet,
    so nothing breaks; the probe immediately documents the current open-egress reality (§1.1).
-2. **`allowlist`/`none` for local containers.** `--network none` + socket (Linux Engine) or
-   per-agent `--internal` network + dual-homed relay (Docker Desktop); the effective model
+2. **`allowlist`/`none` for local containers.** Per-agent `--internal` network + dual-homed relay
+   pinned to the model endpoint (Linux Engine and Docker Desktop); bare `--network none` + socket
+   only when inference is relayed through the coordinator (§2.1, §3); the effective model
    endpoint is always in the egress set (§2.1); add `--read-only` + `--tmpfs /tmp` so the
    writes-denied check genuinely passes (§4.1); rebuild only when the agent is idle (§9).
 3. **Per-team shared folders.** New mount layout + non-destructive migration (§5.1).

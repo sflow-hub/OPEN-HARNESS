@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS messages (
   in_reply_to   TEXT,                            -- messages.id this answers (delegation result links here)
   origin_run_id TEXT,                            -- run that produced this message, if any
   round_id      TEXT,                            -- turn-round grouping, if any
+  source        TEXT NOT NULL DEFAULT 'native',  -- provenance: 'native' | 'browser-v2' | 'backfill' (rollback marker, §10)
   created_at    TEXT NOT NULL,
   FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
@@ -159,12 +160,19 @@ pending ──(agent turn reads it)──> delivered ──(turn committed)─�
   from a reconnecting runner is a no-op.
 - `delivered` → `pending` on turn failure/cancel: the message was never acted on, so it must be
   redeliverable. This is the restart-safety path, and the reset condition has to be chosen
-  carefully: on boot the coordinator rewrites `running`/`waiting_*` runs to `interrupted`
-  (`runtime/db.ts:112`–`113`), and `interrupted` is itself *terminal*. So "reset rows whose run
-  is non-terminal" would never fire after a restart. The correct companion step resets any
-  `delivered` row whose `consumed_run_id` run is **anything other than `completed`** — i.e. the
-  turn did not commit a result — back to `pending`. A `consumed` row (terminal success, output
-  committed) is never touched.
+  carefully. On boot the coordinator rewrites `running`/`waiting_*` runs to `interrupted` (`Store`
+  constructor's raw `UPDATE`, `runtime/db.ts:116`), and `interrupted` is itself *terminal*, so
+  "reset rows whose run is non-terminal" would never fire after a restart. But the mirror-image
+  phrasing "reset rows whose run is anything other than `completed`" is also wrong: applied at
+  runtime it would reset a row whose `consumed_run_id` is still `running` (not yet terminal, not
+  `completed`) and double-deliver the message to a turn still in progress. The reset must name the
+  terminal *failure* states explicitly: reset any `delivered` row whose `consumed_run_id` run is in
+  `state IN ('failed','cancelled','interrupted')` back to `pending`. A `running`/`waiting_*` row is
+  left alone (the turn may still commit), and a `consumed` row (terminal success, output committed)
+  is never touched. To close the window between a child reaching `completed` and its reply being
+  posted, commit the reply **in the same transaction** as the `completed` write (`setRun`,
+  `runtime/db.ts:151`); failing that, the boot sweep (§6.1) re-scans `completed` child runs that
+  have no reply and posts one, so a crash between the two steps can never strand the parent.
 - `dropped` is terminal and set only by membership removal or conversation delete.
 
 **Idempotency & replay safety.** (1) Posting is idempotent on
@@ -240,17 +248,72 @@ POST /internal/handoff
   milliseconds instead of minutes.
 - On **every** terminal transition of the child — not just the happy path — a `messages` row is
   posted (sender = child agent, `in_reply_to` = the delegation message, `origin_run_id` = child
-  run) into the delegation conversation and deliveries fan out. Hooking the single local success
-  handler (`runtime/service.ts:300`–`301`) is **not** enough: it misses the remote-completion
-  path (`runtime/service.ts:270`–`271`) and the failure/cancel/interrupt path
-  (`runtime/service.ts:302`–`307`), so a failed or cancelled child would leave the parent waiting
-  forever at the conversation level. Instead we subscribe the posting logic to
-  `store.runListener`, which already fires on every state write that includes a `state` patch
-  (`runtime/db.ts:147`). A child that completes, fails, is cancelled, or is `interrupted` by a
-  restart (`runtime/db.ts:112`) all produce a reply message — a failure just carries the error
-  text instead of a result — so the parent always hears back. The message that *consumes* a
-  delegation reply is the parent agent's next scheduled turn in that conversation (§9.3); outside
-  a group chat, posting the reply into the parent's direct conversation is what schedules it.
+  run) into the delegation conversation (§6.1.1) and deliveries fan out. Hooking the single local
+  success handler (`store.setRun(... 'completed')`, `runtime/service.ts:302`) is **not** enough: it
+  misses the remote-completion path (`runtime/service.ts:272`) and the failure/cancel/interrupt
+  path (`execute`'s `catch`, `runtime/service.ts:307`), so a failed or cancelled child would leave
+  the parent waiting forever at the conversation level. Three concrete requirements make the
+  listener-based posting sound:
+
+  1. **Chain the listener, never replace it.** `store.runListener` is already taken: `service.ts:52`
+     sets it to `run => tasks.syncRun(run)` for task-board sync. A plain "subscribe" would clobber
+     that and break the board. The reply poster is *added* to a small fan-out — each state write
+     calls both `tasks.syncRun` and the poster — and `setRun` fires that fan-out on every write that
+     carries a `state` patch (`setRun`, `runtime/db.ts:151`).
+  2. **Boot sweep for the restart case.** Two terminal transitions bypass `setRun` entirely and so
+     never reach the listener: the constructor's interrupt of `running`/`waiting_*` runs is a raw
+     `UPDATE` (`Store` constructor, `runtime/db.ts:116`), and queued task runs are interrupted by
+     another raw `UPDATE` (`TaskStore` constructor, `runtime/tasks.ts:102`), both running before or
+     outside `setRun`. This is exactly case B7. So on boot the coordinator runs a one-time sweep:
+     for every terminal child run (`parent_run_id IS NOT NULL`) with no delegation reply yet, post
+     the reply. Without the sweep a child interrupted at boot never reaches its parent.
+  3. **Deterministic idempotency key.** One child can fire several terminal transitions —
+     `stopRunTree` sets `cancelled` (`runtime/service.ts:346`) and may then set `interrupted`
+     (`runtime/service.ts:353`), and `execute`'s `catch` can set the state again
+     (`runtime/service.ts:307`) — so the listener may be invoked more than once for one child. The
+     reply is posted with a fixed `idempotency_key = delegation-result:<childRunId>` in the
+     coordinator's own sender scope (§4.1), so the partial unique index collapses every one of
+     those transitions — and a live post racing the boot sweep — to exactly one `messages` row.
+     This is what makes the chaos test's "one `messages` row" hold.
+
+  A child that completes, fails, is cancelled, or is `interrupted` by a restart (`runtime/db.ts:116`)
+  therefore produces exactly one reply — a failure just carries the error text instead of a result —
+  so the parent always hears back. The message that *consumes* a delegation reply is the parent
+  agent's next scheduled turn in that conversation (§9.3), which carries the lineage forward
+  (§6.1.2) so the cycle guard still holds across that re-entry.
+
+#### 6.1.1 The delegation conversation
+
+A `direct` conversation has exactly one agent member plus the user (§3), so the child agent is
+**not** a member of the parent's direct conversation and cannot post its reply there. Each
+delegation therefore uses a dedicated **delegation conversation**: a `kind='group'` conversation
+created `INSERT OR IGNORE` the first time a parent delegates to a given child, whose members are the
+parent agent (`member`), the child agent (`member`), and the user (`owner`). Its id is
+derived deterministically from the delegation (e.g. `delegation:<parentRunId>:<childAgentId>`) so a
+retry, a duplicate terminal transition, or the boot sweep all land in the same row. The child posts
+its reply here; fan-out creates a `pending` delivery for the parent agent, which schedules the
+parent's next turn (§9.3).
+
+This also removes the dependency on the parent having a usable conversation at all. A **task run or
+a scheduled run** mints a fresh `conversation_id` that the §9.1 backfill may not have reached, and
+neither is a user-facing chat — so "post into the parent's direct conversation" has no valid target
+for them. The delegation conversation is keyed off the parent *run*, not its `conversation_id`, so
+the reply always has a home and the consuming turn reads it from the inbox exactly as in a group
+chat.
+
+#### 6.1.2 Lineage carried across reply re-entry
+
+A reply delivery wakes the parent as a **new depth-0 run with no `parent_run_id`**, so the ancestry
+walk in `createRun` (`runtime/service.ts:383`–`386`) cannot see the earlier hop: A delegates to B,
+B's reply wakes A at depth 0, and A can delegate to B again — unboundedly. "Depth ≤ 2, finite DAG"
+then holds only *per chain*, not across reply re-entry (the only remaining bounds would be the
+per-conversation message and rate caps, §8). To close this, a delegation delivery carries a
+`delegation_root` (the originating top-level run id) and the accumulated hop depth; the turn that
+*consumes* the delivery inherits both, and `createRun` counts a delegation issued from such a turn
+against the carried depth and re-runs the ancestry check against the carried lineage rather than the
+empty `parent_run_id` chain. Invariant 3 (§7) is then stated to hold **across reply re-entry**: the
+total delegation hops rooted at one top-level run are finite, not merely each isolated chain. The
+per-conversation caps (§8) remain a backstop.
 
 ### 6.2 No synchronous convenience path
 
@@ -305,11 +368,15 @@ child can start and every parent waits forever (bounded only by the 30-min timeo
    replacement (§6.2 explains why one cannot be made sound). Agent-side reply reads
    (`check_delegation`/`read_inbox`, §6.3) are single non-blocking calls, never in-turn awaits,
    so a turn never parks itself on another run while holding its slot.
-3. **Fan-out is bounded.** Depth ≤ 2 (`runtime/service.ts:381`) and cycles are rejected
-   (`runtime/service.ts:382`–`386`); a turn may enqueue at most `max_delegations_per_turn`
-   (default 3) children. The child-run graph is a finite DAG, so the dependency graph among
-   *active* runs has no cycle — and with invariant 1 there are no wait edges among active runs
-   at all.
+3. **Fan-out is bounded.** Depth ≤ 2 (`createRun`, `runtime/service.ts:382`) and cycles are
+   rejected (ancestry walk, `runtime/service.ts:383`–`386`); a turn may enqueue at most
+   `max_delegations_per_turn` (default 3) children. The child-run graph is a finite DAG, so the
+   dependency graph among *active* runs has no cycle — and with invariant 1 there are no wait edges
+   among active runs at all. Because a reply wakes the parent as a *fresh* depth-0 run (§6.1.2), the
+   depth-2/DAG bound holds **across reply re-entry only** when the delivery's `delegation_root` and
+   hop depth are carried forward and re-checked in `createRun`; without that carry-forward the bound
+   would hold per chain but not across replies. With it, the delegation hops rooted at any one
+   top-level run are finite.
 4. **Admission is oldest-first among *eligible* runs, and starvation-bounded.** `queued()`
    orders by `created_at` (`runtime/db.ts:131`), but the pump does not admit strictly in that
    order: it `.find`s the oldest run that also passes every eligibility gate
@@ -395,6 +462,7 @@ ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'direct';       
 ALTER TABLE conversations ADD COLUMN turn_policy TEXT NOT NULL DEFAULT 'manual';
 ALTER TABLE conversations ADD COLUMN auto_turns_enabled INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE conversations ADD COLUMN limits_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE conversations ADD COLUMN source TEXT NOT NULL DEFAULT 'native';   -- 'native' | 'browser-v2' | 'backfill' (rollback marker, §10)
 
 CREATE TABLE IF NOT EXISTS conversation_members (
   conversation_id TEXT NOT NULL,
@@ -494,7 +562,10 @@ replace, that path:
    `agent_id` plus the `user`, and one `messages` row per legacy message. Live chats are handled
    by the §9.1 backfill. Migration is the one path where the coordinator does *not* mint a fresh
    `id`: legacy messages have no stable id, so it synthesizes a deterministic
-   `id = sha1(conversation_id || index || role || body)` so re-projection lands on the same row.
+   `id = sha1(JSON.stringify([conversation_id, index, role, body]))`. The input is length-delimited
+   (JSON-encoded), **not** raw `||` concatenation: direct concatenation is ambiguous — `("ab","c")`
+   and `("a","bc")` would hash identically — whereas the JSON encoding keeps every field boundary
+   distinct, so re-projection lands on the same row and distinct messages never collide.
 2. **Dedupe.** Message insert is `INSERT OR IGNORE`, which collapses on the globally `UNIQUE`
    `messages.id` (same guard style as the existing conversation import `INSERT OR IGNORE` at
    `runtime/service.ts:653`). Because the synthesized id folds in `conversation_id`, it is unique
@@ -503,10 +574,15 @@ replace, that path:
    `SCHEMA_VERSION` is untouched (§9.1), rolling back the *projection* does not require an older
    binary or a lower `user_version`. The raw import stays untouched in `conversations.legacy_json`
    and `browser-v1-backup.json` (`runtime/service.ts:655`). "Undo" is a forward operation the
-   current build runs: delete the projected `messages` / `message_deliveries` /
-   `conversation_members` / backfilled `conversations` rows, then delete the `browser-v2`
-   row from the `migrations` table so the projection can run again later. The legacy JSON and the
-   browser copy remain the source of truth; no destructive step runs against `legacy_json`.
+   current build runs, but it must delete **only** the rows this projection wrote. `messages` and
+   `conversations` therefore carry a `source` provenance column (`'browser-v2'` for projected
+   messages, `'backfill'` for backfilled conversation rows, `'native'` for everything created live;
+   §4.1, §9.1): the undo deletes `messages`/`conversations` where `source IN ('browser-v2',
+   'backfill')` plus their dependent `message_deliveries` / `conversation_members`, then deletes the
+   `browser-v2` row from the `migrations` table so the projection can run again later. Without the
+   marker a blind "delete the projected rows" could not tell a projected row apart from a *native*
+   message or conversation created after cutover, and would destroy live data. The legacy JSON and
+   the browser copy remain the source of truth; no destructive step runs against `legacy_json`.
 4. **Keying and ordering.** `browser-v2` is **not** a `MIGRATIONS` array entry — those are keyed
    by `user_version` and applied by version comparison (`runtime/db.ts:38`, `:109`), so a
    string key like `browser-v2` would mean nothing there and clearing it would undo nothing.
@@ -580,7 +656,11 @@ coordinator re-checks `internalAllowed` server-side regardless.
   row.
 - Delegation result delivery fires on **every** terminal child transition (complete, fail,
   cancel, interrupt), not only success — assert a failed child still posts a reply to the parent
-  (§6.1); `store.runListener` is the single hook (`runtime/db.ts:147`).
+  (§6.1). The chained `store.runListener` fan-out (`setRun`, `runtime/db.ts:151`) is the live hook;
+  separately assert the boot sweep posts a reply for a child interrupted by the raw constructor
+  `UPDATE`s (`runtime/db.ts:116`, `runtime/tasks.ts:102`) that bypass `setRun`, and that the
+  `delegation-result:<childRunId>` idempotency key collapses repeated transitions plus a live/sweep
+  race to one `messages` row (§6.1).
 - Turn policy: round-robin ring order, `observer` skipped, busy agent retried; @mention
   schedules only addressed members; moderator cannot pick itself twice; every stop condition.
 - Admission: assert the invariants of §7 — delegating does not increment `activeCount`
@@ -598,8 +678,8 @@ group, post as user, see two agents reply in round-robin; kill switch halts auto
 the page and the thread is present (server-side, not `localStorage`).
 
 **Chaos / restart:** kill the coordinator mid-round. On boot, in-flight turn runs become
-`interrupted` (`runtime/db.ts:112`) — which is *terminal*, so the reset must key on "run is not
-`completed`", not "run is non-terminal" (§4.2); assert their `delivered` deliveries reset to
+`interrupted` (`Store` constructor, `runtime/db.ts:116`) — which is *terminal*, so the reset must key on
+`state IN ('failed','cancelled','interrupted')`, not "run is non-terminal" (§4.2); assert their `delivered` deliveries reset to
 `pending` and the round resumes without duplicate messages, and a regression test pins that an
 `interrupted` run's deliveries are in fact reset (the naive "non-terminal" condition would fail
 this). Simulate a reconnecting runner double-posting a delegation result → one `messages` row,
@@ -611,7 +691,7 @@ one `consumed` transition.
    `message_deliveries`, `conversation_members`, column adds; `browser-v2` projection; read path
    only. No behavior change for existing direct chats.
 2. **Non-blocking delegation.** Swap `/internal/handoff` to return the child id and deliver
-   results to the inbox; keep `awaitInline` capped. This alone removes the 30-min slot-pin.
+   results to the inbox. This alone removes the 30-min slot-pin.
 3. **Group conversations + manual turns.** User-created groups, `post_message`/`read_inbox`
    tools, manual turn policy (user picks who replies).
 4. **Automated turn policies.** Round-robin, then moderated loop, with all §8 guards and the
