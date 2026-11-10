@@ -8,6 +8,13 @@ export type AuditEvent = {
   actorId: string | null; action: string; targetKind: string | null; targetId: string | null; detail: unknown;
 };
 
+export type ApprovalItem = {
+  id: string; runId: string; agentId: string; agentName: string; conversationId: string;
+  runState: PersistentRun["state"]; runCreatedAt: string; state: "pending" | "resolved" | "expired";
+  decision: string | null; createdAt: string; resolvedAt: string | null; ageMs: number;
+  summary: { toolName: string | null; description: string | null };
+};
+
 export type RuntimeStatus = {
   token: string;
   mode: "live" | "test";
@@ -60,6 +67,10 @@ export class ControlClient {
   async listAuditEvents(filters: { after?: number; limit?: number; action?: string; targetKind?: string; targetId?: string } = {}) {
     const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
     return (await this.request<{ events: AuditEvent[] }>(`/v1/audit?${query}`)).events;
+  }
+  listApprovals(filters: { state?: "pending" | "resolved" | "all"; agentId?: string; limit?: number } = {}) {
+    const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+    return this.request<{ approvals: ApprovalItem[]; pendingCount: number }>(`/v1/approvals?${query}`);
   }
   async bootstrap() {
     const response = await fetch(`${base()}/v1/bootstrap`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
