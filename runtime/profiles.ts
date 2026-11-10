@@ -1,9 +1,10 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { TeamStore } from './teams';
 import { DEFAULT_BOARD, DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, normalizeToolIds, runToolGrants, TASK_TOOL, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
 import type { Agent } from '../lib/types';
 
 export class ProfileError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
-export function validId(id: string) { if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new ProfileError('Invalid agent ID.'); return id; }
+export function validId(id: string) { if (typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new ProfileError('Invalid agent ID.'); return id; }
 function short(value: unknown, name: string, max: number, required = false) {
   if (typeof value !== 'string' || value.length > max || (required && !value.trim())) throw new ProfileError(`${name} ${required ? 'is required and ' : ''}must be at most ${max} characters.`);
   return value;
@@ -46,10 +47,41 @@ export function validateProfile(value: AgentProfile): AgentProfile {
 export class Profiles {
   constructor(readonly db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS agent_profiles(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS agent_tombstones(agent_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS profile_revisions(agent_id TEXT NOT NULL, revision INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY(agent_id,revision));
       CREATE TABLE IF NOT EXISTS workspace_settings(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS run_profiles(run_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, revision INTEGER NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tool_catalogs(agent_id TEXT PRIMARY KEY, json TEXT NOT NULL);`);
+  }
+  isDeleted(id: string): boolean { return Boolean(this.db.prepare('SELECT 1 FROM agent_tombstones WHERE agent_id=?').get(id)); }
+  create(input: { name: string; role?: string; description?: string; prompt?: string; id?: string }) {
+    if (!input || typeof input !== 'object') throw new ProfileError('Enter an agent name.');
+    const name = short(input.name, 'Name', 30, true).trim();
+    let id = input.id;
+    if (id === undefined) {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'agent';
+      do { id = `${slug}-${crypto.randomUUID().slice(0, 8)}`; } while (this.get(id) || this.isDeleted(id));
+    }
+    validId(id);
+    if (this.get(id) || this.isDeleted(id)) throw new ProfileError('This agent ID already exists or was previously deleted.', 409);
+    return this.save(draftProfile({ id, name, role: input.role === undefined ? 'Generalist' : input.role, description: input.description === undefined ? '' : input.description, instructions: input.prompt === undefined ? '' : input.prompt, tone: 0, memory: [] }));
+  }
+  delete(id: string) {
+    validId(id);
+    const teams = new TeamStore(this.db);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (!this.get(id)) throw new ProfileError('Agent profile not found.', 404);
+      if (this.list().length === 1) throw new ProfileError('Keep at least one agent in the workspace.', 409);
+      if (this.db.prepare("SELECT 1 FROM runs WHERE agent_id=? AND (state IN ('queued','running') OR state GLOB 'waiting_*') LIMIT 1").get(id)) throw new ProfileError('Stop this agent’s active runs before deleting it.', 409);
+      teams.removeAgent(id);
+      const now = new Date().toISOString();
+      this.db.prepare('INSERT INTO agent_tombstones VALUES(?,?)').run(id, now);
+      this.db.prepare('DELETE FROM agent_profiles WHERE id=?').run(id);
+      this.db.prepare('DELETE FROM agents WHERE id=?').run(id);
+      this.db.prepare('UPDATE schedules SET enabled=0,updated_at=? WHERE agent_id=?').run(now, id);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   get(id: string): AgentProfile | null { const row = this.db.prepare('SELECT json FROM agent_profiles WHERE id=?').get(id) as { json: string } | undefined; if (!row) return null; const profile = JSON.parse(row.json); return { ...profile, allowedTools: [...new Set([...normalizeToolIds(profile.allowedTools || [], (profile.connectors || []).map((connector: { name: string }) => connector.name)), TASK_TOOL])], board: { ...DEFAULT_BOARD, ...(profile.board || {}) }, computer: profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } }; }
   list(): AgentProfile[] { return (this.db.prepare('SELECT json FROM agent_profiles ORDER BY rowid').all() as Array<{ json: string }>).map(row => this.get(JSON.parse(row.json).id)!).filter(Boolean); }
@@ -58,6 +90,7 @@ export class Profiles {
   effective(profile: AgentProfile): ModelChoice { const source = profile.model.inherit ? this.defaults().model : profile.model; return { provider: source.provider, model: source.model, credentialRef: source.credentialRef, baseUrl: source.baseUrl }; }
   save(input: AgentProfile) {
     const profile = validateProfile(input), current = this.get(profile.id);
+    if (this.isDeleted(profile.id)) throw new ProfileError('This agent was deleted.', 409);
     if (profile.revision !== (current?.revision || 0)) throw new ProfileError('This profile was changed elsewhere. Reload the saved profile before saving again; your draft is still here.', 409);
     profile.revision++;
     this.db.exec('BEGIN IMMEDIATE');
@@ -72,6 +105,7 @@ export class Profiles {
     return profile;
   }
   import(agent: Agent & { config?: Partial<ModelChoice> }) {
+    if (this.isDeleted(agent.id)) return null;
     const existing = this.get(agent.id); if (existing) return existing;
     const draft = draftProfile({ ...agent, description: agent.description || '', tone: agent.tone || 0 }); draft.revision = 0;
     if (agent.config?.model && agent.config.model !== 'hermes-agent') draft.model = { ...DEFAULT_MODEL, ...agent.config, credentialRef: agent.config.credentialRef || ({ xai: "XAI_API_KEY", openrouter: "OPENROUTER_API_KEY", anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY" } as Record<string,string>)[agent.config.provider || "xai"] || "", inherit: false };

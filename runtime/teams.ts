@@ -106,6 +106,14 @@ export class TeamStore {
     return this.get(teamId)!;
   }
 
+  // The profile deletion transaction also rolls back membership changes on failure.
+  removeAgent(agentId: string) {
+    for (const team of this.list().filter(team => team.memberAgentIds.includes(agentId))) {
+      this.replaceMembers(team.id, team.memberAgentIds.filter(id => id !== agentId), team.memberAgentIds);
+      this.db.prepare("UPDATE teams SET revision=revision+1,updated_at=? WHERE id=?").run(new Date().toISOString(), team.id);
+    }
+  }
+
   retire(teamId: string): Team {
     const current = this.get(teamId);
     if (!current) throw new TeamError("Team not found.", 404);

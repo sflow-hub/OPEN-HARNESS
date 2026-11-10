@@ -523,8 +523,21 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/v1/agents/sync") {
       const input = await body(req);
-      for (const agent of input.agents || []) { profiles.import(agent); ensureProfileDirs(agent.id); }
+      for (const agent of input.agents || []) { const profile = profiles.import(agent); if (profile) ensureProfileDirs(profile.id); }
       return json(res, 200, { synced: input.agents?.length || 0, agents: profiles.list().map(p => profileAgent(p)) });
+    }
+    if (req.method === "POST" && url.pathname === "/v1/agents") {
+      const profile = profiles.create(await body(req)); ensureProfileDirs(profile.id);
+      return json(res, 201, { agent: profileAgent(profile) });
+    }
+    const agentDeleteMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)$/);
+    if (req.method === "DELETE" && agentDeleteMatch) {
+      const id = validId(decodeURIComponent(agentDeleteMatch[1]));
+      if (machines.transferring(id)) throw new MachineError('Wait for this agent’s computer transfer to finish before deleting it.', 409);
+      const machineId = profiles.get(id)?.computer.machineId;
+      profiles.delete(id);
+      if (machineId) machines.reserve(machineId, id, false);
+      return json(res, 200, { ok: true, id });
     }
     if (req.method === "GET" && url.pathname === "/v1/agents") return json(res, 200, { agents: profiles.list().map(p => profileAgent(p)) });
     if (url.pathname === "/v1/teams") {
