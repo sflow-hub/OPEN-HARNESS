@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { normalizeRoutine, type RoutineInput, type RoutineRun } from "./routine";
 import type { Agent } from "./types";
+import type { MachineInfo } from "./agent-profile";
 import { normalizeConversation, normalizeMember, normalizeMessage, normalizeScheduledRuns, type GroupChatInput, type MemberRole } from "./conversation";
 
 export type AuditEvent = {
@@ -84,6 +85,9 @@ export class ControlClient {
   deleteAgent(id: string) { return this.request<{ ok: true; id: string }>(`/v1/agents/${encodeURIComponent(id)}`, { method: "DELETE" }); }
   createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string }) { return this.request<PersistentRun>("/v1/runs", { method: "POST", body: JSON.stringify(input) }); }
   events(runId: string, after: number) { return this.request<{ events: Array<{ seq: number; id: string; type: string; payload: any }>; run: PersistentRun }>(`/v1/runs/${runId}/events?after=${after}`); }
+  async listMachines() { return (await this.request<{ machines: MachineInfo[] }>("/v1/machines")).machines; }
+  machineAction(id: string, action: "test" | "reconnect") { return this.request<{ ok: boolean; message: string }>(`/v1/machines/${encodeURIComponent(id)}/${action}`, { method: "POST", body: "{}" }); }
+  revokeMachine(id: string) { return this.request<{ ok: true; cancelledCommands: number }>(`/v1/machines/${encodeURIComponent(id)}/revoke`, { method: "POST", body: "{}" }); }
   async listRoutines() { return (await this.request<{ routines: unknown[] }>("/v1/routines")).routines.map(normalizeRoutine); }
   createRoutine(input: RoutineInput) { return this.request<{ id: string; nextRunAt: string }>("/v1/routines", { method: "POST", body: JSON.stringify(input) }); }
   async updateRoutine(id: string, input: Partial<RoutineInput>) { const row = await this.request<{ nextRunAt?: string }>(`/v1/routines/${id}`, { method: "PUT", body: JSON.stringify(input) }); return { ...normalizeRoutine(row), ...(typeof row?.nextRunAt === "string" ? { nextRunAt: row.nextRunAt } : {}) }; }

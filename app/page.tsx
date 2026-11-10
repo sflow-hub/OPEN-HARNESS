@@ -17,6 +17,7 @@ import {
   KeyRound,
   Menu,
   MessageSquare,
+  MonitorCog,
   MessagesSquare,
   Plus,
   Search,
@@ -59,6 +60,7 @@ import TeamManager, { TeamBadge } from "../components/team-manager";
 import CredentialManager, { CredentialSwitcher } from "../components/credential-manager";
 import RoutineHistoryDrawer from "../components/routine-history-drawer";
 import GroupChatView from "../components/group-chat-view";
+import ComputersPage from "../components/computers-page";
 import type { Routine } from "../lib/routine";
 import { fitsProvider, type CredentialRecord } from "../lib/credentials";
 import { profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
@@ -74,7 +76,7 @@ const MIGRATED_KEY = "open-harness.migrated.v1";
 // Kept apart from SETTINGS_KEY on purpose: the onboarding save rewrites that whole
 // blob, which would silently drop anything else stored alongside it.
 const NOTIFY_KEY = "open-harness.notify.v1";
-type View = "home" | "teams" | "chat" | "files" | "routines" | "groups" | "tasks";
+type View = "home" | "teams" | "chat" | "files" | "routines" | "groups" | "tasks" | "computers";
 type ModelSettings = { provider: Provider; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
 const defaultSettings: ModelSettings = {
   provider: "xai",
@@ -1138,6 +1140,15 @@ export default function Home() {
         >
           <MessagesSquare size={16} /> Group chats
         </button>
+        {advancedFeatures && <button
+          className={`nav-item ${view === "computers" ? "active" : ""}`}
+          onClick={() => {
+            setView("computers");
+            setMobileOpen(false);
+          }}
+        >
+          <MonitorCog size={16} /> Computers
+        </button>}
         <div className="nav-label">YOUR AGENTS</div>
         <div className="sidebar-scroll">
           {workspace.agents
@@ -1224,6 +1235,8 @@ export default function Home() {
                     ? "Group chats"
                     : view === "tasks"
                       ? "Tasks"
+                    : view === "computers"
+                      ? "Computers"
                       : agent.name}
             </span>
           </span>
@@ -1953,6 +1966,7 @@ export default function Home() {
           </section>
         )}
         {view === "groups" && <GroupChatView client={controlRef.current} agents={workspace.agents} onNotice={setNotice} />}
+        {advancedFeatures && view === "computers" && <ComputersPage client={controlRef.current} agents={workspace.agents} onAddComputer={() => { setEditingAgentTab('computer'); setEditingAgent(agent); }} />}
       </main>
       {docEditor && (
         <div className="modal-backdrop" onClick={() => !docBusy && setDocEditor(null)}>
@@ -2249,7 +2263,7 @@ export default function Home() {
                   setAdvancedFeatures(enabled);
                   if (!enabled) {
                     setAgentTeamFilter("all");
-                    if (["teams", "tasks"].includes(view)) setView("home");
+                    if (["teams", "tasks", "computers"].includes(view)) setView("home");
                   }
                   localStorage.setItem(ADVANCED_KEY, enabled ? "on" : "off");
                 }}

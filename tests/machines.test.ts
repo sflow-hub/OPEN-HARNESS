@@ -65,6 +65,38 @@ test('a runner encryption key is stored at pairing, backfilled by heartbeat, and
   assert.equal(machines.encryptionKey(fresh.machineId), publicKey);
 });
 
+test('revoking a computer invalidates its runner and ends the work queued for it', () => {
+  const db = database(), machines = new Machines(db), status = (error: unknown) => error instanceof MachineError ? error.status : 0;
+  const paired = machines.pair({ code: machines.createPairing({ name: 'VPS', platform: 'linux' }, 'https://coordinator.example').code });
+  assert.equal(machines.authenticate(paired.machineId, paired.token), true);
+  assert.throws(() => machines.revoke('machine-missing'), (error: unknown) => status(error) === 404);
+  assert.throws(() => machines.revoke('local'), (error: unknown) => status(error) === 409);
+  const queued = machines.enqueue(paired.machineId, 'atlas', 'run', { runId: 'run-1' }), leased = machines.enqueue(paired.machineId, 'atlas', 'run', { runId: 'run-2' });
+  db.prepare("UPDATE runner_commands SET state='leased',leased_at=? WHERE id=?").run(new Date().toISOString(), leased.id);
+  const done = machines.enqueue(paired.machineId, 'atlas', 'probe-tools', {}); db.prepare("UPDATE runner_commands SET state='completed' WHERE id=?").run(done.id);
+  const elsewhere = machines.enqueue('local', 'nova', 'run', { runId: 'run-3' });
+
+  assert.deepEqual(machines.revoke(paired.machineId), { ok: true, cancelledCommands: 2 });
+  assert.equal(machines.authenticate(paired.machineId, paired.token), false, 'the runner credential stops working at once');
+  for (const id of [queued.id, leased.id]) { const command = machines.command(id); assert.equal(command?.state, 'failed'); assert.equal((command?.result as { error: string }).error, 'Computer was revoked.'); }
+  assert.equal(machines.command(done.id)?.state, 'completed', 'finished work keeps its outcome');
+  assert.equal(machines.command(elsewhere.id)?.state, 'queued', 'other computers are untouched');
+  assert.deepEqual(machines.poll(paired.machineId), []);
+  assert.ok(!machines.list().some(machine => machine.id === paired.machineId));
+  assert.throws(() => machines.revoke(paired.machineId), (error: unknown) => status(error) === 409);
+});
+
+test('a computer revoked after assignment checks cannot receive the command', () => {
+  const db = database(), machines = new Machines(db), revoked = (error: unknown) => error instanceof MachineError && error.status === 409 && error.message === 'Computer was revoked.';
+  const paired = machines.pair({ code: machines.createPairing({ name: 'VPS', platform: 'linux' }, 'https://coordinator.example').code });
+  assert.equal(machines.canAssign(paired.machineId, 'atlas').status, 'online');
+  machines.revoke(paired.machineId);
+  assert.throws(() => machines.enqueue(paired.machineId, 'atlas', 'probe-tools', {}), revoked);
+  assert.throws(() => machines.enqueue('machine-missing', 'atlas', 'run', { runId: 'run-1' }), revoked);
+  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM runner_commands').get() as { count: number }).count, 0);
+  assert.deepEqual(machines.poll(paired.machineId), []);
+});
+
 test('a finished command stops carrying the credentials it was dispatched with', () => {
   const db = database(), machines = new Machines(db);
   const paired = machines.pair({ code: machines.createPairing({ name: 'VPS', platform: 'linux' }, 'https://coordinator.example').code });

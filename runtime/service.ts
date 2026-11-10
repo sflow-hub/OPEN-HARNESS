@@ -19,7 +19,7 @@ import { coordinationSocket } from "./coordination-socket";
 import { TaskError, TaskStore } from "./tasks";
 import { Audit } from "./audit";
 import { TeamError, TeamStore } from "./teams";
-import { MachineError, Machines } from "./machines";
+import { COMPUTER_REVOKED, MachineError, Machines } from "./machines";
 import { encryptRunnerSecret } from "../lib/runner-crypto";
 import { exportAgentFiles, importAgentFiles, type TransferBundle } from './transfer-files';
 import { onboardingAction, onboardingStatus } from './readiness';
@@ -185,7 +185,9 @@ async function executeRemote(run: RunRow, snapshot: AgentProfile & { effectiveMo
       await new Promise(resolve => setTimeout(resolve, 250));
       const current = store.getRun(run.id); if (!current || current.state === 'cancelled') throw Object.assign(new Error('Run cancelled.'), { cancelled: true });
       const status = machines.command(command.id); if (!status) throw new Error('The runner command disappeared before completion.');
-      if (machines.get(machine.id).status !== 'online') {
+      const connection = machines.get(machine.id).status;
+      if (connection === 'revoked') throw new Error(COMPUTER_REVOKED);
+      if (connection !== 'online') {
         if (!offlineSince) offlineSince = Date.now();
         else if (Date.now() - offlineSince > REMOTE_OFFLINE_GRACE_MS) throw new Error(`${machine.name} stopped responding and did not return within ${Math.round(REMOTE_OFFLINE_GRACE_MS / 60_000)} minutes. Its work was not replayed because the outcome is uncertain.`);
       } else offlineSince = 0;
@@ -369,8 +371,9 @@ async function stopRunTree(runId: string) {
     const remote = remoteActive.get(id);
     stoppingAgents.add(run.agent_id);
     if (remote) {
-      remoteStopping.add(id); machines.enqueue(remote.machineId, run.agent_id, 'stop', { runId: id, commandId: remote.commandId });
-      event(id, 'stop.pending', { machineId: remote.machineId, message: 'Stop requested. Waiting for the runner to confirm.' });
+      // A revoked computer already failed this run's command; executeRemote ends the run.
+      try { machines.enqueue(remote.machineId, run.agent_id, 'stop', { runId: id, commandId: remote.commandId }); remoteStopping.add(id); event(id, 'stop.pending', { machineId: remote.machineId, message: 'Stop requested. Waiting for the runner to confirm.' }); }
+      catch (error) { if (!(error instanceof MachineError)) { stoppingAgents.delete(run.agent_id); throw error; } }
       stoppingAgents.delete(run.agent_id); stopped++; continue;
     }
     store.setRun(id, { state: "cancelled" });
@@ -555,7 +558,7 @@ const server = createServer(async (req, res) => {
         } catch (error) { return json(res, 200, { ...checked, ok: false, message: error instanceof Error ? error.message : 'Computer access check failed.' }); }
       }
       if (action === 'reconnect') { const result = machines.reconnect(machineId); audit.record({ actorKind: 'operator', action: 'machine.reconnect', targetKind: 'machine', targetId: machineId }); return json(res, 200, result); }
-      { const result = machines.revoke(machineId); audit.record({ actorKind: 'operator', action: 'machine.revoke', targetKind: 'machine', targetId: machineId }); return json(res, 200, result); }
+      { const result = machines.revoke(machineId); audit.record({ actorKind: 'operator', action: 'machine.revoke', targetKind: 'machine', targetId: machineId, detail: { cancelledCommands: result.cancelledCommands } }); return json(res, 200, result); }
     }
     const agentComputerMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(stop|transfer)$/);
     if (agentComputerMatch && req.method === 'POST') {
