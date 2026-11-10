@@ -758,9 +758,9 @@ const server = createServer(async (req, res) => {
       if (resource === 'members' && memberId && req.method === 'DELETE') return json(res, 200, conversations.removeMember(id, memberId));
       if (resource === 'messages' && !memberId && req.method === 'POST') {
         const input = await body(req);
-        const message = conversations.postMessage({ conversationId: id, sender: { kind: 'user', id: 'user' }, body: input.body, mentions: input.mentions, idempotencyKey: input.idempotencyKey, inReplyTo: input.inReplyTo });
+        const { message, created } = conversations.postMessageWithStatus({ conversationId: id, sender: { kind: 'user', id: 'user' }, body: input.body, mentions: input.mentions, idempotencyKey: input.idempotencyKey, inReplyTo: input.inReplyTo });
         const c = conversations.getConversation(id), mentions = JSON.parse(message.mentions_json) as string[];
-        const scheduledRuns = c.kind === 'group' ? messaging.schedule(id, mentions.length ? mentions : c.members.filter(m => m.participant_kind === 'agent').map(m => m.participant_id)) : [];
+        const scheduledRuns = created && c.kind === 'group' ? messaging.schedule(id, mentions.length ? mentions : c.members.filter(m => m.participant_kind === 'agent').map(m => m.participant_id)) : [];
         void pump(); return json(res, 201, { ...message, scheduledRuns });
       }
       if (resource === 'messages' && !memberId && req.method === 'GET') return json(res, 200, { messages: conversations.listMessages(id, Number(url.searchParams.get('after') ?? 0), Number(url.searchParams.get('limit') ?? 100)) });
