@@ -1,6 +1,7 @@
+import { isIP } from 'node:net';
 import type { DatabaseSync } from 'node:sqlite';
 import { TeamStore } from './teams';
-import { DEFAULT_BOARD, DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, normalizeToolIds, runToolGrants, TASK_TOOL, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
+import { DEFAULT_BOARD, DEFAULT_COMPUTER, DEFAULT_NETWORK, DEFAULT_MODEL, draftProfile, normalizeToolIds, runToolGrants, TASK_TOOL, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
 import type { Agent } from '../lib/types';
 
 export class ProfileError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
@@ -15,6 +16,21 @@ export function validateModel(value: ModelChoice): ModelChoice {
   if (model.credentialRef && !/^[A-Z][A-Z0-9_]+$/.test(model.credentialRef)) throw new ProfileError('Credential references must use uppercase letters, digits, and underscores.');
   if (model.baseUrl) { let url: URL; try { url = new URL(model.baseUrl); } catch { throw new ProfileError('Enter a valid endpoint URL.'); } if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new ProfileError('Endpoint must be HTTP(S), without embedded credentials, query, or fragment.'); }
   return model;
+}
+function networkHost(value: unknown): string {
+  const invalid = () => new ProfileError('Allowed hosts must be DNS names, IPv4 addresses, or bracketed IPv6 addresses, with an optional port from 1 to 65535.');
+  if (typeof value !== 'string') throw invalid();
+  const entry = value.trim().toLowerCase();
+  const match = /^(\[[^\]]+\]|[^:]+)(?::([0-9]+))?$/.exec(entry);
+  if (!match || /[\s/@?#\\]/.test(entry)) throw invalid();
+  const [, host, port] = match;
+  if (port !== undefined && (Number(port) < 1 || Number(port) > 65535)) throw invalid();
+  if (host.startsWith('[')) { if (!/^[0-9a-f:.]+$/.test(host.slice(1, -1)) || isIP(host.slice(1, -1)) !== 6) throw invalid(); }
+  else {
+    const dns = host.startsWith('*.') ? host.slice(2) : host;
+    if (dns.length > 253 || !dns.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) || (/^[0-9.]+$/.test(dns) && (host !== dns || isIP(dns) !== 4))) throw invalid();
+  }
+  return entry;
 }
 export function validateProfile(value: AgentProfile): AgentProfile {
   if (!value || !value.prompt || !value.model || !Array.isArray(value.allowedTools) || !Array.isArray(value.connectors)) throw new ProfileError('Invalid profile.');
@@ -33,13 +49,17 @@ export function validateProfile(value: AgentProfile): AgentProfile {
   if (!['private', 'folders', 'direct'].includes(computerInput.access) || !['none', 'virtual', 'existing'].includes(computerInput.desktop)) throw new ProfileError('Choose a valid computer access and desktop mode.');
   if (computerInput.desktop === 'existing' && computerInput.access !== 'direct') throw new ProfileError('Existing desktop control requires direct computer access.');
   if (computerInput.desktop === 'virtual' && computerInput.access === 'direct') throw new ProfileError('A private virtual desktop requires an isolated workspace.');
+  const networkInput = computerInput.network === undefined ? DEFAULT_NETWORK : computerInput.network;
+  if (!networkInput || !['none', 'allowlist', 'open'].includes(networkInput.mode)) throw new ProfileError('Choose a valid network access mode.');
+  if (!Array.isArray(networkInput.allow) || networkInput.allow.length > 50) throw new ProfileError('Allowed hosts must be an array of at most 50 hosts.');
+  const network = { mode: networkInput.mode, allow: [...new Set(networkInput.allow.map(networkHost))] };
   const resources = computerInput.resources || DEFAULT_COMPUTER.resources;
   if (![resources.cpu, resources.memoryMb, resources.concurrency].every(Number.isFinite) || resources.cpu < .25 || resources.cpu > 64 || resources.memoryMb < 256 || resources.memoryMb > 262144 || !Number.isInteger(resources.concurrency) || resources.concurrency < 1 || resources.concurrency > 32) throw new ProfileError('Computer resource limits are outside the supported range.');
   const folders = (computerInput.folders || []).slice(0, 50).map(folder => {
     if (!folder || typeof folder.path !== 'string' || !folder.path.trim() || folder.path.length > 4000 || !['read', 'write'].includes(folder.mode)) throw new ProfileError('Shared folders need a path and read or write access.');
     return { id: short(folder.id || crypto.randomUUID(), 'Folder ID', 100, true), path: folder.path.trim(), mode: folder.mode };
   });
-  const computer: ComputerConfig = { machineId: short(computerInput.machineId || 'local', 'Machine', 100, true), access: computerInput.access, desktop: computerInput.desktop, reserveMachine: Boolean(computerInput.reserveMachine), folders: computerInput.access === 'folders' ? folders : [], resources: { cpu: Math.round(resources.cpu * 100) / 100, memoryMb: Math.round(resources.memoryMb), concurrency: resources.concurrency } };
+  const computer: ComputerConfig = { machineId: short(computerInput.machineId || 'local', 'Machine', 100, true), access: computerInput.access, desktop: computerInput.desktop, reserveMachine: Boolean(computerInput.reserveMachine), network, folders: computerInput.access === 'folders' ? folders : [], resources: { cpu: Math.round(resources.cpu * 100) / 100, memoryMb: Math.round(resources.memoryMb), concurrency: resources.concurrency } };
   const board = { ...DEFAULT_BOARD, ...(value.board || {}) };
   if (![board.assignOthers, board.dispatch, board.manageProjects].every(permission => typeof permission === 'boolean')) throw new ProfileError('Invalid board permissions.');
   return { id: validId(value.id), revision: value.revision, name: short(value.name, 'Name', 30, true).trim(), role: short(value.role, 'Role', 60, true).trim(), description: short(value.description, 'Description', 180), tone: value.tone, prompt: { enabled: value.prompt.enabled, text: short(value.prompt.text, 'System prompt', 12000) }, model: { ...validateModel(value.model.inherit ? { ...DEFAULT_MODEL, ...value.model, model: value.model.model || DEFAULT_MODEL.model } : value.model), inherit: value.model.inherit }, allowedTools: [...new Set([...normalizeToolIds(value.allowedTools, connectors.map(connector => connector.name)), TASK_TOOL])].filter(id => computer.desktop !== 'none' || id !== 'computer_use'), board, connectors, computer };
@@ -83,7 +103,7 @@ export class Profiles {
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
-  get(id: string): AgentProfile | null { const row = this.db.prepare('SELECT json FROM agent_profiles WHERE id=?').get(id) as { json: string } | undefined; if (!row) return null; const profile = JSON.parse(row.json); return { ...profile, allowedTools: [...new Set([...normalizeToolIds(profile.allowedTools || [], (profile.connectors || []).map((connector: { name: string }) => connector.name)), TASK_TOOL])], board: { ...DEFAULT_BOARD, ...(profile.board || {}) }, computer: profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } }; }
+  get(id: string): AgentProfile | null { const row = this.db.prepare('SELECT json FROM agent_profiles WHERE id=?').get(id) as { json: string } | undefined; if (!row) return null; const profile = JSON.parse(row.json); return { ...profile, allowedTools: [...new Set([...normalizeToolIds(profile.allowedTools || [], (profile.connectors || []).map((connector: { name: string }) => connector.name)), TASK_TOOL])], board: { ...DEFAULT_BOARD, ...(profile.board || {}) }, computer: { ...DEFAULT_COMPUTER, ...profile.computer, network: { ...DEFAULT_NETWORK, ...profile.computer?.network, allow: [...(profile.computer?.network?.allow || [])] } } }; }
   list(): AgentProfile[] { return (this.db.prepare('SELECT json FROM agent_profiles ORDER BY rowid').all() as Array<{ json: string }>).map(row => this.get(JSON.parse(row.json).id)!).filter(Boolean); }
   defaults(): { model: ModelChoice; revision: number } { const row = this.db.prepare('SELECT revision,json FROM workspace_settings WHERE id=1').get() as { revision: number; json: string } | undefined; return row ? { model: JSON.parse(row.json), revision: row.revision } : { model: DEFAULT_MODEL, revision: 0 }; }
   setDefaults(model: ModelChoice, revision: number) { const current = this.defaults(); if (revision !== current.revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409); this.db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(revision + 1, JSON.stringify(validateModel(model))); return this.defaults(); }

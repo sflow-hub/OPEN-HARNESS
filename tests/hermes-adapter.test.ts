@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeModels } from '../runtime/profile-runtime';
-import { HermesGateway, lastWords } from '../runtime/hermes';
+import { createHash } from 'node:crypto';
+import { DEFAULT_COMPUTER, DEFAULT_NETWORK, type ComputerConfig } from '../lib/agent-profile';
+import { HermesGateway, lastWords, containerSignature } from '../runtime/hermes';
 
 class StreamingGateway extends HermesGateway {
   constructor(readonly submit: () => Promise<unknown> = async () => ({ status: 'streaming' })) { super('test'); }
@@ -50,4 +52,16 @@ test('a crashed gateway reports the agent\'s own last output, not just an exit c
   assert.ok(lastWords([`x${'y'.repeat(900)}`]).length < 460);
   // Newest last: the final line is the one that explains the crash.
   assert.ok(summary.endsWith("No module named 'hermes_cli'"));
+});
+
+test('default network keeps the legacy container signature while policy changes invalidate it', () => {
+  const selected = { ...DEFAULT_COMPUTER };
+  const legacy = createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, imageId: 'image', stateRoot: '' })).digest('hex').slice(0, 24);
+  assert.equal(containerSignature(selected, 'image'), legacy);
+  const missing = { ...selected } as Partial<ComputerConfig>; delete missing.network;
+  assert.equal(containerSignature(missing as ComputerConfig, 'image'), legacy);
+  assert.equal(containerSignature({ ...selected, network: { ...DEFAULT_NETWORK } }, 'image'), legacy);
+  for (const mode of ['none', 'allowlist'] as const) assert.notEqual(containerSignature({ ...selected, network: { mode, allow: [] } }, 'image'), legacy);
+  assert.notEqual(containerSignature({ ...selected, network: { mode: 'open', allow: ['example.com'] } }, 'image'), legacy);
+  assert.notEqual(containerSignature({ ...selected, network: { mode: 'allowlist', allow: ['example.com'] } }, 'image'), containerSignature({ ...selected, network: { mode: 'allowlist', allow: ['other.com'] } }, 'image'));
 });

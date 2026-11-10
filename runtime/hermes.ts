@@ -5,7 +5,7 @@ import { EventEmitter } from "node:events";
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import type { ComputerConfig } from '../lib/agent-profile';
+import { DEFAULT_NETWORK, type ComputerConfig } from '../lib/agent-profile';
 import { HERMES_IMAGE, RUNTIME_LABEL, classifyContract, imageContract } from './readiness';
 
 const FIRST_SETUP_MESSAGE = "Docker is ready, but the pinned Hermes runtime still needs its first-time setup.";
@@ -263,7 +263,8 @@ export function stateSharing(stateRoot: string): SharingProbe {
 // pointing at the previous path, Docker recreated that path empty, and every run died with
 // "Hermes gateway exited during startup" and a log line blaming the image.
 export function containerSignature(selected: ComputerConfig, imageId: string, stateRoot = '') {
-  return createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, imageId, stateRoot: stateRoot && resolve(stateRoot) })).digest('hex').slice(0, 24);
+  // Omit the default policy so upgrades preserve existing open containers.
+  return createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...((selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}), imageId, stateRoot: stateRoot && resolve(stateRoot) })).digest('hex').slice(0, 24);
 }
 // Short-lived so a rebuild from Settings takes effect without restarting the coordinator.
 let imageIdCache: { id: string; at: number } | null = null;
@@ -299,7 +300,7 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
   if (contract !== 'current') throw new Error(contract === 'missing' ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE);
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
-  const selected = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
+  const selected = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, network: DEFAULT_NETWORK, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
   const signature = containerSignature(selected, currentImageId(), stateRoot);
   const inspect = spawnSync("docker", ["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"open-harness.config\"}}", name], { encoding: "utf8", timeout: 10_000 });
   if (inspect.status === 0) {

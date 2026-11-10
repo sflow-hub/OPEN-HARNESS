@@ -4,6 +4,9 @@ import type { CredentialRecord } from './credentials';
 export type ModelChoice = { provider: string; model: string; credentialRef: string; baseUrl: string };
 export type ConnectorConfig = { id: string; name: string; command: string; args: string[]; secretRef: string; enabled: boolean };
 export type ComputerAccess = 'private' | 'folders' | 'direct';
+export type NetworkMode = 'none' | 'allowlist' | 'open';
+export type NetworkPolicy = { mode: NetworkMode; allow: string[] };
+export const DEFAULT_NETWORK: NetworkPolicy = { mode: 'open', allow: [] };
 export type DesktopMode = 'none' | 'virtual' | 'existing';
 export type FolderGrant = { id: string; path: string; mode: 'read' | 'write' };
 export type ComputerConfig = {
@@ -12,6 +15,7 @@ export type ComputerConfig = {
   folders: FolderGrant[];
   desktop: DesktopMode;
   reserveMachine: boolean;
+  network: NetworkPolicy;
   resources: { cpu: number; memoryMb: number; concurrency: number };
 };
 export type MachineInfo = {
@@ -38,7 +42,7 @@ export type ToolCatalog = { tools: ToolInfo[]; source: 'runtime' | 'cached' | 'u
 export type ModelCatalog = { models: Array<{ id: string; provider: string; label: string }>; error?: string };
 export type ProfileResponse = { profile: AgentProfile; effectiveModel: ModelChoice; activeRevision: number | null; pending: boolean; secretNames: string[]; credentials: CredentialRecord[]; machine?: MachineInfo; transfer?: { state: string; detail: string } | null };
 export const DEFAULT_MODEL: ModelChoice = { provider: 'xai', model: 'grok-4.6', credentialRef: 'XAI_API_KEY', baseUrl: '' };
-export const DEFAULT_COMPUTER: ComputerConfig = { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
+export const DEFAULT_COMPUTER: ComputerConfig = { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, network: { ...DEFAULT_NETWORK, allow: [] }, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
 export const TOOL_GROUPS = [
   ['terminal', 'Terminal & processes', 'Run commands and manage processes. Terminal can also read files and access the network.'],
   ['code', 'Code execution', 'Execute code and use tools from code.'],
@@ -110,9 +114,9 @@ export const DEFAULT_TOOLS = [
 ];
 
 export function draftProfile(agent: Agent): AgentProfile {
-  if (agent.profile) return { ...agent.profile, allowedTools: [...new Set([...normalizeToolIds(agent.profile.allowedTools || [], (agent.profile.connectors || []).map(connector => connector.name)), TASK_TOOL])], board: { ...DEFAULT_BOARD, ...(agent.profile.board || {}) }, computer: agent.profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
+  if (agent.profile) return { ...agent.profile, allowedTools: [...new Set([...normalizeToolIds(agent.profile.allowedTools || [], (agent.profile.connectors || []).map(connector => connector.name)), TASK_TOOL])], board: { ...DEFAULT_BOARD, ...(agent.profile.board || {}) }, computer: { ...DEFAULT_COMPUTER, ...agent.profile.computer, network: { ...DEFAULT_NETWORK, ...agent.profile.computer?.network, allow: [...(agent.profile.computer?.network?.allow || [])] } } };
   return { id: agent.id, revision: 0, name: agent.name, role: agent.role, description: agent.description, tone: agent.tone,
-    prompt: { enabled: true, text: agent.instructions }, model: { ...DEFAULT_MODEL, inherit: true }, allowedTools: [...DEFAULT_TOOLS], board: { ...DEFAULT_BOARD }, connectors: [], computer: { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
+    prompt: { enabled: true, text: agent.instructions }, model: { ...DEFAULT_MODEL, inherit: true }, allowedTools: [...DEFAULT_TOOLS], board: { ...DEFAULT_BOARD }, connectors: [], computer: { ...DEFAULT_COMPUTER, network: { ...DEFAULT_NETWORK, allow: [] }, resources: { ...DEFAULT_COMPUTER.resources } } };
 }
 export function profileAgent(profile: AgentProfile, memory: string[] = []): Agent {
   return { id: profile.id, name: profile.name, role: profile.role, description: profile.description, tone: profile.tone, instructions: profile.prompt.text, memory, profile };
