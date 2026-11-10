@@ -25,6 +25,7 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [discard, setDiscard] = useState(false);
+  const [allowDirectAccess, setAllowDirectAccess] = useState(false);
   const [workspaceModel, setWorkspaceModel] = useState<ModelChoice>(DEFAULT_MODEL);
   const [activeRevision, setActiveRevision] = useState<number | null>(null);
   const [secretNames, setSecretNames] = useState<string[]>([]);
@@ -72,6 +73,8 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
         if (!client.token) await client.bootstrap();
         const defaults = await client.request<{ model: ModelChoice }>('/v1/workspace/model');
         if (!cancelled) setWorkspaceModel(defaults.model);
+        const security = await client.request<{ allowDirectAccess: boolean }>('/v1/workspace/security');
+        if (!cancelled) setAllowDirectAccess(security.allowDirectAccess);
         if (draft.revision || agent.profile) {
           const value = await client.request<ProfileResponse>(`${base}/profile`);
           if (!cancelled && !dirtyRef.current) { setDraft(value.profile); setBaseline(serialize(value.profile)); setActiveRevision(value.activeRevision); setSecretNames(value.secretNames); setCredentials(value.credentials ?? []); setTransfer(value.transfer || null); }
@@ -219,7 +222,7 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
             ['private', 'Private workspace', 'Commands, files, and browser tools run in an isolated container.'],
             ['folders', 'Selected folders', 'Keep container isolation and add only the host folders you choose.'],
             ['direct', 'Direct computer access', 'Run under the runner’s operating-system account with its file permissions.'],
-          ].map(([value, title, description]) => <label className={`computer-choice ${draft.computer.access === value ? 'selected' : ''}`} key={value}><input type="radio" name="computer-access" value={value} checked={draft.computer.access === value} onChange={() => editComputer({ access: value as AgentProfile['computer']['access'], desktop: value === 'direct' ? draft.computer.desktop === 'virtual' ? 'none' : draft.computer.desktop : draft.computer.desktop === 'existing' ? 'none' : draft.computer.desktop })} /><strong>{title}</strong><small>{description}</small></label>)}</fieldset>
+          ].map(([value, title, description]) => <label className={`computer-choice ${draft.computer.access === value ? 'selected' : ''}`} key={value}><input type="radio" name="computer-access" disabled={value === 'direct' && !allowDirectAccess} value={value} checked={draft.computer.access === value} onChange={() => editComputer({ access: value as AgentProfile['computer']['access'], desktop: value === 'direct' ? draft.computer.desktop === 'virtual' ? 'none' : draft.computer.desktop : draft.computer.desktop === 'existing' ? 'none' : draft.computer.desktop })} /><strong>{title}</strong><small>{value === 'direct' && !allowDirectAccess ? 'Disabled. Enable Allow direct computer access in Workspace settings → Security.' : description}</small></label>)}</fieldset>
           {draft.computer.access === 'direct' && <p className="computer-warning">Direct access uses the runner’s OS account. Agents using that account share its permissions; separate agent profile folders do not isolate the rest of the account.</p>}
 
           <h4 className="computer-section-title">Desktop</h4>

@@ -23,3 +23,24 @@ test('no-desktop runs cannot dispatch the computer-use tool', () => {
   assert.deepEqual(runToolGrants(selected), ['terminal']);
   assert.deepEqual(runToolGrants({ ...selected, computer: { ...selected.computer, desktop: 'virtual' } }), ['computer_use', 'terminal']);
 });
+
+test('workspace security defaults off, preserves legacy model settings, and shares revisions', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { Profiles } = await import('../runtime/profiles');
+  const db = new DatabaseSync(':memory:');
+  try {
+    const profiles = new Profiles(db), model = profiles.defaults().model;
+    assert.deepEqual(profiles.security(), { allowDirectAccess: false, revision: 0 });
+    db.prepare('INSERT INTO workspace_settings VALUES(1,1,?)').run(JSON.stringify(model));
+    assert.equal(profiles.security().allowDirectAccess, false);
+    assert.throws(() => profiles.setSecurity(true, 1), /Confirm/);
+    profiles.setSecurity(true, 1, true);
+    assert.deepEqual(profiles.defaults().model, model);
+    profiles.setDefaults(model, 2);
+    assert.equal(profiles.security().allowDirectAccess, true);
+    assert.throws(() => profiles.setSecurity(false, 2), /changed elsewhere/);
+    profiles.setSecurity(false, 3);
+    assert.throws(() => profiles.checkDirect({ access: 'direct' } as never), /Direct computer access is disabled/);
+    assert.throws(() => profiles.save({ ...profile, computer: { ...profile.computer, access: 'direct' } }), (error: unknown) => error instanceof Error && 'status' in error && error.status === 403);
+  } finally { db.close(); }
+});

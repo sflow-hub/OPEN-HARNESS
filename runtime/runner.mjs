@@ -763,6 +763,10 @@ function output(command3, args2, timeout) {
     child.on("exit", (code) => settle(code));
   });
 }
+var allowDirect = process.env.OPEN_HARNESS_ALLOW_DIRECT === "1";
+function checkDirect(access) {
+  if (access === "direct" && !allowDirect) throw new Error("Direct computer access is disabled on this runner. Start it with OPEN_HARNESS_ALLOW_DIRECT=1 to opt in.");
+}
 async function probeCapabilities() {
   const [container, python] = await Promise.all([
     // An image built before a fix must not advertise container capability; the coordinator
@@ -770,7 +774,7 @@ async function probeCapabilities() {
     process.env.OPEN_HARNESS_MOCK === "1" ? true : output("docker", ["image", "inspect", "-f", `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE], 5e3).then((result) => classifyContract(result) === "current"),
     Promise.all(pythons.map(async (name) => await exitCode(name, ["-c", "import hermes_cli, open_harness_policy"], 8e3) === 0)).then((found) => found.some(Boolean))
   ]);
-  return { container, direct: python, desktop: Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === "darwin" || process.platform === "win32"), virtualDesktop: process.platform === "linux" && container, detail: python ? "Hermes host runtime is installed." : "Install the Hermes host runtime to enable direct access." };
+  return { container, direct: allowDirect && python, desktop: Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.platform === "darwin" || process.platform === "win32"), virtualDesktop: process.platform === "linux" && container, detail: !allowDirect ? "Direct access requires the local opt-in OPEN_HARNESS_ALLOW_DIRECT=1." : python ? "Hermes host runtime is installed." : "Install the Hermes host runtime to enable direct access." };
 }
 var known = null;
 var probing = null;
@@ -853,6 +857,7 @@ async function run(command3) {
   const payload = command3.payload;
   const profile = payload.snapshot, direct = profile.computer.access === "direct";
   try {
+    checkDirect(profile.computer.access);
     const agentRoot = join4(stateRoot, "agents", profile.id), shared = join4(stateRoot, "shared");
     mkdirSync5(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean);
@@ -891,6 +896,7 @@ async function control(command3) {
     }
     if (command3.kind === "import-agent") {
       const profile = command3.payload.profile;
+      if (profile) checkDirect(profile.computer.access);
       if (profile) validateComputerTarget(profile, await capabilities(), Array.isArray(command3.payload.requiredSecrets) ? command3.payload.requiredSecrets.map(String) : [], (name) => runnerSecrets.has(name) || Boolean(process.env[name]));
       const bundle = command3.payload.bundle;
       if (!bundle) throw new Error("This transfer arrived without its file bundle. Start the move again from Agent settings.");
@@ -906,6 +912,7 @@ async function control(command3) {
     if (command3.kind.startsWith("probe-")) {
       const profile = command3.payload.profile, direct = profile.computer.access === "direct", shared = join4(stateRoot, "shared"), agentRoot = join4(stateRoot, "agents", profile.id);
       mkdirSync5(shared, { recursive: true });
+      checkDirect(profile.computer.access);
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env }, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]])), dispatched = await openDispatchedSecrets(command3.payload.encryptedSecrets), secretSource = { environment: () => ({ ...localSecrets, ...dispatched }) };
       prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command3.payload.coordinationToken || "", `probe-${command3.id}`, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : {});
       if (command3.kind === "probe-runtime") {

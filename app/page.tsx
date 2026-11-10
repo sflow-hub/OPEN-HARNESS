@@ -145,6 +145,8 @@ export default function Home() {
   const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
   const [credentialsOpen, setCredentialsOpen] = useState(false);
   const [workspaceModelRevision, setWorkspaceModelRevision] = useState(0);
+  const [security, setSecurity] = useState({ allowDirectAccess: false, revision: 0 });
+  const [securityBusy, setSecurityBusy] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [advancedFeatures, setAdvancedFeatures] = useState(false);
   // Snapshot of the settings when the dialog opened, so dismissing it can tell an
@@ -306,6 +308,7 @@ export default function Home() {
           });
           setSettings({ provider: defaults.model.provider as Provider, model: defaults.model.model, baseUrl: defaults.model.baseUrl, credentialRef: defaults.model.credentialRef });
           setWorkspaceModelRevision(defaults.revision);
+          setSecurity(await client.request<{ allowDirectAccess: boolean; revision: number }>("/v1/workspace/security"));
           if (localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
         }
         try { const saved = await client.request<{ credentials: CredentialRecord[] }>("/v1/credentials"); if (!cancelled) setCredentials(saved.credentials); } catch {}
@@ -473,6 +476,7 @@ export default function Home() {
     setSettingsBaseline(settingsSnapshot());
     setConfirmCloseSettings(false);
     setSettingsOpen(true);
+    void controlRef.current.request<{ allowDirectAccess: boolean; revision: number }>("/v1/workspace/security").then(setSecurity).catch(() => setNotice("Workspace security settings could not be loaded."));
   };
   const closeSettings = () => { setConfirmCloseSettings(false); setSettingsOpen(false); };
   // Dismissing this dialog used to drop an unsaved model change or a pasted API key
@@ -2252,6 +2256,18 @@ export default function Home() {
               />
               <span><strong>Advanced features</strong><small>Show teams, task boards, remote computers, direct computer access, and MCP connections. Turn this off for a simpler workspace of agents, conversations and files.</small></span>
             </label>
+            <div className="settings-divider" />
+            <h3>Security</h3>
+            <label className="settings-toggle"><input type="checkbox" aria-label="Allow direct computer access" checked={security.allowDirectAccess} disabled={securityBusy} onChange={async e => {
+              const allowDirectAccess = e.target.checked;
+              if (allowDirectAccess && !window.confirm("Direct computer access is equivalent to giving the agent a shell on that computer. Allow direct computer access?")) return;
+              setSecurityBusy(true);
+              try {
+                const current = await controlRef.current.request<{ allowDirectAccess: boolean; revision: number }>("/v1/workspace/security");
+                setSecurity(await controlRef.current.request<{ allowDirectAccess: boolean; revision: number }>("/v1/workspace/security", { method: "PUT", body: JSON.stringify({ allowDirectAccess, revision: current.revision, confirm: allowDirectAccess }) }));
+                const defaults = await controlRef.current.request<{ revision: number }>("/v1/workspace/model"); setWorkspaceModelRevision(defaults.revision);
+              } catch (err) { setNotice(err instanceof Error ? err.message : "Security setting could not be saved."); } finally { setSecurityBusy(false); }
+            }} /><span><strong>Allow direct computer access</strong><small>Direct access uses the computer’s operating-system account. Changes are audited; paired runners also require a local opt-in.</small></span></label>
             <div className="settings-divider" />
             <h3>Your data stays with you</h3>
             <p className="muted small">

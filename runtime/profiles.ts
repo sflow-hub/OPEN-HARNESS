@@ -105,11 +105,21 @@ export class Profiles {
   }
   get(id: string): AgentProfile | null { const row = this.db.prepare('SELECT json FROM agent_profiles WHERE id=?').get(id) as { json: string } | undefined; if (!row) return null; const profile = JSON.parse(row.json); return { ...profile, allowedTools: [...new Set([...normalizeToolIds(profile.allowedTools || [], (profile.connectors || []).map((connector: { name: string }) => connector.name)), TASK_TOOL])], board: { ...DEFAULT_BOARD, ...(profile.board || {}) }, computer: { ...DEFAULT_COMPUTER, ...profile.computer, network: { ...DEFAULT_NETWORK, ...profile.computer?.network, allow: [...(profile.computer?.network?.allow || [])] } } }; }
   list(): AgentProfile[] { return (this.db.prepare('SELECT json FROM agent_profiles ORDER BY rowid').all() as Array<{ json: string }>).map(row => this.get(JSON.parse(row.json).id)!).filter(Boolean); }
-  defaults(): { model: ModelChoice; revision: number } { const row = this.db.prepare('SELECT revision,json FROM workspace_settings WHERE id=1').get() as { revision: number; json: string } | undefined; return row ? { model: JSON.parse(row.json), revision: row.revision } : { model: DEFAULT_MODEL, revision: 0 }; }
-  setDefaults(model: ModelChoice, revision: number) { const current = this.defaults(); if (revision !== current.revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409); this.db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(revision + 1, JSON.stringify(validateModel(model))); return this.defaults(); }
+  defaults(): { model: ModelChoice; revision: number } { const row = this.db.prepare('SELECT revision,json FROM workspace_settings WHERE id=1').get() as { revision: number; json: string } | undefined; return row ? { model: validateModel(JSON.parse(row.json)), revision: row.revision } : { model: DEFAULT_MODEL, revision: 0 }; }
+  setDefaults(model: ModelChoice, revision: number) { const current = this.defaults(); if (revision !== current.revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409); this.db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(revision + 1, JSON.stringify({ ...validateModel(model), allowDirectAccess: this.security().allowDirectAccess })); return this.defaults(); }
+  security(): { allowDirectAccess: boolean; revision: number } { const row = this.db.prepare('SELECT revision,json FROM workspace_settings WHERE id=1').get() as { revision: number; json: string } | undefined; return { allowDirectAccess: row ? JSON.parse(row.json).allowDirectAccess === true : false, revision: row?.revision ?? 0 }; }
+  setSecurity(allowDirectAccess: boolean, revision: number, confirm?: boolean) {
+    if (revision !== this.security().revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409);
+    if (typeof allowDirectAccess !== 'boolean') throw new ProfileError('Choose whether to allow direct computer access.');
+    if (allowDirectAccess && confirm !== true) throw new ProfileError('Confirm that direct access gives the agent a shell on that computer.');
+    this.db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(revision + 1, JSON.stringify({ ...this.defaults().model, allowDirectAccess }));
+    return this.security();
+  }
+  checkDirect(computer: AgentProfile['computer']) { if (computer.access === 'direct' && !this.security().allowDirectAccess) throw new ProfileError('Direct computer access is disabled. Enable Allow direct computer access in Workspace settings → Security.', 403); }
   effective(profile: AgentProfile): ModelChoice { const source = profile.model.inherit ? this.defaults().model : profile.model; return { provider: source.provider, model: source.model, credentialRef: source.credentialRef, baseUrl: source.baseUrl }; }
   save(input: AgentProfile) {
     const profile = validateProfile(input), current = this.get(profile.id);
+    this.checkDirect(profile.computer);
     if (this.isDeleted(profile.id)) throw new ProfileError('This agent was deleted.', 409);
     if (profile.revision !== (current?.revision || 0)) throw new ProfileError('This profile was changed elsewhere. Reload the saved profile before saving again; your draft is still here.', 409);
     profile.revision++;
@@ -120,6 +130,7 @@ export class Profiles {
   applyTransferredProfile(input: AgentProfile) {
     const current = this.get(input.id); if (!current) throw new ProfileError('Agent profile not found.', 404);
     const profile = validateProfile({ ...input, revision: current.revision });
+    this.checkDirect(profile.computer);
     this.db.exec('BEGIN IMMEDIATE');
     try { this.db.prepare('UPDATE agent_profiles SET json=? WHERE id=?').run(JSON.stringify(profile), profile.id); this.db.prepare('UPDATE profile_revisions SET json=? WHERE agent_id=? AND revision=?').run(JSON.stringify(profile), profile.id, profile.revision); this.db.prepare('UPDATE agents SET name=?,role=?,instructions=?,updated_at=? WHERE id=?').run(profile.name, profile.role, profile.prompt.text, new Date().toISOString(), profile.id); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return profile;

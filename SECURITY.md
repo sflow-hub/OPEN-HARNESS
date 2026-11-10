@@ -31,3 +31,5 @@ Please report suspected vulnerabilities privately through [GitHub Security Advis
 ## Supported versions
 
 Open Harness is pre-1.0. We patch `main` and the latest tagged release; older tags are not backported.
+
+Direct computer access is off by default. The operator must enable it in Workspace settings → Security and confirm that it gives the agent a shell on that computer; changes are audited. Paired runners also require the local opt-in environment variable OPEN_HARNESS_ALLOW_DIRECT=1. Disabling the workspace gate blocks new direct runs and profile saves; existing profiles can be switched to isolated access.

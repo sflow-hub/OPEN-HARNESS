@@ -305,3 +305,28 @@ test('network policy saves hosts, survives reload, and reports invalid entries',
   await expect(panel.getByRole('alert')).toContainText('Allowed hosts');
   await expect(panel.getByLabel('Allowed hosts')).toHaveValue('https://example.com/path');
 });
+
+test('direct access stays disabled until the operator confirms the security toggle', async ({ page, request }, testInfo) => {
+  const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  const headers = { Authorization: `Bearer ${token}` };
+  const security = await (await request.get(control + '/v1/workspace/security', { headers })).json();
+  await request.put(control + '/v1/workspace/security', { headers, data: { allowDirectAccess: false, revision: security.revision } });
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: /Agent settings/ });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
+  await expect(panel.locator('input[value="direct"]')).toBeDisabled();
+  await expect(panel.getByText(/Disabled. Enable Allow direct computer access/)).toBeVisible();
+  await panel.getByRole('button', { name: 'Close agent settings' }).click();
+  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: /Settings/ }).first().click();
+  page.once('dialog', dialog => { expect(dialog.message()).toContain('giving the agent a shell on that computer'); void dialog.dismiss(); });
+  await page.getByLabel('Allow direct computer access', { exact: true }).click();
+  await expect(page.getByLabel('Allow direct computer access', { exact: true })).not.toBeChecked();
+  page.once('dialog', dialog => void dialog.accept());
+  await page.getByLabel('Allow direct computer access', { exact: true }).click();
+  await expect(page.getByLabel('Allow direct computer access', { exact: true })).toBeChecked();
+  const enabled = await (await request.get(control + '/v1/workspace/security', { headers })).json();
+  expect(enabled.allowDirectAccess).toBe(true);
+  await request.put(control + '/v1/workspace/security', { headers, data: { allowDirectAccess: false, revision: enabled.revision } });
+});
