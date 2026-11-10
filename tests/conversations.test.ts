@@ -51,8 +51,10 @@ test('group storage, sender-scoped dedupe, mentions, fan-out, paging, and remova
     assert.deepEqual(JSON.parse(message.mentions_json), ['atlas', 'scout']); assert.match(message.id, /^[0-9a-f-]{36}$/);
     const retry = c.postMessage({ conversationId: group.id, sender: { kind: 'user', id: 'user' }, body: 'changed', idempotencyKey: 'retry' });
     assert.equal(retry.id, message.id);
+    assert.deepEqual(c.postMessageWithStatus({ conversationId: group.id, sender: { kind: 'user', id: 'user' }, body: 'retry', idempotencyKey: 'retry' }), { message, created: false });
     assert.deepEqual(store.db.prepare('SELECT recipient_id FROM message_deliveries WHERE message_id=? ORDER BY recipient_id').all(message.id).map(row => row.recipient_id), ['atlas', 'scout']);
-    const reply = c.postMessage({ conversationId: group.id, sender: agents[0], body: 'Answer', idempotencyKey: 'retry', inReplyTo: message.id });
+    const { message: reply, created } = c.postMessageWithStatus({ conversationId: group.id, sender: agents[0], body: 'Answer', idempotencyKey: 'retry', inReplyTo: message.id });
+    assert.equal(created, true);
     assert.notEqual(reply.id, message.id);
     assert.deepEqual(store.db.prepare('SELECT recipient_id FROM message_deliveries WHERE message_id=? ORDER BY recipient_id').all(reply.id).map(row => row.recipient_id), ['scout', 'user']);
     assert.deepEqual(c.listMessages(group.id, 0, 1).map(m => m.id), [message.id]); assert.deepEqual(c.listMessages(group.id, message.seq).map(m => m.id), [reply.id]);
@@ -134,9 +136,22 @@ test('conversation HTTP contract and explicit per-member session resume in mock 
     const id = String(group.id);
     assert.equal(((await request('/v1/conversations?kind=group')).conversations as unknown[]).length, 1);
     const message = await request(`/v1/conversations/${id}/messages`, 'POST', { body: '@atlas hello', idempotencyKey: 'one' }, 201);
-    assert.equal((await request(`/v1/conversations/${id}/messages`, 'POST', { body: 'retry', idempotencyKey: 'one' }, 201)).id, message.id);
-    assert.deepEqual((await request('/v1/runs')).runs, []);
-    assert.deepEqual((await request(`/v1/conversations/${id}/messages?after=${message.seq}`)).messages, []);
+    assert.deepEqual([...new Set(((await request('/v1/runs')).runs as { agent_id: string; conversation_id: string }[]).map(run => `${run.agent_id}:${run.conversation_id}`))], [`atlas:${id}`]);
+    const scheduledRuns = message.scheduledRuns as Array<{ agentId: string; runId: string }>;
+    assert.equal(scheduledRuns.length, 1); assert.equal(scheduledRuns[0].agentId, 'atlas');
+    const turn = await waitRun(scheduledRuns[0].runId);
+    assert.equal(turn.state, 'completed');
+    const runsBeforeReplay = ((await request('/v1/runs')).runs as Array<{ id: string }>).map(run => run.id);
+    const replay = await request(`/v1/conversations/${id}/messages`, 'POST', { body: 'retry', idempotencyKey: 'one' }, 201);
+    assert.deepEqual(replay, { ...message, scheduledRuns: [] });
+    assert.deepEqual(((await request('/v1/runs')).runs as Array<{ id: string }>).map(run => run.id), runsBeforeReplay);
+    const replies = (await request(`/v1/conversations/${id}/messages?after=${message.seq}`)).messages as Array<Record<string, unknown>>;
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0].sender_kind, 'agent'); assert.equal(replies[0].sender_id, 'atlas');
+    assert.equal(replies[0].seq, Number(message.seq) + 1);
+    assert.equal(replies[0].origin_run_id, scheduledRuns[0].runId);
+    assert.equal(replies[0].idempotency_key, `turn-result:${scheduledRuns[0].runId}`);
+    assert.deepEqual(((await request(`/v1/conversations/${id}/messages`)).messages as Array<Record<string, unknown>>).map(m => m.id), [message.id, replies[0].id]);
     assert.equal(((await request(`/v1/conversations/${id}`)).members as unknown[]).length, 3);
     await request(`/v1/conversations/${id}/members/scout`, 'DELETE');
     await request(`/v1/conversations/${id}/members`, 'POST', agents[1], 201);
@@ -145,18 +160,22 @@ test('conversation HTTP contract and explicit per-member session resume in mock 
     await request(`/v1/conversations/${id}/members`, 'POST', { kind: 'agent', id: 'missing' }, 404);
     await request(`/v1/conversations/${id}/messages`, 'POST', { body: 'x'.repeat(20001) }, 400);
     await request(`/v1/conversations/${id}/messages?after=bad`, 'GET', undefined, 400);
-    async function run(agentId: string, conversationId?: string) {
-      const created = await request('/v1/runs', 'POST', { agentId, conversationId, prompt: 'Hello' }, 202);
+    async function waitRun(runId: string) {
       const until = Date.now() + 30000;
       while (Date.now() < until) {
-        const current = await request(`/v1/runs/${created.id}`);
-        if (current.state === 'completed') return { created, current };
+        const current = await request(`/v1/runs/${runId}`);
+        if (current.state === 'completed') return current;
         assert.ok(!['failed', 'cancelled', 'interrupted'].includes(String(current.state)), JSON.stringify(current));
         await new Promise(resolve => setTimeout(resolve, 50));
       }
       throw new Error('Run timed out.');
     }
-    const first = await run('atlas', id); assert.equal(first.created.session_id, null); assert.ok(first.current.session_id);
+    async function run(agentId: string, conversationId?: string) {
+      const created = await request('/v1/runs', 'POST', { agentId, conversationId, prompt: 'Hello' }, 202);
+      return { created, current: await waitRun(String(created.id)) };
+    }
+    assert.ok(turn.session_id);
+    const first = await run('atlas', id); assert.equal(first.created.session_id, turn.session_id); assert.ok(first.current.session_id);
     const detail = await request(`/v1/conversations/${id}`);
     assert.equal((detail.members as Array<{ participant_id: string; session_id: string }>).find(m => m.participant_id === 'atlas')!.session_id, first.current.session_id);
     assert.equal((await run('atlas', id)).created.session_id, first.current.session_id);

@@ -81,7 +81,7 @@ test('disabling a connector removes its tools at execution even if individually 
 test('coordination cannot bypass disabled delegation or scheduling', async () => {
   const r = await run('MOCK_SLOW'); await waitRun(r.id, ['running']);
   const scoped = createHmac('sha256', token).update('agent:atlas').digest('hex');
-  for (const path of ['/internal/handoff','/internal/schedule']) {
+  for (const path of ['/internal/handoff','/internal/schedule','/internal/message','/internal/inbox/ack']) {
     const response = await fetch(base + path, { method: 'POST', headers: { Authorization: `Bearer ${scoped}`, 'X-Open-Harness-Agent': 'atlas', 'X-Open-Harness-Run': r.id, 'Content-Type': 'application/json' }, body: JSON.stringify({ agentId: 'scout', prompt: 'Bypass', name: 'Bypass' }) }); assert.equal(response.status, 403);
   }
   await waitRun(r.id);

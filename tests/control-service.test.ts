@@ -130,10 +130,12 @@ test("delegates to another named agent and records the handoff", async () => {
   await new Promise(resolve => setTimeout(resolve, 80));
   const scoped = createHmac("sha256", token).update("agent:atlas").digest("hex");
   const response = await fetch(`${base}/internal/handoff`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "Content-Type": "application/json" }, body: JSON.stringify({ agentId: "scout", prompt: "Analyze the inputs" }) });
-  assert.equal(response.status, 200); const delegated = await response.json() as any; assert.equal(delegated.state, "completed");
+  assert.equal(response.status, 202); const delegated = await response.json() as any; assert.equal(delegated.state, "queued");
+  assert.ok(delegated.childRunId); assert.ok(delegated.conversationId);
+  await waitRun(delegated.childRunId);
   const events = await request(`/v1/runs/${parent.id}/events?after=0`);
   assert.ok(events.events.some((event: any) => event.type === "handoff.created"));
-  assert.ok(events.events.some((event: any) => event.type === "handoff.completed"));
+
   assert.equal((await waitRun(parent.id)).state, "completed");
 });
 
@@ -462,4 +464,21 @@ test("routine POST and PUT share validation and persist cron schedules", async (
     assert.equal(routine.timezone, 'Asia/Tokyo');
     assert.equal(routine.misfire_policy, 'run_once');
   } finally { await request(`/v1/routines/${created.id}`, { method: 'DELETE' }); }
+});
+
+test('group messages schedule mentions or all speakers and halt/resume controls admission', async () => {
+  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: [{ id: 'msg-a', name: 'Msg A', role: 'Generalist', instructions: '', config: { model: 'mock' } }, { id: 'msg-b', name: 'Msg B', role: 'Generalist', instructions: '', config: { model: 'mock' } }] }) });
+  const group = await request('/v1/conversations', { method: 'POST', body: JSON.stringify({ kind: 'group', members: [{ kind: 'agent', id: 'msg-a' }, { kind: 'agent', id: 'msg-b' }] }) });
+  const post = (body: string) => request(`/v1/conversations/${group.id}/messages`, { method: 'POST', body: JSON.stringify({ body }) });
+  const directed = await post('@msg-a please answer');
+  assert.deepEqual(directed.scheduledRuns.map((r: any) => r.agentId), ['msg-a']);
+  await waitRun(directed.scheduledRuns[0].runId);
+  const all = await post('Everyone, please answer');
+  assert.deepEqual(all.scheduledRuns.map((r: any) => r.agentId).sort(), ['msg-a', 'msg-b']);
+  const halted = await request(`/v1/conversations/${group.id}/halt`, { method: 'POST' });
+  assert.equal(halted.halted, true); assert.equal(typeof halted.stopped, 'number');
+  assert.deepEqual((await post('While halted')).scheduledRuns, []);
+  assert.deepEqual(await request(`/v1/conversations/${group.id}/resume`, { method: 'POST' }), { resumed: true });
+  const resumed = await post('@msg-b resume'); assert.equal(resumed.scheduledRuns[0].agentId, 'msg-b');
+  await waitRun(resumed.scheduledRuns[0].runId);
 });

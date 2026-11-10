@@ -7,6 +7,8 @@ const token = process.env.OPEN_HARNESS_AGENT_TOKEN;
 const socketPath = process.env.OPEN_HARNESS_CONTROL_SOCKET || "/run/open-harness/coord.sock";
 const controlUrl = process.env.OPEN_HARNESS_CONTROL_URL;
 const tools = [
+  { name: "post_message", description: "Post a message to a conversation you belong to.", inputSchema: { type: "object", properties: { conversationId: { type: "string" }, body: { type: "string" }, mentions: { type: "array", items: { type: "string" } }, idempotencyKey: { type: "string" } }, required: ["conversationId", "body"], additionalProperties: false } },
+  { name: "read_inbox", description: "Read pending messages once without waiting. Optionally acknowledge your own message IDs.", inputSchema: { type: "object", properties: { conversationId: { type: "string" }, messageIds: { type: "array", items: { type: "string" } } }, additionalProperties: false } },
   {
     name: "task",
     description: "Read and manage board tasks and projects. Team tasks are visible only to members; changing another agent's card requires that profile's board permission, and board_create and board_update require its manage-projects permission. A project's stages, automation settings, and archived state stay under human control.",
@@ -14,7 +16,7 @@ const tools = [
   },
   {
     name: "delegate_named_agent",
-    description: "Assign a bounded task to another named Open Harness agent who shares an active team and return the durable run ID. Delegation depth is limited to two and cycles are rejected.",
+    description: "Assign a bounded task to another named Open Harness agent who shares an active team and immediately return { childRunId, conversationId, state: queued }. End your turn; the result arrives asynchronously in your inbox. Delegation depth is limited to two and cycles are rejected.",
     inputSchema: { type: "object", properties: { agentId: { type: "string", description: "Target agent ID" }, prompt: { type: "string" } }, required: ["agentId", "prompt"], additionalProperties: false },
   },
   {
@@ -39,7 +41,7 @@ function attempt(options, input) {
     req.end(JSON.stringify(input));
   });
 }
-async function call(path, input) {
+async function call(path, input, method = "POST") {
   // One options object, never (url, options, callback): node reads the second argument as the
   // response listener when the first is options rather than a URL, so the socket route -- how
   // every local container agent reaches the coordinator -- failed on every call with
@@ -49,10 +51,10 @@ async function call(path, input) {
   // Docker Desktop passes a bind mount through a VM, and a unix socket inside that mount is
   // visible but refuses every connection, so the configured URL is a fallback for that case
   // rather than the default. One failed connect to a socket that is not there costs nothing.
-  const routes = [{ socketPath, path, method: "POST", headers }];
+  const routes = [{ socketPath, path, method, headers }];
   if (controlUrl) {
     const target = new URL(`${controlUrl.replace(/\/$/, '')}${path}`);
-    routes.push({ protocol: target.protocol, hostname: target.hostname, port: target.port || undefined, path: `${target.pathname}${target.search}`, method: "POST", headers });
+    routes.push({ protocol: target.protocol, hostname: target.hostname, port: target.port || undefined, path: `${target.pathname}${target.search}`, method, headers });
   }
   for (const [index, route] of routes.entries()) {
     try {
@@ -68,7 +70,7 @@ async function dispatch(message) {
   if (message.method === "tools/list") return { tools };
   if (message.method === "tools/call") {
     const name = message.params?.name, args = message.params?.arguments || {};
-    const value = name === "delegate_named_agent" ? await call("/internal/handoff", args) : name === "create_open_harness_routine" ? await call("/internal/schedule", args) : name === "task" ? await call("/internal/task", args) : (() => { throw new Error(`Unknown tool: ${name}`); })();
+    const value = name === "post_message" ? await call("/internal/message", args) : name === "read_inbox" ? (args.messageIds ? await call("/internal/inbox/ack", { messageIds: args.messageIds }) : await call(`/internal/inbox${args.conversationId ? `?conversationId=${encodeURIComponent(args.conversationId)}` : ""}`, {}, "GET")) : name === "delegate_named_agent" ? await call("/internal/handoff", args) : name === "create_open_harness_routine" ? await call("/internal/schedule", args) : name === "task" ? await call("/internal/task", args) : (() => { throw new Error(`Unknown tool: ${name}`); })();
     return { content: [{ type: "text", text: JSON.stringify(value) }] };
   }
   if (message.method === "notifications/initialized") return undefined;

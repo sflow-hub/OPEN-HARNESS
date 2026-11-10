@@ -8,7 +8,7 @@ export type MessageRow = { seq: number; id: string; conversation_id: string; sen
 
 export class Conversations {
   constructor(readonly db: DatabaseSync, readonly profiles: { get(id: string): { name: string } | null | undefined }, readonly teams?: { sharesActiveTeam(a: string, b: string): boolean }) {}
-  private transaction<T>(fn: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const result = fn(); this.db.exec('COMMIT'); return result; } catch (error) { this.db.exec('ROLLBACK'); throw error; } }
+  private transaction<T>(fn: () => T): T { this.db.exec('SAVEPOINT conversation_write'); try { const result = fn(); this.db.exec('RELEASE conversation_write'); return result; } catch (error) { this.db.exec('ROLLBACK TO conversation_write; RELEASE conversation_write'); throw error; } }
   private row(id: string) { const row = this.db.prepare('SELECT * FROM conversations WHERE id=?').get(id) as ConversationRow | undefined; if (!row) throw new ConversationError('Conversation not found.', 404); return row; }
   private members(id: string) { return this.db.prepare('SELECT * FROM conversation_members WHERE conversation_id=? AND removed_at IS NULL ORDER BY joined_at,rowid').all(id) as MemberRow[]; }
   private validateMember(member: MemberInput) {
@@ -71,7 +71,8 @@ export class Conversations {
     });
   }
   private touch(id: string) { this.db.prepare('UPDATE conversations SET updated_at=? WHERE id=?').run(new Date().toISOString(), id); }
-  postMessage(input: { conversationId: string; sender: { kind: 'user' | 'agent'; id: string }; body: string; mentions?: string[]; idempotencyKey?: string; inReplyTo?: string; originRunId?: string }) {
+  postMessage(input: { conversationId: string; sender: { kind: 'user' | 'agent'; id: string }; body: string; mentions?: string[]; idempotencyKey?: string; inReplyTo?: string; originRunId?: string }) { return this.postMessageWithStatus(input).message; }
+  postMessageWithStatus(input: Parameters<Conversations['postMessage']>[0]) {
     if (!input || typeof input.body !== 'string' || !input.body.trim() || input.body.length > 20000) throw new ConversationError('Message must contain text and be at most 20000 characters.');
     if (input.mentions !== undefined && (!Array.isArray(input.mentions) || input.mentions.some(m => typeof m !== 'string'))) throw new ConversationError('Mentions must be member IDs.');
     for (const value of [input.idempotencyKey, input.inReplyTo, input.originRunId]) if (value !== undefined && typeof value !== 'string') throw new ConversationError('Message references must be strings.');
@@ -81,7 +82,7 @@ export class Conversations {
       if (!sender) throw new ConversationError('Sender is not a current member.', 403);
       if (input.idempotencyKey !== undefined) {
         const existing = this.db.prepare('SELECT * FROM messages WHERE conversation_id=? AND sender_kind=? AND sender_id=? AND idempotency_key=?').get(input.conversationId, input.sender.kind, input.sender.id, input.idempotencyKey) as MessageRow | undefined;
-        if (existing) return existing;
+        if (existing) return { message: existing, created: false };
       }
       if (input.inReplyTo && !this.db.prepare('SELECT 1 FROM messages WHERE id=? AND conversation_id=?').get(input.inReplyTo, input.conversationId)) throw new ConversationError('Reply message not found.', 404);
       const tokens = [...(input.mentions || []), ...Array.from(input.body.matchAll(/@([a-zA-Z0-9_-]+)/g), match => match[1])].map(token => token.replace(/^@/, '').toLowerCase());
@@ -89,8 +90,11 @@ export class Conversations {
       const id = crypto.randomUUID(), stamp = new Date().toISOString();
       this.db.prepare('INSERT INTO messages(id,conversation_id,sender_kind,sender_id,sender_name,body,idempotency_key,mentions_json,in_reply_to,origin_run_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(id, input.conversationId, input.sender.kind, input.sender.id, input.sender.kind === 'user' ? 'User' : this.profiles.get(input.sender.id)?.name || input.sender.id, input.body, input.idempotencyKey ?? null, JSON.stringify(mentions), input.inReplyTo ?? null, input.originRunId ?? null, stamp);
       for (const member of members) if (member.role !== 'observer' && !(member.participant_kind === input.sender.kind && member.participant_id === input.sender.id)) this.db.prepare('INSERT INTO message_deliveries(message_id,recipient_kind,recipient_id,created_at,updated_at) VALUES(?,?,?,?,?)').run(id, member.participant_kind, member.participant_id, stamp, stamp);
-      this.touch(input.conversationId); return this.db.prepare('SELECT * FROM messages WHERE id=?').get(id) as MessageRow;
+      this.touch(input.conversationId); return { message: this.db.prepare('SELECT * FROM messages WHERE id=?').get(id) as MessageRow, created: true };
     });
+  }
+  postSystem(conversation: string, body: string, key: string) {
+    this.db.prepare("INSERT OR IGNORE INTO messages(id,conversation_id,sender_kind,sender_id,sender_name,body,idempotency_key,created_at) VALUES(?,?,'system','system','System',?,?,?)").run(crypto.randomUUID(), conversation, body, key, new Date().toISOString());
   }
   listMessages(id: string, afterSeq = 0, limit = 100) {
     this.row(id); if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new ConversationError('Invalid message cursor or limit.');

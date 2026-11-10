@@ -69,6 +69,7 @@ export function mcpServerOf(id: string) {
   return server || null;
 }
 export const TASK_TOOL = mcpToolId(COORDINATION_SERVER, 'task');
+export const MESSAGE_TOOL = 'mcp__open_harness__post_message';
 export const HANDOFF_TOOL = mcpToolId(COORDINATION_SERVER, 'delegate_named_agent');
 export const ROUTINE_TOOL = mcpToolId(COORDINATION_SERVER, 'create_open_harness_routine');
 const LEGACY_TOOL_IDS: Record<string, string> = {
