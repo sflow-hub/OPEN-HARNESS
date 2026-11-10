@@ -106,6 +106,10 @@ export class Store {
         UNIQUE(agent_id,name)
       );
     `);
+    // Additive defaults keep older interval-only writers compatible; no version bump.
+    addColumn(this.db, "schedules", "schedule_kind", "TEXT NOT NULL DEFAULT 'interval'");
+    addColumn(this.db, "schedules", "cron_expression", "TEXT");
+    addColumn(this.db, "schedules", "misfire_policy", "TEXT NOT NULL DEFAULT 'run_once'");
     for (const migration of MIGRATIONS) if (migration.to > found) migration.apply(this.db);
     if (found !== SCHEMA_VERSION) this.db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
     const stamp = new Date().toISOString();
