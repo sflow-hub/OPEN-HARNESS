@@ -14,6 +14,18 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
+// lib/agent-profile.ts
+var DEFAULT_NETWORK = { mode: "open", allow: [] };
+var DEFAULT_COMPUTER = { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, network: { ...DEFAULT_NETWORK, allow: [] }, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
+var MCP_PREFIX = "mcp__";
+var COORDINATION_SERVER = "open_harness";
+function mcpToolId(server, tool) {
+  return `${MCP_PREFIX}${server}__${tool}`;
+}
+var TASK_TOOL = mcpToolId(COORDINATION_SERVER, "task");
+var HANDOFF_TOOL = mcpToolId(COORDINATION_SERVER, "delegate_named_agent");
+var ROUTINE_TOOL = mcpToolId(COORDINATION_SERVER, "create_open_harness_routine");
+
 // runtime/readiness.ts
 import { spawn, spawnSync } from "node:child_process";
 
@@ -248,7 +260,7 @@ function stateSharing(stateRoot2) {
   return value;
 }
 function containerSignature(selected, imageId, stateRoot2 = "") {
-  return createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, imageId, stateRoot: stateRoot2 && resolve(stateRoot2) })).digest("hex").slice(0, 24);
+  return createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...(selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}, imageId, stateRoot: stateRoot2 && resolve(stateRoot2) })).digest("hex").slice(0, 24);
 }
 var imageIdCache = null;
 function currentImageId() {
@@ -266,7 +278,7 @@ function ensureContainer(agentId, stateRoot2, computer) {
   if (contract !== "current") throw new Error(contract === "missing" ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE);
   const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   const name = `open-harness-${safe}`;
-  const selected = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
+  const selected = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, network: DEFAULT_NETWORK, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
   const signature = containerSignature(selected, currentImageId(), stateRoot2);
   const inspect = spawnSync2("docker", ["inspect", "-f", '{{.State.Running}} {{index .Config.Labels "open-harness.config"}}', name], { encoding: "utf8", timeout: 1e4 });
   if (inspect.status === 0) {
@@ -335,18 +347,6 @@ function ensureContainer(agentId, stateRoot2, computer) {
 import { spawn as spawn3, spawnSync as spawnSync3 } from "node:child_process";
 import { copyFileSync, mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, renameSync, chmodSync } from "node:fs";
 import { join as join2 } from "node:path";
-
-// lib/agent-profile.ts
-var MCP_PREFIX = "mcp__";
-var COORDINATION_SERVER = "open_harness";
-function mcpToolId(server, tool) {
-  return `${MCP_PREFIX}${server}__${tool}`;
-}
-var TASK_TOOL = mcpToolId(COORDINATION_SERVER, "task");
-var HANDOFF_TOOL = mcpToolId(COORDINATION_SERVER, "delegate_named_agent");
-var ROUTINE_TOOL = mcpToolId(COORDINATION_SERVER, "create_open_harness_routine");
-
-// runtime/profile-runtime.ts
 var COORDINATION_TOOLS = [
   { id: TASK_TOOL, name: "Task board", group: "other", description: "Read and update assigned board tasks.", available: true },
   { id: HANDOFF_TOOL, name: "Hand off to another agent", group: "delegation", description: "Assign explicit task context to a named agent on a shared team.", available: true },
