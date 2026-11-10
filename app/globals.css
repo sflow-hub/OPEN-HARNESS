@@ -2164,7 +2164,30 @@ h1 span {
 .agent-team-filters { display: flex; flex-wrap: wrap; gap: 7px; margin: -8px 0 18px; }.agent-team-filters button { padding: 6px 10px; border: 1px solid var(--line); border-radius: 15px; color: var(--muted); font-size: 10px; }.agent-team-filters button.active { border-color: #708063; background: #283025; color: var(--accent); }
 .task-card .team-badge { margin-top: 7px; }
 
+/* Computers */
+.computers-heading-actions { display: flex; gap: 8px; }
+.computers-content > .muted.small { margin: -14px 0 18px; }
+.computer-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.computer-card { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); }
+.computer-card-main { display: grid; grid-template-columns: auto 1fr auto; align-items: start; gap: 12px; }
+.computer-card-main .computer-status { margin-top: 6px; }
+.computer-card-main h2 { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0 0 5px; font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.computer-card-main p { margin: 0; color: var(--muted); font-size: 12px; }
+.computer-state { padding: 3px 8px; border: 1px solid var(--line); border-radius: 12px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.computer-state.online { border-color: #4f6440; color: #a8cf81; }.computer-state.pairing { border-color: #5f5434; color: #e0c47d; }
+.computer-facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
+.computer-facts dt { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; }
+.computer-facts dd { margin: 4px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+.computer-capabilities { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.computer-capabilities li { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 12px; color: var(--muted); font-size: 10px; }
+.computer-capabilities li.available { border-color: #4f6440; color: #cbd4c5; }
+.computer-card-actions { display: flex; flex-wrap: wrap; gap: 7px; padding-top: 12px; border-top: 1px solid var(--line); }
+.computer-card-actions .danger:not(:disabled) { color: #e3a696; }
+.computer-card > .muted.small { margin: 0; }
+.computer-revoke-effects { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+
 @media (max-width: 720px) {
   .teams-content { padding: 34px 18px 70px; }.teams-heading { align-items: flex-start; flex-direction: column; }.teams-heading .light-button { width: 100%; justify-content: center; }
   .team-member-list { grid-template-columns: 1fr; }.team-members-head { align-items: stretch; flex-direction: column; }.team-members-head .search-box { width: 100%; }
+  .computers-heading-actions { width: 100%; }.computers-heading-actions .light-button { flex: 1; }.computer-list { grid-template-columns: 1fr; }
 }

@@ -13,6 +13,7 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const safeEqual = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 export class MachineError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
+export const COMPUTER_REVOKED = 'Computer was revoked.';
 
 // An RSA JWK from a runner. Stored only when it parses, so a malformed value cannot make
 // every later dispatch throw somewhere further away.
@@ -136,7 +137,20 @@ export class Machines {
     this.db.prepare('UPDATE machines SET reserved_agent_id=?,updated_at=? WHERE id=?').run(reserve ? agentId : row.reserved_agent_id === agentId ? null : row.reserved_agent_id, now(), machineId);
   }
   canAssign(machineId: string, agentId: string) { const machine = this.get(machineId); if (machine.status === 'revoked') throw new MachineError('This computer has been revoked.', 409); if (machine.reservedAgentId && machine.reservedAgentId !== agentId) throw new MachineError('This computer is reserved for another agent.', 409); return machine; }
-  revoke(machineId: string) { if (machineId === 'local') throw new MachineError('The computer hosting this coordinator cannot be revoked.', 409); const stamp = now(); this.db.prepare("UPDATE machines SET status='revoked',revoked_at=?,credential_hash=NULL,updated_at=? WHERE id=?").run(stamp, stamp, machineId); return { ok: true }; }
+  // Leased commands are failed too: the runner holding them can no longer report back, and
+  // whatever waits on them (a run, a probe, a transfer) should end now rather than time out.
+  revoke(machineId: string) {
+    if (machineId === 'local') throw new MachineError('The computer hosting this coordinator cannot be revoked.', 409);
+    const row = this.row(machineId); if (!row) throw new MachineError('Computer not found.', 404); if (row.revoked_at) throw new MachineError(`${row.name} has already been revoked.`, 409);
+    const stamp = now();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare("UPDATE machines SET status='revoked',revoked_at=?,credential_hash=NULL,updated_at=? WHERE id=?").run(stamp, stamp, machineId);
+      const cancelled = this.db.prepare("UPDATE runner_commands SET state='failed',finished_at=?,result_json=? WHERE machine_id=? AND state IN ('queued','leased')").run(stamp, JSON.stringify({ error: COMPUTER_REVOKED, revoked: true }), machineId);
+      this.db.exec('COMMIT');
+      return { ok: true, cancelledCommands: Number(cancelled.changes) };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   reconnect(machineId: string) { const machine = this.get(machineId); return { ok: machine.status === 'online', message: machine.status === 'online' ? `${machine.name} is connected.` : `Waiting for ${machine.name} to reconnect. The runner only needs outbound HTTPS access.` }; }
   test(machineId: string, profile?: AgentProfile) {
     const machine = this.get(machineId), issues: string[] = [];
@@ -147,7 +161,10 @@ export class Machines {
     if (profile?.computer.desktop === 'virtual' && !machine.capabilities.virtualDesktop) issues.push('Private virtual desktops are available on Linux runners only.');
     return { ok: !issues.length, message: issues.length ? issues.join(' ') : `${machine.name} is ready for this agent.`, machine };
   }
-  enqueue(machineId: string, agentId: string | null, kind: string, payload: unknown) { const command = { id: crypto.randomUUID(), machineId, agentId, kind, state: 'queued', createdAt: now() }; this.db.prepare('INSERT INTO runner_commands VALUES(?,?,?,?,?,?,?,?,?,?)').run(command.id, machineId, agentId, kind, JSON.stringify(payload), command.state, command.createdAt, null, null, null); return command; }
+  // Callers validate the machine and then await (secret sealing), so a revoke can land in
+  // between. Guarding inside the insert keeps a revoked machine from ever gaining a command
+  // nobody will lease or fail.
+  enqueue(machineId: string, agentId: string | null, kind: string, payload: unknown) { const command = { id: crypto.randomUUID(), machineId, agentId, kind, state: 'queued', createdAt: now() }; const inserted = this.db.prepare('INSERT INTO runner_commands SELECT ?,?,?,?,?,?,?,NULL,NULL,NULL FROM machines WHERE id=? AND revoked_at IS NULL').run(command.id, machineId, agentId, kind, JSON.stringify(payload), command.state, command.createdAt, machineId); if (!inserted.changes) throw new MachineError(COMPUTER_REVOKED, 409); return command; }
   command(id: string) { const row = this.db.prepare('SELECT * FROM runner_commands WHERE id=?').get(id) as CommandRow | undefined; if (!row) return null; let runId = ''; try { runId = String((JSON.parse(row.payload_json) as { runId?: unknown })?.runId || ''); } catch { runId = ''; } return { id: row.id, machineId: row.machine_id, agentId: row.agent_id, kind: row.kind, state: row.state, runId, result: row.result_json ? JSON.parse(row.result_json) : null }; }
   // Ownership of the command is not enough: without pinning the run as well, any paired
   // runner could post approval or clarification events against an unrelated agent's run

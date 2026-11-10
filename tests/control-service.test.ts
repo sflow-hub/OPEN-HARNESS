@@ -511,3 +511,29 @@ test('group messages schedule mentions or all speakers and halt/resume controls 
   const resumed = await post('@msg-b resume'); assert.equal(resumed.scheduledRuns[0].agentId, 'msg-b');
   await waitRun(resumed.scheduledRuns[0].runId);
 });
+
+test('revoking a computer ends the run active on it and frees its execution slot', async () => {
+  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: [{ id: 'remote-r', name: 'Remote R', role: 'Generalist', instructions: '', config: { model: 'mock' } }] }) });
+  const pairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ name: 'Revoked VPS', platform: 'linux' }) });
+  const paired = await (await fetch(`${base}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, platform: 'linux', capabilities: { container: true, direct: false, desktop: false, virtualDesktop: true } }) })).json() as { machineId: string; token: string };
+  const runnerHeaders = { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId, 'Content-Type': 'application/json' };
+  const commands = async () => (await (await fetch(`${base}/v1/runner/commands`, { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { runId?: string; bundle?: { checksum: string } } }> }).commands;
+  const saved = await request('/v1/agents/remote-r/profile');
+  await request('/v1/agents/remote-r/profile', { method: 'PUT', body: JSON.stringify({ ...saved.profile, computer: { ...saved.profile.computer, machineId: paired.machineId, access: 'private', desktop: 'none', reserveMachine: false } }) });
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while ((await request('/v1/agents/remote-r/profile')).profile.computer.machineId !== paired.machineId) {
+    if (Date.now() > deadline) throw new Error('Transfer did not complete.');
+    for (const item of await commands()) if (item.kind === 'import-agent') await fetch(`${base}/v1/runner/commands/${item.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { checksum: item.payload.bundle?.checksum, validated: true } }) });
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const run = await request('/v1/runs', { method: 'POST', body: JSON.stringify({ agentId: 'remote-r', prompt: 'remote work that never returns' }) });
+  let leased = false;
+  while (!leased) { if (Date.now() > deadline) throw new Error('Run was not dispatched.'); leased = (await commands()).some(item => item.kind === 'run' && item.payload.runId === run.id); if (!leased) await new Promise(resolve => setTimeout(resolve, 50)); }
+  assert.equal((await request(`/v1/runs/${run.id}`)).state, 'running');
+  const activeBefore = (await request('/v1/health')).activeRuns;
+  await request(`/v1/machines/${paired.machineId}/revoke`, { method: 'POST' });
+  const ended = await waitRun(run.id);
+  assert.equal(ended.state, 'failed'); assert.equal(ended.error, 'Computer was revoked.');
+  assert.ok((await request('/v1/health')).activeRuns <= activeBefore - 1, 'the revoked run no longer holds an execution slot');
+  assert.equal((await fetch(`${base}/v1/runner/commands`, { headers: runnerHeaders })).status, 401);
+});
