@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { normalizeRoutine, type RoutineInput, type RoutineRun } from "./routine";
+import type { Agent } from "./types";
 
 export type RuntimeStatus = {
   token: string;
@@ -68,6 +69,9 @@ export class ControlClient {
     if (!response.ok) throw new Error(value.error || `Control service returned HTTP ${response.status}.`);
     return value;
   }
+  async listAgents() { return (await this.request<{ agents: Agent[] }>("/v1/agents")).agents; }
+  async createAgent(input: { name: string; role?: string; description?: string; prompt?: string; id?: string }) { return (await this.request<{ agent: Agent }>("/v1/agents", { method: "POST", body: JSON.stringify(input) })).agent; }
+  deleteAgent(id: string) { return this.request<{ ok: true; id: string }>(`/v1/agents/${encodeURIComponent(id)}`, { method: "DELETE" }); }
   createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string }) { return this.request<PersistentRun>("/v1/runs", { method: "POST", body: JSON.stringify(input) }); }
   events(runId: string, after: number) { return this.request<{ events: Array<{ seq: number; id: string; type: string; payload: any }>; run: PersistentRun }>(`/v1/runs/${runId}/events?after=${after}`); }
   async listRoutines() { return (await this.request<{ routines: unknown[] }>("/v1/routines")).routines.map(normalizeRoutine); }

@@ -51,6 +51,7 @@ import {
 } from "../lib/control-client";
 
 import AgentSettings from "../components/agent-settings";
+import AgentDelete from "../components/agent-delete";
 import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import TeamManager, { TeamBadge } from "../components/team-manager";
@@ -151,6 +152,7 @@ export default function Home() {
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [editingAgentTab, setEditingAgentTab] = useState<'profile' | 'computer'>('profile');
+  const [agentBusy, setAgentBusy] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
@@ -292,7 +294,9 @@ export default function Home() {
         if (workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspace.teams }) });
         const teamResult = await client.request<{ teams: Team[] }>("/v1/teams?includeRetired=1");
         if (!cancelled) {
-          setWorkspace(current => ({ ...current, teams: teamResult.teams.filter(team => !team.retiredAt), agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })) }));
+          // The coordinator's list replaces the cached one, so agents deleted there are dropped
+          // here and from browser storage. An empty reply is kept out: storage needs one agent.
+          setWorkspace(current => ({ ...current, teams: teamResult.teams.filter(team => !team.retiredAt), agents: synced.agents.length ? synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })) : current.agents }));
           setRetiredTeams(teamResult.teams.filter(team => Boolean(team.retiredAt)));
           const defaults = await client.request<{ model: ModelChoice; revision: number }>("/v1/workspace/model/import", {
             method: "POST",
@@ -575,16 +579,42 @@ export default function Home() {
         });
     }
   }
-  function newAgent() {
-    setEditingAgent({
-      id: uid(),
-      name: "",
-      role: "",
-      description: "",
-      instructions: "",
-      memory: [],
-      tone: workspace.agents.length % 3,
-    });
+  async function newAgent() {
+    if (agentBusy) return;
+    setAgentBusy(true);
+    try {
+      const created = await controlRef.current.createAgent({ name: "New agent" });
+      setWorkspace((w) => ({ ...w, agents: [...w.agents.filter((a) => a.id !== created.id), created] }));
+      setSelectedAgent(created.id);
+      setConversationId(null);
+      setInput("");
+      setEditingAgent(created);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not create an agent. Check that Open Harness is running.");
+    } finally {
+      setAgentBusy(false);
+    }
+  }
+  async function deleteAgent(target: Agent) {
+    if (agentBusy || !window.confirm(`Delete ${target.name}? Its profile is removed and cannot be restored.`)) return;
+    setAgentBusy(true);
+    try {
+      await controlRef.current.deleteAgent(target.id);
+      const next = workspace.agents.find((a) => a.id !== target.id);
+      setWorkspace((w) => ({
+        ...w,
+        agents: w.agents.filter((a) => a.id !== target.id),
+        // The coordinator already dropped it from its teams; a stale cached membership
+        // would otherwise be sent back by the next teams sync.
+        teams: w.teams.map((team) => ({ ...team, memberAgentIds: team.memberAgentIds.filter((id) => id !== target.id) })),
+      }));
+      if (next && selectedAgent === target.id) openAgent(next.id);
+      setNotice(`${target.name} was deleted.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : `Could not delete ${target.name}.`);
+    } finally {
+      setAgentBusy(false);
+    }
   }
   function handleEvent(
     event: RunEvent,
@@ -1041,7 +1071,7 @@ export default function Home() {
           <span className="brand-mark">h</span> open harness{" "}
           <span className="version">/ 01</span>
         </button>
-        <button className="new-button" onClick={newAgent} disabled={running}>
+        <button className="new-button" onClick={() => void newAgent()} disabled={running || agentBusy}>
           <Plus size={15} /> New agent
         </button>
         <div className="search-box">
@@ -1206,7 +1236,7 @@ export default function Home() {
                 Your agents{" "}
                 <span>{String(workspace.agents.length).padStart(2, "0")}</span>
               </h2>
-              <button onClick={newAgent} disabled={running}>
+              <button onClick={() => void newAgent()} disabled={running || agentBusy}>
                 <Plus size={13} /> Create agent
               </button>
             </div>
@@ -1691,6 +1721,7 @@ export default function Home() {
                 <div className="inspector-label"><Cable size={13} /> PROFILE TOOLS <span>{agent.profile?.allowedTools.length || 0}</span></div>
                 <p className="panel-help">{agent.profile?.allowedTools.length ? `${agent.profile.allowedTools.length} tools selected. Open Agent settings to check availability or change access.` : "No tools selected. Choose the capabilities this agent needs."}</p>
                 <button className="subtle-button" onClick={() => setEditingAgent({ ...agent })}><SlidersHorizontal size={13} /> Agent settings</button>
+                <AgentDelete agent={agent} disabled={running || agentBusy} onDelete={(target) => void deleteAgent(target)} />
                 <div className="scope-note">
                   {testMode
                     ? "Automated test mode does not run agents. Open the installed desktop app for live work."
