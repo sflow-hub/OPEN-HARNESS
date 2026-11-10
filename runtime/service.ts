@@ -17,6 +17,7 @@ import { validateComputerTarget } from './computer-validation';
 import { hermesApprovalDecision, HermesGateway, dockerStatusCached, ensureContainer, stopManagedContainers } from "./hermes";
 import { coordinationSocket } from "./coordination-socket";
 import { TaskError, TaskStore } from "./tasks";
+import { Audit } from "./audit";
 import { TeamError, TeamStore } from "./teams";
 import { MachineError, Machines } from "./machines";
 import { encryptRunnerSecret } from "../lib/runner-crypto";
@@ -48,6 +49,7 @@ function openSecrets(file: string) {
   }
 }
 const credentials = new Credentials(store.db, secrets);
+const audit = new Audit(store.db);
 const profiles = new Profiles(store.db);
 const teams = new TeamStore(store.db);
 const conversations = new Conversations(store.db, profiles, teams);
@@ -474,7 +476,7 @@ const server = createServer(async (req, res) => {
       if (!existsSync(target)) return json(res, 503, { error: 'The standalone runner bundle is unavailable. Run npm run runner:bundle on this source installation.' });
       return raw(res, 200, 'application/octet-stream', readFileSync(target));
     }
-    if (req.method === 'POST' && url.pathname === '/v1/runner/pair') return json(res, 201, machines.pair(await body(req)));
+    if (req.method === 'POST' && url.pathname === '/v1/runner/pair') { const result = machines.pair(await body(req)); audit.record({ actorKind: 'runner', actorId: result.machineId, action: 'machine.pair', targetKind: 'machine', targetId: result.machineId }); return json(res, 201, result); }
     const runner = url.pathname.startsWith('/v1/runner/') ? runnerIdentity(req) : null;
     if (url.pathname.startsWith('/v1/runner/') && !runner) return json(res, 401, { error: 'Invalid or revoked runner credential.' });
     if (runner && req.method === 'POST' && url.pathname === '/v1/runner/heartbeat') { const input = await body(req), result = machines.heartbeat(runner, input); for (const command of machines.reconcileLeases(runner, Array.isArray(input.activeCommandIds) ? input.activeCommandIds.map(String) : [])) { const run = store.getRun(String((command as any).payload?.runId || '')); if (run && !['completed','failed','cancelled','interrupted'].includes(run.state)) { const error = 'Runner restarted after accepting this work. Completed events were preserved and the task was not replayed.'; store.setRun(run.id, { state: 'interrupted', error }); event(run.id, 'run.interrupted', { error }); } } void pump(); return json(res, 200, result); }
@@ -490,6 +492,12 @@ const server = createServer(async (req, res) => {
     }
     const internalAgent = url.pathname.startsWith("/internal/") ? authenticatedAgent(req) : null;
     if (!authenticated(req) && !internalAgent) return json(res, 401, { error: "Invalid local control token." });
+    if (req.method === "GET" && url.pathname === "/v1/audit") {
+      const integer = (name: string, fallback: number) => { const value = url.searchParams.get(name); return value === null ? fallback : /^\d+$/.test(value) ? Number(value) : NaN; };
+      const after = integer('after', 0), limit = integer('limit', 100);
+      if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1) return json(res, 400, { error: 'Invalid audit cursor or limit.' });
+      return json(res, 200, { events: audit.list({ after, limit, action: url.searchParams.get('action') ?? undefined, targetKind: url.searchParams.get('targetKind') ?? undefined, targetId: url.searchParams.get('targetId') ?? undefined }) });
+    }
     if (req.method === "GET" && url.pathname === "/v1/health") return json(res, 200, { ok: true, runtime: await dockerStatusCached(), activeRuns: store.activeCount(), queuedRuns: store.listRuns().filter(run => run.state === "queued").length, secrets: secrets.names(), secretStorage: secrets.backend });
     if (req.method === 'GET' && url.pathname === '/v1/support-bundle') return json(res, 200, {
       generatedAt: new Date().toISOString(), version: APP_VERSION, hermes: { release: HERMES_RELEASE, commit: HERMES_COMMIT },
@@ -541,8 +549,8 @@ const server = createServer(async (req, res) => {
           return json(res, 200, { ...checked, ok: Boolean(result.ok), message: String(result.message || checked.message), machine: checked.machine });
         } catch (error) { return json(res, 200, { ...checked, ok: false, message: error instanceof Error ? error.message : 'Computer access check failed.' }); }
       }
-      if (action === 'reconnect') return json(res, 200, machines.reconnect(machineId));
-      return json(res, 200, machines.revoke(machineId));
+      if (action === 'reconnect') { const result = machines.reconnect(machineId); audit.record({ actorKind: 'operator', action: 'machine.reconnect', targetKind: 'machine', targetId: machineId }); return json(res, 200, result); }
+      { const result = machines.revoke(machineId); audit.record({ actorKind: 'operator', action: 'machine.revoke', targetKind: 'machine', targetId: machineId }); return json(res, 200, result); }
     }
     const agentComputerMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(stop|transfer)$/);
     if (agentComputerMatch && req.method === 'POST') {
@@ -559,6 +567,7 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/v1/agents") {
       const profile = profiles.create(await body(req)); ensureProfileDirs(profile.id);
+      audit.record({ actorKind: 'operator', action: 'agent.create', targetKind: 'agent', targetId: profile.id });
       return json(res, 201, { agent: profileAgent(profile) });
     }
     const agentDeleteMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)$/);
@@ -568,6 +577,7 @@ const server = createServer(async (req, res) => {
       const machineId = profiles.get(id)?.computer.machineId;
       profiles.delete(id);
       if (machineId) machines.reserve(machineId, id, false);
+      audit.record({ actorKind: 'operator', action: 'agent.delete', targetKind: 'agent', targetId: id });
       return json(res, 200, { ok: true, id });
     }
     if (req.method === "GET" && url.pathname === "/v1/agents") return json(res, 200, { agents: profiles.list().map(p => profileAgent(p)) });
@@ -589,11 +599,12 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/v1/workspace/model/import") {
       const input = await body(req);
-      return json(res, 200, profiles.defaults().revision ? profiles.defaults() : profiles.setDefaults(input.model, 0));
+      if (profiles.defaults().revision) return json(res, 200, profiles.defaults());
+      const result = profiles.setDefaults(input.model, 0); audit.record({ actorKind: 'operator', action: 'workspace.model.update' }); return json(res, 200, result);
     }
     if (url.pathname === "/v1/workspace/model") {
       if (req.method === "GET") return json(res, 200, profiles.defaults());
-      if (req.method === "PUT") { const input = await body(req); return json(res, 200, profiles.setDefaults(input.model, input.revision)); }
+      if (req.method === "PUT") { const input = await body(req); const result = profiles.setDefaults(input.model, input.revision); audit.record({ actorKind: 'operator', action: 'workspace.model.update' }); return json(res, 200, result); }
     }
     const profileMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(profile|credential|tools|models|connection-check|connector-check)$/);
     if (profileMatch) {
@@ -605,6 +616,7 @@ const server = createServer(async (req, res) => {
         const moving = Boolean(current && current.computer.machineId !== desired.computer.machineId), saved = profiles.save(moving ? { ...desired, computer: current!.computer } : desired); ensureProfileDirs(id);
         if (moving) { const pending = { ...desired, revision: saved.revision }; machines.reserve(desired.computer.machineId, id, desired.computer.reserveMachine); void performTransfer(machines.transfer(id, current!.computer.machineId, desired.computer.machineId, pending)); }
         else machines.reserve(saved.computer.machineId, id, saved.computer.reserveMachine);
+        audit.record({ actorKind: 'operator', action: 'agent.profile.update', targetKind: 'agent', targetId: id, detail: { revision: saved.revision, access: desired.computer.access, machineId: desired.computer.machineId, desktop: desired.computer.desktop, folders: desired.computer.folders.length } });
         return json(res, 200, profileResponse(saved));
       }
       if (!profile) return json(res, 404, { error: 'Agent profile not found.' });
@@ -751,6 +763,7 @@ const server = createServer(async (req, res) => {
       if ((resource === 'halt' || resource === 'resume') && req.method === 'POST') {
         conversations.getConversation(id); store.db.prepare('UPDATE conversations SET auto_turns_enabled=? WHERE id=?').run(resource === 'resume' ? 1 : 0, id);
         let stopped = 0; if (resource === 'halt') for (const run of (store.db.prepare("SELECT * FROM runs WHERE conversation_id=? AND state IN ('queued','running','waiting_approval','waiting_input')").all(id) as RunRow[]).filter(r => messaging.isTurn(r.id))) stopped += (await stopRunTree(run.id)).stopped;
+        audit.record({ actorKind: 'operator', action: `conversation.${resource}`, targetKind: 'conversation', targetId: id });
         return json(res, 200, resource === 'halt' ? { halted: true, stopped } : { resumed: true });
       }
       if (!resource && req.method === 'GET') return json(res, 200, conversations.getConversation(id));
@@ -774,27 +787,27 @@ const server = createServer(async (req, res) => {
       if (action === "events" && req.method === "GET") return json(res, 200, { events: store.events(run.id, Number(url.searchParams.get("after") || 0)), run: runResponse(store.getRun(run.id)!) });
       if (action === "steer" && req.method === "POST") { const input = await body(req), live = active.get(run.id), remote = remoteActive.get(run.id); if (!live && !remote) return json(res, 409, { error: "Run is not active." }); if (live) await live.gateway.request("session.steer", { session_id: live.sessionId, text: String(input.text || "") }); else machines.enqueue(remote!.machineId, run.agent_id, 'steer', { runId: run.id, commandId: remote!.commandId, text: String(input.text || '') }); event(run.id, "run.steered", { text: input.text }); return json(res, 200, { ok: true }); }
       if (action === "stop" && req.method === "POST") { const result = await stopRunTree(run.id); return json(res, 200, { ok: true, stopped: result.stopped, ...(result.failures.length ? { failures: result.failures } : {}) }); }
-      if (action === "approval" && req.method === "POST") { const input = await body(req), approval = store.approval(String(input.approvalId)); if (!approval || approval.run_id !== run.id) return json(res, 404, { error: "Approval not found." }); const live = active.get(run.id), remote = remoteActive.get(run.id); if (!live && !remote) return json(res, 409, { error: "Run is not active." }); const granted = hermesApprovalDecision(String(input.decision || "")), decision = granted === "deny" ? "deny" : "approve"; if (live) await live.gateway.request("approval.respond", { session_id: live.sessionId, request_id: approval.gateway_request_id, choice: granted, all: false }); else machines.enqueue(remote!.machineId, run.agent_id, 'approval', { runId: run.id, commandId: remote!.commandId, requestId: approval.gateway_request_id, decision: granted }); store.resolveApproval(String(input.approvalId), decision); store.setRun(run.id, { state: "running" }); event(run.id, "approval.resolved", { approvalId: input.approvalId, decision }); return json(res, 200, { ok: true }); }
+      if (action === "approval" && req.method === "POST") { const input = await body(req), approval = store.approval(String(input.approvalId)); if (!approval || approval.run_id !== run.id) return json(res, 404, { error: "Approval not found." }); const live = active.get(run.id), remote = remoteActive.get(run.id); if (!live && !remote) return json(res, 409, { error: "Run is not active." }); const granted = hermesApprovalDecision(String(input.decision || "")), decision = granted === "deny" ? "deny" : "approve"; if (live) await live.gateway.request("approval.respond", { session_id: live.sessionId, request_id: approval.gateway_request_id, choice: granted, all: false }); else machines.enqueue(remote!.machineId, run.agent_id, 'approval', { runId: run.id, commandId: remote!.commandId, requestId: approval.gateway_request_id, decision: granted }); store.resolveApproval(String(input.approvalId), decision); store.setRun(run.id, { state: "running" }); event(run.id, "approval.resolved", { approvalId: input.approvalId, decision }); audit.record({ actorKind: "operator", action: "run.approval", targetKind: "run", targetId: run.id, detail: { decision } }); return json(res, 200, { ok: true }); }
     }
     if (req.method === "POST" && url.pathname === "/v1/runs/stop-all") { let stopped = 0; const failures: string[] = []; for (const run of store.listRuns().filter(item => !item.parent_run_id && ["queued","running","waiting_approval","waiting_input"].includes(item.state))) { const result = await stopRunTree(run.id); stopped += result.stopped; failures.push(...result.failures); } return json(res, 200, { stopped, ...(failures.length ? { failures } : {}) }); }
     if (url.pathname === "/v1/credentials") {
       if (req.method === "GET") return json(res, 200, { credentials: credentialRecords(), backend: credentials.backend });
-      if (req.method === "POST") { const input = await body(req); return json(res, 201, credentialRecord(credentials.create(input))); }
+      if (req.method === "POST") { const input = await body(req); const row = credentials.create(input); audit.record({ actorKind: "operator", action: "credential.create", targetKind: "credential", targetId: row.ref, detail: { label: row.label, provider: row.provider } }); return json(res, 201, credentialRecord(row)); }
     }
     const credentialMatch = url.pathname.match(/^\/v1\/credentials\/([^/]+)(?:\/(value))?$/);
     if (credentialMatch) {
       const ref = decodeURIComponent(credentialMatch[1]), action = credentialMatch[2];
-      if (action === "value" && req.method === "POST") { const input = await body(req); return json(res, 200, credentialRecord(credentials.rotate(ref, input.value))); }
+      if (action === "value" && req.method === "POST") { const input = await body(req); const row = credentials.rotate(ref, input.value); audit.record({ actorKind: "operator", action: "credential.rotate", targetKind: "credential", targetId: row.ref, detail: { label: row.label, provider: row.provider } }); return json(res, 200, credentialRecord(row)); }
       if (action) return json(res, 405, { error: "Unsupported credential action." });
       if (req.method === "GET") return json(res, 200, credentialRecord(credentials.row(ref)));
-      if (req.method === "PUT") { const input = await body(req); return json(res, 200, credentialRecord(credentials.relabel(ref, input))); }
+      if (req.method === "PUT") { const input = await body(req); const row = credentials.relabel(ref, input); audit.record({ actorKind: "operator", action: "credential.update", targetKind: "credential", targetId: row.ref, detail: { label: row.label, provider: row.provider } }); return json(res, 200, credentialRecord(row)); }
       if (req.method === "DELETE") {
         const usage = credentialUses(credentials.row(ref).ref), reassignTo = url.searchParams.get("reassignTo") || "";
-        if (reassignTo) { if (reassignTo === ref || !credentials.has(reassignTo)) return json(res, 400, { error: "Choose a different saved credential to move these to." }); const reassigned = reassignCredential(ref, reassignTo); credentials.remove(ref); return json(res, 200, { ok: true, reassigned }); }
+        if (reassignTo) { if (reassignTo === ref || !credentials.has(reassignTo)) return json(res, 400, { error: "Choose a different saved credential to move these to." }); const reassigned = reassignCredential(ref, reassignTo); credentials.remove(ref); audit.record({ actorKind: "operator", action: "credential.delete", targetKind: "credential", targetId: ref }); return json(res, 200, { ok: true, reassigned }); }
         // Refuse by default rather than silently breaking agents; the client re-sends with
         // force=1 once it has shown the operator exactly what references this.
         if (usage.uses.length && url.searchParams.get("force") !== "1") return json(res, 409, { error: "This credential is still in use.", usage });
-        credentials.remove(ref); return json(res, 200, { ok: true, reassigned: [] });
+        credentials.remove(ref); audit.record({ actorKind: "operator", action: "credential.delete", targetKind: "credential", targetId: ref }); return json(res, 200, { ok: true, reassigned: [] });
       }
     }
     if (req.method === "POST" && url.pathname === "/v1/secrets") {
