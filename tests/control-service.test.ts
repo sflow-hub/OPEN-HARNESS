@@ -122,6 +122,59 @@ test("pauses for approval and resumes only after an explicit decision", async ()
   assert.equal((await waitRun(run.id)).state, "completed");
 });
 
+test("scopes the approvals inbox and removes a deleted agent's approvals while retaining its runs", async () => {
+  const agentIds = ['inbox-a', 'inbox-b'];
+  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: agentIds.map(id => ({ id, name: id, role: 'Generalist', instructions: '', config: { model: 'mock' } })) }) });
+  const runs: any[] = [];
+  try {
+    for (const agentId of agentIds) {
+      const saved = await request(`/v1/agents/${agentId}/profile`);
+      await request(`/v1/agents/${agentId}/profile`, { method: 'PUT', body: JSON.stringify({ ...saved.profile, allowedTools: ['terminal'] }) });
+      const run = await request('/v1/runs', { method: 'POST', body: JSON.stringify({ agentId, prompt: 'MOCK_APPROVAL' }) });
+      runs.push(run);
+      const deadline = Date.now() + POLL_BUDGET_MS;
+      while (Date.now() < deadline && (await request(`/v1/runs/${run.id}`)).state !== 'waiting_approval') await new Promise(resolve => setTimeout(resolve, 50));
+      assert.equal((await request(`/v1/runs/${run.id}`)).state, 'waiting_approval');
+    }
+    for (const [index, agentId] of agentIds.entries()) {
+      const scoped = await request(`/v1/approvals?agentId=${agentId}&state=all`);
+      assert.equal(scoped.pendingCount, 1);
+      assert.deepEqual(scoped.approvals.map((item: any) => item.runId), [runs[index].id]);
+      assert.ok(scoped.approvals.every((item: any) => item.agentId === agentId));
+    }
+    const before = await request('/v1/approvals?state=all');
+    assert.ok(runs.every(run => before.approvals.some((item: any) => item.runId === run.id)));
+    const aApprovals = before.approvals.filter((item: any) => item.runId === runs[0].id);
+    const aPendingCount = aApprovals.filter((item: any) => item.state === 'pending').length;
+    const rejected = await fetch(`${base}/v1/agents/inbox-a`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(rejected.status, 409);
+    const unchanged = await request('/v1/approvals?state=all');
+    assert.equal(unchanged.pendingCount, before.pendingCount);
+    assert.deepEqual(unchanged.approvals.filter((item: any) => item.runId === runs[0].id).map(({ ageMs, ...rest }: any) => { void ageMs; return rest; }), aApprovals.map(({ ageMs, ...rest }: any) => { void ageMs; return rest; }));
+    assert.equal((await request(`/v1/runs/${runs[0].id}`)).state, 'waiting_approval');
+    await request(`/v1/runs/${runs[0].id}/stop`, { method: 'POST' });
+    assert.equal((await waitRun(runs[0].id)).state, 'cancelled');
+    const deleted = await fetch(`${base}/v1/agents/inbox-a`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(await deleted.json(), { ok: true, id: 'inbox-a' });
+    const after = await request('/v1/approvals?state=all');
+    assert.equal(after.pendingCount, before.pendingCount - aPendingCount);
+    assert.ok(after.approvals.every((item: any) => item.agentId !== 'inbox-a'));
+    assert.ok(after.approvals.some((item: any) => item.runId === runs[1].id && item.state === 'pending'));
+    const removed = await request('/v1/approvals?agentId=inbox-a&state=all');
+    assert.deepEqual(removed, { approvals: [], pendingCount: 0 });
+    const survivor = await request('/v1/approvals?agentId=inbox-b');
+    assert.equal(survivor.pendingCount, 1);
+    assert.deepEqual(survivor.approvals.map((item: any) => item.runId), [runs[1].id]);
+    assert.equal((await request(`/v1/runs/${runs[1].id}`)).state, 'waiting_approval');
+    const store = new Store(join(stateDir, 'state.db'));
+    try { assert.equal((store.db.prepare('SELECT COUNT(*) n FROM approvals WHERE run_id=?').get(runs[0].id) as { n: number }).n, 0); }
+    finally { store.db.close(); }
+  } finally {
+    for (const run of runs) { await request(`/v1/runs/${run.id}/stop`, { method: 'POST' }); await waitRun(run.id); }
+  }
+});
+
 test("rejects expired approvals without changing the row, audit or events", async () => {
   const store = new Store(join(stateDir, "state.db"));
   try {
