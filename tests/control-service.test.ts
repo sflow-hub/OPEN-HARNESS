@@ -150,7 +150,7 @@ test("scopes the approvals inbox and removes a deleted agent's approvals while r
     assert.equal(rejected.status, 409);
     const unchanged = await request('/v1/approvals?state=all');
     assert.equal(unchanged.pendingCount, before.pendingCount);
-    assert.deepEqual(unchanged.approvals.filter((item: any) => item.runId === runs[0].id), aApprovals);
+    assert.deepEqual(unchanged.approvals.filter((item: any) => item.runId === runs[0].id).map(({ ageMs, ...rest }: any) => { void ageMs; return rest; }), aApprovals.map(({ ageMs, ...rest }: any) => { void ageMs; return rest; }));
     assert.equal((await request(`/v1/runs/${runs[0].id}`)).state, 'waiting_approval');
     await request(`/v1/runs/${runs[0].id}/stop`, { method: 'POST' });
     assert.equal((await waitRun(runs[0].id)).state, 'cancelled');
