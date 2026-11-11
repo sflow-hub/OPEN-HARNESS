@@ -1,10 +1,12 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { exportAgentFiles, importAgentFiles, type TransferBundle } from '../runtime/transfer-files';
+
+import { __setSafeFsHook, safeFsMode } from '../runtime/safe-fs';
 
 function bundle(paths: string[]): TransferBundle {
   const files = paths.map(path => ({ path, data: Buffer.from('imported').toString('base64'), checksum: createHash('sha256').update('imported').digest('hex') }));
@@ -58,4 +60,64 @@ test('rejects a non-directory parent and removes staging after commit failure', 
   const { state, agent } = fixture(t); mkdirSync(agent, { recursive: true }); writeFileSync(join(agent, 'private'), 'original');
   assert.throws(() => importAgentFiles(state, 'atlas', bundle(['private/file.txt'])), /non-directory/);
   assert.equal(readFileSync(join(agent, 'private'), 'utf8'), 'original'); assertNoStaging(state);
+});
+
+
+test('export skips symlinked files, directories and allowed roots without reading outside', t => {
+  const { state, agent, outside } = fixture(t); mkdirSync(join(agent, 'private'), { recursive: true }); mkdirSync(join(agent, 'profile'));
+  writeFileSync(join(outside, 'secret.txt'), 'outside secret'); writeFileSync(join(agent, 'private', 'safe.txt'), 'inside');
+  symlinkSync(join(outside, 'secret.txt'), join(agent, 'private', 'link.txt'));
+  symlinkSync(outside, join(agent, 'private', 'linked-dir')); symlinkSync(outside, join(agent, 'profile', 'skills'));
+  symlinkSync(join(outside, 'secret.txt'), join(agent, 'profile', 'MEMORY.md'));
+  const value = exportAgentFiles(state, 'atlas');
+  assert.deepEqual(value.files.map(file => file.path), ['private/safe.txt']);
+  assert.equal(Buffer.from(value.files[0].data, 'base64').toString(), 'inside');
+});
+
+test('export of a missing agent is an empty bundle', t => {
+  const { state } = fixture(t); assert.deepEqual(exportAgentFiles(state, 'missing'), bundle([]));
+});
+
+test('export enforces the directory depth bound', t => {
+  const { state, agent } = fixture(t); mkdirSync(join(agent, 'private', ...Array(33).fill('nested')), { recursive: true });
+  assert.throws(() => exportAgentFiles(state, 'atlas'), /depth limit/);
+});
+
+test('export enforces the remaining 20 MB budget', t => {
+  const { state, agent } = fixture(t); mkdirSync(join(agent, 'private'), { recursive: true });
+  writeFileSync(join(agent, 'private', 'a'), Buffer.alloc(10_000_000)); writeFileSync(join(agent, 'private', 'b'), Buffer.alloc(10_000_001));
+  assert.throws(() => exportAgentFiles(state, 'atlas'), /Managed agent data exceeds the 20 MB transfer limit/);
+});
+
+test('import replaces an existing regular file', t => {
+  const { state, agent } = fixture(t); mkdirSync(join(agent, 'private'), { recursive: true }); writeFileSync(join(agent, 'private', 'file.txt'), 'original');
+  const value = bundle(['private/file.txt']); assert.deepEqual(importAgentFiles(state, 'atlas', value), { checksum: value.checksum, files: 1 });
+  assert.equal(readFileSync(join(agent, 'private', 'file.txt'), 'utf8'), 'imported'); assertNoStaging(state);
+});
+
+test('import reports partial commits when a later parent is a regular file', t => {
+  const { state, agent } = fixture(t); mkdirSync(join(agent, 'private'), { recursive: true }); writeFileSync(join(agent, 'private', 'blocked'), 'original');
+  assert.throws(() => importAgentFiles(state, 'atlas', bundle(['private/first.txt', 'private/blocked/second.txt'])), /non-directory\. \(1 of 2 files committed\)/);
+  assert.equal(readFileSync(join(agent, 'private', 'first.txt'), 'utf8'), 'imported');
+  assert.equal(readFileSync(join(agent, 'private', 'blocked'), 'utf8'), 'original'); assertNoStaging(state);
+});
+
+test('import refuses a directory at the leaf', t => {
+  const { state, agent } = fixture(t); mkdirSync(join(agent, 'private', 'file.txt'), { recursive: true });
+  assert.throws(() => importAgentFiles(state, 'atlas', bundle(['private/file.txt'])), /non-directory/); assertNoStaging(state);
+});
+
+test('import commits into the held parent after a parent swap', { skip: safeFsMode() !== 'fd-relative' }, t => {
+  const { state, agent, outside } = fixture(t); mkdirSync(join(agent, 'private', 'dest'), { recursive: true });
+  writeFileSync(join(outside, 'file.txt'), 'outside');
+  const previous = process.env.OPEN_HARNESS_SAFE_FS_TEST_HOOKS; process.env.OPEN_HARNESS_SAFE_FS_TEST_HOOKS = '1';
+  t.after(() => { __setSafeFsHook('beforeRenameCommit', null); if (previous === undefined) delete process.env.OPEN_HARNESS_SAFE_FS_TEST_HOOKS; else process.env.OPEN_HARNESS_SAFE_FS_TEST_HOOKS = previous; });
+  let swapped = false;
+  __setSafeFsHook('beforeRenameCommit', () => {
+    if (swapped) return; swapped = true;
+    renameSync(join(agent, 'private', 'dest'), join(agent, 'private', 'held')); symlinkSync(outside, join(agent, 'private', 'dest'));
+  });
+  importAgentFiles(state, 'atlas', bundle(['private/dest/file.txt']));
+  assert.equal(swapped, true); assert.equal(readFileSync(join(agent, 'private', 'held', 'file.txt'), 'utf8'), 'imported');
+  assert.equal(readFileSync(join(outside, 'file.txt'), 'utf8'), 'outside'); assert.deepEqual(readdirSync(outside), ['file.txt']); assertNoStaging(state);
 });
