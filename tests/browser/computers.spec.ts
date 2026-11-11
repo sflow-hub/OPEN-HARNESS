@@ -47,3 +47,30 @@ test('lists computers and revokes a paired one after confirmation', async ({ pag
   const heartbeat = await request.post(control + '/v1/runner/heartbeat', { headers: { Authorization: `Bearer ${runner.token}`, 'X-Open-Harness-Machine': runner.machineId }, data: {} });
   expect(heartbeat.status()).toBe(401);
 });
+
+test('a failed revoke stays reported after the list refreshes', async ({ page, request }, testInfo) => {
+  const name = `Flaky server ${testInfo.project.name}`, runner = await pairRunner(request, name);
+  // The coordinator is shared across specs, so the paired runner is revoked even when an assertion fails.
+  try {
+    await page.route('**/v1/machines/*/revoke', route => route.fulfill({ status: 500, json: { error: 'The coordinator could not revoke it.' } }));
+    await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+    if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+    await page.locator('.nav-item', { hasText: 'Computers' }).click();
+    const paired = page.getByRole('article', { name });
+    await expect(paired).toContainText('Online');
+
+    await paired.getByRole('button', { name: `Revoke ${name}` }).click();
+    await page.getByRole('alertdialog', { name: `Revoke ${name}?` }).getByRole('button', { name: 'Revoke computer' }).click();
+    const failure = page.getByRole('alert').filter({ hasText: `${name} was not revoked: The coordinator could not revoke it.` });
+    await expect(failure).toBeVisible();
+
+    const isList = (url: string) => new URL(url).pathname === '/v1/machines';
+    const listed = page.waitForResponse(response => isList(response.url()) && response.request().method() === 'GET' && response.ok());
+    await page.getByRole('button', { name: 'Refresh computers' }).click();
+    await listed;
+    await expect(failure).toBeVisible();
+    await expect(paired).toBeVisible();
+  } finally {
+    expect((await request.post(control + `/v1/machines/${encodeURIComponent(runner.machineId)}/revoke`, { headers: await headers(request), data: {} })).status()).toBe(200);
+  }
+});

@@ -118,6 +118,62 @@ test('an approval answered elsewhere is reported as no longer pending', async ({
   await expect(page.getByRole('list', { name: 'Approval history' }).getByRole('listitem', { name: label() })).toContainText('Approved');
 });
 
+test('a decision error that lands after switching views is not shown', async ({ page, request }, testInfo) => {
+  const mobile = testInfo.project.name === 'mobile';
+  await startRun(request, `MOCK_APPROVAL late conflict ${testInfo.project.name}`);
+  await expect.poll(() => pendingCount(request)).toBe(1);
+  await goLive(page);
+
+  await openNav(page, mobile);
+  await page.getByRole('button', { name: /^Approvals/ }).click();
+  const item = page.getByRole('list', { name: 'Pending approvals' }).getByRole('listitem', { name: label() });
+  await expect(item).toHaveCount(1);
+
+  // Hold the decision until History is on screen, then answer it with a conflict.
+  const isDecision = (url: URL) => /^\/v1\/runs\/[^/]+\/approval$/.test(url.pathname);
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/v1/runs/*/approval', async route => { await held; await route.fulfill({ status: 409, json: { error: 'Approval is not pending.' } }); });
+  const sent = page.waitForRequest(browserRequest => isDecision(new URL(browserRequest.url())));
+  await item.getByRole('button', { name: `Approve Tool request for ${agent.name}` }).click();
+  await sent;
+
+  await page.getByRole('button', { name: 'History', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'History', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.approvals-loading')).toHaveCount(0);
+
+  const isHistoryList = (url: URL) => url.pathname === '/v1/approvals' && url.searchParams.get('state') === 'resolved' && url.searchParams.get('limit') === '100';
+  const answered = page.waitForEvent('requestfinished', browserRequest => isDecision(new URL(browserRequest.url())));
+  const refreshed = page.waitForResponse(response => isHistoryList(new URL(response.url())));
+  release();
+  await answered;
+  await refreshed;
+  // Two frames let the page finish handling the late conflict before checking it was ignored.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const conflict = page.getByRole('alert').filter({ hasText: 'This approval is no longer pending.' });
+  await expect(conflict).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Pending', exact: true }).click();
+  await expect(item).toHaveCount(1);
+  await expect(conflict).toHaveCount(0);
+});
+
+test('a failed approvals load is cleared once a later refresh succeeds', async ({ page }, testInfo) => {
+  const mobile = testInfo.project.name === 'mobile';
+  // limit=100 is the inbox's own list; the nav badge polls with limit=1 and must not consume the failure.
+  const isInboxList = (url: URL) => url.pathname === '/v1/approvals' && url.searchParams.get('limit') === '100';
+  await page.route(isInboxList, route => route.fulfill({ status: 500, json: { error: 'Approvals are briefly unavailable.' } }), { times: 1 });
+  await openNav(page, mobile);
+  await page.getByRole('button', { name: /^Approvals/ }).click();
+  const failure = page.getByRole('alert').filter({ hasText: 'Approvals are briefly unavailable.' });
+  await expect(failure).toBeVisible();
+
+  // The inbox polls every 10 s; that next load is the refresh that should clear the alert.
+  await page.waitForResponse(response => isInboxList(new URL(response.url())) && response.ok(), { timeout: 15_000 });
+  await expect(failure).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Pending', exact: true })).toHaveAttribute('aria-pressed', 'true');
+});
+
 test('a denied approval moves to history and a slow history load never replaces the pending view', async ({ page, request }, testInfo) => {
   const mobile = testInfo.project.name === 'mobile';
   await startRun(request, `MOCK_APPROVAL deny ${testInfo.project.name}`);

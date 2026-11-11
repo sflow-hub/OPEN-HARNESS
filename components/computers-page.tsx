@@ -24,11 +24,13 @@ export default function ComputersPage({ client, agents, onAddComputer }: { clien
   const [machines, setMachines] = useState<MachineInfo[] | null>(null);
   const [busy, setBusy] = useState("");
   const [messages, setMessages] = useState<Record<string, string>>({});
-  const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
+  // Kept apart from loadError so the refresh that follows a failed revoke cannot wipe it.
+  const [revokeError, setRevokeError] = useState("");
   const [revoking, setRevoking] = useState<MachineInfo | null>(null);
   const refresh = useCallback(async () => {
-    try { if (!client.token) await client.bootstrap(); setMachines(await client.listMachines()); setError(""); }
-    catch (cause) { setError(errorText(cause)); }
+    try { if (!client.token) await client.bootstrap(); setMachines(await client.listMachines()); setLoadError(""); }
+    catch (cause) { setLoadError(errorText(cause)); }
   }, [client]);
   useEffect(() => { const first = setTimeout(() => void refresh(), 0), timer = setInterval(() => void refresh(), 10_000); return () => { clearTimeout(first); clearInterval(timer); }; }, [refresh]);
   useEffect(() => {
@@ -44,9 +46,9 @@ export default function ComputersPage({ client, agents, onAddComputer }: { clien
   };
   const revoke = async () => {
     if (!revoking) return;
-    setBusy(revoking.id); setError("");
+    setBusy(revoking.id); setRevokeError("");
     try { await client.revokeMachine(revoking.id); setRevoking(null); await refresh(); }
-    catch (cause) { setError(`${revoking.name} was not revoked: ${errorText(cause)}`); setRevoking(null); await refresh(); }
+    catch (cause) { setRevokeError(`${revoking.name} was not revoked: ${errorText(cause)}`); setRevoking(null); await refresh(); }
     finally { setBusy(""); }
   };
   const agentName = (id: string | null) => id ? agents.find(agent => agent.id === id)?.name || id : "";
@@ -54,8 +56,9 @@ export default function ComputersPage({ client, agents, onAddComputer }: { clien
   return <section className="teams-content computers-content">
     <div className="teams-heading"><div><div className="eyebrow">WHERE AGENTS WORK</div><h1>Computers</h1><p>This computer and every runner you have paired. Several agents can share one computer.</p></div><div className="computers-heading-actions"><button className="subtle-button" aria-label="Refresh computers" onClick={() => void refresh()}><RefreshCw size={14} /></button><button className="light-button" onClick={onAddComputer}><Plus size={14} /> Add computer</button></div></div>
     <p className="muted small">New computers are paired from Agent settings → Computer, which selects the new computer for that agent.</p>
-    {error && <div className="task-error" role="alert">{error}</div>}
-    {!machines && !error && <p className="muted small"><LoaderCircle className="spin" size={13} /> Loading computers…</p>}
+    {loadError && <div className="task-error" role="alert">{loadError}</div>}
+    {revokeError && <div className="task-error" role="alert">{revokeError}</div>}
+    {!machines && !loadError && <p className="muted small"><LoaderCircle className="spin" size={13} /> Loading computers…</p>}
     <div className="computer-list">
       {machines?.map(machine => <article className="computer-card" key={machine.id} aria-label={machine.name}>
         <div className="computer-card-main">

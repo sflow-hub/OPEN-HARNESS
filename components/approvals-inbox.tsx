@@ -20,14 +20,18 @@ function age(ms: number) {
 export default function ApprovalsInbox({ client, refreshKey, onCount, onResolved }: { client: ControlClient; refreshKey: number; onCount: (count: number) => void; onResolved: (approvalId: string) => void }) {
   const [filter, setFilter] = useState<Filter>("pending");
   const [items, setItems] = useState<ApprovalItem[] | null>(null);
-  const [error, setError] = useState("");
+  // A decision is always followed by a refresh, so its error must survive that refresh's success.
+  const [loadError, setLoadError] = useState("");
+  const [decisionError, setDecisionError] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   // Responses can land out of order across filter switches, polls and decisions; only the newest
   // request for the filter on screen may update the list. The filter is read from the ref, not a
   // closure, so a decision that finishes after a switch reloads the view now shown.
   const generation = useRef(0);
   const shown = useRef<Filter>("pending");
-  const choose = (next: Filter) => { if (next === shown.current) return; shown.current = next; generation.current++; setItems(null); setError(""); setFilter(next); };
+  // A decision's error belongs to the view it was made in; a switch or a newer decision makes it stale.
+  const decisionEpoch = useRef(0);
+  const choose = (next: Filter) => { if (next === shown.current) return; shown.current = next; generation.current++; decisionEpoch.current++; setItems(null); setLoadError(""); setDecisionError(""); setFilter(next); };
 
   const refresh = useCallback(async () => {
     const id = ++generation.current, target = shown.current;
@@ -35,11 +39,11 @@ export default function ApprovalsInbox({ client, refreshKey, onCount, onResolved
     try {
       const value = await client.listApprovals({ state: target, limit: 100 });
       if (!latest()) return;
-      setItems(value.approvals); onCount(value.pendingCount);
+      setItems(value.approvals); onCount(value.pendingCount); setLoadError("");
     } catch (cause) {
       if (!latest()) return;
       setItems(current => current ?? []);
-      setError(cause instanceof Error ? cause.message : "Approvals could not be loaded.");
+      setLoadError(cause instanceof Error ? cause.message : "Approvals could not be loaded.");
     }
   }, [client, onCount]);
   useEffect(() => {
@@ -50,12 +54,13 @@ export default function ApprovalsInbox({ client, refreshKey, onCount, onResolved
   }, [refresh, refreshKey, filter]);
 
   const resolve = async (item: ApprovalItem, decision: "approve" | "deny") => {
-    setBusy(item.id); setError("");
+    const epoch = ++decisionEpoch.current;
+    setBusy(item.id); setDecisionError("");
     try {
       await client.resolveApproval(item.runId, item.id, decision);
       onResolved(item.id);
     } catch (cause) {
-      setError((cause as { status?: number }).status === 409 ? "This approval is no longer pending." : cause instanceof Error ? cause.message : "Could not send that decision.");
+      if (epoch === decisionEpoch.current) setDecisionError((cause as { status?: number }).status === 409 ? "This approval is no longer pending." : cause instanceof Error ? cause.message : "Could not send that decision.");
     } finally {
       setBusy(null);
       await refresh();
@@ -74,7 +79,8 @@ export default function ApprovalsInbox({ client, refreshKey, onCount, onResolved
         <button className={filter === "resolved" ? "active" : ""} aria-pressed={filter === "resolved"} onClick={() => choose("resolved")}>History</button>
       </div>
     </div>
-    {error && <div className="task-alert error approvals-alert" role="alert"><CircleAlert size={16} /> {error}<button aria-label="Dismiss" onClick={() => setError("")}><X size={15} /></button></div>}
+    {loadError && <div className="task-alert error approvals-alert" role="alert"><CircleAlert size={16} /> {loadError}<button aria-label="Dismiss" onClick={() => setLoadError("")}><X size={15} /></button></div>}
+    {decisionError && <div className="task-alert error approvals-alert" role="alert"><CircleAlert size={16} /> {decisionError}<button aria-label="Dismiss" onClick={() => setDecisionError("")}><X size={15} /></button></div>}
     {items === null ? <p className="muted small approvals-loading"><LoaderCircle className="spin" size={14} /> Loading approvals…</p>
       : !items.length ? <div className="files-empty">
         <ShieldCheck size={40} />
