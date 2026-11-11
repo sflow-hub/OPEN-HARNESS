@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { COORDINATION_TOOLS, prepareProfile } from '../runtime/profile-runtime';
+import { COORDINATION_TOOLS, discoverTools, prepareProfile } from '../runtime/profile-runtime';
 import { hermesApprovalDecision } from '../runtime/hermes';
 import { DEFAULT_BOARD, DEFAULT_COMPUTER, HANDOFF_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
 
@@ -176,5 +176,43 @@ test('the managed gateway announces itself as a session that can answer approval
   for (const path of ['runtime/service.ts', 'runtime/runner.ts']) {
     assert.match(readFileSync(join(import.meta.dirname, '..', path), 'utf8'), /HERMES_GATEWAY_SESSION: '1'/,
       `${path} must mark its native gateway as an approval channel too`);
+  }
+});
+
+
+test('tool discovery forwards team mounts and the live busy predicate', async () => {
+  const previousMock = process.env.OPEN_HARNESS_MOCK;
+  delete process.env.OPEN_HARNESS_MOCK;
+  try {
+    const teamIds = ['shared-team'];
+    let busy = true, ensured = false, probed = false;
+    const isBusy = () => busy;
+    const catalog = await discoverTools(profile.id, '/state', profile, teamIds, isBusy, {
+      dockerStatusCached: async () => ({ available: true, version: 'test', message: 'Ready' }),
+      ensureContainer: (agentId, root, computer, forwardedTeams, forwardedBusy) => {
+        ensured = true;
+        assert.equal(agentId, profile.id);
+        assert.equal(root, '/state');
+        assert.equal(computer, profile.computer);
+        assert.equal(forwardedTeams, teamIds);
+        assert.equal(forwardedBusy, isBusy);
+        assert.equal(forwardedBusy!(), true);
+        busy = false;
+        assert.equal(forwardedBusy!(), false);
+        return 'existing-container';
+      },
+      runtimeProbe: async (container, input) => {
+        probed = true;
+        assert.equal(container, 'existing-container');
+        assert.deepEqual(input, { action: 'catalog' });
+        return { tools: [] };
+      },
+    });
+    assert.equal(ensured, true);
+    assert.equal(probed, true);
+    assert.equal(catalog.source, 'runtime');
+  } finally {
+    if (previousMock === undefined) delete process.env.OPEN_HARNESS_MOCK;
+    else process.env.OPEN_HARNESS_MOCK = previousMock;
   }
 });

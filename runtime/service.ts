@@ -679,7 +679,7 @@ const server = createServer(async (req, res) => {
       if (action === 'tools' && req.method === 'GET') {
         ensureProfileDirs(id);
         profiles.checkDirect(profile.computer);
-        const catalog = profile.computer.machineId === 'local' ? await discoverTools(id, root, profile) : await runnerProbe(profile, 'probe-tools') as ToolCatalog;
+        const catalog = profile.computer.machineId === 'local' ? await discoverTools(id, root, profile, teams.activeTeamIds(id), () => store.agentBusy(id)) : await runnerProbe(profile, 'probe-tools') as ToolCatalog;
         if (!catalog.tools.some(tool => tool.id === MESSAGE_TOOL)) catalog.tools.push({ id: MESSAGE_TOOL, name: 'Conversation messages', group: 'other', description: 'Post messages and read or acknowledge your inbox.', available: true });
         if (catalog.source === 'unavailable') {
           const cached = store.db.prepare('SELECT json FROM tool_catalogs WHERE agent_id=?').get(id) as { json: string } | undefined;
