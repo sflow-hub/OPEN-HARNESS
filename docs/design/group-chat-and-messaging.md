@@ -41,11 +41,14 @@ This document is the full design; part of it has shipped. Current state, verifie
   identically for every policy (no round-robin ring advance, no moderator control turn).
 - There is no `POST /v1/conversations/:id/policy` route (§11); the route matcher accepts only
   `members`, `messages`, `halt`, and `resume` (`runtime/service.ts:808`).
-- Operator-created groups do not enforce the shared-team rule at creation: `createConversation`
-  validates members but never calls `sharesActiveTeam` (`runtime/conversations.ts:26`–`40`). That
-  gap is only at operator group creation — the team check is enforced elsewhere: when an agent
-  moderator adds a member (`runtime/conversations.ts:55`), when an agent posts a message
-  (`runtime/service.ts:901`), and in inbox/transcript visibility (`runtime/messaging.ts:18`).
+- Operator writes do not enforce the shared-team rule: `createConversation` validates members
+  but never calls `sharesActiveTeam` (`runtime/conversations.ts:26`–`40`), and the operator
+  add-member route (`runtime/service.ts:819`) calls `addMember` with no adder, so it defaults to
+  the user and skips the agent-only team check (`runtime/conversations.ts:50`–`56`). The gap is
+  therefore at operator group creation **and** operator member additions to an existing group.
+  The team check is enforced on the agent paths: when an agent moderator adds a member
+  (`runtime/conversations.ts:55`), when an agent posts a message (`runtime/service.ts:901`), and
+  in inbox/transcript visibility (`runtime/messaging.ts:18`).
 - Per-conversation loop/rate/cost controls (§8) are not honored: the `limits_json` column is
   stored but never read (`runtime/db.ts:113`); the caps are fixed module constants
   (`MAX_TURNS_PER_MESSAGE = 8`, `MAX_TURNS_PER_HOUR = 30`, `runtime/messaging.ts:4`–`5`), not the
