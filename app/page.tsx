@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   ArrowUpRight,
@@ -172,6 +172,12 @@ export default function Home() {
   const [approvals, setApprovals] = useState<Array<{ approvalId: string; detail: string; runId: string; agentName: string }>>([]);
   // Coordinator-wide, unlike the queue above, which only holds runs this page is following.
   const [pendingApprovals, setPendingApprovals] = useState(0);
+  // The badge poll and the inbox both write this count; a poll that started before an answer can
+  // land after the inbox's newer count, so a write older than the last applied one is dropped.
+  const badgeTicket = useRef(0), badgeApplied = useRef(0);
+  const applyPendingApprovals = (ticket: number, count: number) => { if (ticket < badgeApplied.current) return; badgeApplied.current = ticket; setPendingApprovals(count); };
+  // The inbox orders its own requests, so its report is current when it arrives. Stable, since the inbox reloads when onCount changes.
+  const reportInboxCount = useCallback((count: number) => applyPendingApprovals(++badgeTicket.current, count), []);
   const [inputMode, setInputMode] = useState<"steer" | "followup">("steer");
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [historyRoutine, setHistoryRoutine] = useState<Routine | null>(null);
@@ -518,7 +524,7 @@ export default function Home() {
   }, []);
   useEffect(() => {
     if (!runtime) return;
-    const load = () => { if (!document.hidden) controlRef.current.listApprovals({ state: "pending", limit: 1 }).then(value => setPendingApprovals(value.pendingCount)).catch(() => {}); };
+    const load = () => { if (document.hidden) return; const ticket = ++badgeTicket.current; controlRef.current.listApprovals({ state: "pending", limit: 1 }).then(value => applyPendingApprovals(ticket, value.pendingCount)).catch(() => {}); };
     load();
     const timer = window.setInterval(load, 15_000);
     return () => window.clearInterval(timer);
@@ -1986,7 +1992,7 @@ export default function Home() {
             )}
           </section>
         )}
-        {view === "approvals" && <ApprovalsInbox client={controlRef.current} refreshKey={approvals.length} onCount={setPendingApprovals} onResolved={approvalId => setApprovals(current => current.filter(item => item.approvalId !== approvalId))} />}
+        {view === "approvals" && <ApprovalsInbox client={controlRef.current} refreshKey={approvals.length} onCount={reportInboxCount} onResolved={approvalId => setApprovals(current => current.filter(item => item.approvalId !== approvalId))} />}
         {view === "groups" && <GroupChatView client={controlRef.current} agents={workspace.agents} onNotice={setNotice} />}
         {advancedFeatures && view === "computers" && <ComputersPage client={controlRef.current} agents={workspace.agents} onAddComputer={() => { setEditingAgentTab('computer'); setEditingAgent(agent); }} />}
       </main>
