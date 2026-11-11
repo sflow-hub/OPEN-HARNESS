@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { appendFileSync, mkdirSync, writeFileSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, existsSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync, readFileSync, renameSync, statSync, existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
@@ -26,6 +26,7 @@ import { TeamError, TeamStore } from "./teams";
 import { COMPUTER_REVOKED, MachineError, Machines } from "./machines";
 import { encryptRunnerSecret } from "../lib/runner-crypto";
 import { exportAgentFiles, importAgentFiles, type TransferBundle } from './transfer-files';
+import { safeFsMode, SafeFsError, safeFsErrorStatus, readInside, writeInside, unlinkInside, listInside, mkdirInside, rmrfInside, statInside } from './safe-fs';
 import { onboardingAction, onboardingStatus } from './readiness';
 import { APP_VERSION } from '../lib/version';
 import { HERMES_COMMIT, HERMES_RELEASE } from '../lib/hermes-pin';
@@ -443,20 +444,22 @@ function createRun(input: { agentId: string; conversationId?: string; prompt: st
 }
 function runResponse(run: RunRow) { const profile = profiles.runSnapshot(run.id) || profiles.get(run.agent_id); const machineId = profile?.computer.machineId || null; let machineConnection: string | null = null; if (machineId) { try { machineConnection = machines.get(machineId).status; } catch { machineConnection = 'revoked'; } } return { ...run, machine_id: machineId, machine_connection: machineConnection }; }
 
-function listFiles(dir: string) {
-  if (!dir.startsWith(root)) throw new Error("Invalid workspace path.");
-  mkdirSync(dir, { recursive: true });
-  return readdirSync(dir, { withFileTypes: true }).filter(entry => entry.isFile()).slice(0, 200).map(entry => {
-    const path = join(dir, entry.name), stat = statSync(path); return { name: entry.name, size: stat.size, updatedAt: stat.mtime.toISOString(), mimeType: mimeType(entry.name), encoding: isText(entry.name) ? "utf8" : "base64" };
-  });
+function listFiles(anchor: string, base: string) {
+  return listInside(anchor, base, { max: Number.MAX_SAFE_INTEGER }).filter(entry => !entry.isDirectory && statInside(anchor, `${base}/${entry.name}`)?.isFile).slice(0, 200).map(entry => ({ name: entry.name, size: entry.size, updatedAt: new Date(entry.mtimeMs).toISOString(), mimeType: mimeType(entry.name), encoding: isText(entry.name) ? "utf8" : "base64" }));
+}
+function agentFileAnchor(id: string) { const anchor = join(root, "agents", validId(id)); mkdirSync(anchor, { recursive: true }); return anchor; }
+function ensureFileDir(anchor: string, base: string) { if (statInside(anchor, base) === null) mkdirInside(anchor, base); }
+function readContextFile(anchor: string, rel: string) {
+  if (statInside(anchor, rel)?.isSymbolicLink) throw new SafeFsError('symlink', 'Refusing to follow a symbolic link.');
+  try { return readInside(anchor, rel, { encoding: "utf8", maxBytes: Number.MAX_SAFE_INTEGER }); } catch (error) { if (error instanceof SafeFsError && error.code === 'not-found') return ""; throw error; }
 }
 function isText(name: string) { return /\.(txt|md|csv|json|html|css|js|mjs|cjs|ts|tsx|py|yaml|yml|xml|log|svg)$/i.test(name); }
 function mimeType(name: string) {
   const ext = name.toLowerCase().split(".").pop();
   return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml", pdf: "application/pdf", json: "application/json", csv: "text/csv", md: "text/markdown", html: "text/html" } as Record<string, string>)[ext || ""] || (isText(name) ? "text/plain" : "application/octet-stream");
 }
-function workspaceDir(url: URL) { const scope = url.searchParams.get("scope") || "shared", agentId = url.searchParams.get("agentId") || ""; return { scope, dir: scope === "private" ? join(root, "agents", validId(agentId), "private") : join(root, "shared") }; }
-function safeFile(dir: string, name: string) { if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(name) || name.includes("..")) throw new Error("Invalid filename."); const target = join(dir, name); if (!target.startsWith(dir + "/")) throw new Error("Invalid path."); return target; }
+function workspaceDir(url: URL) { const scope = url.searchParams.get("scope") || "shared", agentId = url.searchParams.get("agentId") || ""; return { scope, anchor: scope === "private" ? agentFileAnchor(agentId) : root, base: scope === "private" ? "private" : "shared" }; }
+function safeFile(name: string) { if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(name) || name.includes("..")) throw new Error("Invalid filename."); return name; }
 
 function validTaskMutation(input: Record<string, unknown>, current?: ReturnType<TaskStore["getTask"]>) {
   const teamId = input.teamId === undefined ? current?.teamId || null : input.teamId ? String(input.teamId) : null;
@@ -481,7 +484,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") { res.writeHead(204, { "Access-Control-Allow-Origin": allowedOrigin(origin), "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS" }); return res.end(); }
   const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
   try {
-    if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); if (!loopbackHost(req.headers.host)) return json(res, 403, { error: 'Dashboard bootstrap requires a loopback address. Open Open Harness at http://localhost:3000.' }); return json(res, 200, { token: secrets.token, mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: APP_VERSION, hermes: { release: HERMES_RELEASE, commit: HERMES_COMMIT } }); }
+    if (req.method === "GET" && url.pathname === "/v1/bootstrap") { const address = req.socket.remoteAddress || ''; if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address)) return json(res, 403, { error: 'Dashboard bootstrap is available only from the coordinator machine.' }); if (!loopbackHost(req.headers.host)) return json(res, 403, { error: 'Dashboard bootstrap requires a loopback address. Open Open Harness at http://localhost:3000.' }); return json(res, 200, { token: secrets.token, fileSafety: safeFsMode(), mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: APP_VERSION, hermes: { release: HERMES_RELEASE, commit: HERMES_COMMIT } }); }
     if (req.method === 'GET' && (url.pathname === '/v1/install/runner.sh' || url.pathname === '/v1/install/runner.ps1')) {
       const name = url.pathname.endsWith('.ps1') ? 'install-runner.ps1' : 'install-runner.sh';
       return raw(res, 200, name.endsWith('.ps1') ? 'text/plain; charset=utf-8' : 'text/x-shellscript; charset=utf-8', readFileSync(join(import.meta.dirname, 'installers', name)));
@@ -736,16 +739,16 @@ const server = createServer(async (req, res) => {
       const safe = validId(skillMatch[1]);
       const skill = decodeURIComponent(skillMatch[2]);
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(skill)) return json(res, 400, { error: "Invalid skill name." });
-      const skillDir = join(root, "agents", safe, "profile", "skills", skill), skillFile = join(skillDir, "SKILL.md");
-      if (req.method === "GET") { if (!existsSync(skillFile)) return json(res, 404, { error: "Skill not found." }); return json(res, 200, { name: skill, content: readFileSync(skillFile, "utf8") }); }
-      if (req.method === "PUT") { const input = await body(req); mkdirSync(skillDir, { recursive: true }); writeFileSync(skillFile, String(input.content || ""), { mode: 0o600 }); return json(res, 200, { ok: true }); }
-      if (req.method === "DELETE") { if (existsSync(skillDir)) rmSync(skillDir, { recursive: true }); return json(res, 200, { ok: true }); }
+      const anchor = agentFileAnchor(safe), skillDir = `profile/skills/${skill}`, skillFile = `${skillDir}/SKILL.md`;
+      if (req.method === "GET") { try { return json(res, 200, { name: skill, content: readInside(anchor, skillFile, { encoding: "utf8", maxBytes: Number.MAX_SAFE_INTEGER }) }); } catch (error) { if (error instanceof SafeFsError && error.code === 'not-found') return json(res, 404, { error: "Skill not found." }); throw error; } }
+      if (req.method === "PUT") { const input = await body(req); for (const base of ["profile", "profile/skills", skillDir]) ensureFileDir(anchor, base); writeInside(anchor, skillFile, String(input.content || ""), { maxBytes: Number.MAX_SAFE_INTEGER }); return json(res, 200, { ok: true }); }
+      if (req.method === "DELETE") { try { rmrfInside(anchor, skillDir, { maxEntries: 10000, maxDepth: 16 }); } catch (error) { if (!(error instanceof SafeFsError && error.code === 'not-found')) throw error; } return json(res, 200, { ok: true }); }
     }
     const contextMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/context$/);
     if (contextMatch) {
-      const safe = validId(contextMatch[1]), profile = join(root, "agents", safe, "profile"), memoryPath = join(profile, "MEMORY.md"), userPath = join(profile, "USER.md"), skillsPath = join(profile, "skills"); mkdirSync(profile, { recursive: true });
-      if (req.method === "PUT") { const input = await body(req); if (String(input.memory || "").length > 50_000) return json(res, 413, { error: "Memory is limited to 50 KB." }); writeFileSync(memoryPath, String(input.memory || ""), { mode: 0o600 }); return json(res, 200, { ok: true }); }
-      if (req.method === "GET") { const skills = existsSync(skillsPath) ? readdirSync(skillsPath, { withFileTypes: true }).filter(item => item.isDirectory()).map(item => item.name).slice(0, 200) : [], available = (await dockerStatusCached()).available; return json(res, 200, { memory: existsSync(memoryPath) ? readFileSync(memoryPath, "utf8") : "", user: existsSync(userPath) ? readFileSync(userPath, "utf8") : "", skills, capabilities: { terminal: available, process: available, code: available, files: available, web: available, browser: available, memory: available, skills: available, mcp: available, delegation: available, schedules: true } }); }
+      const anchor = agentFileAnchor(contextMatch[1]); ensureFileDir(anchor, "profile");
+      if (req.method === "PUT") { const input = await body(req); if (String(input.memory || "").length > 50_000) return json(res, 413, { error: "Memory is limited to 50 KB." }); writeInside(anchor, "profile/MEMORY.md", String(input.memory || ""), { maxBytes: 50_000 }); return json(res, 200, { ok: true }); }
+      if (req.method === "GET") { const memory = readContextFile(anchor, "profile/MEMORY.md"), user = readContextFile(anchor, "profile/USER.md"), skills = statInside(anchor, "profile/skills") === null ? [] : listInside(anchor, "profile/skills", { max: Number.MAX_SAFE_INTEGER }).filter(item => item.isDirectory).map(item => item.name).slice(0, 200), available = (await dockerStatusCached()).available; return json(res, 200, { memory, user, skills, capabilities: { terminal: available, process: available, code: available, files: available, web: available, browser: available, memory: available, skills: available, mcp: available, delegation: available, schedules: true } }); }
     }
     if (req.method === "POST" && url.pathname === "/v1/migrate") {
       const input = await body(req); const found = store.db.prepare("SELECT 1 FROM migrations WHERE key='browser-v1'").get();
@@ -753,12 +756,12 @@ const server = createServer(async (req, res) => {
       store.db.prepare("INSERT INTO migrations(key,payload_json,created_at) VALUES(?,?,?)").run("browser-v1", JSON.stringify(input), new Date().toISOString());
       for (const agent of input.agents || []) {
         profiles.import(agent);
-        const safe = validId(String(agent.id)), profile = join(root, "agents", safe, "profile");
-        mkdirSync(profile, { recursive: true });
-        if (Array.isArray(agent.memory) && agent.memory.length) writeFileSync(join(profile, "MEMORY.md"), agent.memory.map((item: unknown) => `- ${String(item)}`).join("\n") + "\n", { mode: 0o600 });
+        const anchor = agentFileAnchor(String(agent.id));
+        ensureFileDir(anchor, "profile");
+        if (Array.isArray(agent.memory) && agent.memory.length) writeInside(anchor, "profile/MEMORY.md", agent.memory.map((item: unknown) => `- ${String(item)}`).join("\n") + "\n", { maxBytes: Number.MAX_SAFE_INTEGER });
       }
       for (const conversation of input.conversations || []) store.db.prepare("INSERT OR IGNORE INTO conversations(id,agent_id,title,legacy_json,created_at,updated_at) VALUES(?,?,?,?,?,?)").run(conversation.id, conversation.agentId, conversation.title, JSON.stringify(conversation), conversation.updatedAt || new Date().toISOString(), conversation.updatedAt || new Date().toISOString());
-      for (const file of input.files || []) { const target = join(root, "shared", String(file.name).replace(/[^a-zA-Z0-9._ -]/g, "_")); writeFileSync(target, String(file.content).slice(0, 1_000_000)); }
+      for (const file of input.files || []) { const name = safeFile(String(file.name).replace(/[^a-zA-Z0-9._ -]/g, "_")); writeInside(root, `shared/${name}`, String(file.content).slice(0, 1_000_000), { maxBytes: 1_000_000 }); }
       writeFileSync(join(root, "browser-v1-backup.json"), JSON.stringify(input, null, 2), { mode: 0o600 });
       return json(res, 200, { migrated: true });
     }
@@ -865,7 +868,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true, name: row.ref });
     }
     if (/^\/v1\/agents\/[^/]+\/connectors/.test(url.pathname)) return json(res, 410, { error: 'Connection settings moved into Agent settings. Reload the app.' });
-    if (url.pathname === "/v1/files") { const { scope, dir } = workspaceDir(url); mkdirSync(dir, { recursive: true }); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = safeFile(dir, name); if (!existsSync(target)) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readFileSync(target, encoding), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(dir), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = safeFile(dir, String(input.name || "")); writeFileSync(target, content, { encoding, mode: 0o600 }); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = safeFile(dir, String(url.searchParams.get("name") || "")); if (existsSync(target)) unlinkSync(target); return json(res, 200, { ok: true }); } }
+    if (url.pathname === "/v1/files") { const { scope, anchor, base } = workspaceDir(url); ensureFileDir(anchor, base); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = `${base}/${safeFile(name)}`; if (statInside(anchor, target) === null) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readInside(anchor, target, { encoding, maxBytes: 1_000_000 }), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(anchor, base), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = `${base}/${safeFile(String(input.name || ""))}`; writeInside(anchor, target, content, { encoding, maxBytes: 1_000_000 }); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = `${base}/${safeFile(String(url.searchParams.get("name") || ""))}`; try { unlinkInside(anchor, target); } catch (error) { if (!(error instanceof SafeFsError && error.code === 'not-found')) throw error; } return json(res, 200, { ok: true }); } }
     if (req.method === "GET" && url.pathname === "/v1/routines") return json(res, 200, { routines: store.db.prepare("SELECT * FROM schedules ORDER BY created_at DESC").all() });
     if (req.method === "POST" && url.pathname === "/v1/routines") return json(res, 201, saveRoutine(store.db, await body(req), new Date()));
     // A routine with a typo, a wrong agent, or a runaway interval could previously only
@@ -963,7 +966,7 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/internal/schedule") { if (!internalAllowed(internalAgent, ROUTINE_TOOL, String(req.headers["x-open-harness-run"] || ""))) return json(res, 403, { error: "Scheduling is disabled for this run." }); return json(res, 201, saveRoutine(store.db, { ...await body(req), agentId: internalAgent }, new Date(), undefined, true)); }
     return json(res, 404, { error: "Not found." });
-  } catch (error) { return json(res, error instanceof ConversationError || error instanceof ProfileError || error instanceof TaskError || error instanceof TeamError || error instanceof MachineError || error instanceof CredentialError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
+  } catch (error) { return json(res, error instanceof SafeFsError ? safeFsErrorStatus(error.code) : error instanceof ConversationError || error instanceof ProfileError || error instanceof TaskError || error instanceof TeamError || error instanceof MachineError || error instanceof CredentialError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
 });
 
 setInterval(() => {
