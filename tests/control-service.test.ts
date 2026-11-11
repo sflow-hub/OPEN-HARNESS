@@ -583,6 +583,43 @@ test('group messages schedule mentions or all speakers and halt/resume controls 
   await waitRun(resumed.scheduledRuns[0].runId);
 });
 
+test('late runner requests cannot revive terminal runs or create pending approvals', async () => {
+  const pairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ name: 'Late events', platform: 'linux' }) });
+  const paired = await request('/v1/runner/pair', { method: 'POST', body: JSON.stringify({ code: pairing.code }) });
+  const headers = { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId };
+  const store = new Store(join(stateDir, 'state.db'));
+  try {
+    for (const state of ['completed', 'failed', 'cancelled', 'interrupted', 'running'] as const) {
+      const id = crypto.randomUUID(), commandId = crypto.randomUUID(), stamp = new Date().toISOString();
+      store.createRun({ id, agent_id: 'late-events', conversation_id: 'late-events', prompt: '', state, session_id: null, parent_run_id: null, depth: 0, created_at: stamp, updated_at: stamp, result: null, error: null });
+      store.db.prepare('INSERT INTO runner_commands VALUES(?,?,?,?,?,?,?,NULL,NULL,NULL)').run(commandId, paired.machineId, 'late-events', 'run', JSON.stringify({ runId: id }), 'leased', stamp);
+      const before = await request('/v1/approvals?state=all');
+      const activeBefore = store.activeCount();
+      for (const type of ['approval.request', 'clarify.request', 'secret.request', 'sudo.request']) {
+        await request(`/v1/runner/commands/${commandId}/events`, { method: 'POST', headers, body: JSON.stringify({ runId: id, eventId: crypto.randomUUID(), event: { type, payload: { request_id: crypto.randomUUID() } } }) });
+        if (state === 'running') {
+          assert.equal(store.getRun(id)?.state, type === 'approval.request' ? 'waiting_approval' : 'waiting_input');
+        } else {
+          assert.equal(store.getRun(id)?.state, state);
+          const after = await request('/v1/approvals?state=all');
+          assert.equal(after.pendingCount, before.pendingCount);
+          assert.equal(after.approvals.length, before.approvals.length);
+          assert.equal(store.activeCount(), activeBefore);
+          assert.deepEqual(store.events(id, 0), []);
+        }
+      }
+      if (state === 'running') {
+        assert.equal((store.db.prepare('SELECT COUNT(*) n FROM approvals WHERE run_id=? AND state=?').get(id, 'pending') as { n: number }).n, 1);
+        store.db.prepare('DELETE FROM approvals WHERE run_id=?').run(id);
+        store.setRun(id, { state: 'completed' });
+      }
+      await request(`/v1/runner/commands/${commandId}/events`, { method: 'POST', headers, body: JSON.stringify({ runId: id, eventId: crypto.randomUUID(), event: { type: 'message.delta', payload: { text: 'trailing output' } } }) });
+      assert.equal(store.events(id, 0).at(-1)?.type, 'message.delta');
+      assert.equal(store.getRun(id)?.state, state === 'running' ? 'completed' : state);
+    }
+  } finally { store.db.close(); }
+});
+
 test('revoking a computer ends the run active on it and frees its execution slot', async () => {
   await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: [{ id: 'remote-r', name: 'Remote R', role: 'Generalist', instructions: '', config: { model: 'mock' } }] }) });
   const pairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ name: 'Revoked VPS', platform: 'linux' }) });

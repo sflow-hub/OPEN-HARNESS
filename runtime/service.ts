@@ -258,6 +258,11 @@ async function gatewayFor(agentId: string, allowedTools: string[] | null = null,
 function mapHermesEvent(run: RunRow, value: any) {
   const type = String(value?.type || value?.event || "runtime.event");
   const payload = value?.payload ?? value?.data ?? value;
+  if (["approval.request", "clarify.request", "secret.request", "sudo.request"].includes(type)) {
+    // Gateway listeners retain the original run row. Keep this check and transition synchronous.
+    const current = store.getRun(run.id);
+    if (!current || ["completed", "failed", "interrupted", "cancelled"].includes(current.state)) return;
+  }
   if (type === "approval.request") {
     const approvalId = crypto.randomUUID();
     store.createApproval(approvalId, run.id, String(payload?.request_id || payload?.id || ""), payload);
