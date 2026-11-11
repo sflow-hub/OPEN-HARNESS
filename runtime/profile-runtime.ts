@@ -34,10 +34,10 @@ export function nativeRuntimeProbe(profileHome: string, input: object): Record<s
   if (result.status || !result.stdout) throw new Error(result.stderr || 'Direct computer access check failed.');
   const value = JSON.parse(result.stdout) as Record<string, unknown>; if (value.error) throw new Error(String(value.error)); return value;
 }
-export async function discoverTools(agentId: string, root: string, profile?: AgentProfile): Promise<ToolCatalog> {
+export async function discoverTools(agentId: string, root: string, profile?: AgentProfile, teamIds: string[] = [], isBusy: () => boolean = () => false, runtime = { dockerStatusCached, ensureContainer, runtimeProbe }): Promise<ToolCatalog> {
   if (process.env.OPEN_HARNESS_MOCK === '1') return { source: 'mock', tools: [...mockTools, ...COORDINATION_TOOLS] };
-  const status = await dockerStatusCached(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
-  try { const result = await runtimeProbe(ensureContainer(agentId, root, profile?.computer), { action: 'catalog' }); return { source: 'runtime', tools: [...(result.tools as ToolInfo[]).filter(t => t.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }; }
+  const status = await runtime.dockerStatusCached(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
+  try { const result = await runtime.runtimeProbe(runtime.ensureContainer(agentId, root, profile?.computer, teamIds, isBusy), { action: 'catalog' }); return { source: 'runtime', tools: [...(result.tools as ToolInfo[]).filter(t => t.group !== 'cronjob').map(groupTool), ...COORDINATION_TOOLS] }; }
   catch (error) { return { source: 'unavailable', tools: [], error: error instanceof Error ? error.message : 'Tool inventory is unavailable.' }; }
 }
 function atomic(path: string, data: string) { writeFileSync(`${path}.tmp`, data, { mode: 0o600 }); renameSync(`${path}.tmp`, path); chmodSync(path, 0o600); }
