@@ -1,6 +1,7 @@
 # Group chat, server-side conversations, and async messaging
 
-Status: design proposal (no code in this change). Targets `0.4.0-beta.x`.
+Targets `0.4.0-beta.x`. Much of this design has shipped; the Implementation status section
+below records what is in the tree and what is not.
 Scope: conversations shared by multiple agents + the user, a turn policy for who speaks
 next, non-blocking delegation, a durable async inbox, server-side conversation storage with
 session resumption, deadlock-free admission, loop/rate/cost guards, and migration off browser
@@ -8,6 +9,52 @@ session resumption, deadlock-free admission, loop/rate/cost guards, and migratio
 
 All claims about current behavior cite `path:line`. Line numbers are against the tree at the
 time of writing; treat them as anchors, not contracts.
+
+## Implementation status
+
+This document is the full design; part of it has shipped. Current state, verified in code:
+
+**Shipped.**
+- Server-side conversation storage: the extended `conversations` table plus `messages`,
+  `message_deliveries`, and `conversation_members` (`runtime/db.ts:113`–`163`), managed by
+  `runtime/conversations.ts` and `runtime/messaging.ts`.
+- Group conversations and membership: `createConversation` / `addMember` / `removeMember`
+  (`runtime/conversations.ts:26`, `:50`, `:62`), with operator routes `POST`/`GET
+  /v1/conversations`, `GET /v1/conversations/:id`, and its `members`, `messages`, `halt`, and
+  `resume` sub-routes (`runtime/service.ts:804`–`828`).
+- Durable async inbox and non-blocking delegation: the `post_message` and `read_inbox`
+  coordination tools (`runtime/hermes/coordination.mjs:10`–`11`) over `/internal/message`,
+  `/internal/inbox`, and `/internal/inbox/ack` (`runtime/service.ts:894`–`902`); each terminal
+  child run posts its result into a per-parent delegation conversation and fans it out to the
+  parent's inbox (`runtime/messaging.ts:71`–`92`), with the boot sweep covering restarts
+  (`runtime/messaging.ts:93`).
+- Turn scheduling on a user group message wakes the mentioned agents, or every agent when none
+  are mentioned (`runtime/service.ts:825`, `runtime/messaging.ts:56`), bounded by the halt/resume
+  kill switch (`auto_turns_enabled`, `runtime/service.ts:812`–`816`).
+- The group chat UI: the Group chats view in `app/page.tsx` (~line 1166) and
+  `components/group-chat-room.tsx`.
+
+**Not implemented.**
+- Turn policies are stored and validated — `manual` | `round_robin` | `moderated`
+  (`runtime/conversations.ts:29`) — and `turn_policy` is read back and surfaced to the client
+  (`lib/conversation.ts:80`), but the scheduler ignores it: `runtime/messaging.ts` schedules
+  identically for every policy (no round-robin ring advance, no moderator control turn).
+- There is no `POST /v1/conversations/:id/policy` route (§11); the route matcher accepts only
+  `members`, `messages`, `halt`, and `resume` (`runtime/service.ts:808`).
+- Operator-created groups do not enforce the shared-team rule at creation: `createConversation`
+  validates members but never calls `sharesActiveTeam` (`runtime/conversations.ts:26`–`40`). That
+  gap is only at operator group creation — the team check is enforced elsewhere: when an agent
+  moderator adds a member (`runtime/conversations.ts:55`), when an agent posts a message
+  (`runtime/service.ts:901`), and in inbox/transcript visibility (`runtime/messaging.ts:18`).
+- Per-conversation loop/rate/cost controls (§8) are not honored: the `limits_json` column is
+  stored but never read (`runtime/db.ts:113`); the caps are fixed module constants
+  (`MAX_TURNS_PER_MESSAGE = 8`, `MAX_TURNS_PER_HOUR = 30`, `runtime/messaging.ts:4`–`5`), not the
+  per-conversation, operator-overridable, clamped values the design describes.
+- The delegation cap is `MAX_DELEGATIONS = 4` per parent run (`runtime/messaging.ts:6`, enforced
+  at `runtime/service.ts:912`), not the design table's default 3 / hard max 5 (§8).
+- `misfire_policy` is **not** a conversation control: it is a column on the `schedules`
+  (routines) table (`runtime/db.ts:178`) and is read there (`lib/routine.ts:48`), unrelated to
+  this feature.
 
 ## 1. Why
 

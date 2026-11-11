@@ -48,7 +48,7 @@ docker compose up -d
 
 Open `http://localhost:3000`. Compose starts the dashboard, coordinator, a private Docker engine for agent containers, and persistent data volumes. No host Node or Python installation is required. By default the dashboard listens only on this computer. For remote access, keep it on loopback behind an authenticated HTTPS reverse proxy, set `OPEN_HARNESS_PUBLIC_URL=https://agents.example.com/api/local`, and explicitly set `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` only after proxy authentication works.
 
-The workspace shows agents, conversations, files, credentials, runtime status, routines, teams, and task boards. Turning off **Workspace settings → Advanced features** hides teams, task boards, remote computers, direct computer access, and MCP connections, for a simpler workspace. Routines stay visible either way, because the coordinator runs them whether or not the view is shown.
+The workspace shows agents, conversations, group chats, files, credentials, runtime status, routines, teams, and task boards. Turning off **Workspace settings → Advanced features** hides teams, task boards, remote computers, direct computer access, and MCP connections, for a simpler workspace. Routines stay visible either way, because the coordinator runs them whether or not the view is shown.
 
 See [Self-hosting operations](docs/SELF_HOSTING.md) for a complete authenticated reverse-proxy example, health checks, updates, diagnostics, and stopped-stack backup and restore.
 Release candidates must also pass the [self-hosted beta checklist](docs/BETA_RELEASE.md).
@@ -141,6 +141,7 @@ Hermes supplies terminal and process execution, code editing, filesystem search,
 - task launches that use the existing agent queue, move successful work to Review, and preserve every attempt for approval or revision
 - streamed messages, commands, tool results, failures, and handoff activity
 - named-agent delegation through an authenticated agent-scoped MCP server and private Unix socket
+- group chats that put you and several agents in one server-side conversation, where agents post to and read a durable per-recipient message inbox without blocking a turn, and delegation results return to that inbox asynchronously
 - team-scoped task ownership, collaboration, filtering, and named-agent delegation
 - delegation depth limited to two, with cyclic handoffs rejected
 - private and shared file APIs and UI
