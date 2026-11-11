@@ -68,7 +68,7 @@ function directSandbox(attestation = "host-attested") {
 }
 var SANDBOX_EXEC_ARGS = ["env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin", "python", "-I", "-S", "/opt/open-harness/sandbox_selftest.py"];
 function dockerJson(args2, input = "{}\n") {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = spawn("docker", args2, { stdio: ["pipe", "pipe", "pipe"] });
     const chunks = [];
     let size = 0, failure;
@@ -94,7 +94,7 @@ function dockerJson(args2, input = "{}\n") {
       clearTimeout(timer);
       if (failure || code) return reject(failure || new Error("Docker sandbox check failed."));
       try {
-        resolve4(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        resolve5(JSON.parse(Buffer.concat(chunks).toString("utf8")));
       } catch {
         reject(new Error("Sandbox check returned invalid JSON."));
       }
@@ -139,9 +139,9 @@ async function sandboxSelftest(container, expected, attestation = "host-attested
 }
 
 // runtime/runner.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync6, readFileSync as readFileSync3, writeFileSync as writeFileSync5, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync3, writeFileSync as writeFileSync6, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync3 } from "node:fs";
 import { homedir, hostname, platform as platform2, arch } from "node:os";
-import { join as join5, resolve as resolve3 } from "node:path";
+import { join as join5, resolve as resolve4 } from "node:path";
 import { spawn as spawn5, spawnSync as spawnSync5 } from "node:child_process";
 
 // runtime/hermes.ts
@@ -267,13 +267,13 @@ var HermesGateway = class extends EventEmitter {
       this.child = null;
       this.emit("exit", error);
     });
-    await new Promise((resolve4, reject) => {
+    await new Promise((resolve5, reject) => {
       const timer = setTimeout(() => reject(new Error("Hermes gateway did not become ready.")), 3e4);
       const ready = (event) => {
         if (event?.type === "gateway.ready") {
           clearTimeout(timer);
           this.off("event", ready);
-          resolve4();
+          resolve5();
         }
       };
       this.on("event", ready);
@@ -287,17 +287,17 @@ var HermesGateway = class extends EventEmitter {
     if (process.env.OPEN_HARNESS_MOCK === "1") return this.mockRequest(method, params);
     if (!this.child) return Promise.reject(new Error("Hermes gateway is not running."));
     const id = String(++this.requestId);
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve5, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out.`));
       }, timeout);
-      this.pending.set(id, { resolve: resolve4, reject, timer });
+      this.pending.set(id, { resolve: resolve5, reject, timer });
       this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     });
   }
   submitPrompt(sessionId, text, timeout = 24 * 60 * 60 * 1e3) {
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve5, reject) => {
       const cleanup = () => {
         clearTimeout(timer);
         this.off("event", onEvent);
@@ -315,7 +315,7 @@ var HermesGateway = class extends EventEmitter {
           if (payload.status === "error" || payload.status === "interrupted") onExit(Object.assign(new Error(payload.error || payload.text || "Hermes execution was interrupted."), { interrupted: payload.status === "interrupted" }));
           else {
             cleanup();
-            resolve4(payload);
+            resolve5(payload);
           }
         }
       };
@@ -325,7 +325,7 @@ var HermesGateway = class extends EventEmitter {
       this.request("prompt.submit", { session_id: sessionId, text }, timeout).then((result) => {
         if (result?.status !== "streaming") {
           cleanup();
-          resolve4(result);
+          resolve5(result);
         }
       }, onExit);
     });
@@ -340,11 +340,11 @@ var HermesGateway = class extends EventEmitter {
       }
       const canUseTerminal = this.allowedTools === null || this.allowedTools.includes("terminal");
       if (canUseTerminal) this.emit("event", { type: "tool.start", payload: { id: "mock-tool", name: "terminal", preview: "python task.py" } });
-      if (prompt.includes("MOCK_SLOW")) await new Promise((resolve4) => setTimeout(resolve4, 800));
+      if (prompt.includes("MOCK_SLOW")) await new Promise((resolve5) => setTimeout(resolve5, 800));
       if (prompt.includes("MOCK_APPROVAL")) {
         this.emit("event", { type: "approval.request", payload: { request_id: "mock-approval", command: "publish mock result" } });
-        const decision = await new Promise((resolve4) => {
-          this.mockApproval = resolve4;
+        const decision = await new Promise((resolve5) => {
+          this.mockApproval = resolve5;
         });
         if (decision === "deny") throw new Error("Mock action was denied.");
       }
@@ -361,10 +361,10 @@ var HermesGateway = class extends EventEmitter {
     return { ok: true };
   }
   async stop() {
-    if (process.env.OPEN_HARNESS_MOCK !== "1" && !this.native) await new Promise((resolve4, reject) => {
+    if (process.env.OPEN_HARNESS_MOCK !== "1" && !this.native) await new Promise((resolve5, reject) => {
       const child = spawn3("docker", ["stop", "--time", "2", this.container], { stdio: "ignore" });
       child.once("error", () => reject(new Error("Could not stop the agent container. Check Docker.")));
-      child.once("exit", (code) => code === 0 ? resolve4() : reject(new Error("Docker could not confirm the agent container stopped.")));
+      child.once("exit", (code) => code === 0 ? resolve5() : reject(new Error("Docker could not confirm the agent container stopped.")));
     });
     if (process.env.OPEN_HARNESS_MOCK !== "1" && this.native && this.child?.pid) {
       if (process.platform === "win32") spawnSync2("taskkill", ["/PID", String(this.child.pid), "/T", "/F"], { stdio: "ignore" });
@@ -542,7 +542,7 @@ function groupTool(tool) {
   return { ...tool, group };
 }
 function runtimeProbe(container, input) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = spawn4("docker", ["exec", "-i", container, "python", "/opt/open-harness/inspect_runtime.py"], { stdio: ["pipe", "pipe", "pipe"] });
     let output2 = "";
     const timer = setTimeout(() => {
@@ -563,7 +563,7 @@ function runtimeProbe(container, input) {
       try {
         const value = JSON.parse(output2.trim());
         if (code || value.error) reject(new Error(value.error || "Runtime check failed."));
-        else resolve4(value);
+        else resolve5(value);
       } catch {
         reject(new Error("Runtime check returned an invalid response. Rebuild the Hermes image."));
       }
@@ -647,40 +647,385 @@ function normalizeModels(result) {
 
 // runtime/transfer-files.ts
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync2, lstatSync, mkdirSync as mkdirSync4, mkdtempSync, readdirSync, readFileSync, renameSync as renameSync2, rmSync, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname, join as join4, normalize, relative, resolve as resolve2 } from "node:path";
+import { lstatSync as lstatSync2, mkdirSync as mkdirSync5, mkdtempSync as mkdtempSync2, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname, join as join4, normalize, relative, resolve as resolve3 } from "node:path";
+
+// runtime/safe-fs.ts
+import { closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync as mkdirSync4, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync as renameSync2, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync as writeFileSync3, writeSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, isAbsolute as isAbsolute2, resolve as resolve2, sep } from "node:path";
+var SafeFsError = class extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+    this.name = "SafeFsError";
+  }
+};
+var { O_RDONLY, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, O_WRONLY, O_CREAT } = constants;
+var DIR_FLAGS = O_RDONLY | O_DIRECTORY | O_NOFOLLOW;
+function remap(error) {
+  if (error instanceof SafeFsError) return error;
+  switch (error?.code) {
+    case "ELOOP":
+      return new SafeFsError("symlink", "Refusing to follow a symbolic link.");
+    case "ENOENT":
+      return new SafeFsError("not-found", "No such file or directory.");
+    case "ENOTDIR":
+      return new SafeFsError("invalid-path", "A path component is not a directory.");
+    case "EISDIR":
+      return new SafeFsError("not-regular", "Target is a directory, not a regular file.");
+    case "ENXIO":
+      return new SafeFsError("not-regular", "Not a regular file.");
+    // O_WRONLY|O_NONBLOCK on a FIFO with no reader
+    case "EWOULDBLOCK":
+      return new SafeFsError("not-regular", "Not a regular file.");
+    // non-blocking open would have blocked
+    case "EEXIST":
+      return new SafeFsError("conflict", "A file or directory already exists at that path.");
+    case "ENOTEMPTY":
+      return new SafeFsError("conflict", "The directory changed during removal.");
+    case "EXDEV":
+      return new SafeFsError("conflict", "Cannot move across filesystems; staging must share the destination filesystem.");
+    default:
+      return error instanceof Error ? error : new Error(String(error));
+  }
+}
+function components(rel) {
+  if (typeof rel !== "string" || rel.includes("\0") || isAbsolute2(rel)) throw new SafeFsError("invalid-path", "Path must be relative and free of NUL bytes.");
+  if (rel === "") return [];
+  const parts = rel.split("/");
+  for (const part of parts) if (part === "" || part === "." || part === ".." || part.includes("\\")) throw new SafeFsError("invalid-path", "Path must not contain empty, relative, or separator-escaped components.");
+  return parts;
+}
+function assertTrustedAnchor(dir) {
+  if (typeof dir !== "string" || dir.includes("\0") || !isAbsolute2(dir) || resolve2(dir) !== dir) throw new SafeFsError("invalid-path", "Anchor must be an absolute, normalized path with no traversal.");
+}
+var hooks = {};
+function testHooksEnabled() {
+  return process.env.OPEN_HARNESS_SAFE_FS_TEST_HOOKS === "1";
+}
+function runHook(phase, name) {
+  if (testHooksEnabled()) hooks[phase]?.({ phase, name });
+}
+var procPath = (fd, name) => `/proc/self/fd/${fd}/${name}`;
+function closeQuietly(fd) {
+  try {
+    closeSync(fd);
+  } catch {
+  }
+}
+var probeResult;
+function probe() {
+  let base = null;
+  try {
+    base = mkdtempSync(resolve2(tmpdir(), "oh-safefs-"));
+    const outside = resolve2(base, "outside");
+    mkdirSync4(outside);
+    writeFileSync3(resolve2(outside, "canary"), "canary");
+    mkdirSync4(resolve2(base, "d"));
+    writeFileSync3(resolve2(base, "d", "f"), "probe", { mode: 384 });
+    const anchorFd = openSync(base, DIR_FLAGS);
+    try {
+      const dFd = openSync(procPath(anchorFd, "d"), DIR_FLAGS);
+      try {
+        const fFd = openSync(procPath(dFd, "f"), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+        try {
+          const st = fstatSync(fFd);
+          if (!st.isFile() || st.size !== 5) throw new Error("probe read failed");
+        } finally {
+          closeQuietly(fFd);
+        }
+        if (!readdirSync(`/proc/self/fd/${dFd}`).includes("f")) throw new Error("probe readdir failed");
+        if (!lstatSync(procPath(dFd, "f")).isFile()) throw new Error("probe lstat failed");
+        const wFd = openSync(procPath(dFd, "g"), O_WRONLY | O_CREAT | O_NOFOLLOW, 384);
+        try {
+          writeSync(wFd, Buffer.from("x"));
+        } finally {
+          closeQuietly(wFd);
+        }
+        mkdirSync4(procPath(dFd, "sub"), { mode: 448 });
+        const subFd = openSync(procPath(dFd, "sub"), DIR_FLAGS);
+        try {
+          renameSync2(procPath(dFd, "g"), procPath(subFd, "g"));
+          unlinkSync(procPath(subFd, "g"));
+        } finally {
+          closeQuietly(subFd);
+        }
+        rmdirSync(procPath(dFd, "sub"));
+        renameSync2(resolve2(base, "d"), resolve2(base, "moved"));
+        symlinkSync(outside, resolve2(base, "d"));
+        if (readFileSync(procPath(dFd, "f"), "utf8") !== "probe") throw new Error("held fd did not survive parent swap");
+        let rejectedComponent = false;
+        try {
+          closeQuietly(openSync(procPath(anchorFd, "d"), DIR_FLAGS));
+        } catch {
+          rejectedComponent = true;
+        }
+        if (!rejectedComponent) throw new Error("symlinked component was not rejected");
+        symlinkSync(resolve2(outside, "canary"), procPath(dFd, "link"));
+        let rejectedLeaf = false;
+        try {
+          closeQuietly(openSync(procPath(dFd, "link"), O_RDONLY | O_NOFOLLOW));
+        } catch {
+          rejectedLeaf = true;
+        }
+        if (!rejectedLeaf) throw new Error("symlinked leaf was not rejected");
+      } finally {
+        closeQuietly(dFd);
+      }
+    } finally {
+      closeQuietly(anchorFd);
+    }
+    return "fd-relative";
+  } catch {
+    return "unsupported";
+  } finally {
+    if (base) try {
+      rmSync(base, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+function safeFsMode() {
+  if (testHooksEnabled()) {
+    const forced = process.env.OPEN_HARNESS_SAFE_FS_MODE;
+    if (forced === "path") return "path-fallback";
+    if (forced === "unsupported") return "unsupported";
+  }
+  if (process.platform !== "linux") return "path-fallback";
+  return probeResult ??= probe();
+}
+function requireMode() {
+  const mode = safeFsMode();
+  if (mode === "unsupported") throw new SafeFsError("unsupported", "Safe workspace file access is unavailable on this host.");
+  return mode;
+}
+function openComponent(parentFd, name) {
+  try {
+    return openSync(procPath(parentFd, name), DIR_FLAGS);
+  } catch (error) {
+    const code = error?.code;
+    if (code === "ELOOP" || code === "ENOTDIR") {
+      const st = lstatSync(procPath(parentFd, name), { throwIfNoEntry: false });
+      if (st?.isSymbolicLink()) throw new SafeFsError("symlink", "Refusing to traverse a symbolic link in the path.");
+    }
+    throw error;
+  }
+}
+function openChain(anchor, dirParts, fds) {
+  let fd = openSync(anchor, DIR_FLAGS);
+  fds.push(fd);
+  runHook("afterComponentOpen");
+  for (const part of dirParts) {
+    fd = openComponent(fd, part);
+    fds.push(fd);
+    runHook("afterComponentOpen", part);
+  }
+  return fd;
+}
+function withParent(anchor, rel, fn) {
+  const parts = components(rel);
+  if (parts.length === 0) throw new SafeFsError("invalid-path", "Operation requires a target name.");
+  const fds = [];
+  try {
+    const parentFd = openChain(anchor, parts.slice(0, -1), fds);
+    const leaf = parts[parts.length - 1];
+    runHook("beforeTerminalOp", leaf);
+    return fn(parentFd, leaf);
+  } finally {
+    for (const fd of fds) closeQuietly(fd);
+  }
+}
+function readFd(anchor, rel, opts) {
+  return withParent(anchor, rel, (parentFd, leaf) => {
+    const fd = openSync(procPath(parentFd, leaf), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    try {
+      const st = fstatSync(fd);
+      if (!st.isFile()) throw new SafeFsError("not-regular", "Not a regular file.");
+      if (st.size > opts.maxBytes) throw new SafeFsError("too-large", `File exceeds the ${opts.maxBytes}-byte limit.`);
+      const buf = Buffer.allocUnsafe(st.size);
+      let off = 0;
+      while (off < st.size) {
+        const n = readSync(fd, buf, off, st.size - off, off);
+        if (n <= 0) break;
+        off += n;
+      }
+      const data = off === st.size ? buf : buf.subarray(0, off);
+      return opts.encoding ? data.toString(opts.encoding) : data;
+    } finally {
+      closeQuietly(fd);
+    }
+  });
+}
+function listFd(anchor, rel, max) {
+  const parts = components(rel);
+  const fds = [];
+  try {
+    const dirFd = openChain(anchor, parts, fds);
+    const names = readdirSync(`/proc/self/fd/${dirFd}`);
+    const out = [];
+    for (const name of names) {
+      if (out.length >= max) break;
+      runHook("betweenReaddirAndLstat", name);
+      const st = lstatSync(procPath(dirFd, name), { throwIfNoEntry: false });
+      if (!st || st.isSymbolicLink()) continue;
+      out.push({ name, size: st.size, mtimeMs: st.mtimeMs, isDirectory: st.isDirectory() });
+    }
+    return out;
+  } finally {
+    for (const fd of fds) closeQuietly(fd);
+  }
+}
+function mkdirFd(anchor, rel) {
+  withParent(anchor, rel, (parentFd, leaf) => mkdirSync4(procPath(parentFd, leaf), { mode: 448 }));
+}
+function statFd(anchor, rel) {
+  return withParent(anchor, rel, (parentFd, leaf) => {
+    const st = lstatSync(procPath(parentFd, leaf), { throwIfNoEntry: false });
+    if (!st) return null;
+    return { name: leaf, size: st.size, mtimeMs: st.mtimeMs, isDirectory: st.isDirectory(), isFile: st.isFile(), isSymbolicLink: st.isSymbolicLink() };
+  });
+}
+function renameFd(stagingDir, name, anchor, rel) {
+  if (components(name).length !== 1) throw new SafeFsError("invalid-path", "Staging name must be a single path component.");
+  const parts = components(rel);
+  if (parts.length === 0) throw new SafeFsError("invalid-path", "Rename requires a destination name.");
+  const fds = [];
+  try {
+    const stagingFd = openSync(stagingDir, DIR_FLAGS);
+    fds.push(stagingFd);
+    const destParentFd = openChain(anchor, parts.slice(0, -1), fds);
+    const leaf = parts[parts.length - 1];
+    runHook("beforeRenameCommit", leaf);
+    renameSync2(procPath(stagingFd, name), procPath(destParentFd, leaf));
+  } finally {
+    for (const fd of fds) closeQuietly(fd);
+  }
+}
+function containedPath(anchor, rel) {
+  const base = resolve2(anchor), target = resolve2(base, components(rel).join("/") || ".");
+  if (target !== base && !target.startsWith(base + sep)) throw new SafeFsError("invalid-path", "Path escaped the workspace.");
+  return target;
+}
+function readFallback(anchor, rel, opts) {
+  const target = containedPath(anchor, rel), st = statSync(target);
+  if (!st.isFile()) throw new SafeFsError("not-regular", "Not a regular file.");
+  if (st.size > opts.maxBytes) throw new SafeFsError("too-large", `File exceeds the ${opts.maxBytes}-byte limit.`);
+  const data = readFileSync(target);
+  return opts.encoding ? data.toString(opts.encoding) : data;
+}
+function listFallback(anchor, rel, max) {
+  const dir = containedPath(anchor, rel), out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (out.length >= max) break;
+    if (entry.isSymbolicLink()) continue;
+    const st = lstatSync(resolve2(dir, entry.name), { throwIfNoEntry: false });
+    if (!st || st.isSymbolicLink()) continue;
+    out.push({ name: entry.name, size: st.size, mtimeMs: st.mtimeMs, isDirectory: st.isDirectory() });
+  }
+  return out;
+}
+function statFallback(anchor, rel) {
+  const target = containedPath(anchor, rel), st = lstatSync(target, { throwIfNoEntry: false });
+  if (!st) return null;
+  return { name: basename(target), size: st.size, mtimeMs: st.mtimeMs, isDirectory: st.isDirectory(), isFile: st.isFile(), isSymbolicLink: st.isSymbolicLink() };
+}
+function renameFallback(stagingDir, name, anchor, rel) {
+  if (components(name).length !== 1) throw new SafeFsError("invalid-path", "Staging name must be a single path component.");
+  renameSync2(resolve2(stagingDir, name), containedPath(anchor, rel));
+}
+function readInside(anchor, rel, opts) {
+  assertTrustedAnchor(anchor);
+  const mode = requireMode();
+  try {
+    return mode === "fd-relative" ? readFd(anchor, rel, opts) : readFallback(anchor, rel, opts);
+  } catch (error) {
+    throw remap(error);
+  }
+}
+function listInside(anchor, rel, opts) {
+  assertTrustedAnchor(anchor);
+  const mode = requireMode();
+  try {
+    return mode === "fd-relative" ? listFd(anchor, rel, opts.max) : listFallback(anchor, rel, opts.max);
+  } catch (error) {
+    throw remap(error);
+  }
+}
+function mkdirInside(anchor, rel) {
+  assertTrustedAnchor(anchor);
+  const mode = requireMode();
+  try {
+    if (mode === "fd-relative") mkdirFd(anchor, rel);
+    else mkdirSync4(containedPath(anchor, rel), { mode: 448 });
+  } catch (error) {
+    throw remap(error);
+  }
+}
+function statInside(anchor, rel) {
+  assertTrustedAnchor(anchor);
+  const mode = requireMode();
+  try {
+    return mode === "fd-relative" ? statFd(anchor, rel) : statFallback(anchor, rel);
+  } catch (error) {
+    throw remap(error);
+  }
+}
+function renameIntoInside(stagingDir, name, anchor, rel) {
+  assertTrustedAnchor(stagingDir);
+  assertTrustedAnchor(anchor);
+  const mode = requireMode();
+  try {
+    if (mode === "fd-relative") renameFd(stagingDir, name, anchor, rel);
+    else renameFallback(stagingDir, name, anchor, rel);
+  } catch (error) {
+    throw remap(error);
+  }
+}
+
+// runtime/transfer-files.ts
 var allowedRoots = ["private", "profile/MEMORY.md", "profile/USER.md", "profile/skills"];
 function digest(data) {
   return createHash2("sha256").update(data).digest("hex");
 }
 function exportAgentFiles(stateRoot2, agentId) {
-  const agentRoot = resolve2(stateRoot2, "agents", agentId), files = [];
-  let total = 0;
-  const visit = (path) => {
-    if (!existsSync2(path)) return;
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) return;
-    if (stat.isDirectory()) {
-      for (const name of readdirSync(path)) visit(join4(path, name));
-      return;
+  const agentRoot = resolve3(stateRoot2, "agents", agentId), files = [];
+  let total = 0, entries = 0;
+  const visit = (rel, depth) => {
+    try {
+      const stat = statInside(agentRoot, rel);
+      if (!stat || stat.isSymbolicLink) return;
+      if (++entries > 1e5) throw new Error("Managed agent data has too many entries to transfer.");
+      if (stat.isDirectory) {
+        if (depth > 32) throw new Error("Managed agent data exceeds the transfer depth limit of 32.");
+        const children = listInside(agentRoot, rel, { max: 10001 });
+        if (children.length > 1e4) throw new Error("Managed agent directory exceeds the transfer limit of 10000 entries.");
+        for (const child of children) visit(`${rel}/${child.name}`, depth + 1);
+        return;
+      }
+      if (!stat.isFile) return;
+      const data = readInside(agentRoot, rel, { maxBytes: 2e7 - total });
+      total += data.length;
+      files.push({ path: rel, data: data.toString("base64"), checksum: digest(data) });
+    } catch (error) {
+      if (error instanceof SafeFsError) {
+        if (error.code === "not-found" || error.code === "symlink" || error.code === "not-regular") return;
+        if (error.code === "too-large") throw new Error("Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.");
+      }
+      throw error;
     }
-    if (!stat.isFile()) return;
-    const data = readFileSync(path);
-    total += data.length;
-    if (total > 2e7) throw new Error("Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.");
-    files.push({ path: relative(agentRoot, path).replaceAll("\\", "/"), data: Buffer.from(data).toString("base64"), checksum: digest(data) });
   };
-  for (const path of allowedRoots) visit(join4(agentRoot, path));
+  for (const path of allowedRoots) visit(path, 0);
   files.sort((a, b) => a.path.localeCompare(b.path));
   return { files, checksum: digest(files.map((file) => `${file.path}:${file.checksum}`).join("\n")) };
 }
 function importAgentFiles(stateRoot2, agentId, bundle) {
-  const agentRoot = resolve2(stateRoot2, "agents", agentId);
+  const agentRoot = resolve3(stateRoot2, "agents", agentId);
   let total = 0;
   const validated = bundle.files.map((file) => {
     const clean = normalize(file.path).replaceAll("\\", "/");
     if (clean.startsWith("../") || !allowedRoots.some((root) => clean === root || clean.startsWith(root + "/"))) throw new Error("Transfer contains an invalid managed path.");
-    const target = resolve2(agentRoot, clean);
+    const target = resolve3(agentRoot, clean);
     if (!target.startsWith(agentRoot + "/") && target !== agentRoot) throw new Error("Transfer path escaped the agent workspace.");
     const data = Buffer.from(file.data, "base64");
     total += data.length;
@@ -689,34 +1034,57 @@ function importAgentFiles(stateRoot2, agentId, bundle) {
   });
   const checksum = digest([...bundle.files].sort((a, b) => a.path.localeCompare(b.path)).map((file) => `${file.path}:${file.checksum}`).join("\n"));
   if (checksum !== bundle.checksum) throw new Error("Transfer bundle checksum validation failed.");
-  const staging = mkdtempSync(join4(stateRoot2, ".transfer-"));
+  const staging = mkdtempSync2(join4(stateRoot2, ".transfer-"));
+  let committed = 0;
   try {
-    for (const [index, file] of validated.entries()) writeFileSync3(join4(staging, String(index)), file.data, { mode: 384 });
-    const ensureDirectory = (path) => {
-      const stat = lstatSync(path, { throwIfNoEntry: false });
-      if (stat?.isSymbolicLink()) throw new Error("Transfer target contains a symbolic link.");
-      if (stat && !stat.isDirectory()) throw new Error("Transfer target contains a non-directory.");
-      if (!stat) mkdirSync4(path);
+    for (const [index, file] of validated.entries()) writeFileSync4(join4(staging, String(index)), file.data, { mode: 384 });
+    mkdirSync5(dirname(agentRoot), { recursive: true });
+    const anchor = lstatSync2(agentRoot, { throwIfNoEntry: false });
+    if (anchor?.isSymbolicLink()) throw new Error("Transfer target contains a symbolic link.");
+    if (anchor && !anchor.isDirectory()) throw new Error("Transfer target contains a non-directory.");
+    if (!anchor) mkdirSync5(agentRoot);
+    const ensureDirectory = (rel) => {
+      let stat = statInside(agentRoot, rel);
+      if (!stat) {
+        try {
+          mkdirInside(agentRoot, rel);
+        } catch (error) {
+          if (!(error instanceof SafeFsError) || error.code !== "conflict") throw error;
+        }
+        stat = statInside(agentRoot, rel);
+      }
+      if (stat?.isSymbolicLink) throw new Error("Transfer target contains a symbolic link.");
+      if (!stat?.isDirectory) throw new Error("Transfer target contains a non-directory.");
     };
-    mkdirSync4(dirname(agentRoot), { recursive: true });
     for (const [index, file] of validated.entries()) {
-      ensureDirectory(agentRoot);
-      let parent = agentRoot;
-      for (const part of relative(agentRoot, dirname(file.target)).split("/").filter(Boolean)) {
-        parent = join4(parent, part);
+      const rel = relative(agentRoot, file.target).replaceAll("\\", "/");
+      const parts = rel.split("/");
+      let parent = "";
+      for (const part of parts.slice(0, -1)) {
+        parent = parent ? `${parent}/${part}` : part;
         ensureDirectory(parent);
       }
-      if (lstatSync(file.target, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error("Transfer target contains a symbolic link.");
-      renameSync2(join4(staging, String(index)), file.target);
+      const leaf = statInside(agentRoot, rel);
+      if (leaf?.isSymbolicLink) throw new Error("Transfer target contains a symbolic link.");
+      if (leaf?.isDirectory) throw new Error("Transfer target contains a non-directory.");
+      renameIntoInside(staging, String(index), agentRoot, rel);
+      committed++;
     }
     return { checksum, files: bundle.files.length };
+  } catch (error) {
+    if (error instanceof SafeFsError) {
+      if (error.code === "symlink") error.message = "Transfer target contains a symbolic link.";
+      else if (error.code === "invalid-path" || error.code === "not-regular") error.message = "Transfer target contains a non-directory.";
+    }
+    if (error instanceof Error) error.message += ` (${committed} of ${validated.length} files committed)`;
+    throw error;
   } finally {
-    rmSync(staging, { recursive: true, force: true });
+    rmSync2(staging, { recursive: true, force: true });
   }
 }
 
 // runtime/secrets.ts
-import { chmodSync as chmodSync2, existsSync as existsSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync2, mkdirSync as mkdirSync6, readFileSync as readFileSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname2 } from "node:path";
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
@@ -778,11 +1146,11 @@ var SecretStore = class {
   constructor(path) {
     this.path = path;
     this.backend = "restricted local file";
-    mkdirSync5(dirname2(path), { recursive: true });
+    mkdirSync6(dirname2(path), { recursive: true });
     this.markerPath = `${path.replace(/\.json$/, "")}.backend`;
-    const recorded = existsSync3(this.markerPath) ? readFileSync2(this.markerPath, "utf8").trim() : "";
+    const recorded = existsSync2(this.markerPath) ? readFileSync2(this.markerPath, "utf8").trim() : "";
     const vaulted = loadVault(path);
-    const onDisk = existsSync3(path);
+    const onDisk = existsSync2(path);
     if (vaulted.state === "ok") {
       this.values = this.parse(vaulted.value, vaulted.backend);
       this.backend = vaulted.backend;
@@ -801,7 +1169,7 @@ Nothing was changed. Delete ${this.markerPath} to start over with an empty crede
       this.values.controlToken = crypto.randomUUID() + crypto.randomUUID();
       this.save();
     } else this.record();
-    if (existsSync3(path)) chmodSync2(path, 384);
+    if (existsSync2(path)) chmodSync2(path, 384);
   }
   get token() {
     return this.values.controlToken;
@@ -844,7 +1212,7 @@ Nothing was changed. Delete ${this.markerPath} to start over with an empty crede
   }
   record() {
     try {
-      writeFileSync4(this.markerPath, this.backend === "restricted local file" ? "file" : `vault:${this.backend}`, { mode: 384 });
+      writeFileSync5(this.markerPath, this.backend === "restricted local file" ? "file" : `vault:${this.backend}`, { mode: 384 });
     } catch {
     }
   }
@@ -856,12 +1224,12 @@ Nothing was changed. Delete ${this.markerPath} to start over with an empty crede
       if (confirmed.state === "ok" && confirmed.value.trim() === serialized) {
         this.backend = backend;
         this.record();
-        if (existsSync3(this.path)) unlinkSync(this.path);
+        if (existsSync2(this.path)) unlinkSync2(this.path);
         return;
       }
     }
     this.backend = "restricted local file";
-    writeFileSync4(this.path, JSON.stringify(this.values, null, 2), { mode: 384 });
+    writeFileSync5(this.path, JSON.stringify(this.values, null, 2), { mode: 384 });
     chmodSync2(this.path, 384);
     this.record();
   }
@@ -887,7 +1255,7 @@ async function decryptRunnerSecret(privateKey, payload) {
 }
 
 // runtime/computer-validation.ts
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants as constants2, statSync as statSync2 } from "node:fs";
 function validateComputerTarget(profile, capabilities2, requiredSecrets = [], hasSecret = () => true) {
   const issues = [];
   if (profile.computer.access === "private" && !capabilities2.container) issues.push("Container execution is unavailable. Install and start Docker, then retry the transfer.");
@@ -897,8 +1265,8 @@ function validateComputerTarget(profile, capabilities2, requiredSecrets = [], ha
   if (profile.computer.access === "folders") {
     for (const folder of profile.computer.folders) {
       try {
-        if (!statSync(folder.path).isDirectory()) throw new Error("not a directory");
-        accessSync(folder.path, constants.R_OK | (folder.mode === "write" ? constants.W_OK : 0));
+        if (!statSync2(folder.path).isDirectory()) throw new Error("not a directory");
+        accessSync(folder.path, constants2.R_OK | (folder.mode === "write" ? constants2.W_OK : 0));
       } catch {
         issues.push(`${folder.path} is not an accessible ${folder.mode === "write" ? "read/write" : "read-only"} folder on this computer.`);
       }
@@ -912,10 +1280,10 @@ function validateComputerTarget(profile, capabilities2, requiredSecrets = [], ha
 // runtime/runner.ts
 var args = /* @__PURE__ */ new Map();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith("--")) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith("--") ? "" : process.argv[++i] || "");
-var stateRoot = resolve3(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join5(homedir(), ".open-harness-runner"));
+var stateRoot = resolve4(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join5(homedir(), ".open-harness-runner"));
 var credentialPath = join5(stateRoot, "connection.json");
 var spool = join5(stateRoot, "spool");
-mkdirSync6(spool, { recursive: true });
+mkdirSync7(spool, { recursive: true });
 var runnerSecrets;
 try {
   runnerSecrets = new SecretStore(join5(stateRoot, "secrets.json"));
@@ -925,12 +1293,12 @@ try {
 }
 var pythons = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean);
 function exitCode(command3, args2, timeout) {
-  return new Promise((resolve4) => {
+  return new Promise((resolve5) => {
     let done = false;
     const settle = (code) => {
       if (!done) {
         done = true;
-        resolve4(code);
+        resolve5(code);
       }
     };
     const child = spawn5(command3, args2, { stdio: "ignore", timeout, killSignal: "SIGKILL" });
@@ -939,12 +1307,12 @@ function exitCode(command3, args2, timeout) {
   });
 }
 function output(command3, args2, timeout) {
-  return new Promise((resolve4) => {
+  return new Promise((resolve5) => {
     let done = false, stdout = "";
     const settle = (status) => {
       if (!done) {
         done = true;
-        resolve4({ status, stdout });
+        resolve5({ status, stdout });
       }
     };
     const child = spawn5(command3, args2, { stdio: ["ignore", "pipe", "ignore"], timeout, killSignal: "SIGKILL" });
@@ -983,15 +1351,15 @@ async function pair() {
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || "Pairing failed.");
   const saved = { coordinator, machineId: value.machineId, token: value.token, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey };
-  writeFileSync5(credentialPath, JSON.stringify(saved, null, 2), { mode: 384 });
+  writeFileSync6(credentialPath, JSON.stringify(saved, null, 2), { mode: 384 });
   chmodSync3(credentialPath, 384);
   return saved;
 }
-var credentials = args.has("pairing-code") ? await pair() : existsSync4(credentialPath) ? JSON.parse(readFileSync3(credentialPath, "utf8")) : await pair();
+var credentials = args.has("pairing-code") ? await pair() : existsSync3(credentialPath) ? JSON.parse(readFileSync3(credentialPath, "utf8")) : await pair();
 if (!credentials.encryptionPrivateKey || !credentials.encryptionPublicKey) {
   const encryption = await generateRunnerKeyPair();
   credentials = { ...credentials, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey };
-  writeFileSync5(credentialPath, JSON.stringify(credentials, null, 2), { mode: 384 });
+  writeFileSync6(credentialPath, JSON.stringify(credentials, null, 2), { mode: 384 });
   chmodSync3(credentialPath, 384);
 }
 var savedTarget = new URL(credentials.coordinator);
@@ -1011,7 +1379,7 @@ async function request(path, init = {}, retry = false) {
       return value;
     } catch (error) {
       if (!retry) throw error;
-      await new Promise((resolve4) => setTimeout(resolve4, 2e3));
+      await new Promise((resolve5) => setTimeout(resolve5, 2e3));
     }
   }
 }
@@ -1020,9 +1388,9 @@ var active = /* @__PURE__ */ new Map();
 var admittedCommands = /* @__PURE__ */ new Set();
 async function deliver(record) {
   const file = join5(spool, `${record.id}.json`);
-  if (!existsSync4(file)) writeFileSync5(file, JSON.stringify(record), { mode: 384 });
+  if (!existsSync3(file)) writeFileSync6(file, JSON.stringify(record), { mode: 384 });
   await request(record.path, { method: "POST", body: JSON.stringify(record.body) }, true);
-  if (existsSync4(file)) unlinkSync2(file);
+  if (existsSync3(file)) unlinkSync3(file);
 }
 async function flushSpool() {
   for (const name of readdirSync2(spool).filter((name2) => name2.endsWith(".json"))) {
@@ -1050,7 +1418,7 @@ async function run(command3) {
   try {
     checkDirect(profile.computer.access);
     const agentRoot = join5(stateRoot, "agents", profile.id), shared = join5(stateRoot, "shared");
-    mkdirSync6(shared, { recursive: true });
+    mkdirSync7(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean);
     const availableSecrets = { ...runnerSecrets.environment(), ...process.env };
     const localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]]));
@@ -1105,7 +1473,7 @@ async function control(command3) {
     }
     if (command3.kind.startsWith("probe-")) {
       const profile = command3.payload.profile, direct = profile.computer.access === "direct", shared = join5(stateRoot, "shared"), agentRoot = join5(stateRoot, "agents", profile.id);
-      mkdirSync6(shared, { recursive: true });
+      mkdirSync7(shared, { recursive: true });
       if (command3.kind === "probe-sandbox" && direct) {
         await finish(command3, directSandbox("runner-attested"));
         return;
@@ -1185,5 +1553,5 @@ for (; ; ) {
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
   }
-  await new Promise((resolve4) => setTimeout(resolve4, 1e3));
+  await new Promise((resolve5) => setTimeout(resolve5, 1e3));
 }
