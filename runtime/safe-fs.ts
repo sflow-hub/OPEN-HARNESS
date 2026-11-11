@@ -322,9 +322,11 @@ function statFallback(anchor: string, rel: string): SafeFsStat | null {
   if (!st) return null;
   return { name: basename(target), size: st.size, mtimeMs: st.mtimeMs, isDirectory: st.isDirectory(), isFile: st.isFile(), isSymbolicLink: st.isSymbolicLink() };
 }
-// Walk and delete post-order, refusing a symbolic link anywhere in the tree (decision 2). Unlike
-// rmSync's recursive mode this never unlinks a nested link. Still exposed to the pathname race in
-// this legacy mode, as documented for the whole fallback core.
+// Walk and delete post-order, stopping with 'symlink' when it meets a symbolic link. There is NO
+// pre-scan: files and directories removed before that point stay removed. Being pathname-based,
+// a concurrent swap between lstat and unlink can still make it unlink a nested symlink or act on a
+// swapped parent. Accepted owner decision: the fallback keeps today's (unprotected) behaviour and
+// does not protect against the parent-swap race or FIFO hangs (fallback writes use writeFileSync).
 function removeTreeFallback(dir: string): void {
   for (const entry of readdirSync(dir)) {
     const full = resolve(dir, entry), st = lstatSync(full);
