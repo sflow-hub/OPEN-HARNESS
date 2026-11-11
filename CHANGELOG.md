@@ -8,10 +8,15 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ### Security
 
-- Transfer imports now validate the whole bundle before writing anything, stage the files
-  privately outside the agent mounts, and reject statically planted symlinked parents and leaves.
-  A residual race remains when a concurrently running agent swaps a parent directory between the
-  check and the rename; see the Known limitations in `SECURITY.md`.
+- The coordinator's agent-directory file operations are now symlink-safe on Linux. `/v1/files`
+  (read, list, write, delete), the skill and context (`MEMORY.md`/`USER.md`) endpoints, the
+  `/v1/migrate` profile and shared writes, and agent file transfer export/import resolve every
+  path from a trusted coordinator-owned anchor through held directory handles (fd-relative via
+  `/proc/self/fd`, `O_NOFOLLOW`), so a planted or racing symlink can no longer redirect a read,
+  write, or delete outside the agent or shared directories. Deleting a symlink is refused rather
+  than followed, and `/v1/bootstrap` now reports the active mode as `fileSafety`
+  (`fd-relative` | `path-fallback` | `unsupported`). Non-Linux hosts keep the pathname fallback;
+  see the Known limitations in `SECURITY.md` for what it does and does not protect.
 - Finished runner commands now drop their probe input as well as credential material, and the
   startup sweep rescans all finished rows. Commands failed by a machine revoke or by lease
   reconciliation keep their payload until the next coordinator restart, when the sweep scrubs them.
