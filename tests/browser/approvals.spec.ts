@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Locator, type Page, type Route } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 
 const control = `http://127.0.0.1:${process.env.OPEN_HARNESS_TEST_PORT || 4317}`;
@@ -86,6 +86,71 @@ test('lists a pending approval with a badge and moves it to history once approve
 
   await openNav(page, mobile);
   await expectBadgeMatchesGlobal(nav, request);
+});
+
+test('a badge poll that lands after the inbox reports a newer count does not restore the old count', async ({ page, request }, testInfo) => {
+  const mobile = testInfo.project.name === 'mobile';
+  await startRun(request, `MOCK_APPROVAL late badge ${testInfo.project.name}`);
+  await expect.poll(() => pendingCount(request)).toBe(1);
+
+  // The page polls the badge on load and every 15 s. Capture the load's poll while this approval is
+  // still pending and hold it; later polls are dropped so only the inbox can correct a stale count.
+  const isBadgePoll = (url: URL) => url.pathname === '/v1/approvals' && url.searchParams.get('state') === 'pending' && url.searchParams.get('limit') === '1';
+  let release!: () => void, fetched!: (count: number) => void, holding = false;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const heldCount = new Promise<number>(resolve => { fetched = resolve; });
+  await page.route(isBadgePoll, async route => {
+    if (holding) return route.abort();
+    holding = true;
+    const response = await route.fetch();
+    fetched((await response.json()).pendingCount);
+    await held;
+    await route.fulfill({ response });
+  });
+  // The inbox also reports the count, on every refresh and every 10 s. Once it has reported the new
+  // count its refreshes are held, so it cannot correct a stale badge while the late poll is checked.
+  const isInboxList = (url: URL) => url.pathname === '/v1/approvals' && url.searchParams.get('limit') === '100';
+  const heldInbox: Route[] = [];
+  let holdInbox = false, inboxInFlight = 0;
+  await page.route(isInboxList, async route => {
+    if (holdInbox) return void heldInbox.push(route);
+    inboxInFlight++;
+    try { await route.fulfill({ response: await route.fetch() }); } finally { inboxInFlight--; }
+  });
+  const sent = page.waitForRequest(browserRequest => isBadgePoll(new URL(browserRequest.url())));
+  await page.reload();
+  const poll = await sent;
+
+  await openNav(page, mobile);
+  const nav = page.getByRole('button', { name: /^Approvals/ });
+  await nav.click();
+  const item = page.getByRole('list', { name: 'Pending approvals' }).getByRole('listitem', { name: label() });
+  await expect(item).toHaveCount(1);
+  // The held poll must carry the count from before the decision, or there is nothing stale to drop.
+  const staleCount = await heldCount;
+  expect(staleCount).toBeGreaterThanOrEqual(1);
+  await item.getByRole('button', { name: `Approve Tool request for ${agent.name}` }).click();
+  // The item only leaves the list on the post-decision refresh, which reports the new count with it.
+  await expect(item).toHaveCount(0);
+  await expect.poll(() => pendingCount(request)).toBe(0);
+  await openNav(page, mobile);
+  await expectBadgeMatchesGlobal(nav, request);
+
+  holdInbox = true;
+  await expect.poll(() => inboxInFlight).toBe(0);
+  const current = await globalPendingCount(request);
+  expect(current).toBeLessThan(staleCount);
+  const delivered = page.waitForEvent('requestfinished', browserRequest => browserRequest === poll);
+  release();
+  await delivered;
+  // Two frames let the page finish handling the late poll; then one read, since a retry could outwait a stale badge.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  expect((await nav.textContent())?.replace(/\s+/g, ' ').trim()).toBe(current ? `Approvals ${current}` : 'Approvals');
+
+  holdInbox = false;
+  await Promise.all(heldInbox.map(route => route.continue()));
+  await page.unroute(isInboxList);
+  await page.unroute(isBadgePoll);
 });
 
 test('an approval answered elsewhere is reported as no longer pending', async ({ page, request }, testInfo) => {
