@@ -412,8 +412,8 @@ function stateSharing(stateRoot2) {
   sharingCache = { root, value };
   return value;
 }
-function containerSignature(selected, imageId, stateRoot2 = "", teamIds = []) {
-  return createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...(selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}, ...teamIds.length ? { teamIds: safeTeamIds(teamIds) } : {}, imageId, stateRoot: stateRoot2 && resolve(stateRoot2) })).digest("hex").slice(0, 24);
+function containerSignature(selected, imageId, stateRoot2 = "", teamIds = [], agentId = "") {
+  return createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...(selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}, ...teamIds.length ? { teamIds: safeTeamIds(teamIds) } : {}, imageId, stateRoot: stateRoot2 && resolve(stateRoot2), ...agentId.length > 48 ? { agentId } : {} })).digest("hex").slice(0, 24);
 }
 var imageIdCache = null;
 function currentImageId() {
@@ -429,6 +429,14 @@ function teamMountArgs(stateRoot2, teamIds) {
 function shouldRebuildContainer(currentSignature, signature, isBusy) {
   return currentSignature !== signature && !isBusy;
 }
+function containerNameFor(agentId) {
+  const suffix = agentId.length <= 48 ? agentId : `${agentId.slice(0, 39)}-${createHash("sha256").update(agentId).digest("hex").slice(0, 8)}`;
+  return `open-harness-${suffix}`;
+}
+function agentMountDirs(stateRoot2, agentId) {
+  const root = join2(stateRoot2, "agents", agentId);
+  return { profile: join2(root, "profile"), privateDir: join2(root, "private"), managed: join2(root, "managed") };
+}
 function ensureContainer(agentId, stateRoot2, computer, teamIds = [], isBusy = () => false) {
   teamIds = safeTeamIds(teamIds);
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
@@ -436,10 +444,9 @@ function ensureContainer(agentId, stateRoot2, computer, teamIds = [], isBusy = (
   if (!sharing.ok) throw new Error(sharing.detail);
   const contract = imageContract();
   if (contract !== "current") throw new Error(contract === "missing" ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE);
-  const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
-  const name = `open-harness-${safe}`;
+  const name = containerNameFor(agentId);
   const selected = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, network: DEFAULT_NETWORK, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
-  const signature = containerSignature(selected, currentImageId(), stateRoot2, teamIds);
+  const signature = containerSignature(selected, currentImageId(), stateRoot2, teamIds, agentId);
   const inspect = spawnSync2("docker", ["inspect", "-f", '{{.State.Running}} {{index .Config.Labels "open-harness.config"}}', name], { encoding: "utf8", timeout: 1e4 });
   if (inspect.status === 0) {
     const [running, currentSignature] = inspect.stdout.trim().split(/\s+/);
@@ -453,7 +460,7 @@ function ensureContainer(agentId, stateRoot2, computer, teamIds = [], isBusy = (
       return name;
     }
   }
-  const profile = `${stateRoot2}/agents/${safe}/profile`, privateDir = `${stateRoot2}/agents/${safe}/private`, shared = `${stateRoot2}/shared`;
+  const { profile, privateDir, managed } = agentMountDirs(stateRoot2, agentId), shared = join2(stateRoot2, "shared");
   ensureTeamFolders(stateRoot2, teamIds);
   const mounts = teamMountArgs(stateRoot2, teamIds);
   if (selected.access === "folders") selected.folders.forEach((folder, index) => {
@@ -490,7 +497,7 @@ function ensureContainer(agentId, stateRoot2, computer, teamIds = [], isBusy = (
     "HOME=/workspace/private",
     ...selected.desktop === "virtual" ? ["-e", "DISPLAY=:99", "-e", "OPEN_HARNESS_VIRTUAL_DESKTOP=1"] : [],
     "-v",
-    `${stateRoot2}/agents/${safe}/managed:/run/open-harness:ro`,
+    `${managed}:/run/open-harness:ro`,
     "-v",
     `${profile}:/home/hermes/.hermes`,
     "-v",
