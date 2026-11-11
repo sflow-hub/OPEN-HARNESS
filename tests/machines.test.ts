@@ -108,3 +108,41 @@ test('a finished command stops carrying the credentials it was dispatched with',
   // What a later lookup still needs is kept, so a trailing event can still be matched to its run.
   assert.equal(machines.command(command.id)?.runId, 'run-1');
 });
+
+for (const failed of [false, true]) test(`a ${failed ? 'failed' : 'completed'} probe drops its input credentials`, () => {
+  const db = database(), machines = new Machines(db);
+  const input = { apiKey: 'probe-api-key', env: { SECRET: 'probe-env-secret' }, baseUrl: 'https://provider.example' };
+  const command = machines.enqueue('local', 'atlas', 'probe-runtime', { runId: 'run-probe', input });
+  const stored = () => (db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(command.id) as { payload_json: string }).payload_json;
+  assert.deepEqual(JSON.parse(stored()).input, input);
+  assert.deepEqual(machines.poll('local')[0].payload.input, input);
+  assert.deepEqual(JSON.parse(stored()).input, input, 'leasing must preserve probe credentials');
+  const result = failed ? { error: 'Connection failed.' } : { status: 'connected' };
+  machines.finish('local', command.id, result, failed);
+  assert.doesNotMatch(stored(), /probe-api-key|probe-env-secret/);
+  assert.equal(JSON.parse(stored()).input, undefined);
+  assert.equal(machines.command(command.id)?.runId, 'run-probe');
+  assert.equal(machines.command(command.id)?.state, failed ? 'failed' : 'completed');
+  assert.deepEqual(machines.command(command.id)?.result, result);
+  assert.equal(machines.receiveEvent('local', command.id, 'trailing-event', 'run-probe'), true);
+});
+
+test('startup scrubs historical terminal payloads and preserves pending credentials', () => {
+  const db = database(), machines = new Machines(db);
+  const payload = { runId: 'run-old', transferId: 'transfer-old', input: { apiKey: 'historical-api-key', env: { SECRET: 'historical-env-secret' }, baseUrl: 'https://provider.example' }, secrets: { KEY: 'old-secret' }, encryptedSecrets: { KEY: 'old-encrypted-secret' }, bundle: 'old-bundle', encrypted: 'old-encrypted' };
+  const commands = ['completed', 'failed', 'queued', 'leased'].map(state => {
+    const command = machines.enqueue('local', 'atlas', 'probe-runtime', payload);
+    db.prepare('UPDATE runner_commands SET state=? WHERE id=?').run(state, command.id);
+    return { ...command, state };
+  });
+  const restarted = new Machines(db);
+  for (const command of commands) {
+    const stored = (db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(command.id) as { payload_json: string }).payload_json;
+    if (['completed', 'failed'].includes(command.state)) {
+      assert.doesNotMatch(stored, /historical-api-key|historical-env-secret|old-secret|old-encrypted-secret|old-bundle|old-encrypted/);
+      assert.deepEqual(JSON.parse(stored), { runId: 'run-old', transferId: 'transfer-old' });
+    } else assert.deepEqual(JSON.parse(stored), payload, `${command.state} credentials must survive startup`);
+    assert.equal(restarted.command(command.id)?.runId, 'run-old');
+    assert.equal(restarted.command(command.id)?.state, command.state);
+  }
+});
