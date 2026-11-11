@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, relative, resolve } from 'node:path';
 
 export type TransferBundle = { files: Array<{ path: string; data: string; checksum: string }>; checksum: string };
@@ -18,10 +18,33 @@ export function exportAgentFiles(stateRoot: string, agentId: string): TransferBu
 }
 export function importAgentFiles(stateRoot: string, agentId: string, bundle: TransferBundle) {
   const agentRoot = resolve(stateRoot, 'agents', agentId); let total = 0;
-  for (const file of bundle.files) {
+  const validated = bundle.files.map(file => {
     const clean = normalize(file.path).replaceAll('\\', '/'); if (clean.startsWith('../') || !allowedRoots.some(root => clean === root || clean.startsWith(root + '/'))) throw new Error('Transfer contains an invalid managed path.');
     const target = resolve(agentRoot, clean); if (!target.startsWith(agentRoot + '/') && target !== agentRoot) throw new Error('Transfer path escaped the agent workspace.');
-    const data = Buffer.from(file.data, 'base64'); total += data.length; if (total > 100_000_000 || digest(data) !== file.checksum) throw new Error('Transfer checksum validation failed.'); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, data, { mode: 0o600 });
-  }
-  const checksum = digest([...bundle.files].sort((a,b) => a.path.localeCompare(b.path)).map(file => `${file.path}:${file.checksum}`).join('\n')); if (checksum !== bundle.checksum) throw new Error('Transfer bundle checksum validation failed.'); return { checksum, files: bundle.files.length };
+    const data = Buffer.from(file.data, 'base64'); total += data.length; if (total > 100_000_000 || digest(data) !== file.checksum) throw new Error('Transfer checksum validation failed.');
+    return { target, data };
+  });
+  const checksum = digest([...bundle.files].sort((a,b) => a.path.localeCompare(b.path)).map(file => `${file.path}:${file.checksum}`).join('\n')); if (checksum !== bundle.checksum) throw new Error('Transfer bundle checksum validation failed.');
+  const staging = mkdtempSync(join(stateRoot, '.transfer-'));
+  try {
+    for (const [index, file] of validated.entries()) writeFileSync(join(staging, String(index)), file.data, { mode: 0o600 });
+    const ensureDirectory = (path: string) => {
+      const stat = lstatSync(path, { throwIfNoEntry: false });
+      if (stat?.isSymbolicLink()) throw new Error('Transfer target contains a symbolic link.');
+      if (stat && !stat.isDirectory()) throw new Error('Transfer target contains a non-directory.');
+      if (!stat) mkdirSync(path);
+    };
+    mkdirSync(dirname(agentRoot), { recursive: true });
+    for (const [index, file] of validated.entries()) {
+      ensureDirectory(agentRoot);
+      let parent = agentRoot;
+      for (const part of relative(agentRoot, dirname(file.target)).split('/').filter(Boolean)) { parent = join(parent, part); ensureDirectory(parent); }
+      if (lstatSync(file.target, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error('Transfer target contains a symbolic link.');
+      // A running agent can still swap a parent between check and rename. This residual
+      // race is accepted here: it requires concurrent mutation of its mounted directories,
+      // while staging stays outside those mounts and static symlink escapes are refused.
+      renameSync(join(staging, String(index)), file.target);
+    }
+    return { checksum, files: bundle.files.length };
+  } finally { rmSync(staging, { recursive: true, force: true }); }
 }

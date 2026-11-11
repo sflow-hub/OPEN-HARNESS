@@ -647,7 +647,7 @@ function normalizeModels(result) {
 
 // runtime/transfer-files.ts
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync2, lstatSync, mkdirSync as mkdirSync4, readdirSync, readFileSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync2, lstatSync, mkdirSync as mkdirSync4, mkdtempSync, readdirSync, readFileSync, renameSync as renameSync2, rmSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname, join as join4, normalize, relative, resolve as resolve2 } from "node:path";
 var allowedRoots = ["private", "profile/MEMORY.md", "profile/USER.md", "profile/skills"];
 function digest(data) {
@@ -677,7 +677,7 @@ function exportAgentFiles(stateRoot2, agentId) {
 function importAgentFiles(stateRoot2, agentId, bundle) {
   const agentRoot = resolve2(stateRoot2, "agents", agentId);
   let total = 0;
-  for (const file of bundle.files) {
+  const validated = bundle.files.map((file) => {
     const clean = normalize(file.path).replaceAll("\\", "/");
     if (clean.startsWith("../") || !allowedRoots.some((root) => clean === root || clean.startsWith(root + "/"))) throw new Error("Transfer contains an invalid managed path.");
     const target = resolve2(agentRoot, clean);
@@ -685,12 +685,34 @@ function importAgentFiles(stateRoot2, agentId, bundle) {
     const data = Buffer.from(file.data, "base64");
     total += data.length;
     if (total > 1e8 || digest(data) !== file.checksum) throw new Error("Transfer checksum validation failed.");
-    mkdirSync4(dirname(target), { recursive: true });
-    writeFileSync3(target, data, { mode: 384 });
-  }
+    return { target, data };
+  });
   const checksum = digest([...bundle.files].sort((a, b) => a.path.localeCompare(b.path)).map((file) => `${file.path}:${file.checksum}`).join("\n"));
   if (checksum !== bundle.checksum) throw new Error("Transfer bundle checksum validation failed.");
-  return { checksum, files: bundle.files.length };
+  const staging = mkdtempSync(join4(stateRoot2, ".transfer-"));
+  try {
+    for (const [index, file] of validated.entries()) writeFileSync3(join4(staging, String(index)), file.data, { mode: 384 });
+    const ensureDirectory = (path) => {
+      const stat = lstatSync(path, { throwIfNoEntry: false });
+      if (stat?.isSymbolicLink()) throw new Error("Transfer target contains a symbolic link.");
+      if (stat && !stat.isDirectory()) throw new Error("Transfer target contains a non-directory.");
+      if (!stat) mkdirSync4(path);
+    };
+    mkdirSync4(dirname(agentRoot), { recursive: true });
+    for (const [index, file] of validated.entries()) {
+      ensureDirectory(agentRoot);
+      let parent = agentRoot;
+      for (const part of relative(agentRoot, dirname(file.target)).split("/").filter(Boolean)) {
+        parent = join4(parent, part);
+        ensureDirectory(parent);
+      }
+      if (lstatSync(file.target, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error("Transfer target contains a symbolic link.");
+      renameSync2(join4(staging, String(index)), file.target);
+    }
+    return { checksum, files: bundle.files.length };
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
 }
 
 // runtime/secrets.ts
