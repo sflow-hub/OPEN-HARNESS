@@ -146,8 +146,9 @@ Real-runtime passes on 2026-09-21/22 covered credential storage, profile prepara
 loading, gateway startup, authenticated round trips to an OpenAI-compatible endpoint, stale
 image detection, and state-directory choice. A third pass on 2026-09-25 added paid-provider
 inference, a real file-writing task, event replay, filesystem isolation, process-tree
-termination, crash recovery, and container reaping. Real MCP servers, Direct Computer Access,
-an approval round trip, and named-agent handoff remain unverified.
+termination, crash recovery, and container reaping. A fourth pass on 2026-09-25 added
+named-agent handoff, task boards, scheduled routines, and an approval round trip. Real MCP
+servers and Direct Computer Access remain unverified.
 `runtime/VERIFICATION.md` is the record; update it when a real-runtime check is performed.
 `ROADMAP.md` tracks feature maturity — Direct Computer Access is the least mature path, and
 the supported install is a local browser dashboard on Linux.

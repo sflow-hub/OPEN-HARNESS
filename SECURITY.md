@@ -26,6 +26,14 @@ The dashboard bootstrap token (served from `/v1/bootstrap`) is the clearest expr
 - **Approvals API.** `GET /v1/approvals` is operator-only and returns a `pendingCount`. Each summary is assembled from an allowlist of fields with inline secret masking, so no unexpected field reaches the browser. A pending approval whose run has already reached a terminal state is reported as `expired`, and resolving it returns `409`. (The inbox UI is not merged yet.)
 - **Sandbox self-test.** `POST`/`GET /v1/agents/:id/sandbox-selftest` check an agent's isolation. Host-attested `docker inspect` facts are authoritative; the in-container probe only corroborates and a contradiction is reported as tampering. Paired runners are labelled `runner-attested` (lower trust) and direct access reports `not a sandbox`. Results are stored and audited (`sandbox.selftest`). Real-container verification is still pending, so this is not yet a production isolation claim — see [`docs/design/agent-network-policy.md`](docs/design/agent-network-policy.md).
 
+## Known limitations
+
+Current, factual gaps on this development branch:
+
+- **Operator file endpoints are not yet symlink-safe.** Agent transfer imports validate the whole bundle, stage it privately outside the mounts, and refuse symlinked parents and leaves (`runtime/transfer-files.ts`), though a residual race remains when a concurrently running agent swaps a parent directory between the symlink check and the rename. The coordinator's file, skills, and context endpoints still follow symlinks; avoid using them on agents you do not trust until that lands.
+- **Finished runner commands are scrubbed, but a few failed ones only on restart.** A completed or failed command drops the credential material and probe input it carried (`spentPayload`, `runtime/machines.ts`). Commands failed by a machine revoke or by lease reconciliation keep their payload until the next coordinator restart, whose startup sweep rescans all finished rows and scrubs them.
+- **Per-agent network egress is not enforced.** Network policy is a stored setting only; containers still launch with open egress and no `--network` restriction. See [`docs/design/agent-network-policy.md`](docs/design/agent-network-policy.md).
+
 ## The Hermes pin
 
 Open Harness vendors a specific pinned commit of [Hermes Agent](https://github.com/NousResearch/hermes-agent) (currently recorded in [`runtime/hermes/NOTICE.md`](runtime/hermes/NOTICE.md)) into its own container build, and does not modify Hermes's reasoning loop. A vulnerability in Hermes itself, independent of how Open Harness integrates it, should also be reported upstream to Nous Research. We aim to bump the pin promptly once a fix lands upstream; a report here that turns out to be purely a Hermes issue will still get triaged and forwarded, not dropped.

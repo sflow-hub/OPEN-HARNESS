@@ -4,6 +4,28 @@ All notable changes to Open Harness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project is
 pre-1.0, so breaking changes can still land in a minor version.
 
+## [Unreleased]
+
+### Security
+
+- Transfer imports now validate the whole bundle before writing anything, stage the files
+  privately outside the agent mounts, and reject statically planted symlinked parents and leaves.
+  A residual race remains when a concurrently running agent swaps a parent directory between the
+  check and the rename; see the Known limitations in `SECURITY.md`.
+- Finished runner commands now drop their probe input as well as credential material, and the
+  startup sweep rescans all finished rows. Commands failed by a machine revoke or by lease
+  reconciliation keep their payload until the next coordinator restart, when the sweep scrubs them.
+
+### Fixed
+
+- Agents with very long IDs get a valid container name; a hashed suffix keeps it within Docker's
+  limit instead of overflowing it.
+- A run that has already reached a terminal state is no longer revived by a late event.
+- Tool discovery no longer rebuilds a busy container or drops its team mounts.
+- The task drawer prompts before discarding unsaved edits.
+- Computers and approvals keep load errors separate from revoke and approval-decision errors.
+- A single ordering guard keeps the approvals badge count correct.
+
 ## [0.4.0-beta.1] — 2026-09-25
 
 ### Added
