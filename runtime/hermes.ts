@@ -263,9 +263,9 @@ export function stateSharing(stateRoot: string): SharingProbe {
 // documents as a supported operation -- the old container was reused with its mounts still
 // pointing at the previous path, Docker recreated that path empty, and every run died with
 // "Hermes gateway exited during startup" and a log line blaming the image.
-export function containerSignature(selected: ComputerConfig, imageId: string, stateRoot = '', teamIds: string[] = []) {
+export function containerSignature(selected: ComputerConfig, imageId: string, stateRoot = '', teamIds: string[] = [], agentId = '') {
   // Omit the default policy so upgrades preserve existing open containers.
-  return createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...((selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}), ...(teamIds.length ? { teamIds: safeTeamIds(teamIds) } : {}), imageId, stateRoot: stateRoot && resolve(stateRoot) })).digest('hex').slice(0, 24);
+  return createHash('sha256').update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...((selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}), ...(teamIds.length ? { teamIds: safeTeamIds(teamIds) } : {}), imageId, stateRoot: stateRoot && resolve(stateRoot), ...(agentId.length > 48 ? { agentId } : {}) })).digest('hex').slice(0, 24);
 }
 // Short-lived so a rebuild from Settings takes effect without restarting the coordinator.
 let imageIdCache: { id: string; at: number } | null = null;
@@ -299,6 +299,16 @@ export function shouldRebuildContainer(currentSignature: string, signature: stri
   return currentSignature !== signature && !isBusy;
 }
 
+export function containerNameFor(agentId: string) {
+  const suffix = agentId.length <= 48 ? agentId : `${agentId.slice(0, 39)}-${createHash('sha256').update(agentId).digest('hex').slice(0, 8)}`;
+  return `open-harness-${suffix}`;
+}
+
+export function agentMountDirs(stateRoot: string, agentId: string) {
+  const root = join(stateRoot, 'agents', agentId);
+  return { profile: join(root, 'profile'), privateDir: join(root, 'private'), managed: join(root, 'managed') };
+}
+
 export function ensureContainer(agentId: string, stateRoot: string, computer?: ComputerConfig, teamIds: string[] = [], isBusy: () => boolean = () => false) {
   teamIds = safeTeamIds(teamIds);
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
@@ -308,10 +318,9 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
   // would start and then die with "gateway exited during startup", which says nothing.
   const contract = imageContract();
   if (contract !== 'current') throw new Error(contract === 'missing' ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE);
-  const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
-  const name = `open-harness-${safe}`;
+  const name = containerNameFor(agentId);
   const selected = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, network: DEFAULT_NETWORK, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
-  const signature = containerSignature(selected, currentImageId(), stateRoot, teamIds);
+  const signature = containerSignature(selected, currentImageId(), stateRoot, teamIds, agentId);
   const inspect = spawnSync("docker", ["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"open-harness.config\"}}", name], { encoding: "utf8", timeout: 10_000 });
   if (inspect.status === 0) {
     const [running, currentSignature] = inspect.stdout.trim().split(/\s+/);
@@ -325,7 +334,7 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
       return name;
     }
   }
-  const profile = `${stateRoot}/agents/${safe}/profile`, privateDir = `${stateRoot}/agents/${safe}/private`, shared = `${stateRoot}/shared`;
+  const { profile, privateDir, managed } = agentMountDirs(stateRoot, agentId), shared = join(stateRoot, 'shared');
   ensureTeamFolders(stateRoot, teamIds);
   const mounts: string[] = teamMountArgs(stateRoot, teamIds);
   if (selected.access === 'folders') selected.folders.forEach((folder, index) => {
@@ -337,7 +346,7 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
     "--cap-drop", "ALL", "--pids-limit", "512", "--memory", `${Math.round(selected.resources.memoryMb)}m`, "--cpus", String(selected.resources.cpu), "--add-host", "host.docker.internal:host-gateway",
     "--user", `${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "-e", "HOME=/workspace/private",
     ...(selected.desktop === 'virtual' ? ['-e', 'DISPLAY=:99', '-e', 'OPEN_HARNESS_VIRTUAL_DESKTOP=1'] : []),
-    "-v", `${stateRoot}/agents/${safe}/managed:/run/open-harness:ro`,
+    "-v", `${managed}:/run/open-harness:ro`,
     "-v", `${profile}:/home/hermes/.hermes`, "-v", `${privateDir}:/workspace/private`, "-v", `${shared}:/workspace/shared`,
     ...mounts,
     HERMES_IMAGE], { encoding: "utf8", timeout: 30_000 });
