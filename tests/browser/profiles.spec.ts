@@ -229,7 +229,11 @@ test('creates, filters, and moves an agent task across desktop and phone layouts
   await drawer.getByRole('button', { name: 'Add item' }).click();
   await drawer.getByPlaceholder('Checklist item').fill('Summarize shipped changes');
   await drawer.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Task details' })).toBeVisible();
+  await expect(drawer.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
   await drawer.getByRole('button', { name: 'Close task' }).click();
+  await expect(page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })).toBeHidden();
+  await expect(drawer).toBeHidden();
   const card = page.locator('.task-card').filter({ hasText: title });
   await expect(card).toBeVisible();
   await card.getByRole('button', { name: 'Move right' }).click();
