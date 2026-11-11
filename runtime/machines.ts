@@ -51,6 +51,8 @@ export class Machines {
     );`);
     addColumn(db, 'agent_transfers', 'pending_profile_json', 'TEXT');
     addColumn(db, 'machines', 'encryption_public_key', 'TEXT');
+    const finished = db.prepare("SELECT id FROM runner_commands WHERE state IN ('completed','failed')").all() as Array<{ id: string }>;
+    for (const command of finished) db.prepare('UPDATE runner_commands SET payload_json=? WHERE id=?').run(this.spentPayload(command.id), command.id);
     const interrupted = db.prepare("SELECT agent_id,destination_machine_id FROM agent_transfers WHERE state IN ('queued','exporting','importing','verifying')").all() as Array<{ agent_id: string; destination_machine_id: string }>;
     for (const transfer of interrupted) db.prepare('UPDATE machines SET reserved_agent_id=NULL,updated_at=? WHERE id=? AND reserved_agent_id=?').run(now(), transfer.destination_machine_id, transfer.agent_id);
     db.prepare("UPDATE agent_transfers SET state='failed',detail='The coordinator restarted during transfer. The source assignment and data were preserved.',updated_at=? WHERE state IN ('queued','exporting','importing','verifying')").run(now());
@@ -178,7 +180,7 @@ export class Machines {
     const row = this.db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(commandId) as { payload_json: string } | undefined;
     try {
       const payload = JSON.parse(row?.payload_json || '{}') as Record<string, unknown>;
-      delete payload.secrets; delete payload.encryptedSecrets; delete payload.bundle; delete payload.encrypted;
+      delete payload.secrets; delete payload.encryptedSecrets; delete payload.bundle; delete payload.encrypted; delete payload.input;
       return JSON.stringify(payload);
     } catch { return '{}'; }
   }
