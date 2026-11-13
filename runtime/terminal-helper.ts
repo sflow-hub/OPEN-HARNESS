@@ -51,16 +51,13 @@ finally:
     try: os.killpg(pid, signal.SIGHUP)
     except ProcessLookupError: pass
     deadline = time.monotonic() + 1
-    status = None
     while time.monotonic() < deadline:
-        found, result = os.waitpid(pid, os.WNOHANG)
-        if found:
-            status = result
-            break
+        # Keep the child unreaped until group signaling ends, so its PID cannot be reused.
+        if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT): break
         time.sleep(.02)
     try: os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError: pass
-    if status is None: _, status = os.waitpid(pid, 0)
+    _, status = os.waitpid(pid, 0)
     try: emit({'type': 'exit', 'code': os.waitstatus_to_exitcode(status)})
     except (BrokenPipeError, OSError): pass
 `;
