@@ -31,6 +31,71 @@ except RuntimeError as error:assert 'identified safely' in str(error)
 else:raise AssertionError('An unknown main browser must fail closed')
 `));
 
+test('browser shutdown recognizes a browser exiting during the post-close identity scan', { skip: !python }, () => check(String.raw`
+import io
+from types import SimpleNamespace
+original_os=scope['os']
+for final_state,final_command in [('Z',b''),(None,b''),('gone',b''),('Z',b"chromium '--unfinished\0")]:
+ phase=[0];closed=[]
+ def readlink(path):
+  if phase[0]==1:phase[0]=2
+  return '/usr/lib/chromium/chromium'
+ def opened(path,mode='r'):
+  if path.endswith('/cmdline'):
+   return io.BytesIO(final_command if phase[0]==2 else b'chromium\0--user-data-dir=/managed/browser\0')
+  assert path.endswith('/stat'),path
+  if phase[0]==2 and final_state is None:raise FileNotFoundError(path)
+  if phase[0]==2 and final_state=='gone':raise ProcessLookupError(path)
+  state=final_state if phase[0]==2 else 'S'
+  return io.StringIO('41 (chromium) '+' '.join([state]+['0']*18+['same']))
+ def request_close(identities):
+  closed.append(identities);phase[0]=1;return 1
+ scope['os']=SimpleNamespace(environ={'AGENT_BROWSER_PROFILE':'/managed/browser'},fsencode=original_os.fsencode,fsdecode=original_os.fsdecode,path=original_os.path,listdir=lambda _:['41'],readlink=readlink)
+ scope['open']=opened;scope['request_window_close']=request_close
+ scope['close_browser'](.3)
+ assert closed==[{41:'same'}],closed
+`));
+
+test('browser shutdown rejects live empty or malformed identities and mid-scan PID reuse', { skip: !python }, () => check(String.raw`
+import io
+from types import SimpleNamespace
+original_os=scope['os']
+cases=[(b'','S','same','identified safely'),(b'chromium\0--unknown\0','S','same','identified safely'),(b"chromium '--unfinished\0",'S','same','identified safely'),(b'','T','same','identified safely'),(b'chromium\0--user-data-dir=/managed/browser\0','S','replacement','changed'),(b'chromium\0--unknown\0','S','replacement','changed')]
+for command,state,start,message in cases:
+ sampled=[False]
+ def opened(path,mode='r'):
+  if path.endswith('/cmdline'):
+   sampled[0]=True;return io.BytesIO(command)
+  assert path.endswith('/stat'),path
+  return io.StringIO('41 (chromium) '+' '.join([state if sampled[0] else 'S']+['0']*18+[start if sampled[0] else 'same']))
+ scope['os']=SimpleNamespace(environ={'AGENT_BROWSER_PROFILE':'/managed/browser'},fsencode=original_os.fsencode,fsdecode=original_os.fsdecode,path=original_os.path,listdir=lambda _:['41'],readlink=lambda _:'/usr/lib/chromium/chromium')
+ scope['open']=opened
+ try:scope['browser_processes']()
+ except RuntimeError as error:assert message in str(error),error
+ else:raise AssertionError('An unidentified live browser or reused PID must fail closed')
+`));
+
+test('browser shutdown fails closed when an identified browser state cannot be rechecked', { skip: !python }, () => check(String.raw`
+import io
+from types import SimpleNamespace
+original_os=scope['os']
+for failure in [PermissionError('denied'),OSError('unreadable'),None]:
+ sampled=[False]
+ def opened(path,mode='r'):
+  if path.endswith('/cmdline'):
+   sampled[0]=True;return io.BytesIO(b'chromium\0--user-data-dir=/managed/browser\0')
+  assert path.endswith('/stat'),path
+  if sampled[0]:
+   if failure is not None:raise failure
+   return io.StringIO('malformed')
+  return io.StringIO('41 (chromium) '+' '.join(['S']+['0']*18+['same']))
+ scope['os']=SimpleNamespace(environ={'AGENT_BROWSER_PROFILE':'/managed/browser'},fsencode=original_os.fsencode,fsdecode=original_os.fsdecode,path=original_os.path,listdir=lambda _:['41'],readlink=lambda _:'/usr/lib/chromium/chromium')
+ scope['open']=opened
+ try:scope['browser_processes']()
+ except RuntimeError as error:assert 'state could not be identified safely' in str(error),error
+ else:raise AssertionError('Unreadable browser state must fail closed')
+`));
+
 test('normal close sends WM_DELETE_WINDOW only to unchanged managed browser PIDs', { skip: !python }, () => check(String.raw`
 import ctypes
 events=[]; atoms={b'_NET_CLIENT_LIST':1,b'_NET_WM_PID':2,b'WM_PROTOCOLS':3,b'WM_DELETE_WINDOW':4}

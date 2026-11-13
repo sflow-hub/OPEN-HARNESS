@@ -56,7 +56,7 @@ const web = createServer((req, res) => {
 const listen = server => new Promise(resolve => server.listen(0, '0.0.0.0', () => resolve(server.address().port)));
 console.log(`Computer transport acceptance artifacts: ${root}`);
 try {
-  const imageInfo = JSON.parse(await command('docker', ['image', 'inspect', image]))[0]; assert.equal(imageInfo.Config.Labels['dev.openharness.runtime'], '9');
+  const imageInfo = JSON.parse(await command('docker', ['image', 'inspect', image]))[0]; assert.equal(imageInfo.Config.Labels['dev.openharness.runtime'], '10');
   const free = createServer(), port = await listen(free); await new Promise(resolve => free.close(resolve)); endpoint = `http://127.0.0.1:${port}`;
   const webPort = await listen(web); await startCoordinator(port);
   const pairing = await request('/v1/machines', 'POST', { name: 'Computer transport fixture', platform: 'linux', coordinatorUrl: 'https://computer-fixture.invalid' });

@@ -65,7 +65,7 @@ const api = async (path, method = 'GET', body) => {
 };
 console.log(`Managed computer MCP acceptance artifacts: ${root}`);
 try {
-  const imageInfo = JSON.parse(await command('docker', ['image', 'inspect', image]))[0]; assert.equal(imageInfo.Config.Labels['dev.openharness.runtime'], '9');
+  const imageInfo = JSON.parse(await command('docker', ['image', 'inspect', image]))[0]; assert.equal(imageInfo.Config.Labels['dev.openharness.runtime'], '10');
   const providerPort = await listen(provider, '0.0.0.0'), gateway = await command('docker', ['network', 'inspect', 'bridge', '-f', '{{(index .IPAM.Config 0).Gateway}}']); assert.match(gateway, /^\d+\.\d+\.\d+\.\d+$/); pageOrigin = `http://${gateway}:${providerPort}`;
   const reservation = createServer(), port = await listen(reservation); await new Promise(resolve => reservation.close(resolve)); endpoint = `http://127.0.0.1:${port}`;
   coordinator = spawn(process.execPath, ['--import', 'tsx', 'runtime/service.ts'], { cwd: repository, env: { ...process.env, OPEN_HARNESS_MOCK: '0', OPEN_HARNESS_DISABLE_OS_VAULT: '1', OPEN_HARNESS_STATE_DIR: state, OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_BIND: paired ? '0.0.0.0' : '127.0.0.1', OPEN_HARNESS_ALLOW_LOOPBACK_PAIRING: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });

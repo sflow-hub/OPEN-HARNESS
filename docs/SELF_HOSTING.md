@@ -64,7 +64,7 @@ docker compose ps
 
 Database migrations run when the coordinator starts. Existing SQLite state, credentials, profiles, and the private container engine remain in named volumes.
 
-The current source requires runtime contract 9. It refreshes the runtime base and dependency packages, keeps confirmed desktop initialization for selected-folder startup, and enables the private desktop's accessibility bus before applications launch, including browsers opened before the first computer-control call. If Readiness reports **Update agent runtime**, run runtime setup from the dashboard before starting agents. Rebuilding the coordinator alone does not rebuild the image inside the private engine. A policy-only patch cannot upgrade an older full runtime.
+The current source requires runtime contract 10. Normal browser shutdown now tolerates a process exiting while it is inspected, while still refusing unidentified live browser processes. It refreshes the runtime base and dependency packages, keeps confirmed desktop initialization for selected-folder startup, and enables the private desktop's accessibility bus before applications launch, including browsers opened before the first computer-control call. If Readiness reports **Update agent runtime**, run runtime setup from the dashboard before starting agents. Rebuilding the coordinator alone does not rebuild the image inside the private engine. A policy-only patch cannot upgrade an older full runtime.
 
 To roll back, stop the stack and restore the backup taken before the update into empty volumes, then start the previous release. Do not run older code against a state volume that has already been opened by a newer release.
 

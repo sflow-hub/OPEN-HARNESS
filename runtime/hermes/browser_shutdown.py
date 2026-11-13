@@ -14,11 +14,29 @@ def browser_processes():
         if not entry.isdigit():
             continue
         try:
+            with open('/proc/' + entry + '/stat') as handle:
+                identity = handle.read().rsplit(')', 1)[1].split()
+            state, start = identity[0], identity[19]
+            if state == 'Z':
+                continue
             executable = os.path.basename(os.readlink('/proc/' + entry + '/exe'))
             if executable not in ('chromium', 'chromium-browser', 'chrome'):
                 continue
             with open('/proc/' + entry + '/cmdline', 'rb') as handle:
                 args = [arg for arg in handle.read().split(b'\0') if arg]
+            # Exiting browsers can lose argv after the executable link was read.
+            try:
+                with open('/proc/' + entry + '/stat') as handle:
+                    fields = handle.read().rsplit(')', 1)[1].split()
+                state, current_start = fields[0], fields[19]
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except (OSError, IndexError) as error:
+                raise RuntimeError('The private browser state could not be identified safely.') from error
+            if state == 'Z':
+                continue
+            if current_start != start:
+                raise RuntimeError('The private browser process changed while it was being identified.')
             # Chromium rewrites argv into a single space-separated process title.
             if len(args) == 1:
                 try:
@@ -31,10 +49,7 @@ def browser_processes():
                 if not any(arg.startswith(b'--user-data-dir=') for arg in args):
                     raise RuntimeError('The private browser profile could not be identified safely.')
                 continue
-            with open('/proc/' + entry + '/stat') as handle:
-                fields = handle.read().rsplit(')', 1)[1].split()
-            if fields[0] != 'Z':
-                result[int(entry)] = fields[19]
+            result[int(entry)] = start
         except (OSError, IndexError):
             pass
     return result

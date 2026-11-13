@@ -9,7 +9,7 @@ import { stateSharing, stateSharingAsync, imageContractAsync } from './hermes';
 
 const releaseImageFile=join(import.meta.dirname,'release-image.json');
 const releaseImage=existsSync(releaseImageFile)?JSON.parse(readFileSync(releaseImageFile,'utf8')) as {ref:string;contract:number}:null;
-if(releaseImage&&(!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref)||releaseImage.contract!==9))throw new Error('The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.');
+if(releaseImage&&(!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref)||releaseImage.contract!==10))throw new Error('The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.');
 export const HERMES_IMAGE = releaseImage?.ref || process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`;
 const pullRuntime=Boolean(releaseImage)||process.env.OPEN_HARNESS_HERMES_PULL==='1';
 
@@ -18,7 +18,7 @@ const pullRuntime=Boolean(releaseImage)||process.env.OPEN_HARNESS_HERMES_PULL===
 // a fix keeps the bug while its tag never changes. The image carries this number as a
 // label. Anything else means "rebuild", including no label at all: contract 1 is the set
 // of images built before the label existed. Bump it whenever runtime/hermes/ changes.
-export const RUNTIME_CONTRACT = 9;
+export const RUNTIME_CONTRACT = 10;
 export const RUNTIME_LABEL = 'dev.openharness.runtime';
 export type ImageContract = 'missing' | 'stale' | 'current';
 export function classifyContract(result: { status: number | null; stdout: string }): ImageContract {

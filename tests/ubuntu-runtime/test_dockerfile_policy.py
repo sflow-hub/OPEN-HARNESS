@@ -74,7 +74,7 @@ class DockerfilePolicy(unittest.TestCase):
     def test_tail_preserves_reviewed_candidate(self):
         candidate = support.PRODUCTION_DOCKERFILE.read_text()
         tail = candidate[candidate.index(BEGIN) + len(BEGIN):candidate.index(END)]
-        tail = tail.replace('ARG OPEN_HARNESS_RUNTIME=6', 'ARG OPEN_HARNESS_RUNTIME=9')
+        tail = tail.replace('ARG OPEN_HARNESS_RUNTIME=6', 'ARG OPEN_HARNESS_RUNTIME=10')
         start = self.text.index('COPY runtime/hermes/security-constraints.txt')
         self.assertEqual(self.text[start:start + len(tail)], tail)
 

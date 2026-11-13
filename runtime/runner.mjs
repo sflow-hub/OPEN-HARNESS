@@ -3824,10 +3824,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { join as join2 } from "node:path";
 var releaseImageFile = join2(import.meta.dirname, "release-image.json");
 var releaseImage = existsSync(releaseImageFile) ? JSON.parse(readFileSync(releaseImageFile, "utf8")) : null;
-if (releaseImage && (!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref) || releaseImage.contract !== 9)) throw new Error("The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.");
+if (releaseImage && (!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref) || releaseImage.contract !== 10)) throw new Error("The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.");
 var HERMES_IMAGE = releaseImage?.ref || process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`;
 var pullRuntime = Boolean(releaseImage) || process.env.OPEN_HARNESS_HERMES_PULL === "1";
-var RUNTIME_CONTRACT = 9;
+var RUNTIME_CONTRACT = 10;
 var RUNTIME_LABEL = "dev.openharness.runtime";
 function classifyContract(result) {
   if (result.status !== 0) return "missing";

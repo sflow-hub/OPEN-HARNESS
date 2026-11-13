@@ -155,7 +155,7 @@ class Fixture:
             wrapper.chmod(0o755)
         self.inspect = {'Id': IMAGE, 'RepoTags': ['open-harness-hermes:release-candidate'], 'RepoDigests': [], 'Os': 'linux',
                         'Architecture': arch, 'Created': '2026-09-29T00:00:00Z',
-                        'Config': {'User': 'hermes', 'Labels': {'dev.openharness.runtime': '9',
+                        'Config': {'User': 'hermes', 'Labels': {'dev.openharness.runtime': '10',
                                                                 'org.opencontainers.image.revision': 'a' * 40}},
                         'RootFS': {'Type': 'layers', 'Layers': ['sha256:' + '1' * 64]}}
         self.state = {'arch': arch, 'os': 'linux', 'dockerHost': DOCKER_HOST, 'python': sys.executable, 'lock': str(self.lock_path),
@@ -277,11 +277,11 @@ class GateSuccess(GateCase):
         self.assertEqual((receipt['schema'], receipt['ok'], receipt['architecture']), ('open-harness-debian-origin-gate/1', True, fixture.arch))
         # Image: the exact ID, native architecture and runtime contract, as docker image inspect reported it.
         self.assertEqual((receipt['image']['id'], receipt['image']['architecture'], receipt['image']['labels']['dev.openharness.runtime']),
-                         (IMAGE, fixture.arch, '9'))
+                         (IMAGE, fixture.arch, '10'))
         self.assertEqual(receipt['host']['docker']['Arch'], fixture.arch)
         # Sources, scanner and database identities, unchanged across the gate; the stale scan cache is never copied.
         self.assertEqual(receipt['sources']['files'], fixture.expected_sources())
-        self.assertEqual(receipt['sources']['runtimeContract'], '9')
+        self.assertEqual(receipt['sources']['runtimeContract'], '10')
         self.assertEqual(receipt['scanner']['sha256'], sha256(fixture.bin / 'trivy'))
         self.assertEqual(receipt['scanner']['version']['VulnerabilityDB'], fixture.metadata)
         database = receipt['database']
@@ -470,8 +470,8 @@ class GateRefusesBeforeAnyContainer(GateCase):
             (OTHER_IMAGE, None, 'image-inspect: docker exited 1'),
             (OTHER_IMAGE, lambda f: f.state['images'].update({OTHER_IMAGE: {'inspect': f.inspect, 'root': str(f.root)}}),
              f'docker resolved {OTHER_IMAGE} to {IMAGE}'),
-            (IMAGE, lambda f: f.inspect['Config']['Labels'].update({'dev.openharness.runtime': '8'}), "runtime contract is '8', not 9"),
-            (IMAGE, lambda f: f.inspect['Config']['Labels'].pop('dev.openharness.runtime'), 'runtime contract is None, not 9'),
+            (IMAGE, lambda f: f.inspect['Config']['Labels'].update({'dev.openharness.runtime': '9'}), "runtime contract is '9', not 10"),
+            (IMAGE, lambda f: f.inspect['Config']['Labels'].pop('dev.openharness.runtime'), 'runtime contract is None, not 10'),
             (IMAGE, lambda f: f.inspect.update(Architecture=OTHER_ARCH), f'the image is linux/{OTHER_ARCH}, not linux/{ARCH}'),
             (IMAGE, lambda f: f.inspect.update(Os='windows'), f'the image is windows/{ARCH}'),
         ]

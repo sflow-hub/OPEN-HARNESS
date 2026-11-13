@@ -9,7 +9,7 @@ pre-1.0, so breaking changes can still land in a minor version.
 ### Added
 
 - Add a per-agent Computer panel with live desktop takeover, a private interactive terminal, persistent terminal consent, and confirmed permission revocation. Preserve existing grants and keep human terminal access separate from agent permissions. (claude, codex)
-- Separate persistent Linux desktops from stoppable execution containers, preserving live browser pages across handoffs while stopping detached commands. Add ownership-checked managed computer tools, ephemeral runner streams, destination-encrypted transfers and runtime contract 9. (codex)
+- Separate persistent Linux desktops from stoppable execution containers, preserving live browser pages across handoffs while stopping detached commands. Add ownership-checked managed computer tools, ephemeral runner streams, destination-encrypted transfers and runtime contract 10. (codex)
 
 - Add prepared decision previews and edits requiring fresh approval, finished-work cards with artifacts and review evidence, a Today brief, three guided starters, agent-scoped notes, workflow reuse and completion-notification preferences to the assistant workspace. (claude, codex)
 

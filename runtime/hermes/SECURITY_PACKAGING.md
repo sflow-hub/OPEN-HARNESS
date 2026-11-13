@@ -1,7 +1,7 @@
 # Runtime dependency packaging
 
 These dependency updates are integrated into unreleased source under runtime
-contract 8. They are not a released or scan-approved image. Hermes stays pinned to
+contract 10. They are not a released or scan-approved image. Hermes stays pinned to
 `939e45c91d751fadd94dcd1b873ac3cb44846213`.
 No reasoning-loop source is modified.
 

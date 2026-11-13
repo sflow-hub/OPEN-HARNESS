@@ -189,7 +189,7 @@ ENV HERMES_HOME=/home/hermes/.hermes HERMES_TUI=1 PYTHONUNBUFFERED=1 \
 WORKDIR /workspace/shared
 # Read by Open Harness to tell whether this image predates a fix; must equal
 # RUNTIME_CONTRACT in runtime/readiness.ts. Last so bumping it invalidates nothing heavier.
-ARG OPEN_HARNESS_RUNTIME=9
+ARG OPEN_HARNESS_RUNTIME=10
 USER root
 RUN printf '%s\n' "$OPEN_HARNESS_RUNTIME" > /opt/open-harness/runtime-contract
 USER hermes
