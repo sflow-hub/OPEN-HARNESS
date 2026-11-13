@@ -19,12 +19,13 @@ function action(runId: string, input: Partial<ActionIntent & { evidence: string 
 
 test('structured result reports persist across reopening and default the title to the task', t => {
   const directory = mkdtempSync(join(tmpdir(), 'oh-assistant-results-')), path = join(directory, 'state.db');
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const initial = new Store(path), source = run(initial, { prompt: 'A'.repeat(180) }), results = new AssistantResults(initial.db);
+  const initial = new Store(path); let initialOpen = true, reopened: Store | null = null;
+  t.after(() => { if (initialOpen) initial.db.close(); reopened?.db.close(); rmSync(directory, { recursive: true, force: true }); });
+  const source = run(initial, { prompt: 'A'.repeat(180) }), results = new AssistantResults(initial.db);
   const report = results.report(source.id, { summary: ' A report and source are ready for review. ', artifacts: [{ label: 'Report', kind: 'file', path: 'Research report.pdf' }, { label: 'Published source', kind: 'link', url: 'https://example.com/report' }], sources: [{ label: 'Source document', url: 'http://example.com/source' }] });
   assert.equal(report.title, 'A'.repeat(150)); assert.equal(report.summary, 'A report and source are ready for review.'); assert.ok(Number.isFinite(Date.parse(report.updatedAt)));
-  initial.db.close();
-  const reopened = new Store(path); t.after(() => reopened.db.close());
+  initial.db.close(); initialOpen = false;
+  reopened = new Store(path);
   const saved = new AssistantResults(reopened.db); assert.deepEqual(saved.get(source.id), report);
   const outcome = saved.outcomes([reopened.getRun(source.id)!], [])[0];
   assert.deepEqual(outcome.artifacts, report.artifacts); assert.deepEqual(outcome.sources, report.sources); assert.equal(outcome.verification.state, 'unreviewed');

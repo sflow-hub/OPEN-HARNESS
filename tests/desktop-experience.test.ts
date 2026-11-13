@@ -129,10 +129,10 @@ test('browser mounts share only a dedicated profile and reject planted source sy
   try {
     const computer = { ...agent().computer, browserSessionTeamId: 'ops' };
     const args = browserSessionMount(root, computer);
-    assert.equal(args[0], '-v'); assert.match(args[1], /browser-sessions\/[^:]+:\/workspace\/private\/\.config\/chromium$/);
-    assert.ok(!args.join(' ').includes('/agents/')); assert.ok(args.includes('AGENT_BROWSER_PROFILE=/workspace/private/.config/chromium'));
+    assert.equal(args[0], '-v'); assert.match(args[1].replaceAll('\\', '/'), /browser-sessions\/[^:]+:\/workspace\/private\/\.config\/chromium$/);
+    assert.ok(!args.join(' ').replaceAll('\\', '/').includes('/agents/')); assert.ok(args.includes('AGENT_BROWSER_PROFILE=/workspace/private/.config/chromium'));
     assert.notEqual(containerSignature(computer, 'image', root), containerSignature({ ...computer, browserSessionTeamId: undefined }, 'image', root));
-    const other = join(root, 'other'); mkdirSync(other); rmSync(join(root, 'browser-sessions'), { recursive: true }); symlinkSync(other, join(root, 'browser-sessions'));
+    const other = join(root, 'other'); mkdirSync(other); rmSync(join(root, 'browser-sessions'), { recursive: true }); symlinkSync(other, join(root, 'browser-sessions'), process.platform === 'win32' ? 'junction' : 'dir');
     assert.throws(() => browserSessionMount(root, computer), /symbolic links/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

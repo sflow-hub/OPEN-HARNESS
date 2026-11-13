@@ -104,6 +104,37 @@ test('late recovery attaches active work without changing the selected conversat
   await expect(page.locator('aside.sidebar').getByLabel('Atlas is working')).toHaveCount(1);
 });
 
+test('opening an agent before history arrives restores its latest conversation and keeps the draft', async ({ page, isMobile }) => {
+  const pending = gate(), state = await fixture(page);
+  const run: PersistentRun = { id: 'remembered-scribe', agent_id: 'scribe', conversation_id: 'scribe-history', prompt: 'Earlier writing task', state: 'completed', result: 'The writing is ready.' };
+  state.history = [{ id: run.conversation_id, agentId: 'scribe', title: run.prompt, updatedAt: new Date().toISOString(), runs: [run] }];
+  state.before = async path => { if (path === '/v1/conversations') await pending.promise; };
+  try {
+    await page.goto(`/?controlPort=${port}`);
+    await openAgent(page, 'Scribe', isMobile);
+    await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Continue editing the introduction.');
+    await expect(page.locator('.transcript .message')).toHaveCount(0);
+  } finally { pending.release(); }
+  await expect(page.locator('.transcript .message.assistant')).toContainText('The writing is ready.');
+  await expect(page.getByRole('textbox', { name: 'Message Scribe' })).toHaveValue('Continue editing the introduction.');
+});
+
+test('choosing a new conversation cancels pending restoration of an agent history', async ({ page, isMobile }) => {
+  const pending = gate(), state = await fixture(page);
+  const run: PersistentRun = { id: 'remembered-scribe', agent_id: 'scribe', conversation_id: 'scribe-history', prompt: 'Earlier writing task', state: 'completed', result: 'The writing is ready.' };
+  state.history = [{ id: run.conversation_id, agentId: 'scribe', title: run.prompt, updatedAt: new Date().toISOString(), runs: [run] }];
+  state.before = async path => { if (path === '/v1/conversations') await pending.promise; };
+  try {
+    await page.goto(`/?controlPort=${port}`);
+    await openAgent(page, 'Scribe', isMobile);
+    await page.getByRole('button', { name: 'New conversation' }).click();
+    await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Start a separate writing task.');
+  } finally { pending.release(); }
+  await expect(page.getByText('Refreshing conversations…')).toHaveCount(0);
+  await expect(page.locator('.transcript .message')).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Message Scribe' })).toHaveValue('Start a separate writing task.');
+});
+
 test('shows sending before acceptance, prevents duplicates, and preserves a newer draft', async ({ page, isMobile }) => {
   const pending = gate();
   const state = await fixture(page);

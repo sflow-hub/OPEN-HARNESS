@@ -4,7 +4,7 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_COMPUTER } from '../lib/agent-profile';
-import { claimDesktopExchange, DESKTOP_FILE_LIMITS, publishDesktopDownloads, stageDesktopUpload } from '../runtime/computer-files';
+import { claimDesktopExchange, DESKTOP_FILE_LIMITS, publishDesktopDownloads, stageDesktopUpload, validateDesktopUploadName } from '../runtime/computer-files';
 import { desktopResourcePaths } from '../runtime/computer-runtime';
 
 const computer = { ...DEFAULT_COMPUTER, desktop: 'virtual' as const, browserSessionTeamId: 'ops' }, lease = { ownerId: 'atlas', epoch: 1, runId: 'run-1' };
@@ -72,7 +72,8 @@ test('unconfirmed browser stop and concurrent ownership claims fail without clea
 
 test('unsafe names, partial files, oversized files and hard links are withheld', async t => {
   const f = fixture(t); await claimDesktopExchange('atlas', f.root, computer, lease, async () => {});
-  for (const name of ['CON.txt', 'trailing.', '.hidden', 'pending.tmp', 'bad:name.txt']) writeFileSync(f.file(name), 'unsafe');
+  for (const name of ['CON.txt', 'trailing.', '.hidden', 'pending.tmp', 'bad:name.txt']) assert.throws(() => validateDesktopUploadName(name), /ordinary file name/);
+  for (const name of process.platform === 'win32' ? ['.hidden', 'pending.tmp'] : ['CON.txt', 'trailing.', '.hidden', 'pending.tmp', 'bad:name.txt']) writeFileSync(f.file(name), 'unsafe');
   writeFileSync(f.file('huge.bin'), ''); truncateSync(f.file('huge.bin'), DESKTOP_FILE_LIMITS.fileBytes + 1);
   const secret = join(f.root, 'never-copy.txt'); writeFileSync(secret, 'secret'); linkSync(secret, f.file('hardlink.txt'));
   if (process.platform !== 'win32') symlinkSync(secret, f.file('link.txt'));

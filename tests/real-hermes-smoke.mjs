@@ -159,7 +159,7 @@ async function verifyCoordinator() {
     assert.equal(config.model.base_url, baseUrl.replace('127.0.0.1', 'host.docker.internal'));
   }
   const { profile: approvalProfile } = await api(`/v1/agents/${agentId}/profile`);
-  await api(`/v1/agents/${agentId}/profile`, 'PUT', { ...approvalProfile, allowedTools: ['terminal', 'mcp__open_harness__task'] });
+  await api(`/v1/agents/${agentId}/profile`, 'PUT', { ...approvalProfile, allowedTools: ['terminal', 'mcp__open_harness__task'], terminalConsent: true });
   const approvalRuns = [];
   for (const decision of ['deny', 'approve']) {
     chmodSync(artifact, 0o600);

@@ -143,7 +143,8 @@ test('submits work and restores a pending approval after reconnect', async ({ pa
   const approval = page.getByRole('alert');
   await expect(approval).toContainText('Atlas needs approval');
   await approval.getByRole('button', { name: 'Approve once' }).click();
-  await expect(page.getByText('Hermes mock completed the task.')).toBeVisible();
+  await expect(page.locator('.transcript .message.assistant').last()).toContainText('Hermes mock completed the task.');
+  await expect(page.locator('.transcript .working')).toHaveCount(0);
 });
 
 test('downloads the exact contents of a workspace file', async ({ page }, testInfo) => {

@@ -107,10 +107,14 @@ class PolicyTests(unittest.TestCase):
             result = json.dumps({'result': json.dumps({'ok': True, 'width': 1, 'height': 1}) + '\nMEDIA:' + str(path)})
             with patch.object(policy, 'computer_image_cache_root', return_value=root):
                 capture = lambda: policy.tool_execution(tool_name='mcp__open_harness__computer', args={'action': 'capture'}, next_call=lambda args: result)
-                actual = capture()
-                self.assertTrue(actual['_multimodal'])
-                self.assertEqual(actual['content'][1]['image_url']['url'], 'data:image/png;base64,' + base64.b64encode(raw).decode())
-                self.assertNotIn(str(path), json.dumps(actual))
+                # The managed Linux runtime opens captures through POSIX directory descriptors.
+                if os.name == 'posix':
+                    actual = capture()
+                    self.assertTrue(actual['_multimodal'])
+                    self.assertEqual(actual['content'][1]['image_url']['url'], 'data:image/png;base64,' + base64.b64encode(raw).decode())
+                    self.assertNotIn(str(path), json.dumps(actual))
+                else:
+                    self.assertIn('capture_unavailable', capture())
                 self.assertEqual(policy.tool_execution(tool_name='mcp__open_harness__computer', args={'action': 'input'}, next_call=lambda args: result), result)
                 with patch.object(policy, 'active_lease', side_effect=[True, False]):
                     self.assertIn('capture_unavailable', capture())
