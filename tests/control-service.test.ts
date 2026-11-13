@@ -145,8 +145,7 @@ test("runs independently of event polling and replays stable events", async () =
   const saved = await request("/v1/agents/atlas/profile");
   await request("/v1/agents/atlas/profile", { method: "PUT", body: JSON.stringify({ ...saved.profile, allowedTools: ["terminal"], terminalConsent: true }) });
   const run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", conversationId: "c1", prompt: "MOCK_SLOW create and execute a script" }) });
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  assert.equal((await request(`/v1/runs/${run.id}`)).state, "completed");
+  assert.equal((await waitRun(run.id)).state, "completed");
   const first = await request(`/v1/runs/${run.id}/events?after=0`); assert.ok(first.events.length >= 5);
   const cursor = first.events[1].seq; const replay = await request(`/v1/runs/${run.id}/events?after=${cursor}`);
   assert.deepEqual(replay.events.map((event: any) => event.seq), first.events.slice(2).map((event: any) => event.seq));

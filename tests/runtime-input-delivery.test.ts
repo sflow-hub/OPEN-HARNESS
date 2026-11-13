@@ -13,17 +13,22 @@ import { decryptRunnerSecret, generateRunnerKeyPair } from '../lib/runner-crypto
 
 let child: ChildProcess, stateDir: string, base: string, port: number, token: string;
 let db: DatabaseSync, runner: any, run: any, command: any;
+const STARTUP_BUDGET_MS = 30_000;
 const capabilities = { container: true, direct: true, desktop: false, virtualDesktop: false, features:['workspace-tools','scoped-tool-review','run-leases'] };
 let keys: Awaited<ReturnType<typeof generateRunnerKeyPair>>;
 async function start() {
   child = spawn(process.execPath, ['--import', 'tsx', 'runtime/service.ts'], { cwd: join(import.meta.dirname, '..'), env: { ...process.env, OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_DISABLE_OS_VAULT: '1', OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: stateDir }, stdio: 'pipe' });
-  let diagnostics = ''; child.stderr?.on('data', data => { diagnostics += String(data); });
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try { const response = await fetch(`${base}/v1/bootstrap`); if (response.ok) { token = (await response.json() as any).token; return; } } catch { /* Wait for startup. */ }
-    if (child.exitCode !== null) throw new Error(`Service exited: ${diagnostics}`);
-    await new Promise(resolve => setTimeout(resolve, 30));
+  let diagnostics = '', spawnError: Error | undefined;
+  const record = (data: Buffer) => { diagnostics = (diagnostics + String(data)).slice(-8000); };
+  child.stdout?.on('data', record); child.stderr?.on('data', record); child.on('error', error => { spawnError = error; });
+  const deadline = Date.now() + STARTUP_BUDGET_MS;
+  while (Date.now() < deadline) {
+    if (spawnError) throw spawnError;
+    if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Service exited (${child.exitCode ?? child.signalCode}): ${diagnostics}`);
+    try { const response = await fetch(`${base}/v1/bootstrap`, { signal: AbortSignal.timeout(Math.max(1, Math.min(1000, deadline - Date.now()))) }); if (response.ok) { token = (await response.json() as any).token; return; } } catch { /* Wait for startup. */ }
+    await new Promise(resolve => setTimeout(resolve, 50));
   }
-  throw new Error(`Service did not start: ${diagnostics}`);
+  throw new Error(`Service did not start within ${STARTUP_BUDGET_MS} ms: ${diagnostics || 'No service output.'}`);
 }
 async function call(path: string, body?: unknown, headers?: Record<string, string>, method = body === undefined ? 'GET' : 'POST') {
   const response = await fetch(`${base}${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -51,7 +56,7 @@ test.before(async () => {
   run = await request('/v1/runs', { agentId: agent.id, prompt: 'Wait for test input' });
   command = (await commands('run'))[0]; assert.ok(command);
 });
-test.after(async () => { db?.close(); if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited; } });
+test.after(async () => { db?.close(); if (child && child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited; } });
 
 test('remote private input claims one reply, retries failure, and persists ciphertext only', async () => {
   await emit('secret.request', { request_id: 'secret-1', label: 'Enter token' });
