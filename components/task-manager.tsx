@@ -228,7 +228,8 @@ export default function TaskManager({ agents, teams, client, onOpenRun }: { agen
   const dirty = Boolean(draft) && (JSON.stringify(draft) !== baseline || comment.trim() !== "" || feedback.trim() !== "");
   // Saving, archiving and approving call closeDetail directly: the work is already
   // committed, so there is nothing to warn about. Only user-initiated dismissal asks.
-  const requestClose = () => { if (dirty) setConfirmDiscard(true); else closeDetail(); };
+  // A save in flight still reads as dirty until it lands, so dismissal waits for it.
+  const requestClose = () => { if (busy) return; if (dirty) setConfirmDiscard(true); else closeDetail(); };
   // Escape is how people close a panel. The page-level handler only knows about the
   // settings and file modals, so without this the drawer can only be dismissed by mouse.
   useEffect(() => {
@@ -237,12 +238,13 @@ export default function TaskManager({ agents, teams, client, onOpenRun }: { agen
       if (event.key !== "Escape") return;
       event.stopPropagation();
       if (confirmDiscard) setConfirmDiscard(false);
+      else if (busy) return;
       else if (dirty) setConfirmDiscard(true);
       else closeDetail();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [draft, dirty, confirmDiscard]);
+  }, [draft, dirty, confirmDiscard, busy]);
   const current = detailId && detailId !== "new" ? snapshot.tasks.find(task => task.id === detailId) : null;
   const eligibleAgents = draft?.teamId ? agents.filter(agent => teamsById.get(draft.teamId!)?.memberAgentIds.includes(agent.id)) : agents;
 
@@ -250,7 +252,7 @@ export default function TaskManager({ agents, teams, client, onOpenRun }: { agen
     if (!draft) return null;
     const path = draft.id ? `/v1/tasks/${draft.id}` : "/v1/tasks";
     const saved = await request<AgentTask>(path, { method: draft.id ? "PUT" : "POST", body: JSON.stringify(draft) });
-    if (saved) { const synced = { ...draft, id: saved.id, revision: saved.revision }; setDetailId(saved.id); setDraft(synced); setBaseline(JSON.stringify(synced)); setComment(""); setFeedback(""); }
+    if (saved) { const synced = { ...draft, id: saved.id, revision: saved.revision }; setDetailId(saved.id); setDraft(synced); setBaseline(JSON.stringify(synced)); setComment(""); setFeedback(""); setConfirmDiscard(false); }
     return saved;
   };
   const start = async (changes = "") => {
@@ -363,8 +365,8 @@ export default function TaskManager({ agents, teams, client, onOpenRun }: { agen
       onDelete={setConfirmDeleteBoard} onCreate={() => setNewBoardOpen(true)} request={request} />}
 
     {draft && <div className="task-drawer-backdrop" onClick={requestClose}><aside className="task-drawer" role="dialog" aria-modal="true" aria-label={draft.id ? "Task details" : "New task"} onClick={event => event.stopPropagation()}>
-      {confirmDiscard && <div className="task-discard" role="alertdialog" aria-labelledby="task-discard-title"><h3 id="task-discard-title">Discard unsaved changes?</h3><p>This task will stay as it was last saved.</p><div className="task-discard-actions"><button type="button" autoFocus onClick={() => setConfirmDiscard(false)}>Keep editing</button><button type="button" className="task-primary" onClick={closeDetail}>Discard changes</button></div></div>}
-      <div className="task-drawer-head"><span>{draft.id ? "Task details" : "New task"}</span><button onClick={requestClose} aria-label="Close task"><X size={19} /></button></div>
+      {confirmDiscard && dirty && <div className="task-discard" role="alertdialog" aria-labelledby="task-discard-title"><h3 id="task-discard-title">Discard unsaved changes?</h3><p>This task will stay as it was last saved.</p><div className="task-discard-actions"><button type="button" autoFocus onClick={() => setConfirmDiscard(false)}>Keep editing</button><button type="button" className="task-primary" onClick={closeDetail}>Discard changes</button></div></div>}
+      <div className="task-drawer-head"><span>{draft.id ? "Task details" : "New task"}</span><button onClick={requestClose} disabled={busy} aria-label="Close task"><X size={19} /></button></div>
       <div className="task-drawer-scroll">
         <input id="task-detail-title" className="task-title-input" value={draft.title} onChange={event => setDraft(value => value && ({ ...value, title: event.target.value }))} placeholder="What needs to be done?" autoFocus />
         <div className="task-form-grid"><label>Project<select value={draft.boardId} disabled={Boolean(current && isActive(current))} onChange={event => { const nextBoard = boardsById.get(event.target.value); setDraft(value => value && ({ ...value, boardId: event.target.value, stageId: nextBoard?.stages.find(stage => stage.category === "backlog")?.id || nextBoard?.stages[0]?.id || "" })); }}>{snapshot.boards.filter(item => !item.archived || item.id === draft.boardId).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>

@@ -1,15 +1,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { appendFileSync, mkdirSync, writeFileSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, existsSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync, readFileSync, renameSync, statSync, existsSync } from "node:fs";
 import { resolve, join, relative } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
 import { discoverTools, discoverModels, prepareProfile, runtimeProbe, writeRunLease } from "./profile-runtime";
-import { DEFAULT_COMPUTER, DEFAULT_MODEL, DEFAULT_BOARD, HANDOFF_TOOL, draftProfile, mcpToolId, mcpServerOf, profileAgent, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
+import { DEFAULT_COMPUTER, DEFAULT_MODEL, DEFAULT_BOARD, HANDOFF_TOOL, MESSAGE_TOOL, draftProfile, mcpToolId, mcpServerOf, profileAgent, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
 import { SchemaTooNewError, Store, type RunRow } from "./db";
 import { SecretStore, SecretsUnavailableError } from "./secrets";
 import { PROVIDER_ENDPOINTS, providerModelList } from "./provider-models";
-import { Credentials, CredentialError } from "./credentials";
+import { Credentials, CredentialError, adoptBootstrapCredentials } from "./credentials";
 import { CodexOAuth } from './codex-oauth';
 import { CODEX_PROVIDER, isCodexSession } from '../lib/codex';
 import { modelForCredential, type CredentialRecord, type CredentialUsage, type CredentialUse } from "../lib/credentials";
@@ -18,6 +18,13 @@ import { hermesApprovalDecision, HermesGateway, dockerStatusCached, ensureContai
 import { closeContainerAdmissions } from './container-admission';
 import { coordinationSocket } from "./coordination-socket";
 import { TaskError, TaskStore } from "./tasks";
+import { Audit } from "./audit";
+import { listApprovals } from "./approvals";
+import { mockSandbox, sandboxSelftest, type SandboxResult } from './sandbox-selftest';
+import { saveRoutine, tickRoutines } from './routines';
+import { Messaging, MAX_DELEGATIONS } from './messaging';
+import { Conversations, ConversationError } from './conversations';
+import { safeFsMode, SafeFsError, safeFsErrorStatus, readInside, writeInside, unlinkInside, listInside, mkdirInside, statInside } from './safe-fs';
 import { TeamError, TeamStore } from "./teams";
 import { MachineError, Machines } from "./machines";
 import { encryptRunnerSecret, generateRunnerKeyPair } from "../lib/runner-crypto";
@@ -30,7 +37,7 @@ import { recoverNativeProcess } from './process-identity';
 import { acquireCoordinatorLock } from './coordinator-lock';
 import { conversationHistory } from './conversation-history';
 import { testModelConnection } from './model-validation';
-import { atomicWorkspaceWrite, readWorkspaceFile, safeWorkspacePath, resolveContainedPath } from './path-safety';
+import { readWorkspaceFile, safeWorkspacePath, resolveContainedPath } from './path-safety';
 import { profileMemory } from './profile-memory';
 import { agentContext, type ContextOperation, type ContextResult } from './agent-context';
 import { BROWSER_PAIRING_INVALID, BROWSER_PAIRING_MESSAGE, consumeBrowserPairing, issueBrowserPairing } from './browser-pairing';
@@ -89,9 +96,12 @@ function openSecrets(file: string) {
     process.exit(1);
   }
 }
+adoptBootstrapCredentials(secrets, process.env);
 const credentials = new Credentials(store.db, secrets);
 const codex = new CodexOAuth(root, credentials, secrets);
+const audit = new Audit(store.db);
 const profiles = new Profiles(store.db);
+store.db.prepare('DELETE FROM approvals WHERE run_id IN (SELECT r.id FROM runs r JOIN agent_tombstones t ON t.agent_id=r.agent_id)').run();
 const workspaceIdentity = new Workspaces(store.db, root);
 store.db.exec('CREATE TABLE IF NOT EXISTS schedule_actors(schedule_id TEXT PRIMARY KEY,actor_id TEXT NOT NULL)');
 store.db.exec('CREATE TABLE IF NOT EXISTS run_submissions(actor_id TEXT NOT NULL,request_id TEXT NOT NULL,prompt_hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(actor_id,request_id))');
@@ -101,7 +111,9 @@ store.db.exec('CREATE TABLE IF NOT EXISTS run_reply_modes(run_id TEXT PRIMARY KE
 store.db.exec('CREATE TABLE IF NOT EXISTS model_lease_releases(run_id TEXT PRIMARY KEY,created_at TEXT NOT NULL)');
 store.db.exec('CREATE TABLE IF NOT EXISTS assistant_messages(actor_id TEXT NOT NULL,request_id TEXT NOT NULL,prompt_hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(actor_id,request_id))');
 store.db.exec('CREATE TABLE IF NOT EXISTS handoff_summaries(parent_run_id TEXT PRIMARY KEY,summary_run_id TEXT NOT NULL)');
-const teams = new TeamStore(store.db);
+const teams = new TeamStore(store.db, root);
+const conversations = new Conversations(store.db, profiles, teams);
+const messaging = new Messaging(store, conversations, input => { if (input.sourceRunId) { assertRecoveryReviewed(input.sourceRunId); return actorContext.run(workspaceIdentity.runActor(input.sourceRunId), () => createRun(input)); } return createRun(input); });
 const tasks = new TaskStore(store.db);
 const machines = new Machines(store.db);
 const delivery = new DeliverySignals();
@@ -180,7 +192,7 @@ const assistantStarters = new AssistantStarters(store.db, {
 });
 let checkingHumanLeases=false;setInterval(()=>{if(process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY!=='1'||checkingHumanLeases||maintenance)return;checkingHumanLeases=true;void(async()=>{for(const run of store.liveRuns().filter(run=>!run.parent_run_id)){try{workspaceIdentity.runActor(run.id);}catch{for(const entry of [run,...store.descendants(run.id).map(item=>store.getRun(item.id)).filter((item):item is RunRow=>Boolean(item))])if(existsSync(join(root,'agents',entry.agent_id,'managed')))writeRunLease(root,entry.agent_id,null);await stopRunTree(run.id);}}})().catch(()=>{}).finally(()=>{checkingHumanLeases=false;});},5000).unref();
 setInterval(()=>{if(!maintenance)void connectionEvents.tick().catch(()=>{});},15000).unref();
-store.runListener = run => { tasks.syncRun(run); groups.onRunChanged(run); workflows.onRunChanged(run); evidence.onRunChanged(run); setupJobs.onRunChanged(run); responsibilities.onRunChanged(run);if(['completed','failed','interrupted','cancelled'].includes(run.state))setImmediate(()=>{resumeVerifiedActions(run.id);gatherHandoffResults(run.parent_run_id||run.id);}); };
+store.runListener = run => { tasks.syncRun(run); messaging.onRun(run); groups.onRunChanged(run); workflows.onRunChanged(run); evidence.onRunChanged(run); setupJobs.onRunChanged(run); responsibilities.onRunChanged(run);if(['completed','failed','interrupted','cancelled'].includes(run.state))setImmediate(()=>{resumeVerifiedActions(run.id);gatherHandoffResults(run.parent_run_id||run.id);}); };
 function gatherHandoffResults(parentId:string){
   if(shuttingDown||maintenance||store.db.prepare('SELECT 1 FROM handoff_summaries WHERE parent_run_id=?').get(parentId))return;
   const parent=store.getRun(parentId);if(!parent||parent.agent_id!==PRIMARY_ASSISTANT_ID||!terminalStates.has(parent.state)||parent.state==='cancelled')return;
@@ -410,7 +422,7 @@ async function dispatchSecrets(machineId: string, profile: AgentProfile, effecti
   if (!key) throw new MachineError('This computer has not published its encryption key yet. It is sent on every heartbeat, so wait a few seconds for it to check in, or pair it again.', 409);
   return Object.fromEntries(await Promise.all(Object.entries(plain).map(async ([name, value]) => [name, await encryptRunnerSecret(key, value)])));
 }
-async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) {
+async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models' | 'probe-sandbox', input?: unknown) {
   assertSandboxedComputer(profile.computer);
   const machine = machines.canAssign(profile.computer.machineId, profile.id);
   if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409);
@@ -425,12 +437,12 @@ async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-r
   }
   delete probe.apiKey;
   if (probe.env) probe.env = Object.fromEntries(Object.keys(probe.env).map(name => [name, '']));
-  return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input: probe, encryptedSecrets, ...(encryptedApiKey ? { encryptedApiKey } : {}), coordinationToken: agentToken(profile.id) }).id);
+  return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { teamIds: teams.activeTeamIds(profile.id), profile: { ...profile, effectiveModel }, input: probe, encryptedSecrets, ...(encryptedApiKey ? { encryptedApiKey } : {}), coordinationToken: agentToken(profile.id) }).id);
 }
 
 function priorHistory(run: RunRow) {
   // Group prompts already contain a bounded recent transcript; replaying them compounds it.
-  if (store.db.prepare('SELECT 1 FROM group_run_links WHERE run_id=?').get(run.id)) return [];
+  if (messaging.isTurn(run.id) || store.db.prepare('SELECT 1 FROM group_run_links WHERE run_id=?').get(run.id)) return [];
   const earlier = store.db.prepare("SELECT * FROM runs WHERE conversation_id=? AND agent_id=? AND id<>? AND state IN ('completed','failed','interrupted','cancelled') ORDER BY created_at,rowid").all(run.conversation_id, run.agent_id, run.id) as RunRow[];
   return conversationHistory(earlier);
 }
@@ -593,11 +605,11 @@ function internalAllowed(agentId: string | null, tool: string, runId?: string) {
   return Boolean(run && run.agent_id === agentId && ['running','waiting_approval','waiting_input'].includes(run.state) && !terminalPermissions.pending(run.agent_id) && Boolean(profiles.runSnapshot(run.id)&&runToolGrants(profiles.runSnapshot(run.id)!).includes(tool)));
 }
 
-async function gatewayFor(agentId: string, allowedTools: string[] | null = null, computer?: ComputerConfig) {
+async function gatewayFor(agentId: string, allowedTools: string[] | null = null, computer?: ComputerConfig, startingRunId?: string) {
   assertSandboxedComputer(computer);
   let gateway = gateways.get(agentId);
   if (gateway) return gateway;
-  gateway = new HermesGateway(await ensureContainerAsync(agentId, root, computer), allowedTools);
+  gateway = new HermesGateway(await ensureContainerAsync(agentId, root, computer, false, teams.activeTeamIds(agentId), () => store.liveRuns().some(run => run.agent_id === agentId && run.id !== startingRunId)), allowedTools);
   gateway.on('log', (entry: { level?: string; message?: string }) => appendAgentLog(agentId, entry));
   gateways.set(agentId, gateway);
   try { await gateway.start(); return gateway; }
@@ -628,7 +640,7 @@ function prewarmNext(agentId:string,replyOnly=false){
     ensureProfileDirs(agentId);const effective=profiles.effective(profile),useSocket=process.platform==='linux';
     if(useSocket){if(!coordinationSockets.has(agentId))coordinationSockets.set(agentId,coordinationSocket(join(root,'agents',agentId,'managed'),agentId,(req,res)=>server.emit('request',req,res)));await coordinationSockets.get(agentId);}
     prepareProfile(root,profile,effective,secrets,agentToken(agentId),'idle',{idle:true,...(useSocket?{}:{controlUrl:`http://host.docker.internal:${port}`})});
-    const gateway=new HermesGateway(await ensureContainerAsync(agentId,root,profile.computer),runToolGrants(profile));gateways.set(agentId,gateway);
+    const gateway=new HermesGateway(await ensureContainerAsync(agentId,root,profile.computer,false,teams.activeTeamIds(agentId),()=>store.agentBusy(agentId)),runToolGrants(profile));gateways.set(agentId,gateway);
     gateway.on('log',(entry:{level?:string;message?:string})=>appendAgentLog(agentId,entry));
     try{await gateway.start();}catch(error){gateways.delete(agentId);throw error;}
     const identity=await preparationIdentity(profile,effective);if(shuttingDown||maintenance){await gateway.stop();gateways.delete(agentId);return;}
@@ -726,7 +738,7 @@ async function execute(run: RunRow) {
     }
     if(usePrepared)writeRunLease(root,run.agent_id,run.id);else prepareProfile(root, snapshot, preparedModel, preparedSecrets, agentToken(run.agent_id), run.id, useSocket ? {} : { controlUrl: `http://host.docker.internal:${port}` });
     event(run.id, 'run.phase', { phase: 'profile-ready',prewarmed:usePrepared });
-    const gateway = await gatewayFor(run.agent_id, runToolGrants(snapshot), snapshot.computer);
+    const gateway = await gatewayFor(run.agent_id, runToolGrants(snapshot), snapshot.computer, run.id);
     event(run.id, 'run.phase', { phase: 'gateway-ready' });
     const listener = (value: any) => mapHermesEvent(run, value); gateway.on("event", listener); subscribed = { gateway, listener };
     const history=priorHistory(run);event(run.id,'run.context',{turns:history.length,characters:history.reduce((sum,turn)=>sum+turn.content.length,0)});
@@ -734,6 +746,7 @@ async function execute(run: RunRow) {
     if (cancelledRuns.has(run.id) || store.getRun(run.id)?.state === "cancelled") return;
     const sessionId = String(session?.session_id || session?.id || run.session_id || "");
     if (!sessionId) throw new Error("Hermes did not return a session ID.");
+    conversations.setSessionId(run.conversation_id, run.agent_id, sessionId);
     store.setRun(run.id, { session_id: sessionId }); active.set(run.id, { gateway, sessionId });
     event(run.id,'run.phase',{phase:'prompt-dispatched'});
     const result = await gateway.submitPrompt(sessionId, run.prompt);
@@ -828,8 +841,9 @@ async function stopRunTree(runId: string) {
     const remote = remoteActive.get(id);
     stoppingAgents.add(run.agent_id);
     if (remote) {
-      remoteStopping.add(id); machines.enqueue(remote.machineId, run.agent_id, 'stop', { runId: id, commandId: remote.commandId });
-      event(id, 'stop.pending', { machineId: remote.machineId, message: 'Stop requested. Waiting for the runner to confirm.' });
+      // A revoked computer already failed this run's command; executeRemote ends the run.
+      try { machines.enqueue(remote.machineId, run.agent_id, 'stop', { runId: id, commandId: remote.commandId }); remoteStopping.add(id); event(id, 'stop.pending', { machineId: remote.machineId, message: 'Stop requested. Waiting for the runner to confirm.' }); }
+      catch (error) { if (!(error instanceof MachineError)) { stoppingAgents.delete(run.agent_id); throw error; } }
       stoppingAgents.delete(run.agent_id); stopped++; continue;
     }
     cancelledRuns.add(id);
@@ -867,7 +881,7 @@ async function waitForRun(id: string, timeoutMs = 30 * 60 * 1000) {
 const PROVIDER_STATUS: Record<number, string> = { 401: 'The API key was rejected.', 403: 'The provider denied access.', 404: 'The model server address was not found.', 429: 'The provider rate limit was reached. Try again shortly.' };
 
 function runReplyOnly(id:string){return Boolean((store.db.prepare('SELECT reply_only FROM run_reply_modes WHERE run_id=?').get(id) as {reply_only:number}|undefined)?.reply_only);}
-function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number; deferStart?: boolean; purpose?: string; sourceRunId?: string;replyOnly?:boolean }) {
+function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number; deferStart?: boolean; purpose?: string; sourceRunId?: string;replyOnly?:boolean; internalConversation?: boolean }) {
   if (!input.agentId || !input.prompt?.trim()) throw new Error("agentId and prompt are required.");
   if(input.sourceRunId&&['repair','continuation'].includes(input.purpose||''))assertRecoveryReviewed(input.sourceRunId);
   const profile = profiles.get(input.agentId);
@@ -878,24 +892,41 @@ function createRun(input: { agentId: string; conversationId?: string; prompt: st
   if (depth > 2) throw new Error("Delegation depth is limited to two.");
   if (parent) {
     const ancestors = new Set<string>([parent.agent_id]); let cursor = parent;
-    while (cursor.parent_run_id) { const previous = store.getRun(cursor.parent_run_id); if (!previous) break; ancestors.add(previous.agent_id); cursor = previous; }
+    while (cursor.parent_run_id || messaging.lineage(cursor.id).anchor) { const previous = store.getRun(cursor.parent_run_id || messaging.lineage(cursor.id).anchor!); if (!previous) break; ancestors.add(previous.agent_id); cursor = previous; }
     if (ancestors.has(input.agentId)) throw new Error("Cyclic agent handoffs are not allowed.");
   }
   if (store.queued(maxTaskQueue + 1).length >= maxTaskQueue) throw new TaskError(`The task queue is full (${maxTaskQueue}). Try again when work completes.`, 429);
   const stamp = new Date().toISOString();
   const run: RunRow = { id: crypto.randomUUID(), agent_id: input.agentId, conversation_id: input.conversationId || crypto.randomUUID(), prompt: input.prompt.trim(), state: "queued", session_id: null, parent_run_id: input.parentRunId || null, depth, created_at: stamp, updated_at: stamp, result: null, error: null };
-  store.createRun(run);if(input.replyOnly||(input.sourceRunId&&runReplyOnly(input.sourceRunId)))store.db.prepare('INSERT INTO run_reply_modes VALUES(?,1)').run(run.id); workspaceIdentity.ownRun(run.id); store.db.prepare('INSERT INTO run_contexts VALUES(?,?,?)').run(run.id, (parent && (store.db.prepare('SELECT purpose FROM run_contexts WHERE run_id=?').get(parent.id) as { purpose: string } | undefined)?.purpose === 'responsibility') ? 'responsibility' : input.purpose || (input.agentId === PRIMARY_ASSISTANT_ID ? 'interactive' : 'work'), input.sourceRunId || null); event(run.id, "run.queued", { position: store.listRuns().filter(item => item.state === "queued").length }); if (!input.deferStart) void pump(); return run;
+  store.db.exec('SAVEPOINT create_run');
+  try {
+    const existing = store.db.prepare('SELECT id,agent_id,kind,source,legacy_json FROM conversations WHERE id=?').get(run.conversation_id) as { id: string; agent_id: string; kind: string; source: string; legacy_json: string | null } | undefined;
+    store.db.prepare("INSERT OR IGNORE INTO conversations(id,agent_id,title,kind,source,created_at,updated_at) VALUES(?,?,?,'direct',?,?,?)").run(run.conversation_id, run.agent_id, '', input.parentRunId || input.internalConversation ? 'internal' : 'run', stamp, stamp);
+    if (!existing) {
+      store.db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id,participant_kind,participant_id,role,joined_at) VALUES(?,'user','user','owner',?)").run(run.conversation_id, stamp);
+      store.db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id,participant_kind,participant_id,role,joined_at) VALUES(?,'agent',?,'member',?)").run(run.conversation_id, run.agent_id, stamp);
+    } else {
+      const member = store.db.prepare("SELECT 1 FROM conversation_members WHERE conversation_id=? AND participant_kind='agent' AND participant_id=? AND removed_at IS NULL").get(run.conversation_id, run.agent_id);
+      // Legacy browser imports have no member rows until first use.
+      if (!member && (existing.kind === 'direct' && (['run', 'backfill'].includes(existing.source) || existing.legacy_json !== null) || existing.agent_id === run.agent_id && !store.db.prepare("SELECT 1 FROM conversation_members WHERE conversation_id=? AND participant_kind='agent'").get(run.conversation_id))) {
+        store.db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id,participant_kind,participant_id,role,joined_at) VALUES(?,'agent',?,'member',?),(?,'user','user','owner',?)").run(run.conversation_id, run.agent_id, stamp, run.conversation_id, stamp);
+      } else if (!member) throw new ConversationError('Agent is not a current conversation member.', 403);
+    }
+    store.createRun(run);if(input.replyOnly||(input.sourceRunId&&runReplyOnly(input.sourceRunId)))store.db.prepare('INSERT INTO run_reply_modes VALUES(?,1)').run(run.id); workspaceIdentity.ownRun(run.id); store.db.prepare('INSERT INTO run_contexts VALUES(?,?,?)').run(run.id, (parent && (store.db.prepare('SELECT purpose FROM run_contexts WHERE run_id=?').get(parent.id) as { purpose: string } | undefined)?.purpose === 'responsibility') ? 'responsibility' : input.purpose || (input.agentId === PRIMARY_ASSISTANT_ID ? 'interactive' : 'work'), input.sourceRunId || null); store.db.exec('RELEASE create_run');
+  } catch (error) { store.db.exec('ROLLBACK TO create_run; RELEASE create_run'); throw error; }
+  event(run.id, "run.queued", { position: store.listRuns().filter(item => item.state === "queued").length }); if (!input.deferStart) void pump(); return run;
 }
 function runResponse(run: RunRow) { const profile = profiles.runSnapshot(run.id) || profiles.get(run.agent_id); const machineId = profile?.computer.machineId || null; let machineConnection: string | null = null; if (machineId) { try { machineConnection = machines.get(machineId).status; } catch { machineConnection = 'revoked'; } } return { ...run, reply_only:runReplyOnly(run.id), machine_id: machineId, machine_connection: machineConnection, pendingApprovals: store.pendingApprovals(run.id), pendingInputs: store.pendingInputs(run.id) }; }
 function assertRecoveryReviewed(runId:string){const ids=[runId,...store.descendants(runId).map(run=>run.id)];for(const id of ids)if(store.db.prepare("SELECT 1 FROM unclassified_actions WHERE run_id=? AND state IN ('uncertain','dispatching') LIMIT 1").get(id)||store.db.prepare("SELECT 1 FROM action_intents WHERE run_id=? AND state IN ('uncertain','dispatching') LIMIT 1").get(id))throw new ProductError('Check this task’s uncertain actions at their destinations before continuing or repairing it. Confirm the outcome in the task review; no action will be replayed automatically.',409);}
 
-function listFiles(dir: string) {
-  safeWorkspacePath(root, relative(root, dir));
-  mkdirSync(dir, { recursive: true });
-  return readdirSync(dir, { withFileTypes: true }).filter(entry => entry.isFile()).slice(0, 200).map(entry => {
-    const path = join(dir, entry.name), stat = statSync(path); return { name: entry.name, size: stat.size, updatedAt: stat.mtime.toISOString(), mimeType: mimeType(entry.name), encoding: isText(entry.name) ? "utf8" : "base64" };
-  });
+function listFiles(anchor: string, base: string) {
+  return listInside(anchor, base, { max: 10000 }).filter(entry => !entry.isDirectory && statInside(anchor, `${base}/${entry.name}`)?.isFile).slice(0, 200).map(entry => ({ name: entry.name, size: entry.size, updatedAt: new Date(entry.mtimeMs).toISOString(), mimeType: mimeType(entry.name), encoding: isText(entry.name) ? "utf8" : "base64" }));
 }
+function ensureFileDir(anchor: string, base: string) {
+  const parts = base.split('/');
+  for (let i = 1; i <= parts.length; i++) { const rel = parts.slice(0, i).join('/'), info = statInside(anchor, rel); if (info === null) mkdirInside(anchor, rel); else if (!info.isDirectory || info.isSymbolicLink) throw new SafeFsError('invalid-path', 'Workspace folders must be real directories.'); }
+}
+function safeFileName(name: string) { if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(name) || name.includes('..')) throw new ProfileError('Invalid filename.'); return name; }
 function isText(name: string) { return /\.(txt|md|csv|json|html|css|js|mjs|cjs|ts|tsx|py|yaml|yml|xml|log|svg)$/i.test(name); }
 function mimeType(name: string) {
   const ext = name.toLowerCase().split(".").pop();
@@ -905,7 +936,7 @@ function workspaceDir(url: URL) {
   const scope = url.searchParams.get('scope') || 'shared', agentId = url.searchParams.get('agentId') || '';
   if (!['shared', 'private'].includes(scope)) throw new ProfileError('Invalid workspace scope.');
   if (scope === 'private') validId(agentId);
-  return { scope, dir: safeWorkspacePath(root, scope === 'private' ? `agents/${agentId}/private` : 'shared') };
+  return { scope, anchor: root, base: scope === 'private' ? `agents/${agentId}/private` : 'shared' };
 }
 function safeFile(dir: string, name: string) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(name) || name.includes('..')) throw new Error('Invalid filename.');
@@ -930,7 +961,7 @@ function agentMayTouchTask(agentId: string, assignOthers: boolean, task: ReturnT
 }
 
 async function bootstrapStatus() {
-  return { token: secrets.token, mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: APP_VERSION,features:['reply-only','runtime-preparation'], hermes: { release: HERMES_RELEASE, commit: HERMES_COMMIT } };
+  return { token: secrets.token, fileSafety: safeFsMode(), mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: APP_VERSION,features:['reply-only','runtime-preparation'], hermes: { release: HERMES_RELEASE, commit: HERMES_COMMIT } };
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse) {
@@ -984,13 +1015,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     }
     if (req.method === 'GET' && url.pathname === '/v1/install/file') {
       const requested = String(url.searchParams.get('path') || '').replaceAll('\\', '/');
-      const allowed = new Set(['runtime/runner.mjs', 'runtime/hermes/Dockerfile', 'runtime/hermes/NOTICE.md', 'runtime/hermes/container-init.sh', 'runtime/hermes/browser_shutdown.py', 'runtime/hermes/coordination.mjs', 'runtime/hermes/gateway-entry.mjs', 'runtime/hermes/model-proxy.mjs', 'runtime/hermes/inspect_runtime.py', 'runtime/hermes/managed_entry.py', 'runtime/hermes/cua_compat.py', 'runtime/hermes/security-constraints.txt', 'runtime/hermes/apply-security-overrides.py', 'runtime/hermes/extension/open_harness_policy.py', 'runtime/hermes/extension/pyproject.toml', 'runtime/ubuntu/helpers/check-native-platform.sh', 'runtime/ubuntu/helpers/ubuntu-snapshot.sh', 'runtime/ubuntu/helpers/check_packages.py', 'runtime/ubuntu/helpers/curl_http3.py', 'runtime/ubuntu/helpers/debian_inputs.py', 'runtime/ubuntu/helpers/debian_origin.py', 'runtime/ubuntu/helpers/elf_arch.py', 'runtime/ubuntu/helpers/ohpkg.py', 'runtime/ubuntu/lock/runtime-inputs.lock.json', 'runtime/ubuntu/lock/ubuntu-os-packages.txt']);
+      const allowed = new Set(['runtime/runner.mjs', 'runtime/hermes/Dockerfile', 'runtime/hermes/NOTICE.md', 'runtime/hermes/container-init.sh', 'runtime/hermes/browser_shutdown.py', 'runtime/hermes/coordination.mjs', 'runtime/hermes/gateway-entry.mjs', 'runtime/hermes/model-proxy.mjs', 'runtime/hermes/inspect_runtime.py', 'runtime/hermes/sandbox_selftest.py', 'runtime/hermes/managed_entry.py', 'runtime/hermes/cua_compat.py', 'runtime/hermes/security-constraints.txt', 'runtime/hermes/apply-security-overrides.py', 'runtime/hermes/extension/open_harness_policy.py', 'runtime/hermes/extension/pyproject.toml', 'runtime/ubuntu/helpers/check-native-platform.sh', 'runtime/ubuntu/helpers/ubuntu-snapshot.sh', 'runtime/ubuntu/helpers/check_packages.py', 'runtime/ubuntu/helpers/curl_http3.py', 'runtime/ubuntu/helpers/debian_inputs.py', 'runtime/ubuntu/helpers/debian_origin.py', 'runtime/ubuntu/helpers/elf_arch.py', 'runtime/ubuntu/helpers/ohpkg.py', 'runtime/ubuntu/lock/runtime-inputs.lock.json', 'runtime/ubuntu/lock/ubuntu-os-packages.txt']);
       if (!allowed.has(requested)) return json(res, 404, { error: 'Runner file not found.' });
       const target = requested === 'runtime/runner.mjs' ? join(import.meta.dirname, 'runner.mjs') : join(import.meta.dirname, requested.slice('runtime/'.length));
       if (!existsSync(target)) return json(res, 503, { error: 'The standalone runner bundle is unavailable. Run npm run runner:bundle on this source installation.' });
       return raw(res, 200, 'application/octet-stream', readFileSync(target));
     }
-    if (req.method === 'POST' && url.pathname === '/v1/runner/pair') return json(res, 201, machines.pair(await body(req)));
+    if (req.method === 'POST' && url.pathname === '/v1/runner/pair') { const result = machines.pair(await body(req)); audit.record({ actorKind: 'runner', actorId: result.machineId, action: 'machine.pair', targetKind: 'machine', targetId: result.machineId }); return json(res, 201, result); }
     const runner = url.pathname.startsWith('/v1/runner/') ? runnerIdentity(req) : null;
     if (url.pathname.startsWith('/v1/runner/') && !runner) return json(res, 401, { error: 'Invalid or revoked runner credential.' });
     if (runner && req.method === 'POST' && url.pathname === '/v1/runner/heartbeat') { const input = await body(req), result = machines.heartbeat(runner, input); for (const command of machines.reconcileLeases(runner, Array.isArray(input.activeCommandIds) ? input.activeCommandIds.map(String) : [])) { const run = store.getRun(String((command as any).payload?.runId || '')); if (run && !['completed','failed','cancelled','interrupted'].includes(run.state)) { const error = 'Runner restarted after accepting this work. Completed events were preserved and the task was not replayed.'; store.setRun(run.id, { state: 'interrupted', error }); event(run.id, 'run.interrupted', { error }); } } void pump(); return json(res, 200, result); }
@@ -1080,6 +1111,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     if(url.pathname==='/v1/backups'){workspaceIdentity.requireOwner();if(req.method==='GET')return json(res,200,{backups:backups.list(),configured:Boolean(backupSecretValues().BACKUP_RECOVERY_KEY),retention:workspaceIdentity.get().retention});if(req.method==='POST')return json(res,202,backups.start(String((await body(req)).requestId||'')));}
     if(url.pathname==='/v1/backups/configure'&&req.method==='POST'){workspaceIdentity.requireOwner();const input=object(await body(req)),key=String(input.recoveryKey||'');backupKey(key);backupSecrets||=new SecretStore(join(root,'backup-secrets.json'));backupSecrets.set('BACKUP_RECOVERY_KEY',key);return json(res,200,{configured:true});}
     const backupDownload=url.pathname.match(/^\/v1\/backups\/([^/]+)\/(download|link)$/);if(backupDownload&&req.method==='GET'){workspaceIdentity.requireOwner();if(backupDownload[2]==='link')return json(res,200,await backups.link(backupDownload[1]));const path=backups.path(backupDownload[1]);res.setHeader('Content-Length',statSync(path).size);res.setHeader('Content-Disposition',`attachment; filename="open-harness-${backupDownload[1]}.ohb"`);return raw(res,200,'application/octet-stream',readWorkspaceFile(path));}
+    if (req.method === "GET" && url.pathname === "/v1/approvals") {
+      const state = url.searchParams.get('state') ?? 'pending', rawLimit = url.searchParams.get('limit'), limit = rawLimit === null ? 100 : /^\d+$/.test(rawLimit) ? Number(rawLimit) : NaN;
+      if (!['pending', 'resolved', 'all'].includes(state) || !Number.isSafeInteger(limit) || limit < 1) return json(res, 400, { error: 'Invalid approval state or limit.' });
+      return json(res, 200, listApprovals(store, { state: state as 'pending' | 'resolved' | 'all', limit, agentId: url.searchParams.get('agentId') ?? undefined }));
+    }
+    if (req.method === "GET" && url.pathname === "/v1/audit") {
+      workspaceIdentity.requireOwner();
+      const integer = (name: string, fallback: number) => { const value = url.searchParams.get(name); return value === null ? fallback : /^\d+$/.test(value) ? Number(value) : NaN; };
+      const after = integer('after', 0), limit = integer('limit', 100);
+      if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1) return json(res, 400, { error: 'Invalid audit cursor or limit.' });
+      return json(res, 200, { events: audit.list({ after, limit, action: url.searchParams.get('action') ?? undefined, targetKind: url.searchParams.get('targetKind') ?? undefined, targetId: url.searchParams.get('targetId') ?? undefined }) });
+    }
     if (url.pathname === '/v1/client-status' && req.method === 'GET') { const status = await bootstrapStatus(); return json(res,200,{...status,token:'',workspaceRole:workspaceIdentity.actor().role}); }
     if (url.pathname === '/v1/client-agents' && req.method === 'GET') return json(res,200,{agents:profiles.list().map(profile => profileAgent(profile))});
     if (url.pathname === '/v1/workspace/members/sync' && req.method === 'POST') {
@@ -1360,8 +1403,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
           return json(res, 200, { ...checked, ok: Boolean(result.ok), message: String(result.message || checked.message), machine: checked.machine });
         } catch (error) { return json(res, 200, { ...checked, ok: false, message: error instanceof Error ? error.message : 'Computer access check failed.' }); }
       }
-      if (action === 'reconnect') return json(res, 200, machines.reconnect(machineId));
-      return json(res, 200, machines.revoke(machineId));
+      if (action === 'reconnect') { const result = machines.reconnect(machineId); audit.record({ actorKind: 'operator', action: 'machine.reconnect', targetKind: 'machine', targetId: machineId }); return json(res, 200, result); }
+      { const result = machines.revoke(machineId); audit.record({ actorKind: 'operator', action: 'machine.revoke', targetKind: 'machine', targetId: machineId, detail: { cancelledCommands: result.cancelledCommands } }); return json(res, 200, result); }
     }
     const agentComputerMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(stop|transfer)$/);
     if (agentComputerMatch && req.method === 'POST') {
@@ -1376,8 +1419,49 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     }
     if (req.method === "POST" && url.pathname === "/v1/agents/sync") {
       const input = await body(req);
-      for (const agent of input.agents || []) { profiles.import(agent); ensureProfileDirs(agent.id); }
+      for (const agent of input.agents || []) { const profile = profiles.import(agent); if (profile) ensureProfileDirs(profile.id); }
       return json(res, 200, { synced: input.agents?.length || 0, agents: profiles.list().map(p => profileAgent(p)) });
+    }
+    if (req.method === "POST" && url.pathname === "/v1/agents") {
+      const profile = profiles.create(await body(req)); ensureProfileDirs(profile.id);
+      audit.record({ actorKind: 'operator', action: 'agent.create', targetKind: 'agent', targetId: profile.id });
+      return json(res, 201, { agent: profileAgent(profile) });
+    }
+    const agentDeleteMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)$/);
+    if (req.method === "DELETE" && agentDeleteMatch) {
+      const id = validId(decodeURIComponent(agentDeleteMatch[1]));
+      if (machines.transferring(id)) throw new MachineError('Wait for this agent’s computer transfer to finish before deleting it.', 409);
+      const current = profiles.get(id);
+      if (!current) throw new ProfileError('Agent profile not found.', 404);
+      if (profiles.list().length === 1) throw new ProfileError('Keep at least one agent in the workspace.', 409);
+      reserveProbe(id);
+      // Keep the profile and its cleanup identity until the idle computer confirms shutdown.
+      const gateway = gateways.get(id);
+      if (gateway) { writeRunLease(root, id, null); await gateway.stop(); gateways.delete(id); }
+      const machineId = current.computer.machineId;
+      if (machineId === 'local') {
+        if (current.computer.access === 'direct') { if (store.db.prepare('SELECT 1 FROM runtime_processes WHERE agent_id=?').get(id)) await cleanPreviousRuntime(id, current.computer); }
+        else await stopAgentComputer(id, root, current.computer);
+      } else {
+        const machine = machines.get(machineId);
+        if (machine.status !== 'online') throw new ProfileError('Reconnect the assigned computer so this agent can be stopped before deleting it.', 409);
+        if (current.computer.desktop === 'virtual') {
+          const result = await runnerDesktop.request(machine.id, id, { profile: current, action: 'reset' }) as Record<string, unknown>;
+          if (result?.ok !== true) throw new ProfileError('The runner has not confirmed computer cleanup. The agent has not been deleted.', 409);
+        } else {
+          if (!machine.capabilities.features?.includes('execution-quiescence')) throw new ProfileError('Update this runner before deleting its agent.', 409);
+          const result = await waitRunnerCommand(machines.enqueue(machine.id, id, 'stop', { quiesce: true, profile: current }).id);
+          if (result?.ok !== true) throw new ProfileError('The runner has not confirmed computer cleanup. The agent has not been deleted.', 409);
+        }
+      }
+      if (profiles.get(id)?.revision !== current.revision) throw new ProfileError('This profile changed during computer cleanup. Reload its current revision before deleting it.', 409);
+      terminalSessions.closeAgent(id);
+      profiles.delete(id);
+      desktopContinuations.delete(id); store.db.prepare('DELETE FROM desktop_continuations WHERE agent_id=?').run(id);
+      const removedApprovals = store.db.prepare('DELETE FROM approvals WHERE run_id IN (SELECT id FROM runs WHERE agent_id=?)').run(id).changes;
+      if (machineId) machines.reserve(machineId, id, false);
+      audit.record({ actorKind: 'operator', action: 'agent.delete', targetKind: 'agent', targetId: id, detail: { removedApprovals: Number(removedApprovals) } });
+      return json(res, 200, { ok: true, id });
     }
     if (req.method === "GET" && url.pathname === "/v1/agents") return json(res, 200, { agents: profiles.list().map(p => profileAgent(p)) });
     if (url.pathname === "/v1/teams") {
@@ -1398,13 +1482,20 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     }
     if (req.method === "POST" && url.pathname === "/v1/workspace/model/import") {
       const input = await body(req);
-      return json(res, 200, profiles.defaults().revision ? profiles.defaults() : profiles.setDefaults(input.model, 0));
+      if (profiles.defaults().revision) return json(res, 200, profiles.defaults());
+      const result = profiles.setDefaults(input.model, 0); audit.record({ actorKind: 'operator', action: 'workspace.model.update' }); return json(res, 200, result);
+    }
+    if (url.pathname === '/v1/workspace/security') {
+      workspaceIdentity.requireOwner();
+      if (!authenticated(req)) return json(res, 403, { error: 'Only the operator can change workspace security.' });
+      if (req.method === 'GET') return json(res, 200, profiles.security());
+      if (req.method === 'PUT') { const input = await body(req), result = profiles.setSecurity(input.allowDirectAccess, input.revision, input.confirm); audit.record({ actorKind: 'operator', action: result.allowDirectAccess ? 'workspace.direct_access.enable' : 'workspace.direct_access.disable' }); return json(res, 200, result); }
     }
     if (url.pathname === "/v1/workspace/model") {
       if (req.method === "GET") return json(res, 200, profiles.defaults());
-      if (req.method === "PUT") { const input = await body(req); return json(res, 200, profiles.setDefaults(input.model, input.revision)); }
+      if (req.method === "PUT") { const input = await body(req); const result = profiles.setDefaults(input.model, input.revision); audit.record({ actorKind: 'operator', action: 'workspace.model.update' }); return json(res, 200, result); }
     }
-    const profileMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(profile|credential|tools|models|connection-check|connector-check)$/);
+    const profileMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(profile|credential|tools|models|connection-check|connector-check|sandbox-selftest)$/);
     if (profileMatch) {
       const id = validId(decodeURIComponent(profileMatch[1])), action = profileMatch[2];
       const profile = profiles.get(id);
@@ -1435,9 +1526,28 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         workspaceIdentity.audit('agent.tools.update',id);
         if (moving) { const pending = { ...desired, revision: saved.revision }; machines.reserve(desired.computer.machineId, id, desired.computer.reserveMachine); void performTransfer(machines.transfer(id, current!.computer.machineId, desired.computer.machineId, pending)); }
         else machines.reserve(saved.computer.machineId, id, saved.computer.reserveMachine);
+        audit.record({ actorKind: 'operator', action: 'agent.profile.update', targetKind: 'agent', targetId: id, detail: { revision: saved.revision, access: desired.computer.access, machineId: desired.computer.machineId, desktop: desired.computer.desktop, folders: desired.computer.folders.length } });
         return json(res, 200, profileResponse(saved));
       }
       if (!profile) return json(res, 404, { error: 'Agent profile not found.' });
+      if (action === 'sandbox-selftest') {
+        if (req.method === 'GET') {
+          const history = store.db.prepare('SELECT id, agent_id, machine_id, runner_kind, attestation, status, result_json, created_at FROM sandbox_selftests WHERE agent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 20').all(id).map(row => { const { result_json, ...metadata } = row; return { ...metadata, result: JSON.parse(String(result_json)) }; });
+          return json(res, 200, { latest: history[0] || null, history });
+        }
+        if (req.method === 'POST') {
+          reserveProbe(id); assertSandboxedComputer(profile.computer);
+          const attestation = process.env.OPEN_HARNESS_MOCK === '1' ? 'mock' : profile.computer.machineId === 'local' ? 'host-attested' : 'runner-attested';
+          const result = attestation === 'mock' ? mockSandbox() : profile.computer.machineId === 'local'
+            ? await sandboxSelftest(await ensureContainerAsync(id, root, profile.computer, false, teams.activeTeamIds(id), () => store.agentBusy(id)), { computer: profile.computer, teamIds: teams.activeTeamIds(id), stateRoot: root, agentId: id })
+            : { ...await runnerProbe(profile, 'probe-sandbox') as SandboxResult, attestation: 'runner-attested' as const };
+          const record = { id: crypto.randomUUID(), agent_id: id, machine_id: profile.computer.machineId, runner_kind: result.runnerKind, attestation: result.attestation, status: result.status, created_at: new Date().toISOString(), result };
+          store.db.prepare('INSERT INTO sandbox_selftests (id, agent_id, machine_id, runner_kind, attestation, status, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, id, record.machine_id, record.runner_kind, record.attestation, record.status, JSON.stringify(result), record.created_at);
+          audit.record({ actorKind: 'operator', action: 'sandbox.selftest', targetKind: 'agent', targetId: id, detail: { status: result.status, attestation: result.attestation } });
+          return json(res, 200, record);
+        }
+        return json(res, 405, { error: 'Use GET or POST for sandbox checks.' });
+      }
       if (action === 'credential' && req.method === 'PUT') {
         const input = await body(req);
         if (input.revision !== undefined && input.revision !== profile.revision) throw new ProfileError(`Profile changed elsewhere (current revision ${profile.revision}). Reload before saving.`, 409);
@@ -1453,7 +1563,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       if (!['profile', 'credential'].includes(action)) reserveProbe(id);
       if (action === 'tools' && req.method === 'GET') {
         ensureProfileDirs(id);
-        const catalog = profile.computer.machineId === 'local' ? await discoverTools(id, root, profile) : await runnerProbe(profile, 'probe-tools') as ToolCatalog;
+        profiles.checkDirect(profile.computer);
+        const catalog = profile.computer.machineId === 'local' ? await discoverTools(id, root, profile, teams.activeTeamIds(id), () => store.agentBusy(id)) : await runnerProbe(profile, 'probe-tools') as ToolCatalog;
+        if (!catalog.tools.some(tool => tool.id === MESSAGE_TOOL)) catalog.tools.push({ id: MESSAGE_TOOL, name: 'Conversation messages', group: 'other', description: 'Post messages and read or acknowledge your inbox.', available: true });
         if (catalog.source === 'unavailable') {
           const cached = store.db.prepare('SELECT json FROM tool_catalogs WHERE agent_id=?').get(id) as { json: string } | undefined;
           if (cached) { catalog.tools = (JSON.parse(cached.json) as ToolCatalog).tools.map(t => ({ ...t, available: false, reason: catalog.error })); catalog.source = 'cached'; }
@@ -1491,7 +1603,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         if (tested.secretRef && !secrets.has(tested.secretRef)) return json(res, 200, { status: 'missing_credentials', error: `Add secret ${tested.secretRef}.`, tools: [] });
         try {
           ensureProfileDirs(id);
-          const result = process.env.OPEN_HARNESS_MOCK === '1' ? { status: 'connected', tools: [{ name: 'lookup', description: 'Mock connected tool' }] } : profile.computer.machineId === 'local' ? await runtimeProbe(await ensureContainerAsync(id, root, profile.computer), { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} }) : await runnerProbe(profile, 'probe-runtime', { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} });
+          const result = process.env.OPEN_HARNESS_MOCK === '1' ? { status: 'connected', tools: [{ name: 'lookup', description: 'Mock connected tool' }] } : profile.computer.machineId === 'local' ? await runtimeProbe(await ensureContainerAsync(id, root, profile.computer, false, teams.activeTeamIds(id), () => store.agentBusy(id)), { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} }) : await runnerProbe(profile, 'probe-runtime', { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} });
           const tools = (result.tools as Array<{ name: string; description: string }>).map(t => ({ id: mcpToolId(tested.name, t.name), name: t.name, description: t.description, group: 'mcp', available: true }));
           const prior = store.db.prepare('SELECT json FROM tool_catalogs WHERE agent_id=?').get(id) as { json: string } | undefined;
           const catalog: ToolCatalog = prior ? JSON.parse(prior.json) : { source: 'runtime', tools: [] };
@@ -1532,12 +1644,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       const files = (input.files || []).map((file: { name: unknown; content: unknown }) => ({ target: safeFile(join(root, 'shared'), String(file.name).replace(/[^a-zA-Z0-9._ -]/g, '_')), content: String(file.content).slice(0, 1_000_000) }));
       store.db.prepare("INSERT INTO migrations(key,payload_json,created_at) VALUES(?,?,?)").run("browser-v1", JSON.stringify(input), new Date().toISOString());
       for (const agent of input.agents || []) {
-        profiles.import(agent);
-        const { memory } = profileMemory(root, String(agent.id));
-        if (Array.isArray(agent.memory) && agent.memory.length && !existsSync(memory)) atomicWorkspaceWrite(memory, agent.memory.map((item: unknown) => `- ${String(item)}`).join("\n") + "\n");
+        const imported = profiles.import(agent); if (!imported) continue;
+        const { memory } = profileMemory(root, imported.id);
+        if (Array.isArray(agent.memory) && agent.memory.length && !existsSync(memory)) writeInside(root, relative(root, memory).split("\\").join("/"), agent.memory.map((item: unknown) => `- ${String(item)}`).join("\n") + "\n", { maxBytes: 200000, exclusive: true });
       }
       for (const conversation of input.conversations || []) store.db.prepare("INSERT OR IGNORE INTO conversations(id,agent_id,title,legacy_json,created_at,updated_at) VALUES(?,?,?,?,?,?)").run(conversation.id, conversation.agentId, conversation.title, JSON.stringify(conversation), conversation.updatedAt || new Date().toISOString(), conversation.updatedAt || new Date().toISOString());
-      for (const file of files) atomicWorkspaceWrite(file.target, file.content);
+      for (const file of files) writeInside(root, relative(root, file.target).split("\\").join("/"), file.content, { maxBytes: 1000000 });
       writeFileSync(join(root, "browser-v1-backup.json"), JSON.stringify(input, null, 2), { mode: 0o600 });
       return json(res, 200, { migrated: true });
     }
@@ -1582,11 +1694,39 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     }
     if (req.method === "POST" && url.pathname === "/v1/runs") {const input=object(await body(req));if(input.replyOnly!==undefined&&typeof input.replyOnly!=='boolean')throw new ProductError('Choose whether this message can use tools.');if(input.parentRunId)throw new ProductError('Delegate through the named-agent handoff so team, depth and concurrency rules can be checked.',409);const requestId=input.requestId?text(input.requestId,'Run request identity',200):crypto.randomUUID(),actorId=workspaceIdentity.actor().id,request={agentId:text(input.agentId,'Agent',100),prompt:text(input.prompt,'Task',120000),...(input.conversationId?{conversationId:text(input.conversationId,'Conversation',200)}:{}),...(input.replyOnly===true?{replyOnly:true}:{})},hash=createHmac('sha256',secrets.token).update(JSON.stringify(request)).digest('hex'),prior=store.db.prepare('SELECT prompt_hash,run_id FROM run_submissions WHERE actor_id=? AND request_id=?').get(actorId,requestId) as {prompt_hash:string;run_id:string}|undefined;if(prior){if(prior.prompt_hash!==hash)throw new ProductError('This run request identity belongs to a different task. Inspect the original task before submitting another.',409);return json(res,202,runResponse(store.getRun(prior.run_id)!));}store.db.exec('SAVEPOINT run_submission');let run:RunRow;try{run=createRun({...request,deferStart:true});store.db.prepare('INSERT INTO run_submissions VALUES(?,?,?,?)').run(actorId,requestId,hash,run.id);store.db.exec('RELEASE run_submission');}catch(error){store.db.exec('ROLLBACK TO run_submission; RELEASE run_submission');throw error;}res.once('finish',()=>event(run.id,'run.acknowledged',{latencyMs:Math.round(performance.now()-requestStarted)}));queueMicrotask(()=>void pump());return json(res,202,runResponse(run)); }
     if (req.method === "GET" && url.pathname === "/v1/runs") return json(res, 200, { runs: store.listRuns().map(runResponse) });
+    if (url.pathname === '/v1/conversations') {
+      if (req.method === 'POST') return json(res, 201, conversations.createConversation(await body(req)));
+      if (req.method === 'GET' && url.searchParams.has('kind')) return json(res, 200, { conversations: conversations.listConversations(url.searchParams.get('kind')!) });
+    }
+    const conversationRoute = url.pathname.match(/^\/v1\/conversations\/([^/]+)(?:\/(members|messages|halt|resume)(?:\/([^/]+))?)?$/);
+    if (conversationRoute) {
+      const [, rawId, resource, rawMemberId] = conversationRoute, id = decodeURIComponent(rawId), memberId = rawMemberId === undefined ? undefined : decodeURIComponent(rawMemberId);
+      // These are operator routes; agent-scoped membership grants belong to the internal API.
+      if ((resource === 'halt' || resource === 'resume') && req.method === 'POST') {
+        conversations.getConversation(id); store.db.prepare('UPDATE conversations SET auto_turns_enabled=? WHERE id=?').run(resource === 'resume' ? 1 : 0, id);
+        let stopped = 0; if (resource === 'halt') for (const run of (store.db.prepare("SELECT * FROM runs WHERE conversation_id=? AND state IN ('queued','running','waiting_approval','waiting_input')").all(id) as RunRow[]).filter(r => messaging.isTurn(r.id))) stopped += (await stopRunTree(run.id)).stopped;
+        audit.record({ actorKind: 'operator', action: `conversation.${resource}`, targetKind: 'conversation', targetId: id });
+        return json(res, 200, resource === 'halt' ? { halted: true, stopped } : { resumed: true });
+      }
+      if (!resource && req.method === 'GET') return json(res, 200, conversations.getConversation(id));
+      if (resource === 'members' && !memberId && req.method === 'POST') return json(res, 201, conversations.addMember(id, await body(req)));
+      if (resource === 'members' && memberId && req.method === 'DELETE') return json(res, 200, conversations.removeMember(id, memberId));
+      if (resource === 'messages' && !memberId && req.method === 'POST') {
+        const input = await body(req);
+        const { message, created } = conversations.postMessageWithStatus({ conversationId: id, sender: { kind: 'user', id: 'user' }, body: input.body, mentions: input.mentions, idempotencyKey: input.idempotencyKey, inReplyTo: input.inReplyTo });
+        const c = conversations.getConversation(id), mentions = JSON.parse(message.mentions_json) as string[];
+        const scheduledRuns = created && c.kind === 'group' ? messaging.schedule(id, mentions.length ? mentions : c.members.filter(m => m.participant_kind === 'agent').map(m => m.participant_id)) : [];
+        void pump(); return json(res, 201, { ...message, scheduledRuns });
+      }
+      if (resource === 'messages' && !memberId && req.method === 'GET') return json(res, 200, { messages: conversations.listMessages(id, Number(url.searchParams.get('after') ?? 0), Number(url.searchParams.get('limit') ?? 100)) });
+    }
     if (req.method === 'GET' && url.pathname === '/v1/conversations') {
       const agentId = url.searchParams.get('agentId');
       const rows = (agentId ? store.db.prepare('SELECT * FROM runs WHERE agent_id=? ORDER BY created_at,rowid').all(agentId) : store.db.prepare('SELECT * FROM runs ORDER BY created_at,rowid').all()) as RunRow[];
+      const groups = new Set((store.db.prepare("SELECT id FROM conversations WHERE kind='group'").all() as { id: string }[]).map(row => row.id));
       const conversations = new Map<string, { id: string; agentId: string; title: string; updatedAt: string; runs: ReturnType<typeof runResponse>[] }>();
       for (const run of rows) {
+        if (groups.has(run.conversation_id)) continue;
         const key = `${run.agent_id}:${run.conversation_id}`;
         const conversation = conversations.get(key) || { id: run.conversation_id, agentId: run.agent_id, title: run.prompt.slice(0, 52), updatedAt: run.updated_at, runs: [] };
         conversation.runs.push(runResponse(run)); conversation.updatedAt = run.updated_at > conversation.updatedAt ? run.updated_at : conversation.updatedAt; conversations.set(key, conversation);
@@ -1609,7 +1749,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       if (action === 'approval' && req.method === 'POST') {
         const input = await body(req), approval = store.approval(String(input.approvalId));
         if (!approval || approval.run_id !== run.id) return json(res, 404, { error: 'Approval not found.' });
-        if (approval.state !== 'pending' || !activeStates.has(run.state)) return json(res, 409, { error: 'This approval is no longer pending.' });
+        if (approval.state !== 'pending') return json(res, 409, { error: 'Approval has already been resolved or is being resolved.' });
+        if (!activeStates.has(run.state)) return json(res, 409, { error: 'Approval expired because the run has ended.' });
         const live = active.get(run.id), remote = remoteActive.get(run.id);
         if (!live && !remote) return json(res, 409, { error: 'Run is not active.' });
         if (!['approve', 'deny', 'once', 'session', 'always'].includes(input.decision)) throw new ProfileError('Choose approve or deny.');
@@ -1635,6 +1776,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
           const inputPending = store.db.prepare("SELECT 1 FROM run_inputs WHERE run_id=? AND state IN ('pending','submitting','submitted') LIMIT 1").get(run.id);
           store.setRun(run.id, { state: approvalPending ? 'waiting_approval' : inputPending ? 'waiting_input' : 'running' });
         }
+        audit.record({ actorKind: 'operator', action: 'run.approval', targetKind: 'run', targetId: run.id, detail: { decision, approvalId } });
         return json(res, 200, { ok: true, pending: Boolean(remote) });
       }
       if (action === 'input' && req.method === 'POST') {
@@ -1679,23 +1821,23 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     }
     if (url.pathname === "/v1/credentials") {
       if (req.method === "GET") return json(res, 200, { credentials: credentialRecords(), backend: credentials.backend });
-      if (req.method === "POST") { const input = await body(req); return json(res, 201, credentialRecord(credentials.create(input))); }
+      if (req.method === "POST") { const input = await body(req); const row = credentials.create(input); audit.record({ actorKind: "operator", action: "credential.create", targetKind: "credential", targetId: row.ref, detail: { label: row.label, provider: row.provider } }); return json(res, 201, credentialRecord(row)); }
     }
     const credentialMatch = url.pathname.match(/^\/v1\/credentials\/([^/]+)(?:\/(value))?$/);
     if (credentialMatch) {
       const ref = decodeURIComponent(credentialMatch[1]), action = credentialMatch[2];
-      if (action === "value" && req.method === "POST") { const input = await body(req); return json(res, 200, credentialRecord(credentials.rotate(ref, input.value))); }
+      if (action === "value" && req.method === "POST") { const input = await body(req); const row = credentials.rotate(ref, input.value); audit.record({ actorKind: "operator", action: "credential.rotate", targetKind: "credential", targetId: row.ref, detail: { label: row.label, provider: row.provider } }); return json(res, 200, credentialRecord(row)); }
       if (action) return json(res, 405, { error: "Unsupported credential action." });
       if (req.method === "GET") return json(res, 200, credentialRecord(credentials.row(ref)));
-      if (req.method === "PUT") { const input = await body(req); return json(res, 200, credentialRecord(credentials.relabel(ref, input))); }
+      if (req.method === "PUT") { const input = await body(req); const row = credentials.relabel(ref, input); audit.record({ actorKind: "operator", action: "credential.update", targetKind: "credential", targetId: row.ref, detail: { label: row.label, provider: row.provider } }); return json(res, 200, credentialRecord(row)); }
       if (req.method === "DELETE") {
         const usage = credentialUses(credentials.row(ref).ref), reassignTo = url.searchParams.get("reassignTo") || "";
         if (reassignTo && !usage.uses.length && usage.activeRuns) return json(res, 409, { error: "Running tasks still use this credential. Let them finish or stop them before deleting it.", usage });
-        if (reassignTo) { if (reassignTo === ref || !credentials.has(reassignTo)) return json(res, 400, { error: "Choose a different saved credential to move these to." }); const reassigned = reassignCredential(ref, reassignTo); const warning = credentials.row(ref).provider === CODEX_PROVIDER ? await codex.disconnect(ref,workspaceIdentity.actor().id) : (credentials.remove(ref), ""); return json(res, 200, { ok: true, reassigned, warning }); }
+        if (reassignTo) { if (reassignTo === ref || !credentials.has(reassignTo)) return json(res, 400, { error: "Choose a different saved credential to move these to." }); const reassigned = reassignCredential(ref, reassignTo); const warning = credentials.row(ref).provider === CODEX_PROVIDER ? await codex.disconnect(ref,workspaceIdentity.actor().id) : (credentials.remove(ref), ""); audit.record({ actorKind: 'operator', action: 'credential.delete', targetKind: 'credential', targetId: ref }); return json(res, 200, { ok: true, reassigned, warning }); }
         // Refuse by default rather than silently breaking agents; the client re-sends with
         // force=1 once it has shown the operator exactly what references this.
         if ((usage.uses.length || usage.activeRuns) && url.searchParams.get("force") !== "1") return json(res, 409, { error: "This credential is still in use.", usage });
-        const warning = credentials.row(ref).provider === CODEX_PROVIDER ? await codex.disconnect(ref,workspaceIdentity.actor().id) : (credentials.remove(ref), ""); return json(res, 200, { ok: true, reassigned: [], warning });
+        const warning = credentials.row(ref).provider === CODEX_PROVIDER ? await codex.disconnect(ref,workspaceIdentity.actor().id) : (credentials.remove(ref), ""); audit.record({ actorKind: 'operator', action: 'credential.delete', targetKind: 'credential', targetId: ref }); return json(res, 200, { ok: true, reassigned: [], warning });
       }
     }
     if (req.method === "POST" && url.pathname === "/v1/secrets") {
@@ -1704,9 +1846,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       return json(res, 200, { ok: true, name: row.ref });
     }
     if (/^\/v1\/agents\/[^/]+\/connectors/.test(url.pathname)) return json(res, 410, { error: 'Connection settings moved into Agent settings. Reload the app.' });
-    if (url.pathname === "/v1/files") { const { scope, dir } = workspaceDir(url); mkdirSync(dir, { recursive: true }); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = safeFile(dir, name); if (!existsSync(target)) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readWorkspaceFile(target).toString(encoding), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(dir), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = safeFile(dir, String(input.name || "")); atomicWorkspaceWrite(target, Buffer.from(content, encoding)); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = safeFile(dir, String(url.searchParams.get("name") || "")); if (existsSync(target)) unlinkSync(target); return json(res, 200, { ok: true }); } }
+    if (url.pathname === "/v1/files") { const { scope, anchor, base } = workspaceDir(url); ensureFileDir(anchor, base); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = `${base}/${safeFileName(name)}`; if (statInside(anchor, target) === null) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readInside(anchor, target, { encoding, maxBytes: 1_000_000 }), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(anchor, base), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = `${base}/${safeFileName(String(input.name || ""))}`; writeInside(anchor, target, content, { encoding, maxBytes: 1_000_000 }); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = `${base}/${safeFileName(String(url.searchParams.get("name") || ""))}`; try { unlinkInside(anchor, target); } catch (error) { if (!(error instanceof SafeFsError && error.code === 'not-found')) throw error; } return json(res, 200, { ok: true }); } }
     if (req.method === "GET" && url.pathname === "/v1/routines") return json(res, 200, { routines: store.db.prepare("SELECT * FROM schedules ORDER BY created_at DESC").all() });
-    if (req.method === "POST" && url.pathname === "/v1/routines") { const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)); const next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, input.agentId, input.name, input.prompt, minutes, input.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone, 1, next, stamp.toISOString(), stamp.toISOString());store.db.prepare('INSERT INTO schedule_actors VALUES(?,?)').run(id,workspaceIdentity.actor().id);return json(res, 201, { id, nextRunAt: next }); }
+    if (req.method === "POST" && url.pathname === "/v1/routines") { const routine = saveRoutine(store.db, await body(req), new Date()); store.db.prepare('INSERT INTO schedule_actors VALUES(?,?)').run(routine.id,workspaceIdentity.actor().id); return json(res, 201, routine); }
     // A routine with a typo, a wrong agent, or a runaway interval could previously only
     // be paused, never corrected or removed — so every mistake was permanent.
     const routineItem = url.pathname.match(/^\/v1\/routines\/([^/]+)$/);
@@ -1719,24 +1861,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         return json(res, 200, { ok: true });
       }
       if (req.method === "PUT") {
-        const input = await body(req), stamp = new Date().toISOString();
-        const name = input.name === undefined ? routine.name : String(input.name).trim().slice(0, 200);
-        const prompt = input.prompt === undefined ? routine.prompt : String(input.prompt).trim().slice(0, 20_000);
-        if (!name || !prompt) return json(res, 400, { error: "A routine needs a name and a task." });
-        const agentId = input.agentId === undefined ? routine.agent_id : String(input.agentId);
-        if (!profiles.list().some(profile => profile.id === agentId)) return json(res, 400, { error: "That agent no longer exists." });
-        // Clamped like the hosted route: an interval of 0 or a negative number would
-        // otherwise land as "every minute, forever".
-        const minutes = input.intervalMinutes === undefined
-          ? Number(routine.interval_minutes)
-          : Math.max(1, Math.min(525_600, Math.round(Number(input.intervalMinutes))));
-        if (!Number.isFinite(minutes)) return json(res, 400, { error: "Enter how often this should run, in minutes." });
-        // Re-base the next run so a shortened interval takes effect now rather than
-        // waiting out the old one.
-        const next = new Date(Date.now() + minutes * 60_000).toISOString();
-        store.db.prepare("UPDATE schedules SET agent_id=?,name=?,prompt=?,interval_minutes=?,next_run_at=?,updated_at=? WHERE id=?")
-          .run(agentId, name, prompt, minutes, next, stamp, routine.id);
-        return json(res, 200, { ...routine, agent_id: agentId, name, prompt, interval_minutes: minutes, next_run_at: next, updated_at: stamp });
+        return json(res, 200, saveRoutine(store.db, await body(req), new Date(), routine));
       }
     }
     const routineMatch = url.pathname.match(/^\/v1\/routines\/([^/]+)\/(run|toggle|history)$/);
@@ -1744,10 +1869,47 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       const routine = store.db.prepare("SELECT * FROM schedules WHERE id=?").get(routineMatch[1]) as any;
       if (!routine) return json(res, 404, { error: "Routine not found." });
       if (routineMatch[2] === "history" && req.method === "GET") return json(res, 200, { history: store.db.prepare("SELECT schedule_runs.*,runs.state,runs.result,runs.error,runs.updated_at FROM schedule_runs JOIN runs ON runs.id=schedule_runs.run_id WHERE schedule_id=? ORDER BY scheduled_for DESC LIMIT 100").all(routine.id) });
-      if (req.method === "POST" && routineMatch[2] === "run") { const stamp = new Date().toISOString(), run = createRun({ agentId: routine.agent_id, prompt: routine.prompt }); store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, stamp); store.db.prepare("UPDATE schedules SET last_run_at=?,updated_at=? WHERE id=?").run(stamp, stamp, routine.id); return json(res, 202, run); }
+      if (req.method === "POST" && routineMatch[2] === "run") { const stamp = new Date().toISOString(), run = createRun({ agentId: routine.agent_id, prompt: routine.prompt, internalConversation: true }); store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, stamp); store.db.prepare("UPDATE schedules SET last_run_at=?,updated_at=? WHERE id=?").run(stamp, stamp, routine.id); return json(res, 202, run); }
       if (req.method === "POST" && routineMatch[2] === "toggle") {if(!routine.enabled)store.db.prepare('INSERT INTO schedule_actors VALUES(?,?) ON CONFLICT(schedule_id) DO UPDATE SET actor_id=excluded.actor_id').run(routine.id,workspaceIdentity.actor().id);store.db.prepare("UPDATE schedules SET enabled=?,updated_at=? WHERE id=?").run(routine.enabled ? 0 : 1, new Date().toISOString(), routine.id); return json(res, 200, { enabled: !routine.enabled }); }
     }
-    if (req.method === "POST" && url.pathname === "/internal/handoff") { const input = await body(req); const parent = store.listRuns().find(run => run.agent_id === internalAgent && ["running","waiting_approval","waiting_input"].includes(run.state)); if (!parent) return json(res, 409, { error: "The delegating agent has no active run." }); if (!internalAllowed(internalAgent, HANDOFF_TOOL, String(req.headers["x-open-harness-run"] || parent.id))) return json(res, 403, { error: "Delegation is disabled for this run." }); const targetId = String(input.agentId || ""); if (!internalAgent || !teams.sharesActiveTeam(internalAgent, targetId)) return json(res, 403, { error: "Named handoffs require both agents to share an active team." }); const child = createRun({ agentId: targetId, prompt: input.prompt, parentRunId: parent.id }); event(parent.id, "handoff.created", { childRunId: child.id, targetAgentId: targetId, prompt: input.prompt }); if(input.detached===true||internalAgent===PRIMARY_ASSISTANT_ID){void waitForRun(child.id).then(result=>event(parent.id,"handoff.completed",{childRunId:child.id,targetAgentId:targetId,state:result.state})).catch(()=>{});return json(res,202,{runId:child.id,state:child.state,detached:true});}const result = await waitForRun(child.id); event(parent.id, "handoff.completed", { childRunId: child.id, targetAgentId: targetId, state: result.state }); return json(res, 200, { runId: result.id, state: result.state, result: result.result, error: result.error }); }
+    if (['/internal/message', '/internal/inbox', '/internal/inbox/ack'].includes(url.pathname)) {
+      if (!internalAllowed(internalAgent, MESSAGE_TOOL, String(req.headers['x-open-harness-run'] || '') || undefined)) return json(res, 403, { error: 'Messaging is disabled for this run.' });
+      const agent = internalAgent!;
+      if (req.method === 'GET' && url.pathname === '/internal/inbox') return json(res, 200, messaging.inbox(agent, url.searchParams.get('conversationId') || undefined));
+      if (req.method === 'POST' && url.pathname === '/internal/inbox/ack') { messaging.ack(agent, (await body(req)).messageIds); return json(res, 200, { acknowledged: true }); }
+      if (req.method === 'POST' && url.pathname === '/internal/message') {
+        const input = await body(req), c = conversations.getConversation(input.conversationId);
+        if (c.members.some(m => m.participant_kind === 'agent' && m.participant_id !== agent && !teams.sharesActiveTeam(agent, m.participant_id))) return json(res, 403, { error: 'Agents must share an active team.' });
+        return json(res, 201, conversations.postMessage({ conversationId: input.conversationId, sender: { kind: 'agent', id: agent }, body: input.body, mentions: input.mentions, idempotencyKey: input.idempotencyKey }));
+      }
+    }
+    if (req.method === 'POST' && url.pathname === '/internal/handoff') {
+      const input = await body(req), runId = String(req.headers['x-open-harness-run'] || '');
+      const parent = runId ? store.getRun(runId) : store.listRuns().find(run => run.agent_id === internalAgent && activeStates.has(run.state));
+      if (!parent || parent.agent_id !== internalAgent || !activeStates.has(parent.state)) return json(res, 409, { error: 'The delegating agent has no active run.' });
+      if (!internalAllowed(internalAgent, HANDOFF_TOOL, parent.id)) return json(res, 403, { error: 'Delegation is disabled for this run.' });
+      const targetId = String(input.agentId || '');
+      if (!internalAgent || !teams.sharesActiveTeam(internalAgent, targetId)) return json(res, 403, { error: 'Named handoffs require both agents to share an active team.' });
+      if ((store.db.prepare('SELECT COUNT(*) n FROM runs WHERE parent_run_id=?').get(parent.id) as { n: number }).n >= MAX_DELEGATIONS) return json(res, 429, { error: 'Delegation limit reached for this run.' });
+      let child: RunRow, conversationId: string | undefined;
+      store.db.exec('SAVEPOINT handoff');
+      try {
+        child = createRun({ agentId: targetId, prompt: input.prompt, parentRunId: parent.id, deferStart: true });
+        if (input.detached === true && internalAgent !== PRIMARY_ASSISTANT_ID) {
+          conversationId = messaging.delegationConversation(parent, child);
+          conversations.postMessage({ conversationId, sender: { kind: 'agent', id: parent.agent_id }, body: child.prompt.slice(0, 20000), originRunId: parent.id, idempotencyKey: `delegation-request:${child.id}` });
+        }
+        event(parent.id, 'handoff.created', { childRunId: child.id, targetAgentId: targetId, prompt: input.prompt });
+        store.db.exec('RELEASE handoff');
+      } catch (error) { store.db.exec('ROLLBACK TO handoff; RELEASE handoff'); throw error; }
+      void pump();
+      if (input.detached === true || internalAgent === PRIMARY_ASSISTANT_ID) {
+        void waitForRun(child.id).then(result => event(parent.id, 'handoff.completed', { childRunId: child.id, targetAgentId: targetId, state: result.state })).catch(() => {});
+        return json(res, 202, { runId: child.id, childRunId: child.id, conversationId, state: child.state, detached: true });
+      }
+      const result = await waitForRun(child.id); event(parent.id, 'handoff.completed', { childRunId: child.id, targetAgentId: targetId, state: result.state });
+      return json(res, 200, { runId: result.id, childRunId: result.id, state: result.state, result: result.result, error: result.error });
+    }
     if (req.method === "POST" && url.pathname === "/internal/task") {
       const input = await body(req), runId = String(req.headers['x-open-harness-run'] || '');
       if (!internalAllowed(internalAgent, TASK_TOOL, runId)) return json(res, 403, { error: 'Task board access is disabled for this run.' });
@@ -1794,9 +1956,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       if (action === 'run') { if (task.ownerAgentId && task.ownerAgentId !== internalAgent && !profile.board.dispatch) return json(res, 403, { error: 'Starting another agent’s task requires Board: dispatch.' }); const board = tasks.getBoard(task.boardId); if (!board.settings.allowAgentDispatch) return json(res, 403, { error: 'Agent task dispatch is disabled for this board.' }); const started = tasks.start(taskId, { revision: task.revision, idempotencyKey: crypto.randomUUID() }, value => createRun({ ...value, deferStart: true })); void pump(); return json(res, 202, started); }
       return json(res, 400, { error: 'Unknown task action.' });
     }
-    if (req.method === "POST" && url.pathname === "/internal/schedule") { if (!internalAllowed(internalAgent, ROUTINE_TOOL, String(req.headers["x-open-harness-run"] || ""))) return json(res, 403, { error: "Scheduling is disabled for this run." }); const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)), next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, internalAgent, input.name, input.prompt, minutes, input.timezone || "UTC", 1, next, stamp.toISOString(), stamp.toISOString());store.db.prepare('INSERT INTO schedule_actors VALUES(?,?)').run(id,workspaceIdentity.actor().id);return json(res, 201, { id, nextRunAt: next }); }
+    if (req.method === "POST" && url.pathname === "/internal/schedule") { if (!internalAllowed(internalAgent, ROUTINE_TOOL, String(req.headers["x-open-harness-run"] || ""))) return json(res, 403, { error: "Scheduling is disabled for this run." }); const routine = saveRoutine(store.db, { ...await body(req), agentId: internalAgent }, new Date(), undefined, true); store.db.prepare('INSERT INTO schedule_actors VALUES(?,?)').run(routine.id,workspaceIdentity.actor().id); return json(res, 201, routine); }
     return json(res, 404, { error: "Not found." });
-  } catch (error) { if (res.destroyed) return; return json(res, error instanceof ProfileError || error instanceof TaskError || error instanceof TeamError || error instanceof MachineError || error instanceof CredentialError || error instanceof GroupChatError || error instanceof OutcomeError || error instanceof DeliveryError || error instanceof ProductError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
+  } catch (error) { if (res.destroyed) return; return json(res, error instanceof SafeFsError ? safeFsErrorStatus(error.code) : error instanceof ConversationError || error instanceof ProfileError || error instanceof TaskError || error instanceof TeamError || error instanceof MachineError || error instanceof CredentialError || error instanceof GroupChatError || error instanceof OutcomeError || error instanceof DeliveryError || error instanceof ProductError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
   finally {
     if (probingAgent) {
       const gateway = gateways.get(probingAgent);
@@ -1823,40 +1985,17 @@ const server = createServer((req, res) => {
 });
 desktopStreaming.attach(server);terminalSessions.attach(server);runnerDuplex.attach(server,runnerIdentity);
 
-// createRun throws for an agent that no longer exists, for a full queue, and for depth
-// and cycle violations. An unguarded throw here escapes the timer callback and takes the
-// whole coordinator down, and because next_run_at is only advanced on success the same
-// routine is still due on restart — a crash loop with no log and no way out. Every
-// routine is therefore isolated, and a routine that can never succeed is disabled rather
-// than retried forever.
-function advanceRoutine(routine: any, now: Date) {
-  const next = new Date(now.getTime() + Number(routine.interval_minutes) * 60000).toISOString();
-  store.db.prepare("UPDATE schedules SET last_run_at=?,next_run_at=?,updated_at=? WHERE id=?").run(now.toISOString(), next, now.toISOString(), routine.id);
-}
-function runDueRoutine(routine: any, now: Date) {
-  const scheduledFor = routine.next_run_at;
-  if (store.db.prepare("SELECT 1 FROM schedule_runs WHERE schedule_id=? AND scheduled_for=?").get(routine.id, scheduledFor)) return;
-  try {
-    const owner=store.db.prepare('SELECT actor_id FROM schedule_actors WHERE schedule_id=?').get(routine.id) as {actor_id:string}|undefined;
-    const run=actorContext.run(workspaceIdentity.memberActor(owner?.actor_id||'local-owner'),()=>createRun({agentId:routine.agent_id,prompt:routine.prompt}));
-    store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, scheduledFor);
-    advanceRoutine(routine, now);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Routine could not start.";
-    if (error instanceof ProfileError) {
-      store.db.prepare("UPDATE schedules SET enabled=0,updated_at=? WHERE id=?").run(now.toISOString(), routine.id);
-      console.error(`Routine ${routine.id} was disabled because its agent no longer exists: ${message}`);
-      return;
-    }
-    console.error(`Routine ${routine.id} could not start and will retry at its next interval: ${message}`);
-    advanceRoutine(routine, now);
-  }
-}
 setInterval(() => {
   if(maintenance)return;
   try {
-    const now = new Date(), due = store.db.prepare("SELECT * FROM schedules WHERE enabled=1 AND next_run_at<=?").all(now.toISOString()) as any[];
-    for (const routine of due) runDueRoutine(routine, now);
+    const now = new Date();
+    tickRoutines(store.db, now, routine => {
+      const owner = store.db.prepare('SELECT actor_id FROM schedule_actors WHERE schedule_id=?').get(routine.id) as { actor_id: string } | undefined;
+      return actorContext.run(workspaceIdentity.memberActor(owner?.actor_id || 'local-owner'), () => createRun({ agentId: routine.agent_id, prompt: routine.prompt, internalConversation: true }));
+    }, (routine, error) => {
+      if (error instanceof ProfileError || error instanceof ProductError && error.status === 403) store.db.prepare('UPDATE schedules SET enabled=0,updated_at=? WHERE id=?').run(now.toISOString(), routine.id);
+      console.error(`Routine ${routine.id} could not start: ${error instanceof Error ? error.message : 'unknown error'}`);
+    });
     workflows.tick(now); responsibilities.tick(now);
   } catch (error) {
     console.error(`The routine scheduler skipped this tick: ${error instanceof Error ? error.message : "unknown error"}`);
@@ -1876,6 +2015,8 @@ server.on("error", error => {
 });
 await new Promise<void>(resolve => server.listen(port, bind, resolve));
 await recoverRuns();
+messaging.bootSweep();
+void pump();
 // Without these the coordinator exits silently when anything throws outside a request —
 // a timer callback, a detached promise — leaving no record of why the service stopped.
 // In-flight runs are marked interrupted on the next start, so exiting is safe; being

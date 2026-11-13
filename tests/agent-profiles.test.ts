@@ -5,8 +5,9 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHmac } from 'node:crypto';
+import { DEFAULT_NETWORK, draftProfile, type AgentProfile, type ProfileResponse, type ModelChoice } from '../lib/agent-profile';
 import { DatabaseSync } from 'node:sqlite';
-import type { AgentProfile, ProfileResponse, ModelChoice } from '../lib/agent-profile';
+import { Profiles, ProfileError, validateProfile } from '../runtime/profiles';
 import type { PersistentRun } from '../lib/control-client';
 import { decryptRunnerSecret, generateRunnerKeyPair, type EncryptedRunnerSecret } from '../lib/runner-crypto';
 
@@ -40,6 +41,15 @@ async function run(prompt: string, agentId = 'atlas') { return request<Persisten
 test.before(async () => { await start(); await request('/v1/agents/sync', 'POST', { agents: ['atlas','scout'].map(id => ({ id, name: id, role: 'Assistant', description: 'A durable profile', tone: 1, instructions: 'Keep context.', memory: [] })) }); });
 test.after(async () => { if (child && child.exitCode === null) { const exited = new Promise(r => child.once('exit', r)); child.kill('SIGTERM'); await exited; } });
 
+test('workspace security cannot re-enable native execution', async () => {
+  const security = await request<{ allowDirectAccess: boolean; revision: number }>('/v1/workspace/security');
+  assert.equal(security.allowDirectAccess, false);
+  const original = await profile(), direct = { ...original, computer: { ...original.computer, access: 'direct' as const } };
+  await assert.rejects(save(direct), { status: 400 });
+  for (const confirm of [false, true]) await assert.rejects(request('/v1/workspace/security', 'PUT', { allowDirectAccess: true, revision: security.revision, confirm }), { status: 400 });
+  assert.equal((await profile()).revision, original.revision);
+  assert.deepEqual(await request('/v1/workspace/security'), security);
+});
 test('independent model overrides survive workspace updates and stale browser sync', async () => {
   const atlas = await profile(), scout = await profile('scout');
   await save({ ...atlas, model: { inherit: false, provider: 'mock', model: 'atlas-model', credentialRef: '', baseUrl: '' }, prompt: { enabled: true, text: 'Atlas custom system prompt' }, allowedTools: ['terminal'] }, true);
@@ -84,7 +94,7 @@ test('disabling a connector removes its tools at execution even if individually 
 test('coordination cannot bypass disabled delegation or scheduling', async () => {
   const r = await run('MOCK_SLOW'); await waitRun(r.id, ['running']);
   const scoped = createHmac('sha256', token).update('agent:atlas').digest('hex');
-  for (const path of ['/internal/handoff','/internal/schedule']) {
+  for (const path of ['/internal/handoff','/internal/schedule','/internal/message','/internal/inbox/ack']) {
     const response = await fetch(base + path, { method: 'POST', headers: { Authorization: `Bearer ${scoped}`, 'X-Open-Harness-Agent': 'atlas', 'X-Open-Harness-Run': r.id, 'Content-Type': 'application/json' }, body: JSON.stringify({ agentId: 'scout', prompt: 'Bypass', name: 'Bypass' }) }); assert.equal(response.status, 403);
   }
   await waitRun(r.id);
@@ -251,4 +261,35 @@ test('computer settings reject unsafe mode combinations and invalid resource lim
   await assert.rejects(save({ ...current, computer: { ...current.computer, access: 'private', desktop: 'existing' } }), { status: 400 });
   await assert.rejects(save({ ...current, computer: { ...current.computer, resources: { ...current.computer.resources, memoryMb: 128 } } }), { status: 400 });
   await assert.rejects(save({ ...current, computer: { ...current.computer, access: 'folders', folders: [{ id: 'bad', path: '', mode: 'write' }] } }), { status: 400 });
+});
+
+test('network defaults cover new, legacy, and stored profiles', () => {
+  const current = draftProfile({ id: 'legacy', name: 'Legacy', role: 'Assistant', description: '', instructions: '', tone: 0, memory: [] });
+  assert.deepEqual(current.computer.network, DEFAULT_NETWORK);
+  const legacy = JSON.parse(JSON.stringify(current)); delete legacy.computer.network;
+  assert.deepEqual(validateProfile(legacy).computer.network, DEFAULT_NETWORK);
+  assert.deepEqual(draftProfile({ id: 'legacy', name: 'Legacy', role: 'Assistant', description: '', instructions: '', tone: 0, memory: [], profile: legacy }).computer.network, DEFAULT_NETWORK);
+  const db = new DatabaseSync(':memory:');
+  try {
+    const profiles = new Profiles(db);
+    db.prepare('INSERT INTO agent_profiles VALUES(?,?,?)').run(legacy.id, 0, JSON.stringify(legacy));
+    assert.deepEqual(profiles.get(legacy.id)!.computer.network, DEFAULT_NETWORK);
+  } finally { db.close(); }
+});
+test('network allow entries normalize and persist in every mode', () => {
+  const current = draftProfile({ id: 'network', name: 'Network', role: 'Assistant', description: '', instructions: '', tone: 0, memory: [] });
+  const allow = [' EXAMPLE.COM:443 ', 'example.com:443', '*.Example.org', '192.168.1.1:1', '[2001:DB8::1]:65535', '[::1]', 'localhost', 'a'.repeat(63) + '.com'];
+  for (const mode of ['none', 'allowlist', 'open'] as const) {
+    const validated = validateProfile({ ...current, computer: { ...current.computer, network: { mode, allow } } });
+    assert.deepEqual(validated.computer.network, { mode, allow: ['example.com:443', '*.example.org', '192.168.1.1:1', '[2001:db8::1]:65535', '[::1]', 'localhost', 'a'.repeat(63) + '.com'] });
+  }
+});
+test('network validation rejects invalid modes, lists, hosts, and ports', () => {
+  const current = draftProfile({ id: 'network', name: 'Network', role: 'Assistant', description: '', instructions: '', tone: 0, memory: [] });
+  const check = (network: unknown) => validateProfile({ ...current, computer: { ...current.computer, network } } as AgentProfile);
+  for (const mode of ['', 'blocked', 1, null]) assert.throws(() => check({ mode, allow: [] }), ProfileError);
+  for (const allow of [null, 'example.com', Array(51).fill('example.com'), [1]]) assert.throws(() => check({ mode: 'open', allow }), ProfileError);
+  for (const host of ['', ' ', 'https://example.com', 'example.com/path', 'user@example.com', 'two hosts', '-bad.com', 'bad-.com', 'bad_.com', 'a..com', 'example.com.', '*.*.com', '*example.com', '256.1.1.1', '[bad::ip]', '::1', '[::1%eth0]', 'example.com:0', 'example.com:65536', 'example.com:', 'example.com:abc', 'a'.repeat(64) + '.com', Array(4).fill('a'.repeat(63)).join('.')]) {
+    assert.throws(() => check({ mode: 'allowlist', allow: [host] }), { name: 'Error', message: /Allowed hosts/ }, host);
+  }
 });

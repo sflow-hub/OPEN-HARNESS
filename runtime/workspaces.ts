@@ -56,6 +56,9 @@ export class Workspaces {
   authorize(method: string, path: string) {
     const actor = this.actor(); if (actor.role === 'owner') return;
     if (/^\/internal\//.test(path)) throw new ProductError('Agent tools require their own run identity.', 403);
+    if (method === 'GET' && /^\/v1\/(?:agents$|routines\/[^/]+\/history$)/.test(path)) return;
+    if (actor.role === 'operator' && method === 'GET' && path === '/v1/approvals') return;
+    if (actor.role === 'operator' && /^(POST|DELETE)$/.test(method) && /^\/v1\/conversations(?:\/|$)/.test(path)) return;
     if (method === 'GET' && /^\/v1\/(?:client-status$|client-agents$|capabilities|workspace(?:\/model)?$|assistant(?:\/(?:starters|preferences))?$|readiness$|runs(?:\/|$)|conversations(?:\/|$)|routines$|tasks(?:\/|$)|boards(?:\/|$)|teams(?:\/|$)|groups(?:\/|$)|responsibilities(?:\/|$)|workflow-drafts(?:\/|$)|workflows(?:\/|$)|files(?:\/|$)|metrics$|actions(?:\/|$)|connections(?:\/|$))/.test(path)) return;
     if (method === 'GET' && /^\/v1\/agents\/[^/]+\/desktop\/status$/.test(path)) return;
     if (actor.role === 'operator' && /^\/v1\/connections(?:\/|$)/.test(path) && /^(POST|PATCH|DELETE)$/.test(method)) return;

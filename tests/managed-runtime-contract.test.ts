@@ -9,9 +9,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GROUP_CHAT_TOOL } from '../lib/group-chat';
 import { WORKSPACE_TOOL } from '../lib/product';
-import { COORDINATION_TOOLS, prepareProfile } from '../runtime/profile-runtime';
+import { COORDINATION_TOOLS, discoverTools, prepareProfile } from '../runtime/profile-runtime';
 import { hermesApprovalDecision } from '../runtime/hermes';
-import { COMPUTER_TOOL, DEFAULT_BOARD, DEFAULT_COMPUTER, HANDOFF_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
+import { COMPUTER_TOOL, DEFAULT_BOARD, DEFAULT_COMPUTER, MESSAGE_TOOL, HANDOFF_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
 
 const model: ModelChoice = { provider: 'custom', model: 'some-model', credentialRef: 'SOME_KEY', baseUrl: 'http://localhost:9/v1' };
 const profile: AgentProfile = {
@@ -138,12 +138,11 @@ test('coordination tools are named the way Hermes registers them', () => {
   assert.equal(mcpToolId('research', 'lookup'), 'mcp__research__lookup');
   assert.equal(mcpServerOf('mcp__research__lookup'), 'research');
   assert.equal(mcpServerOf('terminal'), null);
-  // Every name the coordination server offers must be a tool Open Harness can grant, or the
-  // model is shown a tool the policy will refuse; and every tool it grants must exist there.
+  // Inbox reads/acknowledgments share the explicit messaging grant in the policy middleware.
   const offered = readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs'), 'utf8')
-    .match(/^\s*name: "([a-z_]+)",$/gm)!.map(line => line.split('"')[1]);
-  assert.deepEqual(offered.map(name => mcpToolId('open_harness', name)).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, COMPUTER_TOOL].sort());
-  assert.deepEqual(COORDINATION_TOOLS.map(tool => tool.id).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, COMPUTER_TOOL].sort());
+    .match(/^\s*(?:\{\s*)?name: "([a-z_]+)",/gm)!.map(line => line.split('"')[1]);
+  assert.deepEqual(offered.map(name => mcpToolId('open_harness', name)).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, COMPUTER_TOOL, MESSAGE_TOOL, mcpToolId('open_harness', 'read_inbox')].sort());
+  assert.deepEqual(COORDINATION_TOOLS.map(tool => tool.id).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, COMPUTER_TOOL, MESSAGE_TOOL].sort());
 });
 
 // A grant saved by an earlier version must keep working. This renames; it must never widen.
@@ -210,4 +209,53 @@ test('managed profiles send flagged commands to the operator approval flow', () 
   const source = readFileSync(join(import.meta.dirname, '..', 'runtime', 'profile-runtime.ts'), 'utf8');
   assert.match(source, /approvals: \{ mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' \}/);
   assert.doesNotMatch(source, /approvals: \{ mode: 'smart'/);
+});
+
+test('tool discovery forwards team mounts and the live busy predicate', async () => {
+  const previousMock = process.env.OPEN_HARNESS_MOCK;
+  delete process.env.OPEN_HARNESS_MOCK;
+  try {
+    const teamIds = ['shared-team'];
+    let busy = true, ensured = false, probed = false;
+    const isBusy = () => busy;
+    const catalog = await discoverTools(profile.id, '/state', profile, teamIds, isBusy, {
+      dockerStatusCached: async () => ({ available: true, version: 'test', message: 'Ready' }),
+      ensureContainerAsync: async (agentId, root, computer, fresh, forwardedTeams, forwardedBusy) => {
+        ensured = true; assert.equal(fresh, false);
+        assert.equal(agentId, profile.id);
+        assert.equal(root, '/state');
+        assert.equal(computer, profile.computer);
+        assert.equal(forwardedTeams, teamIds);
+        assert.equal(forwardedBusy, isBusy);
+        assert.equal(forwardedBusy!(), true);
+        busy = false;
+        assert.equal(forwardedBusy!(), false);
+        return 'existing-container';
+      },
+      runtimeProbe: async (container, input) => {
+        probed = true;
+        assert.equal(container, 'existing-container');
+        assert.deepEqual(input, { action: 'catalog' });
+        return { tools: [] };
+      },
+    });
+    assert.equal(ensured, true);
+    assert.equal(probed, true);
+    assert.equal(catalog.source, 'runtime');
+  } finally {
+    if (previousMock === undefined) delete process.env.OPEN_HARNESS_MOCK;
+    else process.env.OPEN_HARNESS_MOCK = previousMock;
+  }
+});
+
+
+test('messaging-only grants configure their transport and empty grants do not', t => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-messaging-contract-')); t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const allowedTools of [[MESSAGE_TOOL], []]) {
+    prepareProfile(root, { ...profile, allowedTools }, model, { environment: () => ({}) }, 'token', 'message-run');
+    const config = JSON.parse(readFileSync(join(root, 'agents', profile.id, 'profile/config.yaml'), 'utf8'));
+    const policy = JSON.parse(readFileSync(join(root, 'agents', profile.id, 'managed/policy.json'), 'utf8'));
+    assert.equal(Boolean(config.mcp_servers.open_harness), allowedTools.length > 0);
+    assert.deepEqual(policy.allowedTools, allowedTools);
+  }
 });

@@ -19,6 +19,8 @@ import {
   ListTodo,
   Menu,
   MessageSquare,
+  MonitorCog,
+  MessagesSquare,
   Plus,
   Search,
   Settings,
@@ -58,6 +60,7 @@ import {
 } from "../lib/control-client";
 
 import AgentSettings from "../components/agent-settings";
+import AgentDelete from "../components/agent-delete";
 import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import TeamManager, { TeamBadge } from "../components/team-manager";
@@ -77,6 +80,12 @@ import AssistantWorkspace from '../components/assistant-workspace';
 import { DesktopPanel } from "../components/desktop-panel";
 import { CREDENTIAL_PROVIDERS, modelForCredential, providerLabel, type CredentialRecord } from "../lib/credentials";
 import { isSandboxedComputer, profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
+import RoutineHistoryDrawer from "../components/routine-history-drawer";
+import GroupChatView from "../components/group-chat-view";
+import ComputersPage from "../components/computers-page";
+import ApprovalsInbox from "../components/approvals-inbox";
+import type { Routine } from "../lib/routine";
+import { trackKeyboardInset, useMobileBackGuard } from "../lib/browser-overlays";
 import type { Team } from "../lib/team";
 import { APP_VERSION } from "../lib/version";
 
@@ -102,7 +111,8 @@ const MIGRATED_KEY = "open-harness.migrated.v1";
 // Kept apart from SETTINGS_KEY on purpose: the onboarding save rewrites that whole
 // blob, which would silently drop anything else stored alongside it.
 const NOTIFY_KEY = "open-harness.notify.v1";
-type View = "assistant" | "home" | "teams" | "groups" | "chat" | "files" | "routines" | "tasks" | "credentials";
+type View = "assistant" | "home" | "teams" | "groups" | "chat" | "files" | "routines" | "tasks" | "credentials" | "computers" | "approvals";
+const EMPTY_AGENT: Agent = { id: "", name: "No agent selected", role: "", description: "", instructions: "", memory: [], tone: 0 };
 type ModelSettings = { provider: string; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
 const defaultSettings: ModelSettings = {
   provider: "xai",
@@ -187,20 +197,31 @@ export default function Home() {
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [editingAgentTab, setEditingAgentTab] = useState<'profile' | 'computer'>('profile');
+  const [agentBusy, setAgentBusy] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [input, setInput] = useState("");
   const [replyOnly, setReplyOnly] = useState(false);
   const [search, setSearch] = useState("");
   const [agentTeamFilter, setAgentTeamFilter] = useState("all");
+  const [groupKind, setGroupKind] = useState<"chat" | "team">("chat");
   const [liveRuns, setLiveRuns] = useState<Record<string, PersistentRun>>({});
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [answered, setAnswered] = useState<Array<{ id: string; runId: string; at: number }>>([]);
   const ANSWER_GRACE_MS = 20_000;
   const [answering, setAnswering] = useState("");
   const [inputDraft, setInputDraft] = useState<{ inputId: string; text: string; choices: string[] }>({ inputId: "", text: "", choices: [] });
+  // Includes approvals from runs this page is not following.
+  const [pendingApprovals, setPendingApprovals] = useState(0);
+  // The badge poll and the inbox both write this count; a poll that started before an answer can
+  // land after the inbox's newer count, so a write older than the last applied one is dropped.
+  const badgeTicket = useRef(0), badgeApplied = useRef(0);
+  const applyPendingApprovals = (ticket: number, count: number) => { if (ticket < badgeApplied.current) return; badgeApplied.current = ticket; setPendingApprovals(count); };
+  const startApprovalCount = useCallback(() => ++badgeTicket.current, []);
+  const reportInboxCount = useCallback((ticket: number, count: number) => applyPendingApprovals(ticket, count), []);
   const [inputMode, setInputMode] = useState<"steer" | "followup">("steer");
-  const [routines, setRoutines] = useState<Array<Record<string, unknown>>>([]);
-  const [routineDraft, setRoutineDraft] = useState<{ id?: string; name: string; prompt: string; agentId: string; intervalMinutes: number } | null>(null);
+  const [routines, setRoutines] = useState<Routine[]>([]);
+  const [historyRoutine, setHistoryRoutine] = useState<Routine | null>(null);
+  const [routineDraft, setRoutineDraft] = useState<{ id?: string; name: string; prompt: string; agentId: string; intervalMinutes: number; cronSchedule?: string } | null>(null);
   const [routineBusy, setRoutineBusy] = useState(false);
   const [reviewRun, setReviewRun] = useState<PersistentRun | null>(null);
   const [desktopAgentId, setDesktopAgentId] = useState<string | null>(null);
@@ -251,7 +272,7 @@ export default function Home() {
   const importRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const agent =
-    workspace.agents.find((a) => a.id === selectedAgent) || workspace.agents[0];
+    workspace.agents.find((a) => a.id === selectedAgent) || workspace.agents[0] || EMPTY_AGENT;
   const conversation = workspace.conversations.find(
     (c) => c.id === conversationId,
   );
@@ -293,7 +314,7 @@ export default function Home() {
   // the coordinator decides whether it can, and a refusal changes nothing on screen.
   const preparedAt = useRef(new Map<string, number>());
   const prepareComposer = () => {
-    if (!connected || running || !runtime?.features?.includes('agent-prepare')) return;
+    if (!agent.id || !connected || running || !runtime?.features?.includes('agent-prepare')) return;
     const key = `${agent.id}:${replyOnlyMode}`, last = preparedAt.current.get(key) || 0;
     if (Date.now() - last < 60_000) return;
     preparedAt.current.set(key, Date.now());
@@ -528,8 +549,16 @@ export default function Home() {
           body: JSON.stringify({ agents: workspace.agents }),
         });
         if (!isCurrent()) return;
-        workspaceRef.current = { ...workspaceRef.current, agents: synced.agents };
-        setWorkspace(current => ({ ...current, agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })) }));
+        const agentIds = new Set(synced.agents.map(agent => agent.id));
+        const reconcileAgents = (current: Workspace): Workspace => ({ ...current,
+          agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })),
+          conversations: current.conversations.filter(conversation => agentIds.has(conversation.agentId)),
+          teams: current.teams.map(team => ({ ...team, memberAgentIds: team.memberAgentIds.filter(id => agentIds.has(id)) })),
+        });
+        workspaceRef.current = reconcileAgents(workspaceRef.current);
+        setWorkspace(reconcileAgents);
+        setSelectedAgent(current => agentIds.has(current) ? current : synced.agents[0]?.id || "");
+        if (!synced.agents.length) { pendingAgentHistory.current = null; setConversationId(null); setView(current => current === "chat" ? "home" : current); }
         if (!client.managed && localStorage.getItem(MIGRATED_KEY) !== 'done') {
           await client.request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) });
           localStorage.setItem(MIGRATED_KEY, 'done');
@@ -539,7 +568,7 @@ export default function Home() {
         // or credential response must not hold up history and reattaching active work.
         await Promise.all([
           (async () => {
-            if (!client.managed && workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspace.teams }) });
+            if (!client.managed && workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspaceRef.current.teams }) });
             const { teams } = await client.request<{ teams: Team[] }>("/v1/teams?includeRetired=1");
             if (!isCurrent()) return;
             setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) }));
@@ -560,8 +589,8 @@ export default function Home() {
           }),
           client.request<{ credentials: CredentialRecord[] }>("/v1/credentials")
             .then(saved => { if (isCurrent()) setCredentials(saved.credentials); }).catch(() => {}),
-          client.request<{ routines: Array<Record<string, unknown>> }>("/v1/routines")
-            .then(saved => { if (isCurrent()) setRoutines(saved.routines); }),
+          client.listRoutines()
+            .then(saved => { if (isCurrent()) setRoutines(saved); }),
           client.managed ? refreshRuntimeFiles().catch(() => {}) : Promise.resolve(),
           Promise.all([client.request<{ runs: PersistentRun[] }>("/v1/runs"), client.conversations()]).then(([{ runs }, history]) => {
             if (!isCurrent()) return;
@@ -725,8 +754,7 @@ export default function Home() {
   };
 
   const refreshRoutines = async () => {
-    const result = await controlRef.current.request<{ routines: Array<Record<string, unknown>> }>("/v1/routines");
-    setRoutines(result.routines);
+    setRoutines(await controlRef.current.listRoutines());
   };
   const saveRoutine = async () => {
     if (!routineDraft) return;
@@ -734,9 +762,11 @@ export default function Home() {
     if (!name || !prompt) { setNotice("Give the routine a name and a task."); return; }
     setRoutineBusy(true);
     try {
-      const payload = JSON.stringify({ name, prompt, agentId: routineDraft.agentId, intervalMinutes: routineDraft.intervalMinutes, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
-      if (routineDraft.id) await controlRef.current.request(`/v1/routines/${routineDraft.id}`, { method: "PUT", body: payload });
-      else await controlRef.current.request("/v1/routines", { method: "POST", body: payload });
+      // Updates leave timezone and schedule kind to the server: resending the browser's
+      // timezone would shift a cron routine saved elsewhere, and cron routines have no interval.
+      const fields = { name, prompt, agentId: routineDraft.agentId };
+      if (routineDraft.id) await controlRef.current.updateRoutine(routineDraft.id, routineDraft.cronSchedule ? fields : { ...fields, intervalMinutes: routineDraft.intervalMinutes });
+      else await controlRef.current.createRoutine({ ...fields, intervalMinutes: routineDraft.intervalMinutes, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
       await refreshRoutines();
       setRoutineDraft(null);
       setNotice(routineDraft.id ? "Routine updated." : "Routine created.");
@@ -780,6 +810,11 @@ export default function Home() {
   const requestCloseSettings = () => { if (settingsDirty) setConfirmCloseSettings(true); else closeSettings(); };
   const escapeSettingsRef = useRef<() => void>(() => {});
   escapeSettingsRef.current = () => { if (settingsOpen) requestCloseSettings(); };
+  useEffect(trackKeyboardInset, []);
+  useMobileBackGuard(mobileOpen, () => setMobileOpen(false));
+  useMobileBackGuard(settingsOpen, () => { if (confirmCloseSettings) setConfirmCloseSettings(false); else requestCloseSettings(); });
+  useMobileBackGuard(onboardingOpen, () => setOnboardingOpen(false));
+  useMobileBackGuard(Boolean(selectedFile), () => setSelectedFile(null));
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -805,6 +840,13 @@ export default function Home() {
       window.removeEventListener("beforeunload", beforeLeave);
     };
   }, []);
+  useEffect(() => {
+    if (!runtime) return;
+    const load = () => { if (document.hidden) return; const ticket = ++badgeTicket.current; controlRef.current.listApprovals({ state: "pending", limit: 1 }).then(value => applyPendingApprovals(ticket, value.pendingCount)).catch(() => {}); };
+    load();
+    const timer = window.setInterval(load, 15_000);
+    return () => window.clearInterval(timer);
+  }, [runtime, approvals.length]);
   useEffect(() => {
     if (notice) {
       const timeout = setTimeout(() => setNotice(""), 6500);
@@ -865,16 +907,44 @@ export default function Home() {
     setConversationId(run.conversation_id);
     setView("chat");
   }
-  function newAgent() {
-    setEditingAgent({
-      id: uid(),
-      name: "",
-      role: "",
-      description: "",
-      instructions: "",
-      memory: [],
-      tone: workspace.agents.length % 3,
-    });
+  async function newAgent() {
+    if (agentBusy) return;
+    setAgentBusy(true);
+    try {
+      const created = await controlRef.current.createAgent({ name: "New agent" });
+      setWorkspace((w) => ({ ...w, agents: [...w.agents.filter((a) => a.id !== created.id), created] }));
+      pendingAgentHistory.current = null;
+      setSelectedAgent(created.id);
+      setConversationId(null);
+      setInput("");
+      setEditingAgent(created);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not create an agent. Check that Open Harness is running.");
+    } finally {
+      setAgentBusy(false);
+    }
+  }
+  async function deleteAgent(target: Agent) {
+    if (agentBusy || !window.confirm(`Delete ${target.name}? Its profile is removed and cannot be restored.`)) return;
+    setAgentBusy(true);
+    try {
+      await controlRef.current.deleteAgent(target.id);
+      const next = workspace.agents.find((a) => a.id !== target.id);
+      setWorkspace((w) => ({
+        ...w,
+        agents: w.agents.filter((a) => a.id !== target.id),
+        conversations: w.conversations.filter(conversation => conversation.agentId !== target.id),
+        // The coordinator already dropped it from its teams; a stale cached membership
+        // would otherwise be sent back by the next teams sync.
+        teams: w.teams.map((team) => ({ ...team, memberAgentIds: team.memberAgentIds.filter((id) => id !== target.id) })),
+      }));
+      if (next && selectedAgent === target.id) openAgent(next.id);
+      setNotice(`${target.name} was deleted.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : `Could not delete ${target.name}.`);
+    } finally {
+      setAgentBusy(false);
+    }
   }
   function handleEvents(
     events: RunEvent[],
@@ -1356,7 +1426,7 @@ export default function Home() {
           <span className="brand-mark">h</span> open harness{" "}
           <span className="version">/ 01</span>
         </button>
-        <button className="new-button" onClick={newAgent} disabled={running}>
+        <button className="new-button" onClick={() => void newAgent()} disabled={running || agentBusy}>
           <Plus size={15} /> New agent
         </button>
         <div className="search-box">
@@ -1410,8 +1480,34 @@ export default function Home() {
         >
           <CalendarClock size={16} /> Routines <span>{routines.length || ""}</span>
         </button>
-        {advancedFeatures && <button className={`nav-item ${view === "groups" ? "active" : ""}`} onClick={() => { setView("groups"); setMobileOpen(false); }}><MessageSquare size={16} /> Group conversations</button>}
         <button className={`nav-item ${view === "credentials" ? "active" : ""}`} aria-current={view === "credentials" ? "page" : undefined} onClick={() => { setView("credentials"); setMobileOpen(false); }}><KeyRound size={16} /> Credentials</button>
+        <button
+          className={`nav-item ${view === "approvals" ? "active" : ""}`}
+          onClick={() => {
+            setView("approvals");
+            setMobileOpen(false);
+          }}
+        >
+          <ShieldCheck size={16} /> Approvals <span className={pendingApprovals ? "nav-alert-count" : ""}>{pendingApprovals || ""}</span>
+        </button>
+        <button
+          className={`nav-item ${view === "groups" ? "active" : ""}`}
+          onClick={() => {
+            setView("groups");
+            setMobileOpen(false);
+          }}
+        >
+          <MessagesSquare size={16} /> Groups
+        </button>
+        {advancedFeatures && <button
+          className={`nav-item ${view === "computers" ? "active" : ""}`}
+          onClick={() => {
+            setView("computers");
+            setMobileOpen(false);
+          }}
+        >
+          <MonitorCog size={16} /> Computers
+        </button>}
         <div className="nav-label">YOUR AGENTS</div>
         <div className="sidebar-scroll">
           {workspace.agents
@@ -1489,16 +1585,20 @@ export default function Home() {
                 ? "Agents"
                 : view === "teams"
                   ? "Teams"
-                : view === "groups"
-                  ? "Group conversations"
                 : view === "files"
                   ? "Files"
                   : view === "routines"
                     ? "Routines"
+                    : view === "groups"
+                    ? "Groups"
+                    : view === "approvals"
+                    ? "Approvals"
                     : view === "tasks"
                       ? "Tasks"
                     : view === "credentials"
                       ? "Credentials"
+                    : view === "computers"
+                      ? "Computers"
                       : agent.name}
             </span>
           </span>
@@ -1507,7 +1607,6 @@ export default function Home() {
         {view === 'assistant' && <AssistantWorkspace client={controlRef.current} ready={Boolean(runtime)} agents={workspace.agents} onProfile={applySavedProfile} onOpenRun={openTaskRun} onWorkflow={id => { setSelectedWorkflowId(id); setWorkflowSourceRunId(''); setView('routines'); }} />}
         {advancedFeatures && view === "tasks" && <TaskManager agents={workspace.agents} teams={[...workspace.teams, ...retiredTeams]} client={controlRef.current} onOpenRun={openTaskRun} />}
         {advancedFeatures && view === "teams" && <TeamManager agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onChanged={teams => { setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) })); setRetiredTeams(teams.filter(team => Boolean(team.retiredAt))); }} />}
-        {advancedFeatures && view === "groups" && <GroupConversations agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onOpenRun={openTaskRun} />}
         {view === "credentials" && <CredentialsPage client={controlRef.current} onChanged={setCredentials} />}
         {view === "home" && (
           <section className="home-content">
@@ -1527,7 +1626,7 @@ export default function Home() {
                 Your agents{" "}
                 <span>{String(workspace.agents.length).padStart(2, "0")}</span>
               </h2>
-              <button onClick={newAgent} disabled={running}>
+              <button onClick={() => void newAgent()} disabled={running || agentBusy}>
                 <Plus size={13} /> Create agent
               </button>
             </div>
@@ -1536,6 +1635,7 @@ export default function Home() {
               {workspace.teams.map(team => <button className={agentTeamFilter === team.id ? "active" : ""} onClick={() => setAgentTeamFilter(team.id)} key={team.id}>{team.name}</button>)}
               <button className={agentTeamFilter === "unassigned" ? "active" : ""} onClick={() => setAgentTeamFilter("unassigned")}>Unassigned</button>
             </div>}
+            {!workspace.agents.length && <div className="files-empty"><h2>No agents yet</h2><p>Create your first agent, or set up your primary assistant from Assistant.</p></div>}
             <div className="agent-grid">
               {visibleAgents.map((a) => (
                 <div className="agent-card-shell" key={a.id}>
@@ -1569,7 +1669,7 @@ export default function Home() {
                 </div>
               ))}
             </div>
-            <div className="start-panel">
+            {workspace.agents.length > 0 && <div className="start-panel">
               <Sparkles className="spark" size={31} />
               <div>
                 <h3>Start small. Make it yours.</h3>
@@ -1584,7 +1684,7 @@ export default function Home() {
               >
                 Meet {workspace.agents[0].name} <ArrowUpRight size={13} />
               </button>
-            </div>
+            </div>}
             <div className="home-footer">
               <span>YOUR MODELS. YOUR INSTRUCTIONS. YOUR WORK.</span>
               <button onClick={() => openSettings()}>
@@ -1593,7 +1693,7 @@ export default function Home() {
             </div>
           </section>
         )}
-        {view === "chat" && (
+        {view === "chat" && Boolean(agent.id) && (
           <div className={`chat-layout ${inspector ? "" : "no-inspector"}`}>
             <section className="chat-main">
               <div className="chat-toolbar">
@@ -2075,6 +2175,7 @@ export default function Home() {
                 <div className="inspector-label"><Cable size={13} /> PROFILE TOOLS <span>{agent.profile?.allowedTools.length || 0}</span></div>
                 <p className="panel-help">{agent.profile?.allowedTools.length ? `${agent.profile.allowedTools.length} tools selected. Open Agent settings to check availability or change access.` : "No tools selected. Choose the capabilities this agent needs."}</p>
                 <button className="subtle-button" onClick={() => setEditingAgent({ ...agent })}><SlidersHorizontal size={13} /> Agent settings</button>
+                <AgentDelete agent={agent} disabled={running || agentBusy} onDelete={(target) => void deleteAgent(target)} />
                 <div className="scope-note">
                   {testMode
                     ? "Automated test mode does not run agents. Open the installed desktop app for live work."
@@ -2196,19 +2297,22 @@ export default function Home() {
             ) : (
               <div className="file-table">
                 {routines.map((routine) => (
-                  <div className="file-table-row" key={String(routine.id)}>
+                  <div className="file-table-row" key={routine.id}>
                     <div className="file-name">
                       <CalendarClock size={20} />
                       <span>
-                        {String(routine.name)}
+                        {routine.name}
                         <small>
-                          {agentNameFor(String(routine.agent_id))}
-                          {" · "}every {formatInterval(Number(routine.interval_minutes))}
-                          {" · "}next {new Date(String(routine.next_run_at)).toLocaleString()}
+                          {agentNameFor(routine.agent_id)}
+                          {" · "}
+                          {routine.schedule_kind === "cron"
+                            ? `cron ${routine.cron_expression || "(no expression)"}${routine.timezone ? ` (${routine.timezone})` : ""}`
+                            : `every ${formatInterval(routine.interval_minutes)}`}
+                          {routine.next_run_at && <>{" · "}next {new Date(routine.next_run_at).toLocaleString()}</>}
                         </small>
                         <small>
                           {routine.last_run_at
-                            ? `Last run ${new Date(String(routine.last_run_at)).toLocaleString()}`
+                            ? `Last run ${new Date(routine.last_run_at).toLocaleString()}`
                             : "Has not run yet"}
                         </small>
                       </span>
@@ -2220,7 +2324,7 @@ export default function Home() {
                       className="subtle-button"
                       onClick={async () => {
                         try {
-                          await controlRef.current.request(`/v1/routines/${String(routine.id)}/run`, { method: "POST" });
+                          await controlRef.current.runRoutine(routine.id);
                           // The server stamps last_run_at and next_run_at; without this the
                           // row keeps showing the schedule it had before you pressed the button.
                           await refreshRoutines();
@@ -2234,12 +2338,20 @@ export default function Home() {
                     </button>
                     <button
                       className="subtle-button"
+                      aria-label={`History for ${routine.name}`}
+                      onClick={() => setHistoryRoutine(routine)}
+                    >
+                      History
+                    </button>
+                    <button
+                      className="subtle-button"
                       onClick={() => setRoutineDraft({
-                        id: String(routine.id),
-                        name: String(routine.name),
-                        prompt: String(routine.prompt),
-                        agentId: String(routine.agent_id),
-                        intervalMinutes: Number(routine.interval_minutes) || 1440,
+                        id: routine.id,
+                        name: routine.name,
+                        prompt: routine.prompt,
+                        agentId: routine.agent_id,
+                        intervalMinutes: routine.interval_minutes,
+                        cronSchedule: routine.schedule_kind === "cron" ? `${routine.cron_expression || "(no expression)"}${routine.timezone ? ` (${routine.timezone})` : ""}` : undefined,
                       })}
                     >
                       Edit
@@ -2247,7 +2359,7 @@ export default function Home() {
                     <button
                       onClick={async () => {
                         try {
-                          await controlRef.current.request(`/v1/routines/${String(routine.id)}/toggle`, { method: "POST" });
+                          await controlRef.current.toggleRoutine(routine.id);
                           await refreshRoutines();
                         } catch (error) {
                           setNotice(error instanceof Error ? error.message : "Could not change that routine.");
@@ -2258,11 +2370,11 @@ export default function Home() {
                     </button>
                     <button
                       className="danger-text"
-                      aria-label={`Delete routine ${String(routine.name)}`}
+                      aria-label={`Delete routine ${routine.name}`}
                       onClick={async () => {
-                        if (!window.confirm(`Delete the routine “${String(routine.name)}”? Its schedule and history are removed.`)) return;
+                        if (!window.confirm(`Delete the routine “${routine.name}”? Its schedule and history are removed.`)) return;
                         try {
-                          await controlRef.current.request(`/v1/routines/${String(routine.id)}`, { method: "DELETE" });
+                          await controlRef.current.deleteRoutine(routine.id);
                           await refreshRoutines();
                           setNotice("Routine deleted.");
                         } catch (error) {
@@ -2278,6 +2390,12 @@ export default function Home() {
             )}
           </section>
         )}
+        {view === "approvals" && <ApprovalsInbox client={controlRef.current} refreshKey={approvals.length} onCountStart={startApprovalCount} onCount={reportInboxCount} onResolved={(id, runId) => setAnswered(current => [...current.filter(item => item.id !== id), { id, runId, at: Date.now() }])} />}
+        {view === "groups" && <div className="groups-workspace">
+          {advancedFeatures && <div className="task-view-switch groups-tabs" role="group" aria-label="Group type"><button className={groupKind === "chat" ? "active" : ""} aria-pressed={groupKind === "chat"} onClick={() => setGroupKind("chat")}>Group chats</button><button className={groupKind === "team" ? "active" : ""} aria-pressed={groupKind === "team"} onClick={() => setGroupKind("team")}>Team conversations</button></div>}
+          {advancedFeatures && groupKind === "team" ? <GroupConversations agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onOpenRun={openTaskRun} /> : <GroupChatView client={controlRef.current} agents={workspace.agents} onNotice={setNotice} />}
+        </div>}
+        {advancedFeatures && view === "computers" && <ComputersPage client={controlRef.current} agents={workspace.agents} onAddComputer={() => { if (!agent.id) { setNotice('Create an agent before choosing its computer.'); return; } setEditingAgentTab('computer'); setEditingAgent(agent); }} />}
       </main>
       {docEditor && (
         <div className="modal-backdrop" onClick={() => !docBusy && setDocEditor(null)}>
@@ -2384,7 +2502,9 @@ export default function Home() {
                   ))}
                 </select>
               </label>
-              <label>
+              {routineDraft.cronSchedule ? (
+                <p className="muted small">Runs on the cron schedule {routineDraft.cronSchedule}. Saving keeps that schedule.</p>
+              ) : <label>
                 Run every
                 <select
                   value={String(routineDraft.intervalMinutes)}
@@ -2399,7 +2519,7 @@ export default function Home() {
                 <small className="muted">
                   Counted from the last run, not from a clock time — a daily routine drifts if you also run it by hand.
                 </small>
-              </label>
+              </label>}
             </div>
             <div className="modal-footer">
               <button className="subtle-button" disabled={routineBusy} onClick={() => setRoutineDraft(null)}>Cancel</button>
@@ -2409,6 +2529,15 @@ export default function Home() {
             </div>
           </section>
         </div>
+      )}
+      {historyRoutine && (
+        <RoutineHistoryDrawer
+          key={historyRoutine.id}
+          routine={historyRoutine}
+          agentName={agentNameFor(historyRoutine.agent_id)}
+          client={controlRef.current}
+          onClose={() => setHistoryRoutine(null)}
+        />
       )}
       <input
         type="file"
@@ -2562,7 +2691,7 @@ export default function Home() {
                   setAdvancedFeatures(enabled);
                   if (!enabled) {
                     setAgentTeamFilter("all");
-                    if (["teams", "groups", "tasks"].includes(view)) setView("home");
+                    if (["teams", "tasks", "computers"].includes(view)) setView("home");
                   }
                   localStorage.setItem(ADVANCED_KEY, enabled ? "on" : "off");
                 }}

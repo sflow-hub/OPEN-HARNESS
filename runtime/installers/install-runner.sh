@@ -42,7 +42,7 @@ download() {
   curl -fL --retry 3 "$coordinator/v1/install/file?path=$1" -o "$install_dir/$1"
 }
 download "runtime/runner.mjs"
-for file in Dockerfile NOTICE.md container-init.sh browser_shutdown.py cua_compat.py coordination.mjs gateway-entry.mjs model-proxy.mjs inspect_runtime.py managed_entry.py security-constraints.txt apply-security-overrides.py extension/open_harness_policy.py extension/pyproject.toml; do
+for file in Dockerfile NOTICE.md container-init.sh browser_shutdown.py cua_compat.py coordination.mjs gateway-entry.mjs model-proxy.mjs inspect_runtime.py sandbox_selftest.py managed_entry.py security-constraints.txt apply-security-overrides.py extension/open_harness_policy.py extension/pyproject.toml; do
   download "runtime/hermes/$file"
 done
 for file in helpers/check-native-platform.sh helpers/ubuntu-snapshot.sh helpers/check_packages.py helpers/curl_http3.py helpers/debian_inputs.py helpers/debian_origin.py helpers/elf_arch.py helpers/ohpkg.py lock/runtime-inputs.lock.json lock/ubuntu-os-packages.txt; do

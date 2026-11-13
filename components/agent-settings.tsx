@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Cpu, FileText, LoaderCircle, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, UserRound, X, Cable, MonitorCog, Server, Folder, Copy, CircleStop, FolderKanban, ShieldAlert, Boxes, TriangleAlert } from 'lucide-react';
 import { ControlClient, type TerminalRevocation } from '../lib/control-client';
 import { COMPUTER_TOOL, DEFAULT_MODEL, TOOL_GROUPS, draftProfile, isSandboxedComputer, type AgentProfile, type MachineInfo, type ModelCatalog, type ModelChoice, type ProfileResponse, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
+import type { SandboxResult } from '../runtime/sandbox-selftest';
+import { useMobileBackGuard } from '../lib/browser-overlays';
 import { initialWorkspace, type Agent } from '../lib/types';
 import { describeCredential, fitsProvider, type CredentialRecord } from '../lib/credentials';
 import { FALLBACK_HARNESSES, FEATURE_LABELS, applySwitch, groupSupported, harnessOf, mergeCatalog, reviewSwitch, type HarnessInfo, type HarnessKind, type HarnessProfile, type SwitchReview } from '../lib/harness';
@@ -52,6 +54,9 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
   const [machines, setMachines] = useState<MachineInfo[]>([]);
   const [computerBusy, setComputerBusy] = useState(false);
   const [computerStatus, setComputerStatus] = useState('');
+  const [sandbox, setSandbox] = useState<SandboxResult | null>(null);
+  const [sandboxBusy, setSandboxBusy] = useState(false);
+  useEffect(() => { let live = true; client.sandboxHistory(agent.id).then(value => { if (live) setSandbox(value.latest?.result || null); }).catch(() => {}); return () => { live = false; }; }, [client, agent.id]);
   const [showPairing, setShowPairing] = useState(false);
   const [pairPlatform, setPairPlatform] = useState<'linux' | 'darwin' | 'win32'>('linux');
   const [pairName, setPairName] = useState('');
@@ -81,6 +86,7 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
   function editModel(patch: Partial<AgentProfile['model']>) { setConnection(''); edit({ model: { ...draft.model, ...patch } }); }
   function editComputer(patch: Partial<AgentProfile['computer']>) { setComputerStatus(''); const computer = { ...draft.computer, ...patch }; edit({ computer, ...(computer.desktop === 'none' ? { allowedTools: draft.allowedTools.filter(id => !DESKTOP_ALIASES.includes(id)) } : {}) }); }
   function close() { if (saving) return; if (dirty) setDiscard(true); else onClose(); }
+  useMobileBackGuard(true, () => { if (discard) setDiscard(false); else close(); });
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -299,6 +305,13 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
               {!desktopCapable && <small>{desktopUnavailableReason}</small>}
             </div>
           </div>}
+          <div className="sandbox-selftest">
+            <button type="button" disabled={loading || sandboxBusy || JSON.stringify(draft.computer) !== JSON.stringify(JSON.parse(baseline).computer)} onClick={async () => { setSandboxBusy(true); setError(''); try { setSandbox((await client.sandboxSelftest(agent.id)).result); } catch (error) { setError(errorText(error)); } finally { setSandboxBusy(false); } }}>{sandboxBusy ? 'Checking sandbox…' : 'Verify sandbox'}</button>
+            <small>Checks the saved computer settings. Save computer changes before verifying.</small>
+            {draft.computer.access === 'direct' && <p>not a sandbox (direct access)</p>}
+            {sandbox && <><p role="status" className={`sandbox-badge sandbox-${sandbox.status}`}>{sandbox.status} · {sandbox.attestation}{sandbox.runnerKind === 'native' ? ' · not a sandbox' : ''}</p><ul>{Object.entries(sandbox.checks).map(([name, check]) => <li key={name}><strong>{name.replaceAll('_', ' ')}</strong>: {check.ok === null ? 'Unknown' : check.ok ? 'Pass' : 'Fail'} — {check.detail}</li>)}</ul>{sandbox.observations && Object.keys(sandbox.observations).length > 0 && <details><summary>In-container observations (corroboration)</summary><ul>{Object.entries(sandbox.observations).map(([name, check]) => <li key={name}>{name.replaceAll('_', ' ')}: {check.ok === null ? 'Unknown' : check.ok ? 'Pass' : 'Fail'} — {check.detail}</li>)}</ul></details>}</>}
+          </div>
+
           <div className="computer-heading"><h4>Where it runs</h4><button type="button" className="subtle-button" onClick={() => { setShowPairing(true); setPairing(null); }}><Plus size={14} /> Add computer</button></div>
           <label>Connected computer<select aria-label="Connected computer" value={draft.computer.machineId} onChange={e => editComputer({ machineId: e.target.value })}>{machines.map(machine => <option value={machine.id} key={machine.id}>{machine.name} · {platformName(machine.platform)} · {machine.status}</option>)}</select></label>
           {selectedMachine && <div className="computer-machine-card"><span className={`computer-status ${selectedMachine.status}`} aria-hidden="true" /><div><strong>{selectedMachine.name}</strong><small>{platformName(selectedMachine.platform)} · {selectedMachine.arch} · {selectedMachine.assignedAgents} agent{selectedMachine.assignedAgents === 1 ? '' : 's'} assigned</small><small>{selectedMachine.status === 'online' ? 'Connected and ready to receive work' : selectedMachine.status === 'offline' ? `Last seen ${selectedMachine.lastSeenAt ? new Date(selectedMachine.lastSeenAt).toLocaleString() : 'never'}` : selectedMachine.status}</small></div></div>}
@@ -332,6 +345,9 @@ export default function AgentSettings({ agent, client, onClose, onSaved, initial
             <p className="profile-help">Your own workspace terminal in the agent’s Computer panel needs no permission here and never grants this agent terminal access.</p>
           </div>
           <p className="profile-help">Controlling the desktop you are signed in to is not available: it would run outside the sandbox. A private agent desktop is the only desktop an agent can be given.</p>
+          <label>Network access<select aria-label="Network access" value={draft.computer.network.mode} onChange={e => editComputer({ network: { ...draft.computer.network, mode: e.target.value as AgentProfile['computer']['network']['mode'] } })}><option value="open">Open – unrestricted</option><option value="allowlist">Allowlist – only listed hosts</option><option value="none">None – model and coordinator only</option></select></label>
+          {draft.computer.network.mode === 'allowlist' && <label>Allowed hosts<textarea aria-label="Allowed hosts" rows={4} value={draft.computer.network.allow.join('\n')} onChange={e => editComputer({ network: { ...draft.computer.network, allow: e.target.value === '' ? [] : e.target.value.split('\n') } })} /><small>One host[:port] per line.</small></label>}
+          <p className="profile-help">This setting is saved now. Network restrictions are not enforced in this release.</p>
 
           <details className="profile-advanced"><summary><ChevronDown size={14} /> Advanced resources and shared folders</summary>{advancedFeatures && <div className="profile-three-columns"><label>CPU cores<input aria-label="CPU cores" type="number" min="0.25" max="64" step="0.25" value={draft.computer.resources.cpu} onChange={e => editComputer({ resources: { ...draft.computer.resources, cpu: Number(e.target.value) } })} /></label><label>Memory (MB)<input aria-label="Memory in MB" type="number" min="256" max="262144" step="256" value={draft.computer.resources.memoryMb} onChange={e => editComputer({ resources: { ...draft.computer.resources, memoryMb: Number(e.target.value) } })} /></label><label>Concurrent tasks<input aria-label="Concurrent tasks" type="number" min="1" max="32" step="1" value={draft.computer.resources.concurrency} onChange={e => editComputer({ resources: { ...draft.computer.resources, concurrency: Number(e.target.value) } })} /></label></div>}
             <div className="computer-heading"><h4>Selected host folders</h4><button type="button" className="subtle-button" disabled={draft.computer.access !== 'folders' || folderExports?.length === 0} onClick={() => editComputer({ folders: [...draft.computer.folders, { id: crypto.randomUUID(), path: folderExports ? (folderExports.find(folder => !draft.computer.folders.some(item => item.path === folder.path)) || folderExports[0]).path : '', mode: 'read' }] })}><Folder size={13} /> Add folder</button></div>

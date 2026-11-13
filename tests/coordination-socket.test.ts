@@ -20,9 +20,9 @@ test('coordination crosses a long workspace path and rejects other agents and AP
     assert.match(socket.socketPath, new RegExp(`^/proc/${process.pid}/fd/\\d+/coord\\.sock$`));
     assert.equal(statSync(dirname(socket.socketPath)).ino, statSync(dir).ino);
   }
-  async function call(path: string, agent = 'atlas') {
+  async function call(path: string, agent = 'atlas', method = 'POST') {
     return new Promise<number>((resolve, reject) => {
-      const req = request({ socketPath: socket.socketPath, path, method: 'POST', headers: { 'X-Open-Harness-Agent': agent } }, res => { res.resume(); res.on('end', () => resolve(res.statusCode!)); });
+      const req = request({ socketPath: socket.socketPath, path, method, headers: { 'X-Open-Harness-Agent': agent } }, res => { res.resume(); res.on('end', () => resolve(res.statusCode!)); });
       req.on('error', reject); req.end();
     });
   }
@@ -33,6 +33,12 @@ test('coordination crosses a long workspace path and rejects other agents and AP
       assert.equal(await call(path, 'scout'), 403);
     }
     assert.equal(await call('/internal/review-tool?bypass=1'), 403);
+    for (const path of ['/internal/message', '/internal/inbox/ack']) {
+      assert.equal(await call(path), 200); assert.equal(await call(path, 'scout'), 403); assert.equal(await call(path, 'atlas', 'GET'), 403);
+    }
+    for (const path of ['/internal/inbox', '/internal/inbox?conversationId=shared']) {
+      assert.equal(await call(path, 'atlas', 'GET'), 200); assert.equal(await call(path, 'scout', 'GET'), 403); assert.equal(await call(path), 403);
+    }
     assert.equal(await call('/internal/schedule', 'scout'), 403);
     assert.equal(await call('/v1/agents/atlas/profile'), 403);
   } finally { await socket.close(); }
@@ -93,4 +99,27 @@ test('socket coordination through the agent-side server reaches the coordinator'
     assert.equal(received.run, 'run-1');
     assert.deepEqual(JSON.parse(received.body!), { agentId: 'scout', prompt: 'Write the file' });
   } finally { child.kill(); await socket.close(); }
+});
+
+test('messaging transport keeps inbox GET separate from posting and acknowledgment', { timeout: 30_000 }, async () => {
+  const received: Array<{ url: string; method: string; body: string }> = [];
+  const server = createServer((req, res) => {
+    let body = ''; req.on('data', chunk => { body += chunk; }); req.on('end', () => {
+      received.push({ url: req.url || '', method: req.method || '', body });
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}');
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs')], { env: { ...process.env, OPEN_HARNESS_CONTROL_URL: `http://127.0.0.1:${address.port}`, OPEN_HARNESS_AGENT_ID: 'atlas', OPEN_HARNESS_AGENT_TOKEN: 'run-token', OPEN_HARNESS_RUN_ID: 'run-1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  try {
+    for (const [name, args] of [['post_message', { conversationId: 'group/one', body: 'Hello' }], ['read_inbox', { conversationId: 'group/one' }], ['read_inbox', { messageIds: ['message-one'] }]] as const) {
+      const reply = new Promise<string>((resolve, reject) => { child.stdout.once('data', data => resolve(String(data))); child.once('error', reject); });
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: received.length + 1, method: 'tools/call', params: { name, arguments: args } }) + '\n');
+      assert.equal(JSON.parse(await reply).error, undefined);
+    }
+    assert.deepEqual(received.map(value => [value.url, value.method]), [['/internal/message', 'POST'], ['/internal/inbox?conversationId=group%2Fone', 'GET'], ['/internal/inbox/ack', 'POST']]);
+    assert.equal(received[1].body, '');
+    assert.deepEqual(JSON.parse(received[2].body), { messageIds: ['message-one'] });
+  } finally { child.kill(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });

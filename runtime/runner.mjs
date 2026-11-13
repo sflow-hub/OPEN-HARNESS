@@ -3736,11 +3736,147 @@ var require_websocket_server = __commonJS({
   }
 });
 
+// runtime/sandbox-selftest.ts
+import { spawn } from "node:child_process";
+
+// runtime/sandbox-attest.ts
+import { posix } from "node:path";
+function attestContainer(inspect2, expected) {
+  const h = inspect2.HostConfig || {}, mounts = inspect2.Mounts || [], options = h.SecurityOpt || [], { computer } = expected;
+  const root = posix.normalize(expected.stateRoot), own = `${root}/agents/${expected.agentId}`;
+  const allowed = [
+    { source: `${own}/managed`, destination: "/run/open-harness", rw: false },
+    { source: `${own}/profile`, destination: "/home/hermes/.hermes", rw: true },
+    { source: `${own}/private`, destination: "/workspace/private", rw: true },
+    { source: `${root}/shared`, destination: "/workspace/shared", rw: true },
+    ...(expected.teamIds || []).map((id) => ({ source: `${root}/teams/${id}/shared`, destination: `/workspace/teams/${id}`, rw: true }))
+  ];
+  const managedSources = new Set(allowed.map((m) => m.source));
+  if (computer.access === "folders") computer.folders.forEach((folder, index) => allowed.push({ source: posix.normalize(folder.path), destination: `/workspace/mounts/folder-${index + 1}`, rw: folder.mode === "write" }));
+  const matches = (m, a) => posix.normalize(m.Source) === a.source && m.RW === a.rw && m.Destination === a.destination;
+  const unexpected = mounts.filter((m) => {
+    const source = posix.normalize(m.Source);
+    if ((source === root || root.startsWith(`${source}/`) || source.startsWith(`${root}/`)) && !managedSources.has(source)) return true;
+    return !allowed.some((a) => matches(m, a));
+  });
+  const missing = allowed.filter((a) => !mounts.some((m) => matches(m, a)));
+  const networks = Object.values(inspect2.NetworkSettings?.Networks || {}), internal = networks.length > 0 && networks.every((n) => n.Internal === true);
+  const network = h.NetworkMode || "unknown", mode = computer.network?.mode || "open";
+  const checks = {};
+  const check = (key, ok, detail) => {
+    checks[key] = { ok, detail };
+  };
+  check("cap_drop_all", Boolean(h.CapDrop?.some((c) => c.toUpperCase() === "ALL")) && !h.CapAdd?.length, `CapDrop=${JSON.stringify(h.CapDrop || [])}; CapAdd=${JSON.stringify(h.CapAdd || [])}`);
+  check("no_new_privileges", options.some((o) => /^no-new-privileges(?:(?:=|:)true)?$/.test(o)), `SecurityOpt=${JSON.stringify(options)}`);
+  check("seccomp_not_unconfined", !options.some((o) => /^seccomp[=:]unconfined$/.test(o)), options.find((o) => /^seccomp[=:]/.test(o)) || "Docker default seccomp profile");
+  check("not_privileged", h.Privileged === false, `Privileged=${h.Privileged}`);
+  check("readonly_rootfs", h.ReadonlyRootfs === true, h.ReadonlyRootfs ? "read-only image rootfs" : "writable image rootfs (hardening pending)");
+  check("limits", Number(h.PidsLimit) > 0 && h.Memory === Math.round(computer.resources.memoryMb) * 1024 * 1024 && h.NanoCpus === computer.resources.cpu * 1e9, `PidsLimit=${h.PidsLimit}; Memory=${h.Memory}; NanoCpus=${h.NanoCpus}; expected memory=${computer.resources.memoryMb} MB, cpu=${computer.resources.cpu}`);
+  check("no_docker_socket_mount", !mounts.some((m) => /(?:^|\/)docker\.sock(?:\/|$)/.test(m.Source) || /(?:^|\/)docker\.sock(?:\/|$)/.test(m.Destination)), "Mount sources and destinations checked for docker.sock");
+  check("no_host_home_mount", !mounts.some((m) => {
+    const s = posix.normalize(m.Source);
+    return s === "/" || s === "/root" || s === "/home" || s === "/Users" || /^\/(?:home|Users)\/[^/]+$/.test(s);
+  }), "Mount sources checked for host root and home directories");
+  check("mounts_expected", Array.isArray(inspect2.Mounts) && unexpected.length === 0 && missing.length === 0 && mounts.length === allowed.length, unexpected.length ? `Unexpected mounts: ${unexpected.map((m) => `${m.Source}:${m.Destination}:${m.RW ? "rw" : "ro"}`).join(", ")}` : missing.length ? `Missing mounts: ${missing.map((m) => m.destination).join(", ")}` : "Exact expected mount sources, destinations and write flags");
+  check("network_mode", mode === "open" || network === "none" || internal ? true : null, `NetworkMode=${network}; profile network.mode=${mode}${mode !== "open" && network !== "none" && !internal ? "; not enforced yet" : internal ? "; host-inspected internal network" : ""}`);
+  return { checks };
+}
+
+// runtime/sandbox-selftest.ts
+var PROBE_CHECKS = ["writes_outside_writable_mounts_denied", "docker_socket_absent", "host_home_absent", "no_privilege_escalation", "cpu_mem_pids_limited"];
+function combineSandbox(checks, observations = {}, attestation = "host-attested") {
+  const combined = Object.fromEntries(Object.entries(checks).map(([key, value]) => [key, { ...value }]));
+  const corroboration = { readonly_rootfs: ["writes_outside_writable_mounts_denied"], no_docker_socket_mount: ["docker_socket_absent"], no_host_home_mount: ["host_home_absent"], limits: ["cpu_mem_pids_limited"], no_new_privileges: ["no_privilege_escalation"], cap_drop_all: ["no_privilege_escalation"], seccomp_not_unconfined: ["no_privilege_escalation"] };
+  for (const [key, names] of Object.entries(corroboration)) for (const name of names) {
+    const fact = combined[key], observation = observations[name];
+    const composite = ["no_privilege_escalation", "cpu_mem_pids_limited"].includes(name);
+    const allPrivilegeFacts = ["no_new_privileges", "cap_drop_all", "seccomp_not_unconfined"].every((key2) => combined[key2]?.ok === true);
+    const contradictsComposite = !composite || observation?.ok === true || name === "no_privilege_escalation" && allPrivilegeFacts || name === "cpu_mem_pids_limited";
+    if (fact && observation && fact.ok !== null && observation.ok !== null && fact.ok !== observation.ok && contradictsComposite) {
+      fact.tampering_suspected = true;
+      fact.detail += `; tampering_suspected: probe ${name} disagrees`;
+    }
+  }
+  const values = Object.values(combined), status = values.some((c) => c.ok === false || c.tampering_suspected) ? "red" : values.some((c) => c.ok === null) || Object.values(observations).some((c) => c.ok !== true) ? "amber" : "green";
+  return { probe: "sandbox-selftest/v1", runnerKind: "container", attestation, status, checks: combined, observations };
+}
+var SANDBOX_EXEC_ARGS = ["env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin", "python", "-I", "-S", "/opt/open-harness/sandbox_selftest.py"];
+function dockerJson(args2, input = "{}\n") {
+  return new Promise((resolve8, reject) => {
+    const child = spawn("docker", args2, { stdio: ["pipe", "pipe", "pipe"] });
+    const chunks = [];
+    let size = 0, failure3;
+    const timer = setTimeout(() => {
+      failure3 = new Error("Sandbox check timed out.");
+      child.kill("SIGKILL");
+    }, 25e3);
+    child.stdout.on("data", (part) => {
+      size += part.length;
+      if (size > 1e6) {
+        failure3 = new Error("Sandbox check output exceeded its limit.");
+        child.kill("SIGKILL");
+      } else chunks.push(part);
+    });
+    child.stderr.resume();
+    child.stdin.on("error", () => {
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (failure3 || code) return reject(failure3 || new Error("Docker sandbox check failed."));
+      try {
+        resolve8(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch {
+        reject(new Error("Sandbox check returned invalid JSON."));
+      }
+    });
+    child.stdin.end(input);
+  });
+}
+function probeChecks(value) {
+  if (!value || typeof value !== "object" || !("probe" in value) || value.probe !== "sandbox-selftest/v1" || !("checks" in value) || !value.checks || typeof value.checks !== "object" || Array.isArray(value.checks)) throw new Error("Invalid sandbox probe response.");
+  const checks = value.checks;
+  if (!PROBE_CHECKS.every((key) => key in checks)) throw new Error("Incomplete sandbox probe response.");
+  for (const check of Object.values(value.checks)) if (!check || ![true, false, null].includes(check.ok) || typeof check.detail !== "string") throw new Error("Invalid sandbox probe check.");
+  return value.checks;
+}
+async function sandboxSelftest(container, expected, attestation = "host-attested", transport = dockerJson) {
+  const inspected = await transport(["inspect", container]);
+  if (!Array.isArray(inspected) || inspected.length !== 1 || !inspected[0]?.HostConfig) throw new Error("Invalid Docker inspect response.");
+  const containerInspect = inspected[0];
+  if (expected.computer.network?.mode !== "open" && containerInspect.HostConfig.NetworkMode !== "none") {
+    const networks = containerInspect.NetworkSettings?.Networks || {};
+    const names = Object.keys(networks);
+    for (const name of names) networks[name].Internal = false;
+    if (names.length) {
+      try {
+        const metadata = await transport(["network", "inspect", ...names]);
+        if (Array.isArray(metadata)) for (const name of names) {
+          const network = metadata.find((n) => n.Name === name && n.Id === networks[name].NetworkID);
+          networks[name].Internal = network?.Internal === true;
+        }
+      } catch {
+      }
+    }
+  }
+  const { checks } = attestContainer(inspected[0], expected);
+  let observations;
+  try {
+    observations = probeChecks(await transport(["exec", "-i", container, ...SANDBOX_EXEC_ARGS]));
+  } catch (error) {
+    observations = { probe_available: { ok: null, detail: error instanceof Error ? error.message : "Probe unavailable; rebuild the Hermes image." } };
+  }
+  return combineSandbox(checks, observations, attestation);
+}
+
 // runtime/runner.ts
-import { existsSync as existsSync10, mkdirSync as mkdirSync9, readFileSync as readFileSync10, writeFileSync as writeFileSync8, chmodSync as chmodSync3, readdirSync as readdirSync5, unlinkSync as unlinkSync4 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync10, readFileSync as readFileSync8, writeFileSync as writeFileSync8, chmodSync as chmodSync3, readdirSync as readdirSync5, unlinkSync as unlinkSync5 } from "node:fs";
 import { homedir as homedir2, hostname, platform as platform2, arch } from "node:os";
-import { join as join9, resolve as resolve6 } from "node:path";
-import { spawn as spawn6 } from "node:child_process";
+import { join as join11, resolve as resolve7 } from "node:path";
+import { spawn as spawn7 } from "node:child_process";
 
 // runtime/docker-path.mjs
 import { accessSync, constants } from "node:fs";
@@ -3772,16 +3908,16 @@ function prepareDockerEnvironment(environment = process.env) {
 prepareDockerEnvironment();
 
 // runtime/commands.ts
-import { spawn } from "node:child_process";
+import { spawn as spawn2 } from "node:child_process";
 function commandAsync(name, args2, timeout = 1e4, options = {}) {
-  return new Promise((resolve7) => {
-    const child = spawn(name, args2, { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], timeout, killSignal: "SIGKILL", windowsHide: true });
+  return new Promise((resolve8) => {
+    const child = spawn2(name, args2, { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], timeout, killSignal: "SIGKILL", windowsHide: true });
     let stdout = "", stderr = "", error, settled = false;
     const limit = options.maxBytes ?? 2e6;
     const done = (status) => {
       if (!settled) {
         settled = true;
-        resolve7({ status, stdout, stderr, error });
+        resolve8({ status, stdout, stderr, error });
       }
     };
     const append = (chunk, stream) => {
@@ -3808,42 +3944,20 @@ function commandAsync(name, args2, timeout = 1e4, options = {}) {
 }
 
 // runtime/hermes.ts
-import { spawn as spawn2, spawnSync } from "node:child_process";
+import { spawn as spawn3, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
 import { createHash, randomUUID as randomUUID3 } from "node:crypto";
-import { lstatSync as lstatSync3, mkdirSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join3, resolve as resolve4, sep } from "node:path";
-
-// lib/hermes-pin.ts
-var HERMES_RELEASE = "v2026.9.11";
-var HERMES_IMAGE_TAG = HERMES_RELEASE.replace(/^v/, "");
-
-// runtime/readiness.ts
-import { existsSync, readFileSync } from "node:fs";
-import { join as join2 } from "node:path";
-var releaseImageFile = join2(import.meta.dirname, "release-image.json");
-var releaseImage = existsSync(releaseImageFile) ? JSON.parse(readFileSync(releaseImageFile, "utf8")) : null;
-if (releaseImage && (!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref) || releaseImage.contract !== 10)) throw new Error("The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.");
-var HERMES_IMAGE = releaseImage?.ref || process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`;
-var pullRuntime = Boolean(releaseImage) || process.env.OPEN_HARNESS_HERMES_PULL === "1";
-var RUNTIME_CONTRACT = 10;
-var RUNTIME_LABEL = "dev.openharness.runtime";
-function classifyContract(result) {
-  if (result.status !== 0) return "missing";
-  return result.stdout.trim() === String(RUNTIME_CONTRACT) ? "current" : "stale";
-}
-var platform = ["linux", "darwin", "win32"].includes(process.platform) ? process.platform : "unknown";
-
-// runtime/computer-validation.ts
-import { accessSync as accessSync2, constants as constants2, existsSync as existsSync2, lstatSync } from "node:fs";
-import { dirname as dirname2, resolve } from "node:path";
+import { lstatSync as lstatSync4, mkdirSync as mkdirSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join3, resolve as resolve5, sep as sep2 } from "node:path";
 
 // lib/agent-profile.ts
+var DEFAULT_NETWORK = { mode: "open", allow: [] };
 var UNSANDBOXED_COMPUTER_MESSAGE = "Direct access to the signed-in computer is not sandboxed and is disabled. Open Agent settings \u2192 Computer and choose a private workspace or private agent desktop.";
 function isSandboxedComputer(computer) {
   return ["private", "folders"].includes(computer.access) && ["none", "virtual"].includes(computer.desktop);
 }
+var DEFAULT_COMPUTER = { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, network: { ...DEFAULT_NETWORK, allow: [] }, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
 var MCP_PREFIX = "mcp__";
 var COORDINATION_SERVER = "open_harness";
 function mcpToolId(server, tool) {
@@ -3855,6 +3969,7 @@ function mcpServerOf(id) {
   return server || null;
 }
 var TASK_TOOL = mcpToolId(COORDINATION_SERVER, "task");
+var MESSAGE_TOOL = "mcp__open_harness__post_message";
 var HANDOFF_TOOL = mcpToolId(COORDINATION_SERVER, "delegate_named_agent");
 var ROUTINE_TOOL = mcpToolId(COORDINATION_SERVER, "create_open_harness_routine");
 var COMPUTER_TOOL = mcpToolId(COORDINATION_SERVER, "computer");
@@ -3879,9 +3994,522 @@ function runToolGrants(profile) {
   ))];
 }
 
+// runtime/safe-fs.ts
+import { closeSync, constants as constants2, fstatSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, isAbsolute, resolve, sep } from "node:path";
+var SafeFsError = class extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+    this.name = "SafeFsError";
+  }
+};
+var { O_RDONLY, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, O_WRONLY, O_CREAT } = constants2;
+var DIR_FLAGS = O_RDONLY | O_DIRECTORY | O_NOFOLLOW;
+function remap(error) {
+  if (error instanceof SafeFsError) return error;
+  switch (error?.code) {
+    case "ELOOP":
+      return new SafeFsError("symlink", "Refusing to follow a symbolic link.");
+    case "ENOENT":
+      return new SafeFsError("not-found", "No such file or directory.");
+    case "ENOTDIR":
+      return new SafeFsError("invalid-path", "A path component is not a directory.");
+    case "EISDIR":
+      return new SafeFsError("not-regular", "Target is a directory, not a regular file.");
+    case "ENXIO":
+      return new SafeFsError("not-regular", "Not a regular file.");
+    // O_WRONLY|O_NONBLOCK on a FIFO with no reader
+    case "EWOULDBLOCK":
+      return new SafeFsError("not-regular", "Not a regular file.");
+    // non-blocking open would have blocked
+    case "EEXIST":
+      return new SafeFsError("conflict", "A file or directory already exists at that path.");
+    case "ENOTEMPTY":
+      return new SafeFsError("conflict", "The directory changed during removal.");
+    case "EXDEV":
+      return new SafeFsError("conflict", "Cannot move across filesystems; staging must share the destination filesystem.");
+    default:
+      return error instanceof Error ? error : new Error(String(error));
+  }
+}
+function components(rel) {
+  if (typeof rel !== "string" || rel.includes("\0") || isAbsolute(rel)) throw new SafeFsError("invalid-path", "Path must be relative and free of NUL bytes.");
+  if (rel === "") return [];
+  const parts = rel.split("/");
+  for (const part of parts) if (part === "" || part === "." || part === ".." || part.includes("\\")) throw new SafeFsError("invalid-path", "Path must not contain empty, relative, or separator-escaped components.");
+  return parts;
+}
+function assertTrustedAnchor(dir) {
+  if (typeof dir !== "string" || dir.includes("\0") || !isAbsolute(dir) || resolve(dir) !== dir) throw new SafeFsError("invalid-path", "Anchor must be an absolute, normalized path with no traversal.");
+}
+var hooks = {};
+function testHooksEnabled() {
+  return process.env.OPEN_HARNESS_SAFE_FS_TEST_HOOKS === "1";
+}
+function runHook(phase, name) {
+  if (testHooksEnabled()) hooks[phase]?.({ phase, name });
+}
+var procPath = (fd, name) => `/proc/self/fd/${fd}/${name}`;
+function closeQuietly(fd) {
+  try {
+    closeSync(fd);
+  } catch {
+  }
+}
+var probeResult;
+function probe() {
+  let base = null;
+  try {
+    base = mkdtempSync(resolve(tmpdir(), "oh-safefs-"));
+    const outside = resolve(base, "outside");
+    mkdirSync(outside);
+    writeFileSync(resolve(outside, "canary"), "canary");
+    mkdirSync(resolve(base, "d"));
+    writeFileSync(resolve(base, "d", "f"), "probe", { mode: 384 });
+    const anchorFd = openSync(base, DIR_FLAGS);
+    try {
+      const dFd = openSync(procPath(anchorFd, "d"), DIR_FLAGS);
+      try {
+        const fFd = openSync(procPath(dFd, "f"), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+        try {
+          const st = fstatSync(fFd);
+          if (!st.isFile() || st.size !== 5) throw new Error("probe read failed");
+        } finally {
+          closeQuietly(fFd);
+        }
+        if (!readdirSync(`/proc/self/fd/${dFd}`).includes("f")) throw new Error("probe readdir failed");
+        if (!lstatSync(procPath(dFd, "f")).isFile()) throw new Error("probe lstat failed");
+        const wFd = openSync(procPath(dFd, "g"), O_WRONLY | O_CREAT | O_NOFOLLOW, 384);
+        try {
+          writeSync(wFd, Buffer.from("x"));
+        } finally {
+          closeQuietly(wFd);
+        }
+        mkdirSync(procPath(dFd, "sub"), { mode: 448 });
+        const subFd = openSync(procPath(dFd, "sub"), DIR_FLAGS);
+        try {
+          renameSync(procPath(dFd, "g"), procPath(subFd, "g"));
+          unlinkSync(procPath(subFd, "g"));
+        } finally {
+          closeQuietly(subFd);
+        }
+        rmdirSync(procPath(dFd, "sub"));
+        renameSync(resolve(base, "d"), resolve(base, "moved"));
+        symlinkSync(outside, resolve(base, "d"));
+        if (readFileSync(procPath(dFd, "f"), "utf8") !== "probe") throw new Error("held fd did not survive parent swap");
+        let rejectedComponent = false;
+        try {
+          closeQuietly(openSync(procPath(anchorFd, "d"), DIR_FLAGS));
+        } catch {
+          rejectedComponent = true;
+        }
+        if (!rejectedComponent) throw new Error("symlinked component was not rejected");
+        symlinkSync(resolve(outside, "canary"), procPath(dFd, "link"));
+        let rejectedLeaf = false;
+        try {
+          closeQuietly(openSync(procPath(dFd, "link"), O_RDONLY | O_NOFOLLOW));
+        } catch {
+          rejectedLeaf = true;
+        }
+        if (!rejectedLeaf) throw new Error("symlinked leaf was not rejected");
+      } finally {
+        closeQuietly(dFd);
+      }
+    } finally {
+      closeQuietly(anchorFd);
+    }
+    return "fd-relative";
+  } catch {
+    return "unsupported";
+  } finally {
+    if (base) try {
+      rmSync(base, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+function safeFsMode() {
+  if (testHooksEnabled()) {
+    const forced = process.env.OPEN_HARNESS_SAFE_FS_MODE;
+    if (forced === "path") return "path-fallback";
+    if (forced === "unsupported") return "unsupported";
+  }
+  if (process.platform !== "linux") return "path-fallback";
+  return probeResult ??= probe();
+}
+function requireMode() {
+  const mode = safeFsMode();
+  if (mode === "unsupported") throw new SafeFsError("unsupported", "Safe workspace file access is unavailable on this host.");
+  return mode;
+}
+function openComponent(parentFd, name) {
+  try {
+    return openSync(procPath(parentFd, name), DIR_FLAGS);
+  } catch (error) {
+    const code = error?.code;
+    if (code === "ELOOP" || code === "ENOTDIR") {
+      const st = lstatSync(procPath(parentFd, name), { throwIfNoEntry: false });
+      if (st?.isSymbolicLink()) throw new SafeFsError("symlink", "Refusing to traverse a symbolic link in the path.");
+    }
+    throw error;
+  }
+}
+function openChain(anchor, dirParts, fds) {
+  let fd = openSync(anchor, DIR_FLAGS);
+  fds.push(fd);
+  runHook("afterComponentOpen");
+  for (const part of dirParts) {
+    fd = openComponent(fd, part);
+    fds.push(fd);
+    runHook("afterComponentOpen", part);
+  }
+  return fd;
+}
+function withParent(anchor, rel, fn) {
+  const parts = components(rel);
+  if (parts.length === 0) throw new SafeFsError("invalid-path", "Operation requires a target name.");
+  const fds = [];
+  try {
+    const parentFd = openChain(anchor, parts.slice(0, -1), fds);
+    const leaf = parts[parts.length - 1];
+    runHook("beforeTerminalOp", leaf);
+    return fn(parentFd, leaf);
+  } finally {
+    for (const fd of fds) closeQuietly(fd);
+  }
+}
+function readFd(anchor, rel, opts) {
+  return withParent(anchor, rel, (parentFd, leaf) => {
+    const fd = openSync(procPath(parentFd, leaf), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    try {
+      const st = fstatSync(fd);
+      if (!st.isFile()) throw new SafeFsError("not-regular", "Not a regular file.");
+      if (st.size > opts.maxBytes) throw new SafeFsError("too-large", `File exceeds the ${opts.maxBytes}-byte limit.`);
+      const buf = Buffer.allocUnsafe(st.size);
+      let off = 0;
+      while (off < st.size) {
+        const n = readSync(fd, buf, off, st.size - off, off);
+        if (n <= 0) break;
+        off += n;
+      }
+      const data = off === st.size ? buf : buf.subarray(0, off);
+      return opts.encoding ? data.toString(opts.encoding) : data;
+    } finally {
+      closeQuietly(fd);
+    }
+  });
+}
+function writeFd(anchor, rel, bytes2, mode, exclusive = false) {
+  withParent(anchor, rel, (parentFd, leaf) => {
+    const fd = openSync(procPath(parentFd, leaf), O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | (exclusive ? constants2.O_EXCL : 0), mode);
+    try {
+      if (!fstatSync(fd).isFile()) throw new SafeFsError("not-regular", "Not a regular file.");
+      ftruncateSync(fd, 0);
+      let off = 0;
+      while (off < bytes2.length) off += writeSync(fd, bytes2, off, bytes2.length - off, off);
+    } finally {
+      closeQuietly(fd);
+    }
+  });
+}
+function listFd(anchor, rel, max) {
+  const parts = components(rel);
+  const fds = [];
+  try {
+    const dirFd = openChain(anchor, parts, fds);
+    const names = readdirSync(`/proc/self/fd/${dirFd}`);
+    const out = [];
+    for (const name of names) {
+      if (out.length >= max) break;
+      runHook("betweenReaddirAndLstat", name);
+      const st = lstatSync(procPath(dirFd, name), { throwIfNoEntry: false });
+      if (!st || st.isSymbolicLink()) continue;
+      out.push({ name, size: st.size, mtimeMs: st.mtimeMs, isDirectory: st.isDirectory() });
+    }
+    return out;
+  } finally {
+    for (const fd of fds) closeQuietly(fd);
+  }
+}
+function mkdirFd(anchor, rel) {
+  withParent(anchor, rel, (parentFd, leaf) => mkdirSync(procPath(parentFd, leaf), { mode: 448 }));
+}
+function statFd(anchor, rel) {
+  return withParent(anchor, rel, (parentFd, leaf) => {
+    const st = lstatSync(procPath(parentFd, leaf), { throwIfNoEntry: false });
+    if (!st) return null;
+    return { name: leaf, size: st.size, mtimeMs: st.mtimeMs, isDirectory: st.isDirectory(), isFile: st.isFile(), isSymbolicLink: st.isSymbolicLink() };
+  });
+}
+function scanTree(parentFd, name, limits, depth, count) {
+  if (depth > limits.maxDepth) throw new SafeFsError("too-large", "Directory tree is too deep to remove.");
+  const dirFd = openSync(procPath(parentFd, name), DIR_FLAGS);
+  try {
+    for (const child of readdirSync(`/proc/self/fd/${dirFd}`)) {
+      if (++count.n > limits.maxEntries) throw new SafeFsError("too-large", "Directory tree has too many entries to remove.");
+      const st = lstatSync(procPath(dirFd, child));
+      if (st.isSymbolicLink()) throw new SafeFsError("symlink", "Refusing to remove a tree that contains a symbolic link.");
+      if (st.isDirectory()) scanTree(dirFd, child, limits, depth + 1, count);
+    }
+  } finally {
+    closeQuietly(dirFd);
+  }
+}
+function removeTree(parentFd, name, limits, depth, count) {
+  if (depth > limits.maxDepth) throw new SafeFsError("too-large", "Directory tree is too deep to remove.");
+  const dirFd = openSync(procPath(parentFd, name), DIR_FLAGS);
+  const ident = fstatSync(dirFd);
+  try {
+    for (const child of readdirSync(`/proc/self/fd/${dirFd}`)) {
+      if (++count.n > limits.maxEntries) throw new SafeFsError("too-large", "Directory tree has too many entries to remove.");
+      runHook("duringRecursiveDescent", child);
+      const st = lstatSync(procPath(dirFd, child));
+      if (st.isSymbolicLink()) throw new SafeFsError("symlink", "Refusing to remove a symbolic link.");
+      if (st.isDirectory()) removeTree(dirFd, child, limits, depth + 1, count);
+      else unlinkSync(procPath(dirFd, child));
+    }
+  } finally {
+    closeQuietly(dirFd);
+  }
+  const now = lstatSync(procPath(parentFd, name), { throwIfNoEntry: false });
+  if (!now || now.dev !== ident.dev || now.ino !== ident.ino) throw new SafeFsError("conflict", "The directory changed during removal.");
+  rmdirSync(procPath(parentFd, name));
+}
+function rmrfFd(anchor, rel, limits) {
+  withParent(anchor, rel, (parentFd, leaf) => {
+    const st = lstatSync(procPath(parentFd, leaf));
+    if (st.isSymbolicLink()) throw new SafeFsError("symlink", "Refusing to remove a symbolic link.");
+    if (st.isDirectory()) {
+      scanTree(parentFd, leaf, limits, 0, { n: 0 });
+      removeTree(parentFd, leaf, limits, 0, { n: 0 });
+    } else unlinkSync(procPath(parentFd, leaf));
+  });
+}
+function renameFd(stagingDir, name, anchor, rel) {
+  if (components(name).length !== 1) throw new SafeFsError("invalid-path", "Staging name must be a single path component.");
+  const parts = components(rel);
+  if (parts.length === 0) throw new SafeFsError("invalid-path", "Rename requires a destination name.");
+  const fds = [];
+  try {
+    const stagingFd = openSync(stagingDir, DIR_FLAGS);
+    fds.push(stagingFd);
+    const destParentFd = openChain(anchor, parts.slice(0, -1), fds);
+    const leaf = parts[parts.length - 1];
+    runHook("beforeRenameCommit", leaf);
+    renameSync(procPath(stagingFd, name), procPath(destParentFd, leaf));
+  } finally {
+    for (const fd of fds) closeQuietly(fd);
+  }
+}
+function containedPath(anchor, rel, allowLeafLink = false) {
+  const parts = components(rel), base = resolve(anchor), target = resolve(base, parts.join("/") || ".");
+  if (target !== base && !target.startsWith(base + sep)) throw new SafeFsError("invalid-path", "Path escaped the workspace.");
+  let current = base;
+  for (const [index, part] of parts.entries()) {
+    current = resolve(current, part);
+    const st = lstatSync(current, { throwIfNoEntry: false });
+    if (!st) break;
+    if (st.isSymbolicLink() && !(allowLeafLink && index === parts.length - 1)) throw new SafeFsError("symlink", "Refusing to follow a symbolic link.");
+    if (index < parts.length - 1 && !st.isDirectory()) throw new SafeFsError("invalid-path", "A path component is not a directory.");
+  }
+  return target;
+}
+function readFallback(anchor, rel, opts) {
+  const target = containedPath(anchor, rel), st = lstatSync(target);
+  if (!st.isFile()) throw new SafeFsError("not-regular", "Not a regular file.");
+  const fd = openSync(target, O_RDONLY | (O_NOFOLLOW || 0) | (O_NONBLOCK || 0));
+  try {
+    const actual = fstatSync(fd);
+    if (!actual.isFile() || actual.dev !== st.dev || actual.ino !== st.ino) throw new SafeFsError("conflict", "The file changed while opening it.");
+    if (actual.size > opts.maxBytes) throw new SafeFsError("too-large", `File exceeds the ${opts.maxBytes}-byte limit.`);
+    const data = Buffer.allocUnsafe(actual.size);
+    let off = 0;
+    while (off < data.length) {
+      const n = readSync(fd, data, off, data.length - off, off);
+      if (n <= 0) break;
+      off += n;
+    }
+    return opts.encoding ? data.subarray(0, off).toString(opts.encoding) : data.subarray(0, off);
+  } finally {
+    closeQuietly(fd);
+  }
+}
+function writeFallback(anchor, rel, bytes2, mode, exclusive = false) {
+  const target = containedPath(anchor, rel), st = lstatSync(target, { throwIfNoEntry: false });
+  if (st && !st.isFile()) throw new SafeFsError("not-regular", "Not a regular file.");
+  const fd = openSync(target, O_WRONLY | O_CREAT | (O_NOFOLLOW || 0) | (O_NONBLOCK || 0) | (exclusive ? constants2.O_EXCL : 0), mode);
+  try {
+    const actual = fstatSync(fd);
+    if (!actual.isFile() || st && (actual.dev !== st.dev || actual.ino !== st.ino)) throw new SafeFsError("conflict", "The file changed while opening it.");
+    ftruncateSync(fd, 0);
+    let off = 0;
+    while (off < bytes2.length) off += writeSync(fd, bytes2, off, bytes2.length - off, off);
+  } finally {
+    closeQuietly(fd);
+  }
+}
+function listFallback(anchor, rel, max) {
+  const dir = containedPath(anchor, rel), out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (out.length >= max) break;
+    if (entry.isSymbolicLink()) continue;
+    const st = lstatSync(resolve(dir, entry.name), { throwIfNoEntry: false });
+    if (!st || st.isSymbolicLink()) continue;
+    out.push({ name: entry.name, size: st.size, mtimeMs: st.mtimeMs, isDirectory: st.isDirectory() });
+  }
+  return out;
+}
+function statFallback(anchor, rel) {
+  const target = containedPath(anchor, rel, true), st = lstatSync(target, { throwIfNoEntry: false });
+  if (!st) return null;
+  return { name: basename(target), size: st.size, mtimeMs: st.mtimeMs, isDirectory: st.isDirectory(), isFile: st.isFile(), isSymbolicLink: st.isSymbolicLink() };
+}
+function scanTreeFallback(dir, limits, depth, count) {
+  if (depth > limits.maxDepth) throw new SafeFsError("too-large", "Directory tree is too deep to remove.");
+  for (const entry of readdirSync(dir)) {
+    if (++count.n > limits.maxEntries) throw new SafeFsError("too-large", "Directory tree has too many entries to remove.");
+    const full = resolve(dir, entry), st = lstatSync(full);
+    if (st.isSymbolicLink()) throw new SafeFsError("symlink", "Refusing to remove a tree that contains a symbolic link.");
+    if (st.isDirectory()) scanTreeFallback(full, limits, depth + 1, count);
+  }
+}
+function removeTreeFallback(dir) {
+  for (const entry of readdirSync(dir)) {
+    const full = resolve(dir, entry), st = lstatSync(full);
+    if (st.isSymbolicLink()) throw new SafeFsError("symlink", "Refusing to remove a tree that contains a symbolic link.");
+    if (st.isDirectory()) removeTreeFallback(full);
+    else unlinkSync(full);
+  }
+  rmdirSync(dir);
+}
+function rmrfFallback(anchor, rel, limits) {
+  const target = containedPath(anchor, rel), st = lstatSync(target, { throwIfNoEntry: false });
+  if (!st) throw new SafeFsError("not-found", "No such file or directory.");
+  if (st.isSymbolicLink()) throw new SafeFsError("symlink", "Refusing to remove a symbolic link.");
+  if (st.isDirectory()) {
+    scanTreeFallback(target, limits, 0, { n: 0 });
+    removeTreeFallback(target);
+  } else unlinkSync(target);
+}
+function renameFallback(stagingDir, name, anchor, rel) {
+  if (components(name).length !== 1) throw new SafeFsError("invalid-path", "Staging name must be a single path component.");
+  renameSync(resolve(stagingDir, name), containedPath(anchor, rel));
+}
+function readInside(anchor, rel, opts) {
+  assertTrustedAnchor(anchor);
+  const mode = requireMode();
+  try {
+    return mode === "fd-relative" ? readFd(anchor, rel, opts) : readFallback(anchor, rel, opts);
+  } catch (error) {
+    throw remap(error);
+  }
+}
+function writeInside(anchor, rel, data, opts) {
+  assertTrustedAnchor(anchor);
+  const mode = requireMode(), bytes2 = typeof data === "string" ? Buffer.from(data, opts.encoding ?? "utf8") : data;
+  if (bytes2.length > opts.maxBytes) throw new SafeFsError("too-large", `Content exceeds the ${opts.maxBytes}-byte limit.`);
+  try {
+    if (mode === "fd-relative") writeFd(anchor, rel, bytes2, opts.mode ?? 384, opts.exclusive);
+    else writeFallback(anchor, rel, bytes2, opts.mode ?? 384, opts.exclusive);
+  } catch (error) {
+    throw remap(error);
+  }
+}
+function listInside(anchor, rel, opts) {
+  assertTrustedAnchor(anchor);
+  const mode = requireMode();
+  try {
+    return mode === "fd-relative" ? listFd(anchor, rel, opts.max) : listFallback(anchor, rel, opts.max);
+  } catch (error) {
+    throw remap(error);
+  }
+}
+function mkdirInside(anchor, rel) {
+  assertTrustedAnchor(anchor);
+  const mode = requireMode();
+  try {
+    if (mode === "fd-relative") mkdirFd(anchor, rel);
+    else mkdirSync(containedPath(anchor, rel), { mode: 448 });
+  } catch (error) {
+    throw remap(error);
+  }
+}
+function rmrfInside(anchor, rel, opts) {
+  assertTrustedAnchor(anchor);
+  const mode = requireMode();
+  try {
+    if (mode === "fd-relative") rmrfFd(anchor, rel, opts);
+    else rmrfFallback(anchor, rel, opts);
+  } catch (error) {
+    throw remap(error);
+  }
+}
+function statInside(anchor, rel) {
+  assertTrustedAnchor(anchor);
+  const mode = requireMode();
+  try {
+    return mode === "fd-relative" ? statFd(anchor, rel) : statFallback(anchor, rel);
+  } catch (error) {
+    throw remap(error);
+  }
+}
+function renameIntoInside(stagingDir, name, anchor, rel) {
+  assertTrustedAnchor(stagingDir);
+  assertTrustedAnchor(anchor);
+  const mode = requireMode();
+  try {
+    if (mode === "fd-relative") renameFd(stagingDir, name, anchor, rel);
+    else renameFallback(stagingDir, name, anchor, rel);
+  } catch (error) {
+    throw remap(error);
+  }
+}
+
+// runtime/teams.ts
+function safeTeamIds(teamIds) {
+  return [...new Set(teamIds.map((id) => {
+    if (typeof id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new Error("Invalid team id.");
+    return id;
+  }))].sort();
+}
+function ensureTeamFolders(stateRoot2, teamIds) {
+  const ids = safeTeamIds(teamIds);
+  for (const path2 of ["teams", ...ids.flatMap((id) => [`teams/${id}`, `teams/${id}/shared`])]) {
+    const info = statInside(stateRoot2, path2);
+    if (info === null) mkdirInside(stateRoot2, path2);
+    else if (!info.isDirectory || info.isSymbolicLink) throw new SafeFsError("symlink", "Team folders must be real directories inside this workspace.");
+  }
+}
+
+// lib/hermes-pin.ts
+var HERMES_RELEASE = "v2026.9.11";
+var HERMES_IMAGE_TAG = HERMES_RELEASE.replace(/^v/, "");
+
+// runtime/readiness.ts
+import { existsSync, readFileSync as readFileSync2 } from "node:fs";
+import { join as join2 } from "node:path";
+var releaseImageFile = join2(import.meta.dirname, "release-image.json");
+var releaseImage = existsSync(releaseImageFile) ? JSON.parse(readFileSync2(releaseImageFile, "utf8")) : null;
+if (releaseImage && (!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref) || releaseImage.contract !== 11)) throw new Error("The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.");
+var HERMES_IMAGE = releaseImage?.ref || process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`;
+var pullRuntime = Boolean(releaseImage) || process.env.OPEN_HARNESS_HERMES_PULL === "1";
+var RUNTIME_CONTRACT = 11;
+var RUNTIME_LABEL = "dev.openharness.runtime";
+function classifyContract(result) {
+  if (result.status !== 0) return "missing";
+  return result.stdout.trim() === String(RUNTIME_CONTRACT) ? "current" : "stale";
+}
+var platform = ["linux", "darwin", "win32"].includes(process.platform) ? process.platform : "unknown";
+
+// runtime/computer-validation.ts
+import { accessSync as accessSync2, constants as constants3, existsSync as existsSync2, lstatSync as lstatSync2 } from "node:fs";
+import { dirname as dirname2, resolve as resolve2 } from "node:path";
+
 // runtime/host-folders.ts
-import { readFileSync as readFileSync2 } from "node:fs";
-import { posix } from "node:path";
+import { readFileSync as readFileSync3 } from "node:fs";
+import { posix as posix2 } from "node:path";
 function parseHostFolderMounts(mountinfo) {
   const mounts = /* @__PURE__ */ new Map();
   for (const line of mountinfo.split("\n")) {
@@ -3894,14 +4522,14 @@ function parseHostFolderMounts(mountinfo) {
 function hostFolderExports() {
   if (process.env.OPEN_HARNESS_DEPLOYMENT !== "compose") return void 0;
   try {
-    return parseHostFolderMounts(readFileSync2("/proc/self/mountinfo", "utf8"));
+    return parseHostFolderMounts(readFileSync3("/proc/self/mountinfo", "utf8"));
   } catch {
     return [];
   }
 }
 function validateFolderExport(path2, mode, exports = hostFolderExports()) {
   if (!exports) return;
-  const resolved = posix.resolve(path2);
+  const resolved = posix2.resolve(path2);
   const grant = exports.find((folder) => resolved === folder.path);
   if (!grant) throw new Error("This exact folder has not been shared with Open Harness. Add it to both services in your host-folder Compose override, then select its /host-folders/ path. To select a subfolder, export that subfolder separately.");
   if (mode === "write" && grant.mode === "read") throw new Error(`This folder is shared read-only with Open Harness: ${grant.path}. Choose read-only access for this agent.`);
@@ -3912,11 +4540,11 @@ function assertSandboxedComputer(computer) {
   if (computer && !isSandboxedComputer(computer)) throw new Error(UNSANDBOXED_COMPUTER_MESSAGE);
 }
 function sharedFolderSource(value, mode = "read") {
-  const source = resolve(value);
+  const source = resolve2(value);
   validateFolderExport(source, mode);
   if (!existsSync2(source)) throw new Error(`Shared folder does not exist on this computer: ${value}`);
   for (let current = source; ; current = dirname2(current)) {
-    const info = lstatSync(current);
+    const info = lstatSync2(current);
     if (info.isSymbolicLink()) throw new Error(`Shared folders cannot contain symbolic links. Select the real folder path: ${value}`);
     if (current === source && !info.isDirectory()) throw new Error(`Shared folder is not a directory: ${value}`);
     if (dirname2(current) === current) break;
@@ -3931,7 +4559,7 @@ function validateComputerTarget(profile, capabilities2, requiredSecrets = [], ha
   if (profile.computer.access === "folders") {
     for (const folder of profile.computer.folders) {
       try {
-        accessSync2(sharedFolderSource(folder.path, folder.mode), constants2.R_OK | (folder.mode === "write" ? constants2.W_OK : 0));
+        accessSync2(sharedFolderSource(folder.path, folder.mode), constants3.R_OK | (folder.mode === "write" ? constants3.W_OK : 0));
       } catch (error) {
         issues.push(`${folder.path} is not an accessible ${folder.mode === "write" ? "read/write" : "read-only"} folder on this computer.${process.env.OPEN_HARNESS_DEPLOYMENT === "compose" && error instanceof Error ? ` ${error.message}` : ""}`);
       }
@@ -3944,8 +4572,8 @@ function validateComputerTarget(profile, capabilities2, requiredSecrets = [], ha
 
 // runtime/folder-mounts.ts
 import { randomUUID } from "node:crypto";
-import { closeSync, constants as constants3, fstatSync, openSync, readFileSync as readFileSync3 } from "node:fs";
-import { resolve as resolve2 } from "node:path";
+import { closeSync as closeSync2, constants as constants4, fstatSync as fstatSync2, openSync as openSync2, readFileSync as readFileSync4 } from "node:fs";
+import { resolve as resolve3 } from "node:path";
 var NATIVE_FOLDER_GUIDANCE = "Selected host folders require Open Harness and Docker to use the same Linux kernel. Use the local browser Compose installation with explicitly exported folders, or a native Linux runner.";
 var BOOT_ID = "/proc/sys/kernel/random/boot_id";
 var UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -3955,19 +4583,19 @@ function requiresFolderVerification(computer) {
   return process.env.OPEN_HARNESS_DEPLOYMENT !== "compose" && computer.access === "folders" && computer.folders.length > 0;
 }
 function pinDirectory(path2) {
-  const flags = constants3.O_RDONLY | constants3.O_DIRECTORY | constants3.O_NOFOLLOW;
-  let fd = openSync("/", flags);
+  const flags = constants4.O_RDONLY | constants4.O_DIRECTORY | constants4.O_NOFOLLOW;
+  let fd = openSync2("/", flags);
   try {
-    for (const component of resolve2(path2).split("/").filter(Boolean)) {
-      const next = openSync(`/proc/self/fd/${fd}/${component}`, flags);
-      closeSync(fd);
+    for (const component of resolve3(path2).split("/").filter(Boolean)) {
+      const next = openSync2(`/proc/self/fd/${fd}/${component}`, flags);
+      closeSync2(fd);
       fd = next;
     }
-    const info = fstatSync(fd, { bigint: true });
+    const info = fstatSync2(fd, { bigint: true });
     if (!info.isDirectory()) throw new Error("not a directory");
     return { fd, device: String(info.dev), inode: String(info.ino) };
   } catch (error) {
-    closeSync(fd);
+    closeSync2(fd);
     throw new Error(`Could not safely open selected folder ${path2}. Select an existing directory without symbolic links. ${error instanceof Error ? error.message : ""}`);
   }
 }
@@ -3975,14 +4603,14 @@ function pinSelectedFolders(folders) {
   if (process.platform !== "linux") throw new Error(NATIVE_FOLDER_GUIDANCE);
   let bootId;
   try {
-    bootId = readFileSync3(BOOT_ID, "utf8").trim();
+    bootId = readFileSync4(BOOT_ID, "utf8").trim();
   } catch {
     throw new Error(NATIVE_FOLDER_GUIDANCE);
   }
   if (!UUID.test(bootId)) throw new Error(NATIVE_FOLDER_GUIDANCE);
   const fds = [], mounts = [];
   const close = () => {
-    for (const fd of fds.splice(0)) closeSync(fd);
+    for (const fd of fds.splice(0)) closeSync2(fd);
   };
   try {
     folders.forEach((folder, index) => {
@@ -4070,28 +4698,28 @@ async function createVerifiedFolderContainerAsync(args2, pinned, desktop, comman
 }
 
 // runtime/path-safety.ts
-import { closeSync as closeSync2, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync2, openSync as openSync2, readFileSync as readFileSync4, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync as closeSync3, constants as constants5, fstatSync as fstatSync3, lstatSync as lstatSync3, openSync as openSync3, readFileSync as readFileSync5, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { randomUUID as randomUUID2 } from "node:crypto";
 import path from "node:path";
 function atomicWorkspaceWrite(target, data) {
   const temporary = `${target}.${randomUUID2()}.tmp`;
   try {
-    writeFileSync(temporary, data, { mode: 384, flag: "wx" });
-    renameSync(temporary, target);
+    writeFileSync2(temporary, data, { mode: 384, flag: "wx" });
+    renameSync2(temporary, target);
   } finally {
-    rmSync(temporary, { force: true });
+    rmSync2(temporary, { force: true });
   }
 }
 function readWorkspaceFile(target) {
-  const expected = lstatSync2(target);
+  const expected = lstatSync3(target);
   if (!expected.isFile()) throw new Error("Workspace path must be a regular file.");
-  const fd = openSync2(target, constants4.O_RDONLY | (constants4.O_NOFOLLOW || 0) | (constants4.O_NONBLOCK || 0));
+  const fd = openSync3(target, constants5.O_RDONLY | (constants5.O_NOFOLLOW || 0) | (constants5.O_NONBLOCK || 0));
   try {
-    const actual = fstatSync2(fd);
+    const actual = fstatSync3(fd);
     if (!actual.isFile() || actual.dev !== expected.dev || actual.ino !== expected.ino) throw new Error("Workspace file changed while opening it. Try again.");
-    return readFileSync4(fd);
+    return readFileSync5(fd);
   } finally {
-    closeSync2(fd);
+    closeSync3(fd);
   }
 }
 function resolveContainedPath(root, name, paths2 = path) {
@@ -4100,8 +4728,8 @@ function resolveContainedPath(root, name, paths2 = path) {
   if (parts.some((part) => !part || part === "." || part === "..")) throw new Error("Invalid workspace path.");
   if (parts.some((part) => /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(part))) throw new Error("Invalid portable workspace path.");
   const target = paths2.resolve(root, parts.join(paths2.sep));
-  const relative3 = paths2.relative(paths2.resolve(root), target);
-  if (!relative3 || relative3 === ".." || relative3.startsWith(`..${paths2.sep}`) || paths2.isAbsolute(relative3)) throw new Error("Path escaped the workspace.");
+  const relative4 = paths2.relative(paths2.resolve(root), target);
+  if (!relative4 || relative4 === ".." || relative4.startsWith(`..${paths2.sep}`) || paths2.isAbsolute(relative4)) throw new Error("Path escaped the workspace.");
   return target;
 }
 function safeWorkspacePath(root, name) {
@@ -4112,7 +4740,7 @@ function safeWorkspacePath(root, name) {
     current = path.join(current, parts[index]);
     let stat;
     try {
-      stat = lstatSync2(current);
+      stat = lstatSync3(current);
     } catch (error) {
       if (error.code === "ENOENT") break;
       throw error;
@@ -4124,10 +4752,10 @@ function safeWorkspacePath(root, name) {
 }
 
 // runtime/container-admission.ts
-import { resolve as resolve3 } from "node:path";
+import { resolve as resolve4 } from "node:path";
 var workspaces = /* @__PURE__ */ new Map();
 function workspace(root) {
-  const key = resolve3(root);
+  const key = resolve4(root);
   let value = workspaces.get(key);
   if (!value) {
     value = { closed: false, pending: /* @__PURE__ */ new Set() };
@@ -4159,18 +4787,18 @@ var FIRST_SETUP_MESSAGE = "Docker is ready, but the pinned Hermes runtime still 
 var STALE_IMAGE_MESSAGE = "Docker is ready, but the agent runtime on this computer was built before a fix. Open Settings \u2192 Readiness and update it.";
 function authorizeWorkspaceMounts(stateRoot2, computer) {
   if (process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY !== "1" || computer.access !== "folders" || computer.machineId !== "local") return;
-  const shared = resolve4(stateRoot2, "shared");
+  const shared = resolve5(stateRoot2, "shared");
   if (computer.folders.some((folder) => {
-    const source = resolve4(folder.path);
-    return source !== shared && !source.startsWith(shared + sep);
+    const source = resolve5(folder.path);
+    return source !== shared && !source.startsWith(shared + sep2);
   })) throw new Error("Authenticated shared workspaces may mount only their shared files. Upload project files to the workspace or use a private agent computer.");
 }
 function prepareExecutionDirectories(agentId, stateRoot2) {
   const names = ["shared", ...["profile", "private", "managed"].map((name) => `agents/${agentId}/${name}`)];
   const paths2 = names.map((name) => safeWorkspacePath(stateRoot2, name));
   for (const [index, path2] of paths2.entries()) {
-    mkdirSync(path2, { recursive: true, mode: 448 });
-    if (!lstatSync3(safeWorkspacePath(stateRoot2, names[index])).isDirectory()) throw new Error("The managed execution workspace must contain ordinary directories.");
+    mkdirSync2(path2, { recursive: true, mode: 448 });
+    if (!lstatSync4(safeWorkspacePath(stateRoot2, names[index])).isDirectory()) throw new Error("The managed execution workspace must contain ordinary directories.");
   }
 }
 function lastWords(stderrTail, keep = 3, limit = 400) {
@@ -4210,7 +4838,7 @@ var HermesGateway = class extends EventEmitter {
       return;
     }
     if (this.child && !this.child.killed) return;
-    const child = this.child = spawn2("docker", ["exec", "-i", ...GATEWAY_ENV, this.container, "node", "/run/open-harness/gateway-entry.mjs"], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = this.child = spawn3("docker", ["exec", "-i", ...GATEWAY_ENV, this.container, "node", "/run/open-harness/gateway-entry.mjs"], { stdio: ["pipe", "pipe", "pipe"] });
     let exited = false;
     const failed = (error) => {
       if (exited) return;
@@ -4254,7 +4882,7 @@ var HermesGateway = class extends EventEmitter {
       failed(error);
     });
     try {
-      await new Promise((resolve7, reject) => {
+      await new Promise((resolve8, reject) => {
         const cleanup = () => {
           clearTimeout(timer);
           this.off("event", ready);
@@ -4267,7 +4895,7 @@ var HermesGateway = class extends EventEmitter {
         const ready = (event) => {
           if (event?.type === "gateway.ready") {
             cleanup();
-            resolve7();
+            resolve8();
           }
         };
         const timer = setTimeout(() => fail(new Error("Hermes gateway did not become ready.")), 3e4);
@@ -4287,17 +4915,17 @@ var HermesGateway = class extends EventEmitter {
     if (process.env.OPEN_HARNESS_MOCK === "1") return this.mockRequest(method, params);
     if (!this.child) return Promise.reject(new Error("Hermes gateway is not running."));
     const id = String(++this.requestId);
-    return new Promise((resolve7, reject) => {
+    return new Promise((resolve8, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out.`));
       }, timeout);
-      this.pending.set(id, { resolve: resolve7, reject, timer });
+      this.pending.set(id, { resolve: resolve8, reject, timer });
       this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     });
   }
   submitPrompt(sessionId, text, timeout = 24 * 60 * 60 * 1e3) {
-    return new Promise((resolve7, reject) => {
+    return new Promise((resolve8, reject) => {
       const cleanup = () => {
         clearTimeout(timer);
         this.off("event", onEvent);
@@ -4315,7 +4943,7 @@ var HermesGateway = class extends EventEmitter {
           if (payload.status === "error" || payload.status === "interrupted") onExit(Object.assign(new Error(payload.error || payload.text || "Hermes execution was interrupted."), { interrupted: payload.status === "interrupted" }));
           else {
             cleanup();
-            resolve7(payload);
+            resolve8(payload);
           }
         }
       };
@@ -4325,7 +4953,7 @@ var HermesGateway = class extends EventEmitter {
       this.request("prompt.submit", { session_id: sessionId, text }, timeout).then((result) => {
         if (result?.status !== "streaming") {
           cleanup();
-          resolve7(result);
+          resolve8(result);
         }
       }, onExit);
     });
@@ -4345,18 +4973,18 @@ var HermesGateway = class extends EventEmitter {
       }
       const canUseTerminal = this.allowedTools === null || this.allowedTools.includes("terminal");
       if (canUseTerminal) this.emit("event", { type: "tool.start", payload: { id: "mock-tool", name: "terminal", preview: "python task.py" } });
-      if (prompt.includes("MOCK_SLOW")) await new Promise((resolve7) => setTimeout(resolve7, 800));
+      if (prompt.includes("MOCK_SLOW")) await new Promise((resolve8) => setTimeout(resolve8, 800));
       if (prompt.includes("MOCK_APPROVAL")) {
         this.emit("event", { type: "approval.request", payload: { request_id: "mock-approval", command: "publish mock result" } });
-        const decision = await new Promise((resolve7) => {
-          this.mockApproval = resolve7;
+        const decision = await new Promise((resolve8) => {
+          this.mockApproval = resolve8;
         });
         if (decision === "deny") throw new Error("Mock action was denied.");
       }
       if (prompt.includes("MOCK_CLARIFY")) {
         this.emit("event", { type: "clarify.request", session_id: params.session_id, payload: { request_id: "mock-clarify", question: "What should I use?" } });
-        const answer = await new Promise((resolve7) => {
-          this.mockInput = resolve7;
+        const answer = await new Promise((resolve8) => {
+          this.mockInput = resolve8;
         });
         return { final_response: `Hermes mock completed the task. Answer: ${Array.isArray(answer) ? answer.join(", ") : String(answer)}` };
       }
@@ -4384,10 +5012,10 @@ var HermesGateway = class extends EventEmitter {
     });
   }
   async stopRuntime() {
-    if (process.env.OPEN_HARNESS_MOCK !== "1" && !this.native) await new Promise((resolve7, reject) => {
-      const child = spawn2("docker", ["stop", "--time", "2", this.container], { stdio: "ignore", timeout: 1e4, killSignal: "SIGKILL" });
+    if (process.env.OPEN_HARNESS_MOCK !== "1" && !this.native) await new Promise((resolve8, reject) => {
+      const child = spawn3("docker", ["stop", "--time", "2", this.container], { stdio: "ignore", timeout: 1e4, killSignal: "SIGKILL" });
       child.once("error", () => reject(new Error("Could not stop the agent container. Check Docker.")));
-      child.once("exit", (code) => code === 0 ? resolve7() : reject(new Error("Docker could not confirm the agent container stopped.")));
+      child.once("exit", (code) => code === 0 ? resolve8() : reject(new Error("Docker could not confirm the agent container stopped.")));
     });
     this.mockApproval?.("deny");
     this.mockApproval = null;
@@ -4403,17 +5031,23 @@ async function execDocker(args2, timeout) {
   const result = await commandAsync("docker", args2, timeout);
   return { code: result.status, stdout: result.stdout, stderr: result.stderr || result.error?.message || "" };
 }
-function containerSignature(selected, imageId, stateRoot2 = "") {
-  return createHash("sha256").update(JSON.stringify({ role: "execution-v1", access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...selected.browserSessionTeamId ? { browserSessionTeamId: selected.browserSessionTeamId, machineId: selected.machineId } : {}, imageId, stateRoot: stateRoot2 && resolve4(stateRoot2), ...requiresFolderVerification(selected) ? { folderStartup: "verified-inert-v1" } : {} })).digest("hex").slice(0, 24);
+function containerSignature(selected, imageId, stateRoot2 = "", teamIds = [], agentId = "") {
+  return createHash("sha256").update(JSON.stringify({ role: "execution-v1", ...safeTeamIds(teamIds).length ? { teamIds: safeTeamIds(teamIds) } : {}, ...(selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}, ...agentId.length > 48 ? { agentId } : {}, access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...selected.browserSessionTeamId ? { browserSessionTeamId: selected.browserSessionTeamId, machineId: selected.machineId } : {}, imageId, stateRoot: stateRoot2 && resolve5(stateRoot2), ...requiresFolderVerification(selected) ? { folderStartup: "verified-inert-v1" } : {} })).digest("hex").slice(0, 24);
 }
 var imageIdCache = null;
 var MANAGED_LABEL = "open-harness.managed";
 var STATE_LABEL = "open-harness.state";
 function containerStateKey(stateRoot2) {
-  return createHash("sha256").update(resolve4(stateRoot2)).digest("hex").slice(0, 24);
+  return createHash("sha256").update(resolve5(stateRoot2)).digest("hex").slice(0, 24);
+}
+function containerNameFor(agentId) {
+  return `open-harness-${agentId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
+}
+function teamMountArgs(stateRoot2, teamIds) {
+  return safeTeamIds(teamIds).flatMap((id) => ["-v", `${safeWorkspacePath(stateRoot2, `teams/${id}/shared`)}:/workspace/teams/${id}`]);
 }
 function agentContainerNames(agentId, stateRoot2) {
-  const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-"), base = `open-harness-${safe}`;
+  const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-"), base = containerNameFor(agentId);
   return { safe, names: [base, `${base}-${containerStateKey(stateRoot2).slice(0, 12)}`] };
 }
 function inspectedContainer(code, stdout, stderr, name) {
@@ -4440,7 +5074,7 @@ function ownsContainer(container, safe, stateRoot2) {
     ["/workspace/private", join3(stateRoot2, "agents", safe, "private")],
     ["/workspace/shared", join3(stateRoot2, "shared")]
   ]);
-  return [...expected].every(([destination, source]) => container.Mounts?.some((mount) => mount.Destination === destination && resolve4(mount.Source) === resolve4(source)));
+  return [...expected].every(([destination, source]) => container.Mounts?.some((mount) => mount.Destination === destination && resolve5(mount.Source) === resolve5(source)));
 }
 async function runningAgentContainer(agentId, stateRoot2) {
   const { safe, names } = agentContainerNames(agentId, stateRoot2);
@@ -4495,20 +5129,20 @@ async function inspectContainerAsync(name) {
 var asyncSharing = /* @__PURE__ */ new Map();
 function stateSharingAsync(stateRoot2) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return Promise.resolve({ ok: true, detail: "Deterministic test runtime shares state directly." });
-  const root = resolve4(stateRoot2), cached = asyncSharing.get(root);
+  const root = resolve5(stateRoot2), cached = asyncSharing.get(root);
   if (cached && Date.now() - cached.at < 6e4) return cached.value;
   const value = (async () => {
     try {
       const dir = join3(root, ".mount-probe"), token = randomUUID3();
-      mkdirSync(dir, { recursive: true });
+      mkdirSync2(dir, { recursive: true });
       const canary = `canary-${token}`;
-      writeFileSync2(join3(dir, canary), token, { mode: 420 });
+      writeFileSync3(join3(dir, canary), token, { mode: 420 });
       try {
         const result = await commandAsync("docker", ["run", "--rm", "--user", `${process.getuid?.() ?? 1e3}:${process.getgid?.() ?? 1e3}`, "-v", `${dir}:/probe:ro`, HERMES_IMAGE, "cat", `/probe/${canary}`], 6e4);
         return result.status === 0 && result.stdout.trim() === token ? { ok: true, detail: "Docker can read the Open Harness data folder." } : { ok: false, detail: "Docker cannot read the Open Harness data folder. Add it to Docker file sharing or choose a shared data folder before running work." };
       } finally {
         try {
-          unlinkSync(join3(dir, canary));
+          unlinkSync2(join3(dir, canary));
         } catch {
         }
       }
@@ -4519,10 +5153,11 @@ function stateSharingAsync(stateRoot2) {
   asyncSharing.set(root, { at: Date.now(), value });
   return value;
 }
-function ensureContainerAsync(agentId, stateRoot2, computer, fresh = false) {
-  return withContainerAdmission(stateRoot2, () => startExecutionContainer(agentId, stateRoot2, computer, fresh));
+function ensureContainerAsync(agentId, stateRoot2, computer, fresh = false, teamIds = [], isBusy = () => false) {
+  return withContainerAdmission(stateRoot2, () => startExecutionContainer(agentId, stateRoot2, computer, fresh, teamIds, isBusy));
 }
-async function startExecutionContainer(agentId, stateRoot2, computer, fresh = false) {
+async function startExecutionContainer(agentId, stateRoot2, computer, fresh = false, teamIds = [], isBusy = () => false) {
+  teamIds = safeTeamIds(teamIds);
   assertSandboxedComputer(computer);
   if (computer) authorizeWorkspaceMounts(stateRoot2, computer);
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
@@ -4532,15 +5167,16 @@ async function startExecutionContainer(agentId, stateRoot2, computer, fresh = fa
   if (contract !== "current") throw new Error(contract === "missing" ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE);
   const { safe, names } = agentContainerNames(agentId, stateRoot2);
   prepareExecutionDirectories(safe, stateRoot2);
-  const selected = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
-  const mounts = [];
+  const selected = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, network: DEFAULT_NETWORK, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
+  ensureTeamFolders(stateRoot2, teamIds);
+  const mounts = teamMountArgs(stateRoot2, teamIds);
   if (selected.access === "folders") selected.folders.forEach((folder, index) => {
     const source = sharedFolderSource(folder.path, folder.mode);
     mounts.push("-v", `${source}:/workspace/mounts/folder-${index + 1}${folder.mode === "read" ? ":ro" : ""}`);
   });
   const pinned = requiresFolderVerification(selected) ? pinSelectedFolders(selected.folders) : null;
   try {
-    const signature2 = containerSignature(selected, await currentImageIdAsync(), stateRoot2);
+    const signature2 = containerSignature(selected, await currentImageIdAsync(), stateRoot2, teamIds, agentId);
     let name = names[0], container = await inspectContainerAsync(name);
     if (!container || !ownsContainer(container, safe, stateRoot2)) {
       const alternate = await inspectContainerAsync(names[1]);
@@ -4552,6 +5188,7 @@ async function startExecutionContainer(agentId, stateRoot2, computer, fresh = fa
     }
     if (container) {
       if (fresh || pinned || container.Config.Labels?.["open-harness.config"] !== signature2 || !container.Config.Labels?.[STATE_LABEL]) {
+        if (isBusy()) throw new Error("This agent is busy. Wait for its work to finish before updating its computer.");
         const removed = await commandAsync("docker", ["rm", "-f", container.Id], 2e4);
         if (removed.status !== 0) throw new Error(removed.stderr?.trim() || "Could not replace the previous agent container. Check the Docker daemon.");
       } else if (!container.State.Running) {
@@ -4626,14 +5263,14 @@ async function runtimeImageIdentity() {
 
 // runtime/transfer-files.ts
 import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
-import { existsSync as existsSync4, lstatSync as lstatSync5, mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync4, lstatSync as lstatSync6, mkdirSync as mkdirSync3, mkdtempSync as mkdtempSync2, readdirSync as readdirSync3, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname4, join as join5, relative as relative2 } from "node:path";
 
 // runtime/computer-runtime.ts
 import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
 import { cp, mkdir, open, rename } from "node:fs/promises";
-import { constants as constants5, existsSync as existsSync3, lstatSync as lstatSync4, readdirSync, rmSync as rmSync2 } from "node:fs";
-import { dirname as dirname3, join as join4, relative, resolve as resolve5, sep as sep2 } from "node:path";
+import { constants as constants6, existsSync as existsSync3, lstatSync as lstatSync5, readdirSync as readdirSync2, rmSync as rmSync3 } from "node:fs";
+import { dirname as dirname3, join as join4, relative, resolve as resolve6, sep as sep3 } from "node:path";
 var ROLE_LABEL = "open-harness.role";
 var RESOURCE_LABEL = "open-harness.computer";
 var locks = /* @__PURE__ */ new Set(["SingletonLock", "SingletonSocket", "SingletonCookie"]);
@@ -4685,35 +5322,35 @@ async function assertLegacyIdle(source, stateRoot2) {
     const value = await inspect(id);
     if (!value?.State.Running) continue;
     if (value.Mounts?.some((mount) => {
-      const path2 = relative(resolve5(mount.Source), resolve5(source));
-      return path2 === "" || path2 !== ".." && !path2.startsWith(`..${sep2}`) && !path2.startsWith(sep2);
+      const path2 = relative(resolve6(mount.Source), resolve6(source));
+      return path2 === "" || path2 !== ".." && !path2.startsWith(`..${sep3}`) && !path2.startsWith(sep3);
     })) throw new Error("Stop agents using the old browser before migrating the private desktop. Its browser profile has not been changed.");
   }
 }
 function checkBrowserTree(path2) {
-  const stat = lstatSync4(path2);
+  const stat = lstatSync5(path2);
   if (stat.isSymbolicLink() || stat.isFile() && stat.nlink !== 1 || !stat.isDirectory() && !stat.isFile()) throw new Error("The saved browser profile contains an unsupported link or special file. It has not been migrated.");
   if (stat.isDirectory()) {
-    for (const name of readdirSync(path2)) if (!locks.has(name)) checkBrowserTree(join4(path2, name));
+    for (const name of readdirSync2(path2)) if (!locks.has(name)) checkBrowserTree(join4(path2, name));
   }
 }
 async function copyBrowser(source, target) {
-  if (!lstatSync4(source).isDirectory()) throw new Error("The saved browser profile is not a directory. It has not been migrated.");
+  if (!lstatSync5(source).isDirectory()) throw new Error("The saved browser profile is not a directory. It has not been migrated.");
   checkBrowserTree(source);
-  await cp(source, target, { recursive: true, dereference: false, force: false, errorOnExist: true, filter: (path2) => !locks.has(path2.split(sep2).at(-1) || "") });
+  await cp(source, target, { recursive: true, dereference: false, force: false, errorOnExist: true, filter: (path2) => !locks.has(path2.split(sep3).at(-1) || "") });
   checkBrowserTree(target);
 }
 async function browserFingerprint(path2) {
   checkBrowserTree(path2);
   const digest2 = createHash2("sha256");
   const visit = async (directory) => {
-    for (const name of readdirSync(directory).sort()) {
+    for (const name of readdirSync2(directory).sort()) {
       if (locks.has(name)) continue;
-      const file = join4(directory, name), info = lstatSync4(file);
+      const file = join4(directory, name), info = lstatSync5(file);
       digest2.update(JSON.stringify([relative(path2, file), info.isDirectory() ? "directory" : "file"]));
       if (info.isDirectory()) await visit(file);
       else {
-        const content = createHash2("sha256"), handle = await open(file, constants5.O_RDONLY | (constants5.O_NOFOLLOW || 0));
+        const content = createHash2("sha256"), handle = await open(file, constants6.O_RDONLY | (constants6.O_NOFOLLOW || 0));
         try {
           for await (const chunk of handle.createReadStream()) content.update(chunk);
         } finally {
@@ -4735,7 +5372,7 @@ async function migrateBrowser(agentId, stateRoot2, computer) {
     } catch {
       throw new Error("The private desktop migration record is unreadable. Restore it before starting the computer.");
     }
-    if (![1, 2].includes(saved.version) || saved.resourceKey !== paths2.key || !existsSync3(paths2.browser) || !lstatSync4(paths2.browser).isDirectory()) throw new Error("The private desktop migration is incomplete. Restore its browser backup before starting the computer.");
+    if (![1, 2].includes(saved.version) || saved.resourceKey !== paths2.key || !existsSync3(paths2.browser) || !lstatSync5(paths2.browser).isDirectory()) throw new Error("The private desktop migration is incomplete. Restore its browser backup before starting the computer.");
     if (saved.version === 2) return;
     const source2 = legacyBrowser(agentId, stateRoot2, computer), recordedSource = relative(stateRoot2, source2);
     if (saved.source === recordedSource && existsSync3(source2)) {
@@ -4754,7 +5391,7 @@ async function migrateBrowser(agentId, stateRoot2, computer) {
   if (hasSource) {
     await assertLegacyIdle(source, stateRoot2);
     checkBrowserTree(source);
-    if (!lstatSync4(source).isDirectory()) throw new Error("The saved browser profile is not a directory. It has not been migrated.");
+    if (!lstatSync5(source).isDirectory()) throw new Error("The saved browser profile is not a directory. It has not been migrated.");
   }
   await mkdir(dirname3(paths2.browser), { recursive: true, mode: 448 });
   const temporary = safeWorkspacePath(stateRoot2, `computers/${paths2.key}/migration-${randomUUID4()}`);
@@ -4770,7 +5407,7 @@ async function migrateBrowser(agentId, stateRoot2, computer) {
     } else await mkdir(paths2.browser, { recursive: true, mode: 448 });
     atomicWorkspaceWrite(paths2.migration, JSON.stringify({ version: 2, ...record2, migratedAt: (/* @__PURE__ */ new Date()).toISOString() }));
   } finally {
-    rmSync2(temporary, { recursive: true, force: true });
+    rmSync3(temporary, { recursive: true, force: true });
   }
 }
 function desktopContainerArguments(agentId, stateRoot2, computer, imageId) {
@@ -4910,26 +5547,37 @@ function bundleDigest(bundle) {
 }
 function exportFiles(stateRoot2, agentId, omitLegacy = false) {
   const agentRoot = safeWorkspacePath(stateRoot2, `agents/${agentId}`), files = [];
-  let total = 0;
-  const visit = (path2) => {
-    if (omitLegacy && relative2(agentRoot, path2).replaceAll("\\", "/") === "private/.config/chromium") return;
-    if (!existsSync4(path2)) return;
-    const stat = lstatSync5(path2);
-    if (stat.isSymbolicLink()) return;
-    safeWorkspacePath(stateRoot2, relative2(stateRoot2, path2));
-    if (stat.isDirectory()) {
-      for (const name of readdirSync2(path2)) visit(join5(path2, name));
-      return;
+  let total = 0, entries2 = 0;
+  const visit = (rel, depth) => {
+    if (omitLegacy && rel === "private/.config/chromium") return;
+    try {
+      const stat = statInside(agentRoot, rel);
+      if (!stat || stat.isSymbolicLink) return;
+      if (++entries2 > maxEntries) throw new Error("Managed agent data has too many entries to transfer.");
+      if (stat.isDirectory) {
+        if (depth > 32) throw new Error("Managed agent data exceeds the transfer depth limit of 32.");
+        const children = listInside(agentRoot, rel, { max: maxEntries + 1 });
+        if (children.length > maxEntries) throw new Error("Managed agent directory exceeds the transfer limit of 10000 entries.");
+        for (const child of children) visit(`${rel}/${child.name}`, depth + 1);
+        return;
+      }
+      if (!stat.isFile) return;
+      safeWorkspacePath(stateRoot2, `agents/${agentId}/${rel}`);
+      const data = readInside(agentRoot, rel, { maxBytes: 2e7 - total });
+      total += data.length;
+      files.push({ path: rel, data: data.toString("base64"), checksum: digest(data) });
+    } catch (error) {
+      if (error instanceof SafeFsError) {
+        if (["not-found", "not-regular"].includes(error.code)) return;
+        if (error.code === "symlink") error.message = "Workspace paths cannot contain symbolic links.";
+        if (error.code === "too-large") throw new Error("Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.");
+      }
+      throw error;
     }
-    if (!stat.isFile()) return;
-    const data = readFileSync5(path2);
-    total += data.length;
-    if (total > 2e7) throw new Error("Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.");
-    files.push({ path: relative2(agentRoot, path2).replaceAll("\\", "/"), data: Buffer.from(data).toString("base64"), checksum: digest(data) });
   };
-  for (const path2 of allowedRoots) visit(join5(agentRoot, path2));
+  for (const path2 of allowedRoots) visit(path2, 0);
   files.sort((a, b) => a.path.localeCompare(b.path));
-  return { files, checksum: digest(files.map((file) => `${file.path}:${file.checksum}`).join("\n")) };
+  return { files, checksum: digest(manifest(files)) };
 }
 function validateBundle(stateRoot2, agentId, bundle) {
   if (!bundle || !Array.isArray(bundle.files) || bundle.files.length > maxEntries || typeof bundle.checksum !== "string") throw new Error("Invalid transfer bundle.");
@@ -4970,10 +5618,39 @@ function validateBundle(stateRoot2, agentId, bundle) {
   return { files, browser, checksum };
 }
 function writeManagedFiles(stateRoot2, files) {
-  for (const file of files) {
-    safeWorkspacePath(stateRoot2, file.name);
-    mkdirSync2(dirname4(file.target), { recursive: true });
-    writeFileSync3(safeWorkspacePath(stateRoot2, file.name), file.data, { mode: 384 });
+  mkdirSync3(stateRoot2, { recursive: true, mode: 448 });
+  const staging = mkdtempSync2(join5(stateRoot2, ".transfer-"));
+  let committed = 0;
+  try {
+    for (const [index, file] of files.entries()) writeFileSync4(join5(staging, String(index)), file.data, { mode: 384, flag: "wx" });
+    for (const [index, file] of files.entries()) {
+      const parts = file.name.split("/");
+      let parent = "";
+      for (const part of parts.slice(0, -1)) {
+        parent = parent ? `${parent}/${part}` : part;
+        let stat = statInside(stateRoot2, parent);
+        if (!stat) {
+          try {
+            mkdirInside(stateRoot2, parent);
+          } catch (error) {
+            if (!(error instanceof SafeFsError) || error.code !== "conflict") throw error;
+          }
+          stat = statInside(stateRoot2, parent);
+        }
+        if (stat?.isSymbolicLink) throw new SafeFsError("symlink", "Transfer target contains a symbolic link.");
+        if (!stat?.isDirectory) throw new SafeFsError("invalid-path", "Transfer target contains a non-directory.");
+      }
+      const leaf = statInside(stateRoot2, file.name);
+      if (leaf?.isSymbolicLink) throw new SafeFsError("symlink", "Transfer target contains a symbolic link.");
+      if (leaf && !leaf.isFile) throw new SafeFsError("not-regular", "Transfer target contains a non-regular file.");
+      renameIntoInside(staging, String(index), stateRoot2, file.name);
+      committed++;
+    }
+  } catch (error) {
+    if (error instanceof Error) error.message += ` (${committed} of ${files.length} files committed)`;
+    throw error;
+  } finally {
+    rmSync4(staging, { recursive: true, force: true });
   }
 }
 function transferComputer(computer) {
@@ -4991,7 +5668,7 @@ async function exportAgentTransfer(stateRoot2, agentId, computer) {
   const bundle = exportFiles(stateRoot2, agentId, true), paths2 = desktopResourcePaths(agentId, stateRoot2, target);
   const legacy = safeWorkspacePath(stateRoot2, `agents/${agentId}/private/.config/chromium`), source = existsSync4(paths2.browser) ? paths2.browser : existsSync4(legacy) ? legacy : null;
   if (!source) return bundle;
-  if (!lstatSync5(source).isDirectory()) throw new Error("The saved browser profile is not a directory.");
+  if (!lstatSync6(source).isDirectory()) throw new Error("The saved browser profile is not a directory.");
   const files = [];
   let total = bundle.files.reduce((sum, file) => sum + Buffer.byteLength(file.data, "base64"), 0);
   const visit = (path2, depth) => {
@@ -4999,14 +5676,14 @@ async function exportAgentTransfer(stateRoot2, agentId, computer) {
     const name = relative2(source, path2).replaceAll("\\", "/");
     if (name.split("/").some((part) => volatileBrowser.has(part))) return;
     safeWorkspacePath(stateRoot2, relative2(stateRoot2, path2));
-    const stat = lstatSync5(path2);
+    const stat = lstatSync6(path2);
     if (stat.isDirectory()) {
-      for (const entry of readdirSync2(path2)) visit(join5(path2, entry), depth + 1);
+      for (const entry of readdirSync3(path2)) visit(join5(path2, entry), depth + 1);
       return;
     }
     if (!stat.isFile() || stat.nlink !== 1) throw new Error("The saved browser contains a link or special file. It has not been transferred.");
     if (stat.size + total > browserBytes || files.length + bundle.files.length >= maxEntries || name.length > 1024) throw new Error("Managed files and saved browser data exceed the 50 MB transfer limit. Source data was preserved.");
-    const data = readWorkspaceFile(path2), after = lstatSync5(path2);
+    const data = readWorkspaceFile(path2), after = lstatSync6(path2);
     if (data.length !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw new Error("The saved browser changed during transfer. Confirm it has stopped.");
     total += data.length;
     files.push({ path: name, data: data.toString("base64"), checksum: digest(data) });
@@ -5035,32 +5712,32 @@ async function importAgentTransfer(stateRoot2, agentId, bundle, computer) {
   const oldMigration = existsSync4(paths2.migration) ? readWorkspaceFile(paths2.migration) : null;
   let replaced = false, preserved = false;
   try {
-    mkdirSync2(temporary, { recursive: true, mode: 448 });
+    mkdirSync3(temporary, { recursive: true, mode: 448 });
     for (const file of browser) {
       const path2 = safeWorkspacePath(temporary, file.path);
-      mkdirSync2(dirname4(path2), { recursive: true, mode: 448 });
-      writeFileSync3(path2, file.data, { mode: 384, flag: "wx" });
+      mkdirSync3(dirname4(path2), { recursive: true, mode: 448 });
+      writeFileSync4(path2, file.data, { mode: 384, flag: "wx" });
     }
     writeManagedFiles(stateRoot2, validated.files.filter((file) => !relative2(safeWorkspacePath(stateRoot2, `agents/${agentId}`), file.target).replaceAll("\\", "/").startsWith(legacyPrefix)));
     safeWorkspacePath(stateRoot2, relative2(stateRoot2, paths2.browser));
-    mkdirSync2(dirname4(paths2.browser), { recursive: true, mode: 448 });
+    mkdirSync3(dirname4(paths2.browser), { recursive: true, mode: 448 });
     atomicWorkspaceWrite(paths2.migration, JSON.stringify({ version: 0, resourceKey: paths2.key, source: "agent-transfer-incomplete", backup: existsSync4(paths2.browser) ? relative2(stateRoot2, backup) : null, staged: relative2(stateRoot2, temporary), previousMigration: oldMigration ? JSON.parse(oldMigration.toString("utf8")) : null }));
     if (existsSync4(paths2.browser)) {
-      if (!lstatSync5(paths2.browser).isDirectory()) throw new Error("The destination browser profile is not a directory.");
-      renameSync2(paths2.browser, backup);
+      if (!lstatSync6(paths2.browser).isDirectory()) throw new Error("The destination browser profile is not a directory.");
+      renameSync3(paths2.browser, backup);
       preserved = true;
     }
-    renameSync2(temporary, paths2.browser);
+    renameSync3(temporary, paths2.browser);
     replaced = true;
     atomicWorkspaceWrite(paths2.migration, JSON.stringify({ version: 2, resourceKey: paths2.key, source: "agent-transfer", archive: oldMigration ? JSON.parse(oldMigration.toString("utf8")).archive || null : null, backup: preserved ? relative2(stateRoot2, backup) : null, migratedAt: (/* @__PURE__ */ new Date()).toISOString() }));
   } catch (error) {
-    if (replaced) rmSync3(paths2.browser, { recursive: true, force: true });
-    if (preserved) renameSync2(backup, paths2.browser);
+    if (replaced) rmSync4(paths2.browser, { recursive: true, force: true });
+    if (preserved) renameSync3(backup, paths2.browser);
     if (oldMigration) atomicWorkspaceWrite(paths2.migration, oldMigration);
-    else rmSync3(paths2.migration, { force: true });
+    else rmSync4(paths2.migration, { force: true });
     throw error;
   } finally {
-    rmSync3(temporary, { recursive: true, force: true });
+    rmSync4(temporary, { recursive: true, force: true });
   }
   return { checksum: validated.checksum, files: bundle.files.length, browserFiles: browser.length };
 }
@@ -5096,15 +5773,16 @@ async function readRunnerResponse(response, limit = AGENT_TRANSFER_WIRE_LIMIT + 
 }
 
 // runtime/profile-runtime.ts
-import { spawn as spawn3 } from "node:child_process";
-import { copyFileSync, mkdirSync as mkdirSync4, chmodSync } from "node:fs";
-import { join as join6 } from "node:path";
+import { spawn as spawn4 } from "node:child_process";
+import { copyFileSync, mkdirSync as mkdirSync5, chmodSync } from "node:fs";
+import { join as join7 } from "node:path";
 
 // lib/product.ts
 var WORKSPACE_TOOL = "mcp__open_harness__workspace";
 
 // runtime/profile-memory.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync3, readFileSync as readFileSync6, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync4 } from "node:fs";
+import { join as join6 } from "node:path";
 
 // runtime/profiles.ts
 var ProfileError = class extends Error {
@@ -5114,27 +5792,40 @@ var ProfileError = class extends Error {
   }
 };
 function validId(id) {
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new ProfileError("Invalid agent ID.");
+  if (typeof id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new ProfileError("Invalid agent ID.");
   return id;
 }
 
 // runtime/profile-memory.ts
 function profileMemory(root, agentId) {
-  const profile = `agents/${validId(agentId)}/profile`;
-  const directory = safeWorkspacePath(root, `${profile}/memories`);
-  mkdirSync3(directory, { recursive: true });
+  const anchor = safeWorkspacePath(root, `agents/${validId(agentId)}`);
+  mkdirSync4(anchor, { recursive: true, mode: 448 });
+  for (const rel of ["profile", "profile/memories"]) {
+    let stat = statInside(anchor, rel);
+    if (!stat) {
+      try {
+        mkdirInside(anchor, rel);
+      } catch (error) {
+        if (!(error instanceof SafeFsError) || error.code !== "conflict") throw error;
+      }
+      stat = statInside(anchor, rel);
+    }
+    if (stat?.isSymbolicLink) throw new SafeFsError("symlink", "Workspace paths cannot contain symbolic links.");
+    if (!stat?.isDirectory) throw new SafeFsError("invalid-path", "Workspace parent is not a directory.");
+  }
   const paths2 = { memory: "", user: "" };
   for (const [key, file] of [["memory", "MEMORY.md"], ["user", "USER.md"]]) {
-    const target = safeWorkspacePath(root, `${profile}/memories/${file}`);
-    const legacy = safeWorkspacePath(root, `${profile}/${file}`);
-    if (!existsSync5(target) && existsSync5(legacy)) {
+    const target = `profile/memories/${file}`, legacy = `profile/${file}`;
+    const current = statInside(anchor, target), previous = statInside(anchor, legacy);
+    if (current?.isSymbolicLink || previous?.isSymbolicLink) throw new SafeFsError("symlink", "Workspace paths cannot contain symbolic links.");
+    if (!current && previous) {
       try {
-        writeFileSync4(target, readFileSync6(legacy), { flag: "wx", mode: 384 });
+        writeInside(anchor, target, readInside(anchor, legacy, { maxBytes: 2e5 }), { exclusive: true, maxBytes: 2e5 });
       } catch (error) {
-        if (error.code !== "EEXIST") throw error;
+        if (!(error instanceof SafeFsError) || error.code !== "conflict") throw error;
       }
     }
-    paths2[key] = target;
+    paths2[key] = join6(anchor, target);
   }
   return paths2;
 }
@@ -5214,6 +5905,7 @@ var COORDINATION_TOOLS = [
   { id: GROUP_CHAT_TOOL, name: "Group conversations", group: "delegation", description: "Read and message teammates in shared group conversations.", available: true },
   { id: TASK_TOOL, name: "Task board", group: "other", description: "Read and update assigned board tasks.", available: true },
   { id: HANDOFF_TOOL, name: "Hand off to another agent", group: "delegation", description: "Assign explicit task context to a named agent on a shared team.", available: true },
+  { id: MESSAGE_TOOL, name: "Post a message", group: "delegation", description: "Post an update to the current conversation without starting another run.", available: true },
   { id: ROUTINE_TOOL, name: "Create a routine", group: "scheduling", description: "Schedule work through Open Harness.", available: true }
 ];
 var mockTools = [
@@ -5251,10 +5943,10 @@ function containerBaseUrl(value) {
   return url.toString().replace(/\/$/, "");
 }
 function runtimeProbe(container, input) {
-  const probe = input;
-  const request2 = probe.action === "connection" && probe.baseUrl ? { ...probe, baseUrl: containerBaseUrl(probe.baseUrl) } : input;
-  return new Promise((resolve7, reject) => {
-    const child = spawn3("docker", ["exec", "-i", container, "python", "/opt/open-harness/inspect_runtime.py"], { stdio: ["pipe", "pipe", "pipe"] });
+  const probe2 = input;
+  const request2 = probe2.action === "connection" && probe2.baseUrl ? { ...probe2, baseUrl: containerBaseUrl(probe2.baseUrl) } : input;
+  return new Promise((resolve8, reject) => {
+    const child = spawn4("docker", ["exec", "-i", container, "python", "/opt/open-harness/inspect_runtime.py"], { stdio: ["pipe", "pipe", "pipe"] });
     let output2 = "";
     const timer = setTimeout(() => {
       child.kill();
@@ -5274,7 +5966,7 @@ function runtimeProbe(container, input) {
       try {
         const value = JSON.parse(output2.trim());
         if (code || value.error) reject(new Error(value.error || "Runtime check failed."));
-        else resolve7(value);
+        else resolve8(value);
       } catch {
         reject(new Error("Runtime check returned an invalid response. Rebuild the Hermes image."));
       }
@@ -5286,16 +5978,16 @@ function prepareProfile(root, profile, effective, secrets, token, runId, options
   assertSandboxedComputer(profile.computer);
   const allowedTools = runToolGrants(profile);
   const baseUrl = effective.baseUrl ? containerBaseUrl(effective.baseUrl) : "";
-  const dir = join6(root, "agents", profile.id), home = join6(dir, "profile"), managed = join6(dir, "managed");
-  for (const path2 of [home, managed, join6(dir, "private")]) mkdirSync4(path2, { recursive: true });
+  const dir = join7(root, "agents", profile.id), home = join7(dir, "profile"), managed = join7(dir, "managed");
+  for (const path2 of [home, managed, join7(dir, "private")]) mkdirSync5(path2, { recursive: true });
   profileMemory(root, profile.id);
   const mcp = {};
-  const coordination = join6(managed, "coordination.mjs");
-  copyFileSync(join6(import.meta.dirname, "hermes", "coordination.mjs"), coordination);
+  const coordination = join7(managed, "coordination.mjs");
+  copyFileSync(join7(import.meta.dirname, "hermes", "coordination.mjs"), coordination);
   chmodSync(coordination, 384);
   for (const name of ["gateway-entry.mjs", "model-proxy.mjs"]) {
-    const target = join6(managed, name);
-    copyFileSync(join6(import.meta.dirname, "hermes", name), target);
+    const target = join7(managed, name);
+    copyFileSync(join7(import.meta.dirname, "hermes", name), target);
     chmodSync(target, 384);
   }
   const coordinationEnv = { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, OPEN_HARNESS_RUN_LEASE: "/run/open-harness/run-lease.json", ...options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}, ...options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {} };
@@ -5323,14 +6015,14 @@ function prepareProfile(root, profile, effective, secrets, token, runId, options
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: "${" + c.secretRef + "}" } : {} };
   }
   const config = { model: { default: effective.model, provider: hermesProvider, ...codex ? { base_url: "http://127.0.0.1:1/v1", api_mode: "codex_responses" } : effective.baseUrl ? { base_url: baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "manual", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, tools: { tool_search: { enabled: "off" } }, plugins: { enabled: ["open_harness_policy"] }, ...providers ? { providers } : {}, mcp_servers: mcp };
-  atomicWorkspaceWrite(join6(home, "config.yaml"), JSON.stringify(config, null, 2));
-  atomicWorkspaceWrite(join6(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
-  atomicWorkspaceWrite(join6(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
-  atomicWorkspaceWrite(join6(managed, "policy.json"), JSON.stringify({ runId, revision: profile.revision, modelProvider: effective.provider, allowedTools, coordination: coordinationEnv, reviewUnclassified: options.reviewUnclassified ?? (process.env.OPEN_HARNESS_SCOPED_AUTONOMY !== "0" || process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY === "1") }));
+  atomicWorkspaceWrite(join7(home, "config.yaml"), JSON.stringify(config, null, 2));
+  atomicWorkspaceWrite(join7(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
+  atomicWorkspaceWrite(join7(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
+  atomicWorkspaceWrite(join7(managed, "policy.json"), JSON.stringify({ runId, revision: profile.revision, modelProvider: effective.provider, allowedTools, coordination: coordinationEnv, reviewUnclassified: options.reviewUnclassified ?? (process.env.OPEN_HARNESS_SCOPED_AUTONOMY !== "0" || process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY === "1") }));
   writeRunLease(root, profile.id, options.idle ? null : runId);
 }
 function writeRunLease(root, agentId, runId) {
-  atomicWorkspaceWrite(join6(root, "agents", agentId, "managed", "run-lease.json"), JSON.stringify({ runId, active: Boolean(runId), expiresAt: Date.now() + 864e5 }));
+  atomicWorkspaceWrite(join7(root, "agents", agentId, "managed", "run-lease.json"), JSON.stringify({ runId, active: Boolean(runId), expiresAt: Date.now() + 864e5 }));
 }
 async function discoverModels(gateway) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { models: [{ id: "mock-atlas", provider: "mock", label: "Mock Atlas" }, { id: "mock-scout", provider: "mock", label: "Mock Scout" }] };
@@ -5468,7 +6160,7 @@ async function openAgentTransfer(value, binding, privateKey) {
 }
 
 // runtime/secrets.ts
-import { chmodSync as chmodSync2, existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync7, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync5, mkdirSync as mkdirSync6, readFileSync as readFileSync6, unlinkSync as unlinkSync3, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname5 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
@@ -5530,16 +6222,16 @@ var SecretStore = class {
   constructor(path2) {
     this.path = path2;
     this.backend = "restricted local file";
-    mkdirSync5(dirname5(path2), { recursive: true });
+    mkdirSync6(dirname5(path2), { recursive: true });
     this.markerPath = `${path2.replace(/\.json$/, "")}.backend`;
-    const recorded = existsSync6(this.markerPath) ? readFileSync7(this.markerPath, "utf8").trim() : "";
+    const recorded = existsSync5(this.markerPath) ? readFileSync6(this.markerPath, "utf8").trim() : "";
     const vaulted = loadVault(path2);
-    const onDisk = existsSync6(path2);
+    const onDisk = existsSync5(path2);
     if (vaulted.state === "ok") {
       this.values = this.parse(vaulted.value, vaulted.backend);
       this.backend = vaulted.backend;
     } else if (onDisk) {
-      this.values = this.parse(readFileSync7(path2, "utf8"), path2);
+      this.values = this.parse(readFileSync6(path2, "utf8"), path2);
       this.backend = "restricted local file";
     } else if (recorded.startsWith("vault")) {
       const detail = vaulted.state === "unavailable" ? vaulted.reason : "The vault reports no stored credentials.";
@@ -5553,7 +6245,7 @@ Nothing was changed. Delete ${this.markerPath} to start over with an empty crede
       this.values.controlToken = crypto.randomUUID() + crypto.randomUUID();
       this.save();
     } else this.record();
-    if (existsSync6(path2)) chmodSync2(path2, 384);
+    if (existsSync5(path2)) chmodSync2(path2, 384);
   }
   get token() {
     return this.values.controlToken;
@@ -5608,7 +6300,7 @@ Nothing was changed. Delete ${this.markerPath} to start over with an empty crede
       if (confirmed.state === "ok" && confirmed.value.trim() === serialized) {
         this.backend = backend;
         this.record();
-        if (existsSync6(this.path)) unlinkSync2(this.path);
+        if (existsSync5(this.path)) unlinkSync3(this.path);
         return;
       }
     }
@@ -5620,59 +6312,98 @@ Nothing was changed. Delete ${this.markerPath} to start over with an empty crede
 };
 
 // runtime/agent-context.ts
-import { existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync8, readdirSync as readdirSync3, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname6 } from "node:path";
-import { createHash as createHash6, randomUUID as randomUUID6 } from "node:crypto";
-function write(path2, content) {
-  mkdirSync6(dirname6(path2), { recursive: true });
-  const temporary = `${path2}.${randomUUID6()}.tmp`;
+import { mkdirSync as mkdirSync7, mkdtempSync as mkdtempSync3, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { join as join8, relative as relative3 } from "node:path";
+import { createHash as createHash6 } from "node:crypto";
+function ensureDirectory(anchor, rel) {
+  let stat = statInside(anchor, rel);
+  if (!stat) {
+    try {
+      mkdirInside(anchor, rel);
+    } catch (error) {
+      if (!(error instanceof SafeFsError) || error.code !== "conflict") throw error;
+    }
+    stat = statInside(anchor, rel);
+  }
+  if (stat?.isSymbolicLink) throw new SafeFsError("symlink", "Workspace paths cannot contain symbolic links.");
+  if (!stat?.isDirectory) throw new SafeFsError("invalid-path", "Workspace parent is not a directory.");
+}
+function write(root, anchor, rel, content) {
+  const parts = rel.split("/");
+  let parent = "";
+  for (const part of parts.slice(0, -1)) {
+    parent = parent ? `${parent}/${part}` : part;
+    ensureDirectory(anchor, parent);
+  }
+  if (statInside(anchor, rel)?.isSymbolicLink) throw new SafeFsError("symlink", "Workspace paths cannot contain symbolic links.");
+  const staging = mkdtempSync3(join8(root, ".context-"));
   try {
-    writeFileSync6(temporary, content, { mode: 384, flag: "wx" });
-    renameSync3(temporary, path2);
+    writeFileSync6(join8(staging, "value"), content, { mode: 384, flag: "wx" });
+    renameIntoInside(staging, "value", anchor, rel);
   } finally {
-    rmSync4(temporary, { force: true });
+    rmSync5(staging, { recursive: true, force: true });
+  }
+}
+function read(anchor, rel, maxBytes) {
+  try {
+    return readInside(anchor, rel, { encoding: "utf8", maxBytes });
+  } catch (error) {
+    if (error instanceof SafeFsError && error.code === "not-found") return "";
+    throw error;
   }
 }
 function agentContext(root, agentId, input) {
-  const profile = `agents/${validId(agentId)}/profile`;
-  const skills = safeWorkspacePath(root, `${profile}/skills`);
+  const anchor = safeWorkspacePath(root, `agents/${validId(agentId)}`);
+  mkdirSync7(anchor, { recursive: true, mode: 448 });
   if (input.operation === "get" || input.operation === "set-memory") {
     const paths2 = profileMemory(root, agentId);
-    const memory = existsSync7(paths2.memory) ? readFileSync8(paths2.memory, "utf8") : "", user = existsSync7(paths2.user) ? readFileSync8(paths2.user, "utf8") : "";
+    const memoryPath = relative3(anchor, paths2.memory).replaceAll("\\", "/"), userPath = relative3(anchor, paths2.user).replaceAll("\\", "/");
+    const memory = read(anchor, memoryPath, 2e5), user = read(anchor, userPath, 2e5);
     const revision = createHash6("sha256").update(JSON.stringify({ memory, user })).digest("hex");
     if (input.operation === "set-memory") {
       if (input.revision !== void 0 && input.revision !== revision) throw new ProfileError(`These notes changed elsewhere (revision ${revision.slice(0, 12)}). Your draft is preserved; reload the saved notes before saving again.`, 409);
       if (input.user !== void 0 && input.revision === void 0) throw new ProfileError("Reload these notes before changing personal preferences.", 409);
       const nextMemory = input.memory === void 0 ? memory : String(input.memory), nextUser = input.user === void 0 ? user : String(input.user);
       if (nextMemory.length > 5e4 || nextUser.length > 5e4) throw new ProfileError("Each memory field is limited to 50 KB.", 413);
-      if (input.memory !== void 0) write(paths2.memory, nextMemory);
-      if (input.user !== void 0) write(paths2.user, nextUser);
+      if (input.memory !== void 0) write(root, anchor, memoryPath, nextMemory);
+      if (input.user !== void 0) write(root, anchor, userPath, nextUser);
       return { status: 200, value: { ok: true, revision: createHash6("sha256").update(JSON.stringify({ memory: nextMemory, user: nextUser })).digest("hex") } };
     }
-    return { status: 200, value: {
-      memory,
-      user,
-      revision,
-      skills: existsSync7(skills) ? readdirSync3(skills, { withFileTypes: true }).filter((item) => item.isDirectory()).map((item) => item.name).slice(0, 200) : []
-    } };
+    return { status: 200, value: { memory, user, revision, skills: statInside(anchor, "profile/skills") ? listInside(anchor, "profile/skills", { max: 1e4 }).filter((item) => item.isDirectory).map((item) => item.name).slice(0, 200) : [] } };
   }
   if (!["get-skill", "put-skill", "delete-skill"].includes(input.operation)) throw new ProfileError("Invalid context operation.");
   const name = String(input.name || "");
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(name)) throw new ProfileError("Invalid skill name.");
-  const directory = safeWorkspacePath(root, `${profile}/skills/${name}`);
-  const file = safeWorkspacePath(root, `${profile}/skills/${name}/SKILL.md`);
-  if (input.operation === "get-skill") return existsSync7(file) ? { status: 200, value: { name, content: readFileSync8(file, "utf8") } } : { status: 404, value: { error: "Skill not found." } };
-  if (input.operation === "put-skill") write(file, String(input.content || ""));
-  else if (existsSync7(directory)) rmSync4(directory, { recursive: true });
+  safeWorkspacePath(root, `agents/${agentId}/profile/skills/${name}`);
+  const directory = `profile/skills/${name}`, file = `${directory}/SKILL.md`;
+  if (input.operation === "get-skill") {
+    try {
+      return { status: 200, value: { name, content: readInside(anchor, file, { encoding: "utf8", maxBytes: 1e6 }) } };
+    } catch (error) {
+      if (error instanceof SafeFsError && error.code === "not-found") return { status: 404, value: { error: "Skill not found." } };
+      throw error;
+    }
+  }
+  if (input.operation === "put-skill") {
+    const content = String(input.content || "");
+    if (Buffer.byteLength(content) > 1e6) throw new ProfileError("Skills are limited to 1 MB.", 413);
+    write(root, anchor, file, content);
+  } else {
+    try {
+      rmrfInside(anchor, directory, { maxEntries: 1e4, maxDepth: 16 });
+    } catch (error) {
+      if (!(error instanceof SafeFsError) || error.code !== "not-found") throw error;
+    }
+  }
   return { status: 200, value: { ok: true } };
 }
 
 // runtime/desktop-control.ts
-import { spawn as spawn4 } from "node:child_process";
+import { spawn as spawn5 } from "node:child_process";
 
 // runtime/computer-ownership.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync9 } from "node:fs";
-import { join as join7 } from "node:path";
+import { existsSync as existsSync6, mkdirSync as mkdirSync8, readFileSync as readFileSync7 } from "node:fs";
+import { join as join9 } from "node:path";
 function validComputerOwnership(value) {
   if (!value || typeof value !== "object") return false;
   const item = value;
@@ -5680,15 +6411,15 @@ function validComputerOwnership(value) {
 }
 function ownershipPath(root, profile) {
   const directory = safeWorkspacePath(root, "computer-ownership");
-  mkdirSync7(directory, { recursive: true, mode: 448 });
-  return join7(directory, `${desktopResourceKey(profile.id, root, profile.computer)}.json`);
+  mkdirSync8(directory, { recursive: true, mode: 448 });
+  return join9(directory, `${desktopResourceKey(profile.id, root, profile.computer)}.json`);
 }
 function readComputerOwnership(root, profile) {
   const path2 = ownershipPath(root, profile);
-  if (!existsSync8(path2)) return null;
+  if (!existsSync6(path2)) return null;
   let value;
   try {
-    value = JSON.parse(readFileSync9(path2, "utf8"));
+    value = JSON.parse(readFileSync7(path2, "utf8"));
   } catch {
     throw new ProfileError("Computer ownership could not be read. Control remains blocked.", 409);
   }
@@ -5890,8 +6621,8 @@ except Exception:
 
 // runtime/computer-files.ts
 import { createHash as createHash7 } from "node:crypto";
-import { closeSync as closeSync3, constants as constants6, existsSync as existsSync9, fstatSync as fstatSync3, lstatSync as lstatSync6, mkdirSync as mkdirSync8, openSync as openSync3, readdirSync as readdirSync4, readSync, unlinkSync as unlinkSync3, writeFileSync as writeFileSync7 } from "node:fs";
-import { join as join8 } from "node:path";
+import { closeSync as closeSync4, constants as constants7, existsSync as existsSync7, fstatSync as fstatSync4, lstatSync as lstatSync7, mkdirSync as mkdirSync9, openSync as openSync4, readdirSync as readdirSync4, readSync as readSync2, unlinkSync as unlinkSync4, writeFileSync as writeFileSync7 } from "node:fs";
+import { join as join10 } from "node:path";
 var DESKTOP_FILE_LIMITS = { fileBytes: 25 * 1024 * 1024, batchBytes: 100 * 1024 * 1024, entries: 100 };
 var claiming = /* @__PURE__ */ new Set();
 var same = (first, second) => first.ownerId === second.ownerId && first.epoch === second.epoch && first.runId === second.runId;
@@ -5903,7 +6634,7 @@ function paths(agentId, root, computer) {
   return { ...desktop, record: safeWorkspacePath(root, `${prefix}/exchange.json`), downloads: safeWorkspacePath(root, `${prefix}/staging/downloads`), uploads: safeWorkspacePath(root, `${prefix}/staging/uploads`), receipts: safeWorkspacePath(root, `${prefix}/receipts`) };
 }
 function readRecord(file, key) {
-  if (!existsSync9(file)) return null;
+  if (!existsSync7(file)) return null;
   let value;
   try {
     value = JSON.parse(readWorkspaceFile(file).toString("utf8"));
@@ -5940,7 +6671,7 @@ function identity(stat) {
 function observe(path2, record2) {
   const current = {};
   for (const name of entries(path2)) {
-    const stat = lstatSync6(join8(path2, name));
+    const stat = lstatSync7(join10(path2, name));
     if (!stat.isFile() || stat.nlink !== 1) continue;
     const id = identity(stat);
     current[id] = record2.observed[id] || record2.lease;
@@ -5948,24 +6679,24 @@ function observe(path2, record2) {
   record2.observed = current;
 }
 function readBounded(file) {
-  const expected = lstatSync6(file);
+  const expected = lstatSync7(file);
   if (!expected.isFile() || expected.nlink !== 1 || expected.size > DESKTOP_FILE_LIMITS.fileBytes) throw new Error("Desktop exchange accepts regular files up to 25 MiB only.");
-  const fd = openSync3(file, constants6.O_RDONLY | (constants6.O_NOFOLLOW || 0) | (constants6.O_NONBLOCK || 0));
+  const fd = openSync4(file, constants7.O_RDONLY | (constants7.O_NOFOLLOW || 0) | (constants7.O_NONBLOCK || 0));
   try {
-    const before = fstatSync3(fd);
+    const before = fstatSync4(fd);
     if (!before.isFile() || before.nlink !== 1 || identity(before) !== identity(expected)) throw new Error("Desktop file changed while opening it.");
     const data = Buffer.alloc(Math.min(before.size + 1, DESKTOP_FILE_LIMITS.fileBytes + 1));
     let size = 0;
     while (size < data.length) {
-      const count = readSync(fd, data, size, data.length - size, null);
+      const count = readSync2(fd, data, size, data.length - size, null);
       if (!count) break;
       size += count;
     }
-    const after = fstatSync3(fd);
+    const after = fstatSync4(fd);
     if (size !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Error("Desktop download is still changing.");
     return { data: data.subarray(0, size), stat: after };
   } finally {
-    closeSync3(fd);
+    closeSync4(fd);
   }
 }
 function saveNew(file, data) {
@@ -5981,7 +6712,7 @@ function publish(agentId, root, computer, record2) {
   let bytes2 = 0;
   for (const name of entries(p.downloads)) {
     if (!allowedName(name) || partial(name)) continue;
-    const source = join8(p.downloads, name);
+    const source = join10(p.downloads, name);
     let value;
     try {
       value = readBounded(source);
@@ -5993,14 +6724,14 @@ function publish(agentId, root, computer, record2) {
     if (!origin || origin.ownerId !== agentId) throw new Error("Desktop download owner changed.");
     const sha256 = createHash7("sha256").update(value.data).digest("hex"), id = createHash7("sha256").update(JSON.stringify([p.key, origin, identity(value.stat), sha256])).digest("hex").slice(0, 32);
     const nameOnDisk = `${id}-${name}`, privateDirectory = safeWorkspacePath(root, `agents/${agentId}/private/downloads`);
-    mkdirSync8(privateDirectory, { recursive: true, mode: 448 });
-    mkdirSync8(p.receipts, { recursive: true, mode: 448 });
+    mkdirSync9(privateDirectory, { recursive: true, mode: 448 });
+    mkdirSync9(p.receipts, { recursive: true, mode: 448 });
     const target = safeWorkspacePath(root, `agents/${agentId}/private/downloads/${nameOnDisk}`), receiptPath = safeWorkspacePath(root, `computers/${p.key}/receipts/${id}.json`);
     saveNew(target, value.data);
     const receipt = { ...origin, id, name, path: `downloads/${nameOnDisk}`, bytes: value.data.length, sha256, savedAt: (/* @__PURE__ */ new Date()).toISOString() };
-    if (!existsSync9(receiptPath)) atomicWorkspaceWrite(receiptPath, JSON.stringify(receipt));
-    const now = lstatSync6(source);
-    if (identity(now) === identity(value.stat) && now.size === value.stat.size && now.mtimeMs === value.stat.mtimeMs) unlinkSync3(source);
+    if (!existsSync7(receiptPath)) atomicWorkspaceWrite(receiptPath, JSON.stringify(receipt));
+    const now = lstatSync7(source);
+    if (identity(now) === identity(value.stat) && now.size === value.stat.size && now.mtimeMs === value.stat.mtimeMs) unlinkSync4(source);
     result.push(receipt);
     bytes2 += value.data.length;
   }
@@ -6014,16 +6745,16 @@ function clearStaging(staging) {
     if (depth > 3) throw new Error("Desktop staging contains unsupported directories.");
     for (const name of readdirSync4(path2)) {
       if (files.length + directories.length >= DESKTOP_FILE_LIMITS.entries * 3) throw new Error("Desktop staging needs cleanup before it can change owners.");
-      const file = join8(path2, name), stat = lstatSync6(file);
+      const file = join10(path2, name), stat = lstatSync7(file);
       if (stat.isDirectory()) {
-        if (file !== join8(staging, "downloads") && file !== join8(staging, "uploads")) throw new Error("Desktop staging contains unsupported directories.");
+        if (file !== join10(staging, "downloads") && file !== join10(staging, "uploads")) throw new Error("Desktop staging contains unsupported directories.");
         directories.push(file);
         walk(file, depth + 1);
       } else files.push(file);
     }
   };
   walk(staging, 0);
-  for (const file of files) unlinkSync3(file);
+  for (const file of files) unlinkSync4(file);
 }
 async function claimDesktopExchange(agentId, root, computer, lease, stopBrowser) {
   validateLease(agentId, lease);
@@ -6031,8 +6762,8 @@ async function claimDesktopExchange(agentId, root, computer, lease, stopBrowser)
   if (claiming.has(p.key)) throw new Error("Desktop file ownership is changing.");
   claiming.add(p.key);
   try {
-    mkdirSync8(p.downloads, { recursive: true, mode: 448 });
-    mkdirSync8(p.uploads, { recursive: true, mode: 448 });
+    mkdirSync9(p.downloads, { recursive: true, mode: 448 });
+    mkdirSync9(p.uploads, { recursive: true, mode: 448 });
     const previous = readRecord(p.record, p.key), original = JSON.stringify(previous);
     if (previous && lease.epoch < previous.lease.epoch) throw new Error("Desktop file ownership is stale.");
     const reset = previous ? previous.lease.ownerId !== agentId : readdirSync4(p.staging).some((name) => !["downloads", "uploads"].includes(name)) || entries(p.downloads).length > 0 || entries(p.uploads).length > 0;
@@ -6064,7 +6795,7 @@ function stageDesktopUpload(agentId, root, computer, lease, name) {
   let total = 0;
   const existing = entries(p.uploads);
   for (const item of existing) {
-    const stat = lstatSync6(join8(p.uploads, item));
+    const stat = lstatSync7(join10(p.uploads, item));
     if (!stat.isFile() || stat.nlink !== 1) throw new Error("Upload staging contains an unsupported file.");
     total += stat.size;
   }
@@ -6169,8 +6900,8 @@ async function executeDesktopCommand(root, profile, command2) {
   }
 }
 function desktopHelper(container, command2) {
-  return new Promise((resolve7, reject) => {
-    const child = spawn4("docker", ["exec", "-i", container, "timeout", "--signal=KILL", "18s", "python", "-c", DESKTOP_HELPER], { stdio: ["pipe", "pipe", "ignore"], timeout: 2e4, killSignal: "SIGKILL" });
+  return new Promise((resolve8, reject) => {
+    const child = spawn5("docker", ["exec", "-i", container, "timeout", "--signal=KILL", "18s", "python", "-c", DESKTOP_HELPER], { stdio: ["pipe", "pipe", "ignore"], timeout: 2e4, killSignal: "SIGKILL" });
     let output2 = "", settled = false;
     const fail = () => {
       if (!settled) {
@@ -6200,7 +6931,7 @@ function desktopHelper(container, command2) {
           return;
         }
         settled = true;
-        resolve7(result);
+        resolve8(result);
       } catch {
         fail();
       }
@@ -6223,7 +6954,7 @@ var import_websocket = __toESM(require_websocket(), 1);
 var import_websocket_server = __toESM(require_websocket_server(), 1);
 
 // runtime/computer-stream.ts
-import { spawn as spawn5 } from "node:child_process";
+import { spawn as spawn6 } from "node:child_process";
 import { Duplex } from "node:stream";
 
 // runtime/desktop-stream-helper.ts
@@ -6400,7 +7131,7 @@ function immutableContainer(value) {
 function startComputerStream(containerId, kind) {
   if (!immutableContainer(containerId)) throw new Error("The computer container identity could not be confirmed.");
   const seconds = kind === "terminal" ? 1800 : 300;
-  const child = spawn5("docker", ["exec", "-i", containerId, "timeout", "--signal=TERM", "--kill-after=3s", `${seconds}s`, "python", "-c", kind === "terminal" ? TERMINAL_HELPER : DESKTOP_STREAM_HELPER], { stdio: ["pipe", "pipe", "ignore"], timeout: (seconds + 5) * 1e3, killSignal: "SIGKILL" });
+  const child = spawn6("docker", ["exec", "-i", containerId, "timeout", "--signal=TERM", "--kill-after=3s", `${seconds}s`, "python", "-c", kind === "terminal" ? TERMINAL_HELPER : DESKTOP_STREAM_HELPER], { stdio: ["pipe", "pipe", "ignore"], timeout: (seconds + 5) * 1e3, killSignal: "SIGKILL" });
   const stream = Duplex.from({ readable: child.stdout, writable: child.stdin });
   stream.on("error", () => {
   });
@@ -6442,8 +7173,8 @@ async function admitRunnerTerminal(agentId, expiresAt, operations, validate2, st
     const operation = operations.get(agentId);
     if (!operation || operation === previous) {
       let ready;
-      const startup = new Promise((resolve7) => {
-        ready = resolve7;
+      const startup = new Promise((resolve8) => {
+        ready = resolve8;
       });
       const release = () => {
         if (operations.get(agentId) === startup) operations.delete(agentId);
@@ -6482,7 +7213,7 @@ async function executeRunnerDuplex(root, credentials2, command2, admission = {})
   const url = new URL(credentials2.coordinator.replace(/\/$/, "") + command2.payload.path);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   const ws = new import_websocket.default(url, { headers: { Authorization: `Bearer ${credentials2.token}`, "X-Open-Harness-Machine": credentials2.machineId }, maxPayload: 65536, handshakeTimeout: 5e3, perMessageDeflate: false });
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     let source, ended = false, checking = false;
     const finish2 = (error) => {
       if (ended) return;
@@ -6495,7 +7226,7 @@ async function executeRunnerDuplex(root, credentials2, command2, admission = {})
       if (!connections.size) runnerConnections.delete(root);
       admission.ready?.();
       if (error) reject(error);
-      else resolve7();
+      else resolve8();
     };
     const stop = () => finish2(), connections = runnerConnections.get(root) || /* @__PURE__ */ new Set();
     connections.add(stop);
@@ -6557,27 +7288,27 @@ async function executeRunnerDuplex(root, credentials2, command2, admission = {})
 // runtime/runner.ts
 var args = /* @__PURE__ */ new Map();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith("--")) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith("--") ? "" : process.argv[++i] || "");
-var stateRoot = resolve6(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join9(homedir2(), ".open-harness-runner"));
-var credentialPath = join9(stateRoot, "connection.json");
-var spool = join9(stateRoot, "spool");
-mkdirSync9(spool, { recursive: true });
+var stateRoot = resolve7(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join11(homedir2(), ".open-harness-runner"));
+var credentialPath = join11(stateRoot, "connection.json");
+var spool = join11(stateRoot, "spool");
+mkdirSync10(spool, { recursive: true });
 var runnerSecrets;
 try {
-  runnerSecrets = new SecretStore(join9(stateRoot, "secrets.json"));
+  runnerSecrets = new SecretStore(join11(stateRoot, "secrets.json"));
 } catch (error) {
   console.error(error instanceof Error ? error.message : "The runner could not open its credential store.");
   process.exit(1);
 }
 function output(command2, args2, timeout) {
-  return new Promise((resolve7) => {
+  return new Promise((resolve8) => {
     let done = false, stdout = "";
     const settle = (status) => {
       if (!done) {
         done = true;
-        resolve7({ status, stdout });
+        resolve8({ status, stdout });
       }
     };
-    const child = spawn6(command2, args2, { stdio: ["ignore", "pipe", "ignore"], timeout, killSignal: "SIGKILL" });
+    const child = spawn7(command2, args2, { stdio: ["ignore", "pipe", "ignore"], timeout, killSignal: "SIGKILL" });
     child.stdout.on("data", (chunk) => stdout += chunk);
     child.on("error", () => settle(null));
     child.on("exit", (code) => settle(code));
@@ -6608,7 +7339,7 @@ async function pair() {
   chmodSync3(credentialPath, 384);
   return saved;
 }
-var credentials = args.has("pairing-code") ? await pair() : existsSync10(credentialPath) ? JSON.parse(readFileSync10(credentialPath, "utf8")) : await pair();
+var credentials = args.has("pairing-code") ? await pair() : existsSync8(credentialPath) ? JSON.parse(readFileSync8(credentialPath, "utf8")) : await pair();
 if (!credentials.encryptionPrivateKey || !credentials.encryptionPublicKey) {
   const encryption = await generateRunnerKeyPair();
   credentials = { ...credentials, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey };
@@ -6632,7 +7363,7 @@ async function request(path2, init = {}, retry = false) {
       return value;
     } catch (error) {
       if (!retry) throw error;
-      await new Promise((resolve7) => setTimeout(resolve7, 2e3));
+      await new Promise((resolve8) => setTimeout(resolve8, 2e3));
     }
   }
 }
@@ -6679,15 +7410,15 @@ async function shutdown(signal) {
 }
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => void shutdown(signal));
 async function deliver(record2) {
-  const file = join9(spool, `${record2.id}.json`);
-  if (!existsSync10(file)) writeFileSync8(file, JSON.stringify(record2), { mode: 384 });
+  const file = join11(spool, `${record2.id}.json`);
+  if (!existsSync8(file)) writeFileSync8(file, JSON.stringify(record2), { mode: 384 });
   await request(record2.path, { method: "POST", body: JSON.stringify(record2.body) }, true);
-  if (existsSync10(file)) unlinkSync4(file);
+  if (existsSync8(file)) unlinkSync5(file);
 }
 async function flushSpool() {
   for (const name of readdirSync5(spool).filter((name2) => name2.endsWith(".json"))) {
     try {
-      await deliver(JSON.parse(readFileSync10(join9(spool, name), "utf8")));
+      await deliver(JSON.parse(readFileSync8(join11(spool, name), "utf8")));
     } catch {
     }
   }
@@ -6718,8 +7449,8 @@ async function run(command2) {
       }
     };
     assertOwnership();
-    const shared = join9(stateRoot, "shared");
-    mkdirSync9(shared, { recursive: true });
+    const shared = join11(stateRoot, "shared");
+    mkdirSync10(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean);
     const availableSecrets = { ...runnerSecrets.environment(), ...process.env };
     const localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]]));
@@ -6729,7 +7460,7 @@ async function run(command2) {
     const coordinatorForContainer = credentials.coordinator.replace("://localhost", "://host.docker.internal").replace("://127.0.0.1", "://host.docker.internal");
     prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, { controlUrl: coordinatorForContainer, reviewUnclassified: payload.reviewUnclassified });
     await phase("profile-ready");
-    const container = await ensureContainerAsync(profile.id, stateRoot, profile.computer);
+    const container = await ensureContainerAsync(profile.id, stateRoot, profile.computer, false, command2.payload.teamIds || [], () => [...active.values()].some((live2) => live2.agentId === profile.id));
     assertOwnership();
     if (admittedRuns.get(payload.runId)?.cancelled || blockedAgents.has(profile.id)) throw new Error("Run stopped before its runtime started.");
     gateway = new HermesGateway(container, runToolGrants(profile));
@@ -6801,9 +7532,9 @@ async function control(command2) {
       return;
     }
     if (command2.kind.startsWith("probe-")) {
-      const profile = command2.payload.profile, shared = join9(stateRoot, "shared");
+      const profile = command2.payload.profile, shared = join11(stateRoot, "shared");
       assertSandboxedComputer(profile.computer);
-      mkdirSync9(shared, { recursive: true });
+      mkdirSync10(shared, { recursive: true });
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env }, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]])), dispatched = await openDispatchedSecrets(command2.payload.encryptedSecrets), secretSource = { environment: () => ({ ...localSecrets, ...dispatched }) };
       if (command2.kind === "probe-runtime" && command2.payload.input?.action === "model-test") {
         const model = command2.payload.input.model;
@@ -6812,6 +7543,11 @@ async function control(command2) {
         return;
       }
       prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command2.payload.coordinationToken || "", `probe-${command2.id}`, {});
+      if (command2.kind === "probe-sandbox") {
+        const container2 = await ensureContainerAsync(profile.id, stateRoot, profile.computer, false, command2.payload.teamIds || [], () => [...active.values()].some((live2) => live2.agentId === profile.id));
+        await finish(command2, await sandboxSelftest(container2, { computer: profile.computer, teamIds: command2.payload.teamIds || [], stateRoot, agentId: profile.id }, "runner-attested"));
+        return;
+      }
       if (command2.kind === "probe-runtime") {
         const probeInput = { ...command2.payload.input || {} };
         if (probeInput.action === "computer") probeInput.desktop = profile.computer.desktop;
@@ -6819,11 +7555,11 @@ async function control(command2) {
         if (probeInput.action === "mcp" && probeInput.env) {
           for (const name of Object.keys(probeInput.env)) if (!probeInput.env[name] && secretSource.environment()[name]) probeInput.env[name] = secretSource.environment()[name];
         }
-        const container2 = probeInput.action === "computer" && profile.computer.desktop === "virtual" ? await ensureDesktopContainerAsync(profile.id, stateRoot, profile.computer) : await ensureContainerAsync(profile.id, stateRoot, profile.computer);
+        const container2 = probeInput.action === "computer" && profile.computer.desktop === "virtual" ? await ensureDesktopContainerAsync(profile.id, stateRoot, profile.computer) : await ensureContainerAsync(profile.id, stateRoot, profile.computer, false, command2.payload.teamIds || [], () => [...active.values()].some((live2) => live2.agentId === profile.id));
         await finish(command2, await runtimeProbe(container2, probeInput));
         return;
       }
-      const container = await ensureContainerAsync(profile.id, stateRoot, profile.computer);
+      const container = await ensureContainerAsync(profile.id, stateRoot, profile.computer, false, command2.payload.teamIds || [], () => [...active.values()].some((live2) => live2.agentId === profile.id));
       if (command2.kind === "probe-tools") {
         const input = await runtimeProbe(container, { action: "catalog" });
         await finish(command2, { source: "runtime", tools: runtimeToolCatalog(Array.isArray(input.tools) ? input.tools : [], profile) });
@@ -7016,9 +7752,9 @@ for (; !shuttingDown; ) {
       admittedCommands.add(command2.id);
       void executeCommand(command2).catch((error) => console.error(error instanceof Error ? error.message : error)).finally(() => admittedCommands.delete(command2.id));
     }
-    if (!result.commands.length && Date.now() - started < 500) await new Promise((resolve7) => setTimeout(resolve7, 1e3));
+    if (!result.commands.length && Date.now() - started < 500) await new Promise((resolve8) => setTimeout(resolve8, 1e3));
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
-    await new Promise((resolve7) => setTimeout(resolve7, 1e3));
+    await new Promise((resolve8) => setTimeout(resolve8, 1e3));
   }
 }

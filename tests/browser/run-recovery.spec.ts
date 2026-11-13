@@ -43,7 +43,7 @@ async function liveRuns(request: APIRequestContext) {
 // the way a person would.
 async function openAgent(page: Page, name: string, isMobile: boolean, fresh = true) {
   if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.locator('aside.sidebar .agent-row', { hasText: name }).click();
+  await page.locator('aside.sidebar .agent-row').filter({ has: page.getByText(name, { exact: true }) }).click();
   await expect(page.getByRole('textbox', { name: `Message ${name}` })).toBeVisible();
   if (fresh && await page.locator('.transcript .message').count()) {
     await page.getByRole('button', { name: 'New conversation' }).click();

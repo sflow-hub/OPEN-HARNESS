@@ -30,8 +30,9 @@ export type RunRow = {
 // Bump when a release changes the schema in a way an older build would mishandle. It is
 // recorded in PRAGMA user_version, which is how a downgrade is detected: an older binary
 // opening a newer database cannot know which columns and tables it must keep filling.
-// Older coordinators would resume queued reply-only tasks with the full profile grant.
-export const SCHEMA_VERSION = 4;
+// Version 4 protects reply-only grants; version 5 prevents interval-only schedulers from
+// silently treating cron schedules as recurring interval work after a downgrade.
+export const SCHEMA_VERSION = 5;
 
 // Whole-database steps for an upgrade, keyed by the version they bring the file to.
 // Column additions for a single store's own tables stay in that store, because it creates
@@ -71,6 +72,10 @@ export class Store {
       this.db.prepare('VACUUM INTO ?').run(backup); chmodSync(backup, 0o600);
     }
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
+    this.db.exec(`CREATE TABLE IF NOT EXISTS sandbox_selftests (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, machine_id TEXT, runner_kind TEXT,
+      attestation TEXT, status TEXT, result_json TEXT NOT NULL, created_at TEXT NOT NULL
+    ); CREATE INDEX IF NOT EXISTS sandbox_selftests_agent ON sandbox_selftests(agent_id, created_at);`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL,
@@ -126,6 +131,72 @@ export class Store {
         UNIQUE(agent_id,name)
       );
     `);
+    for (const [column, definition] of Object.entries({ kind: "TEXT NOT NULL DEFAULT 'direct'", title: "TEXT", turn_policy: "TEXT NOT NULL DEFAULT 'manual'", auto_turns_enabled: "INTEGER NOT NULL DEFAULT 1", limits_json: "TEXT NOT NULL DEFAULT '{}'", source: "TEXT NOT NULL DEFAULT 'native'", created_at: "TEXT NOT NULL DEFAULT ''", updated_at: "TEXT NOT NULL DEFAULT ''" })) addColumn(this.db, "conversations", column, definition);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS messages (
+        seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+        id            TEXT UNIQUE NOT NULL,
+        conversation_id TEXT NOT NULL,
+        sender_kind   TEXT NOT NULL,
+        sender_id     TEXT NOT NULL,
+        sender_name   TEXT NOT NULL,
+        body          TEXT NOT NULL,
+        idempotency_key TEXT,
+        mentions_json TEXT NOT NULL DEFAULT '[]',
+        in_reply_to   TEXT,
+        origin_run_id TEXT,
+        round_id      TEXT,
+        source        TEXT NOT NULL DEFAULT 'native',
+        created_at    TEXT NOT NULL,
+        FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS messages_conv_seq ON messages(conversation_id, seq);
+      CREATE UNIQUE INDEX IF NOT EXISTS messages_idem
+        ON messages(conversation_id, sender_kind, sender_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS message_deliveries (
+        message_id    TEXT NOT NULL,
+        recipient_kind TEXT NOT NULL,
+        recipient_id  TEXT NOT NULL,
+        state         TEXT NOT NULL DEFAULT 'pending',
+        deliver_after TEXT,
+        consumed_run_id TEXT,
+        delegation_root TEXT,
+        hop_depth INTEGER,
+        attempts      INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        PRIMARY KEY(message_id, recipient_kind, recipient_id),
+        FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS deliveries_inbox ON message_deliveries(recipient_kind, recipient_id, state);
+      CREATE TABLE IF NOT EXISTS conversation_members (
+        conversation_id TEXT NOT NULL,
+        participant_kind TEXT NOT NULL,
+        participant_id  TEXT NOT NULL,
+        role            TEXT NOT NULL DEFAULT 'member',
+        session_id      TEXT,
+        joined_at       TEXT NOT NULL,
+        removed_at      TEXT,
+        PRIMARY KEY(conversation_id, participant_kind, participant_id),
+        FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS conv_members_agent ON conversation_members(participant_kind, participant_id);
+    `);
+    const internalRun = ['task_runs', 'schedule_runs'].filter(table => this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))
+      .map(table => ` OR EXISTS(SELECT 1 FROM ${table} linked WHERE linked.run_id=r.id)`).join('');
+    this.db.exec(`
+      INSERT OR IGNORE INTO conversations(id,agent_id,title,kind,source,created_at,updated_at)
+        SELECT r.conversation_id,(SELECT first.agent_id FROM runs first WHERE first.conversation_id=r.conversation_id ORDER BY first.created_at,first.id LIMIT 1),'','direct',CASE WHEN MIN(r.parent_run_id IS NOT NULL${internalRun})=1 THEN 'internal' ELSE 'backfill' END,MIN(r.created_at),MAX(r.updated_at) FROM runs r GROUP BY r.conversation_id;
+      INSERT OR IGNORE INTO conversation_members(conversation_id,participant_kind,participant_id,role,joined_at)
+        SELECT id,'agent',agent_id,'member',created_at FROM conversations;
+      INSERT OR IGNORE INTO conversation_members(conversation_id,participant_kind,participant_id,role,joined_at)
+        SELECT id,'user','user','owner',created_at FROM conversations;
+    `);
+    // Existing interval schedules keep their behavior; cron semantics require schema 5.
+    addColumn(this.db, "schedules", "schedule_kind", "TEXT NOT NULL DEFAULT 'interval'");
+    addColumn(this.db, "schedules", "cron_expression", "TEXT");
+    addColumn(this.db, "schedules", "misfire_policy", "TEXT NOT NULL DEFAULT 'run_once'");
     for (const migration of MIGRATIONS) if (migration.to > found) migration.apply(this.db);
     if (found !== SCHEMA_VERSION) this.db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
     const stamp = new Date().toISOString();

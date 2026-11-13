@@ -18,7 +18,9 @@ export async function coordinationSocket(directory: string, agentId: string, han
     if (alias) { rmSync(alias, { recursive: true, force: true }); alias = undefined; }
   };
   const server = createServer((req, res) => {
-    if (req.headers['x-open-harness-agent'] !== agentId || !['/internal/computer', '/internal/handoff', '/internal/schedule', '/internal/task', '/internal/workspace', '/internal/group-chat', '/internal/review-tool', '/internal/tool-receipt', '/internal/codex/responses'].includes(req.url || '')) {
+    const path = req.url || '', endpoint = path.startsWith('/internal/inbox?') && req.method === 'GET' ? '/internal/inbox' : path;
+    const messaging = ['/internal/message', '/internal/inbox', '/internal/inbox/ack'].includes(endpoint);
+    if (req.headers['x-open-harness-agent'] !== agentId || messaging && req.method !== (endpoint === '/internal/inbox' ? 'GET' : 'POST') || !['/internal/computer', '/internal/handoff', '/internal/schedule', '/internal/task', '/internal/workspace', '/internal/group-chat', '/internal/message', '/internal/inbox', '/internal/inbox/ack', '/internal/review-tool', '/internal/tool-receipt', '/internal/codex/responses'].includes(endpoint)) {
       res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'This endpoint is scoped to its owning agent and coordination tools.' })); return;
     }
     handler(req, res);

@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import type { ComputerConfig } from '../lib/agent-profile';
 import { atomicWorkspaceWrite, readWorkspaceFile, safeWorkspacePath } from './path-safety';
 import { desktopResourcePaths, migrateBrowser, runningDesktopContainer, stopAgentComputer } from './computer-runtime';
 import { runningAgentContainer } from './hermes';
+import { listInside, mkdirInside, readInside, renameIntoInside, SafeFsError, statInside } from './safe-fs';
 import { assertSandboxedComputer } from './computer-validation';
 
 type TransferFile = { path: string; data: string; checksum: string };
@@ -19,17 +20,34 @@ function digest(data: Buffer | string) { return createHash('sha256').update(data
 function manifest(files: TransferFile[]) { return [...files].sort((a,b) => a.path.localeCompare(b.path)).map(file => `${file.path}:${file.checksum}`).join('\n'); }
 function bundleDigest(bundle: Pick<TransferBundle, 'files' | 'browser'>) { return digest(manifest(bundle.files) + (bundle.browser ? `\n@desktop-browser-v1:${bundle.browser.checksum}` : '')); }
 function exportFiles(stateRoot: string, agentId: string, omitLegacy = false): TransferBundle {
-  const agentRoot = safeWorkspacePath(stateRoot, `agents/${agentId}`), files: TransferBundle['files'] = []; let total = 0;
-  const visit = (path: string) => {
-    if (omitLegacy && relative(agentRoot, path).replaceAll('\\', '/') === 'private/.config/chromium') return;
-    if (!existsSync(path)) return; const stat = lstatSync(path); if (stat.isSymbolicLink()) return;
-    safeWorkspacePath(stateRoot, relative(stateRoot, path));
-    if (stat.isDirectory()) { for (const name of readdirSync(path)) visit(join(path, name)); return; }
-    if (!stat.isFile()) return; const data = readFileSync(path); total += data.length; if (total > 20_000_000) throw new Error('Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.');
-    files.push({ path: relative(agentRoot, path).replaceAll('\\', '/'), data: Buffer.from(data).toString('base64'), checksum: digest(data) });
+  const agentRoot = safeWorkspacePath(stateRoot, `agents/${agentId}`), files: TransferBundle['files'] = []; let total = 0, entries = 0;
+  const visit = (rel: string, depth: number) => {
+    if (omitLegacy && rel === 'private/.config/chromium') return;
+    try {
+      const stat = statInside(agentRoot, rel); if (!stat || stat.isSymbolicLink) return;
+      if (++entries > maxEntries) throw new Error('Managed agent data has too many entries to transfer.');
+      if (stat.isDirectory) {
+        if (depth > 32) throw new Error('Managed agent data exceeds the transfer depth limit of 32.');
+        const children = listInside(agentRoot, rel, { max: maxEntries + 1 });
+        if (children.length > maxEntries) throw new Error('Managed agent directory exceeds the transfer limit of 10000 entries.');
+        for (const child of children) visit(`${rel}/${child.name}`, depth + 1);
+        return;
+      }
+      if (!stat.isFile) return;
+      safeWorkspacePath(stateRoot, `agents/${agentId}/${rel}`);
+      const data = readInside(agentRoot, rel, { maxBytes: 20_000_000 - total }) as Buffer; total += data.length;
+      files.push({ path: rel, data: data.toString('base64'), checksum: digest(data) });
+    } catch (error) {
+      if (error instanceof SafeFsError) {
+        if (['not-found', 'not-regular'].includes(error.code)) return;
+        if (error.code === 'symlink') error.message = 'Workspace paths cannot contain symbolic links.';
+        if (error.code === 'too-large') throw new Error('Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.');
+      }
+      throw error;
+    }
   };
-  for (const path of allowedRoots) visit(join(agentRoot, path));
-  files.sort((a,b) => a.path.localeCompare(b.path)); return { files, checksum: digest(files.map(file => `${file.path}:${file.checksum}`).join('\n')) };
+  for (const path of allowedRoots) visit(path, 0);
+  files.sort((a,b) => a.path.localeCompare(b.path)); return { files, checksum: digest(manifest(files)) };
 }
 export function exportAgentFiles(stateRoot: string, agentId: string): TransferBundle { return exportFiles(stateRoot, agentId); }
 function validateBundle(stateRoot: string, agentId: string, bundle: TransferBundle) {
@@ -69,11 +87,31 @@ function validateBundle(stateRoot: string, agentId: string, bundle: TransferBund
   return { files, browser, checksum };
 }
 function writeManagedFiles(stateRoot: string, files: ReturnType<typeof validateBundle>['files']) {
-  for (const file of files) {
-    safeWorkspacePath(stateRoot, file.name);
-    mkdirSync(dirname(file.target), { recursive: true });
-    writeFileSync(safeWorkspacePath(stateRoot, file.name), file.data, { mode: 0o600 });
-  }
+  mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+  const staging = mkdtempSync(join(stateRoot, '.transfer-')); let committed = 0;
+  try {
+    for (const [index, file] of files.entries()) writeFileSync(join(staging, String(index)), file.data, { mode: 0o600, flag: 'wx' });
+    for (const [index, file] of files.entries()) {
+      const parts = file.name.split('/'); let parent = '';
+      for (const part of parts.slice(0, -1)) {
+        parent = parent ? `${parent}/${part}` : part;
+        let stat = statInside(stateRoot, parent);
+        if (!stat) {
+          try { mkdirInside(stateRoot, parent); } catch (error) { if (!(error instanceof SafeFsError) || error.code !== 'conflict') throw error; }
+          stat = statInside(stateRoot, parent);
+        }
+        if (stat?.isSymbolicLink) throw new SafeFsError('symlink', 'Transfer target contains a symbolic link.');
+        if (!stat?.isDirectory) throw new SafeFsError('invalid-path', 'Transfer target contains a non-directory.');
+      }
+      const leaf = statInside(stateRoot, file.name);
+      if (leaf?.isSymbolicLink) throw new SafeFsError('symlink', 'Transfer target contains a symbolic link.');
+      if (leaf && !leaf.isFile) throw new SafeFsError('not-regular', 'Transfer target contains a non-regular file.');
+      renameIntoInside(staging, String(index), stateRoot, file.name); committed++;
+    }
+  } catch (error) {
+    if (error instanceof Error) error.message += ` (${committed} of ${files.length} files committed)`;
+    throw error;
+  } finally { rmSync(staging, { recursive: true, force: true }); }
 }
 export function importAgentFiles(stateRoot: string, agentId: string, bundle: TransferBundle) {
   if (bundle?.browser) throw new Error('This transfer contains a private browser. Import it through the stopped computer transfer API.');

@@ -11,7 +11,7 @@ const config=JSON.parse(await readFile(resolve(root,'src-tauri','tauri.conf.json
 let releaseImage;
 if(config.bundle.createUpdaterArtifacts){
   if(!process.env.OPEN_HARNESS_RELEASE_IMAGE_LOCK)throw new Error('Signed desktop builds require the accepted release image-lock.json; source builds are not used on first launch.');
-  const manifest=JSON.parse(await readFile(resolve(process.env.OPEN_HARNESS_RELEASE_IMAGE_LOCK),'utf8')),version=JSON.parse(await readFile(resolve(root,'package.json'),'utf8')).version,revision=execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();validateImageLock(manifest,version,revision);releaseImage={ref:manifest.images.hermes.ref,contract:10,version,revision};
+  const manifest=JSON.parse(await readFile(resolve(process.env.OPEN_HARNESS_RELEASE_IMAGE_LOCK),'utf8')),version=JSON.parse(await readFile(resolve(root,'package.json'),'utf8')).version,revision=execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();validateImageLock(manifest,version,revision);releaseImage={ref:manifest.images.hermes.ref,contract:11,version,revision};
 }
 
 function command(program, args) {

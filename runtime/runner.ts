@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { sandboxSelftest } from './sandbox-selftest';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, unlinkSync } from 'node:fs';
 import { homedir, hostname, platform, arch } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -23,7 +24,7 @@ import { assertComputerOwnership, type ComputerOwnership } from './computer-owne
 import { ensureDesktopContainerAsync } from './computer-runtime';
 
 type Credentials = { coordinator: string; machineId: string; token: string; encryptionPublicKey: string; encryptionPrivateKey: string };
-type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'input' | 'agent-context' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'store-secret' | 'desktop' | 'duplex'; payload: any };
+type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'input' | 'agent-context' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'probe-sandbox' | 'store-secret' | 'desktop' | 'duplex'; payload: any };
 const args = new Map<string,string>();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith('--')) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith('--') ? '' : process.argv[++i] || '');
 const stateRoot = resolve(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join(homedir(), '.open-harness-runner'));
@@ -129,7 +130,7 @@ async function run(command: RunnerCommand) {
     const coordinatorForContainer = credentials.coordinator.replace('://localhost', '://host.docker.internal').replace('://127.0.0.1', '://host.docker.internal');
     prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, { controlUrl: coordinatorForContainer,reviewUnclassified:payload.reviewUnclassified });
     await phase('profile-ready');
-    const container = await ensureContainerAsync(profile.id, stateRoot, profile.computer);
+    const container = await ensureContainerAsync(profile.id, stateRoot, profile.computer, false, command.payload.teamIds || [], () => [...active.values()].some(live => live.agentId === profile.id));
     assertOwnership();
     if (admittedRuns.get(payload.runId)?.cancelled || blockedAgents.has(profile.id)) throw new Error('Run stopped before its runtime started.');
     gateway = new HermesGateway(container, runToolGrants(profile));
@@ -192,16 +193,20 @@ async function control(command: RunnerCommand) {
         await finish(command, await testModelConnection(model, apiKey)); return;
       }
       prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command.payload.coordinationToken || '', `probe-${command.id}`, {});
+      if (command.kind === 'probe-sandbox') {
+        const container = await ensureContainerAsync(profile.id, stateRoot, profile.computer, false, command.payload.teamIds || [], () => [...active.values()].some(live => live.agentId === profile.id));
+        await finish(command, await sandboxSelftest(container, { computer: profile.computer, teamIds: command.payload.teamIds || [], stateRoot, agentId: profile.id }, 'runner-attested')); return;
+      }
       if (command.kind === 'probe-runtime') {
         const probeInput = { ...(command.payload.input || {}) } as any;
         if (probeInput.action === 'computer') probeInput.desktop = profile.computer.desktop;
         if (probeInput.action === 'connection' && !probeInput.apiKey) probeInput.apiKey = command.payload.encryptedApiKey ? await decryptRunnerSecret(credentials.encryptionPrivateKey, command.payload.encryptedApiKey) : secretSource.environment()[profile.effectiveModel.credentialRef] || '';
         if (probeInput.action === 'mcp' && probeInput.env) for (const name of Object.keys(probeInput.env)) if (!probeInput.env[name] && secretSource.environment()[name]) probeInput.env[name] = secretSource.environment()[name];
-        const container = probeInput.action === 'computer' && profile.computer.desktop === 'virtual' ? await ensureDesktopContainerAsync(profile.id, stateRoot, profile.computer) : await ensureContainerAsync(profile.id, stateRoot, profile.computer);
+        const container = probeInput.action === 'computer' && profile.computer.desktop === 'virtual' ? await ensureDesktopContainerAsync(profile.id, stateRoot, profile.computer) : await ensureContainerAsync(profile.id, stateRoot, profile.computer, false, command.payload.teamIds || [], () => [...active.values()].some(live => live.agentId === profile.id));
         await finish(command, await runtimeProbe(container, probeInput));
         return;
       }
-      const container = await ensureContainerAsync(profile.id, stateRoot, profile.computer);
+      const container = await ensureContainerAsync(profile.id, stateRoot, profile.computer, false, command.payload.teamIds || [], () => [...active.values()].some(live => live.agentId === profile.id));
       if (command.kind === 'probe-tools') { const input = await runtimeProbe(container, { action: 'catalog' }); await finish(command, { source: 'runtime', tools: runtimeToolCatalog(Array.isArray(input.tools) ? input.tools : [], profile) }); return; }
       const gateway = new HermesGateway(container, []);
       let result;

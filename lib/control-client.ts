@@ -1,4 +1,22 @@
+import type { SandboxResult } from '../runtime/sandbox-selftest';
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { normalizeRoutine, type RoutineInput, type RoutineRun } from "./routine";
+import type { Agent } from "./types";
+import type { MachineInfo } from "./agent-profile";
+import { normalizeConversation, normalizeMember, normalizeMessage, normalizeScheduledRuns, type GroupChatInput, type MemberRole } from "./conversation";
+
+export type AuditEvent = {
+  seq: number; id: string; at: string; actorKind: "operator" | "agent" | "runner" | "system";
+  actorId: string | null; action: string; targetKind: string | null; targetId: string | null; detail: unknown;
+};
+
+export type ApprovalItem = {
+  id: string; runId: string; agentId: string; agentName: string; conversationId: string;
+  runState: PersistentRun["state"]; runCreatedAt: string; state: "pending" | "submitting" | "submitted" | "resolved" | "expired";
+  decision: string | null; createdAt: string; resolvedAt: string | null; ageMs: number;
+  summary: { toolName: string | null; description: string | null };
+};
+
 export type RuntimeStatus = {
   token: string;
   mode: "live" | "test";
@@ -128,6 +146,15 @@ export class ControlClient {
   private pairings = 0;
   private keepPaired(token: string) { this.paired = token ? { base: base(), token } : null; storeToken(token); }
   private pairedToken() { return storedToken() || (this.paired && this.paired.base === base() ? this.paired.token : ""); }
+  async listAuditEvents(filters: { after?: number; limit?: number; action?: string; targetKind?: string; targetId?: string } = {}) {
+    const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+    return (await this.request<{ events: AuditEvent[] }>(`/v1/audit?${query}`)).events;
+  }
+  listApprovals(filters: { state?: "pending" | "resolved" | "all"; agentId?: string; limit?: number } = {}) {
+    const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+    return this.request<{ approvals: ApprovalItem[]; pendingCount: number }>(`/v1/approvals?${query}`);
+  }
+  resolveApproval(runId: string, approvalId: string, decision: "approve" | "deny") { return this.request<{ ok: boolean }>(`/v1/runs/${encodeURIComponent(runId)}/approval`, { method: "POST", body: JSON.stringify({ approvalId, decision }) }); }
   async bootstrap() {
     if(this.managed){
       const response=await fetch('/cloud/v1/me',{credentials:'include',signal:AbortSignal.timeout(REQUEST_TIMEOUT_MS)});if(!response.ok)throw new Error('Sign in to your managed workspace to continue.');
@@ -189,4 +216,31 @@ export class ControlClient {
     const wait = Math.min(25_000, Math.max(0, options.waitMs ?? 25_000));
     return this.request<{ events: Array<{ seq: number; id: string; type: string; payload: any }>; run: PersistentRun }>(`/v1/runs/${encodeURIComponent(runId)}/events?after=${Math.max(0, Math.floor(after) || 0)}&wait=${wait}`, { signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   }
+  sandboxSelftest(id: string) { return this.request<{ result: SandboxResult }>(`/v1/agents/${encodeURIComponent(id)}/sandbox-selftest`, { method: 'POST', signal: AbortSignal.timeout(120_000) }); }
+  sandboxHistory(id: string) { return this.request<{ latest: { result: SandboxResult } | null }>(`/v1/agents/${encodeURIComponent(id)}/sandbox-selftest`); }
+  async listAgents() { return (await this.request<{ agents: Agent[] }>("/v1/agents")).agents; }
+  async createAgent(input: { name: string; role?: string; description?: string; prompt?: string; id?: string }) { return (await this.request<{ agent: Agent }>("/v1/agents", { method: "POST", body: JSON.stringify(input) })).agent; }
+  deleteAgent(id: string) { return this.request<{ ok: true; id: string }>(`/v1/agents/${encodeURIComponent(id)}`, { method: "DELETE" }); }
+  async listMachines() { return (await this.request<{ machines: MachineInfo[] }>("/v1/machines")).machines; }
+  machineAction(id: string, action: "test" | "reconnect") { return this.request<{ ok: boolean; message: string }>(`/v1/machines/${encodeURIComponent(id)}/${action}`, { method: "POST", body: "{}" }); }
+  revokeMachine(id: string) { return this.request<{ ok: true; cancelledCommands: number }>(`/v1/machines/${encodeURIComponent(id)}/revoke`, { method: "POST", body: "{}" }); }
+  async listRoutines() { return (await this.request<{ routines: unknown[] }>("/v1/routines")).routines.map(normalizeRoutine); }
+  createRoutine(input: RoutineInput) { return this.request<{ id: string; nextRunAt: string }>("/v1/routines", { method: "POST", body: JSON.stringify(input) }); }
+  async updateRoutine(id: string, input: Partial<RoutineInput>) { const row = await this.request<{ nextRunAt?: string }>(`/v1/routines/${id}`, { method: "PUT", body: JSON.stringify(input) }); return { ...normalizeRoutine(row), ...(typeof row?.nextRunAt === "string" ? { nextRunAt: row.nextRunAt } : {}) }; }
+  deleteRoutine(id: string) { return this.request<{ ok: boolean }>(`/v1/routines/${id}`, { method: "DELETE" }); }
+  runRoutine(id: string) { return this.request<PersistentRun>(`/v1/routines/${id}/run`, { method: "POST" }); }
+  toggleRoutine(id: string) { return this.request<{ enabled: boolean }>(`/v1/routines/${id}/toggle`, { method: "POST" }); }
+  async routineHistory(id: string) { return (await this.request<{ history: RoutineRun[] }>(`/v1/routines/${id}/history`)).history; }
+  async listGroupChats() { return (await this.request<{ conversations: unknown[] }>("/v1/conversations?kind=group")).conversations.map(normalizeConversation); }
+  async createGroupChat(input: GroupChatInput) { return normalizeConversation(await this.request("/v1/conversations", { method: "POST", body: JSON.stringify({ kind: "group", title: input.title, members: input.agentIds.map(id => ({ kind: "agent", id, role: "member" })), turnPolicy: "manual" }) })); }
+  async getConversation(id: string) { return normalizeConversation(await this.request(`/v1/conversations/${encodeURIComponent(id)}`)); }
+  async addConversationMember(id: string, agentId: string, role: Exclude<MemberRole, "owner"> = "member") { return normalizeMember(await this.request(`/v1/conversations/${encodeURIComponent(id)}/members`, { method: "POST", body: JSON.stringify({ kind: "agent", id: agentId, role }) })); }
+  async removeConversationMember(id: string, agentId: string) { return normalizeMember(await this.request(`/v1/conversations/${encodeURIComponent(id)}/members/${encodeURIComponent(agentId)}`, { method: "DELETE" })); }
+  // The caller keeps idempotencyKey across retries of the same draft, so a repeated send returns the stored message.
+  async postConversationMessage(id: string, input: { body: string; mentions?: string[]; idempotencyKey: string }) { const row = await this.request<{ scheduledRuns?: unknown }>(`/v1/conversations/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify(input) }); return { message: normalizeMessage(row), scheduledRuns: normalizeScheduledRuns(row.scheduledRuns) }; }
+  async listConversationMessages(id: string, after = 0, limit = 100) { return (await this.request<{ messages: unknown[] }>(`/v1/conversations/${encodeURIComponent(id)}/messages?after=${after}&limit=${limit}`)).messages.map(normalizeMessage); }
+  // Coordinators without halt/resume answer the generic "Not found." route miss; null lets the UI hide the control.
+  haltConversation(id: string) { return this.conversationControl<{ halted: boolean; stopped: number }>(id, "halt"); }
+  resumeConversation(id: string) { return this.conversationControl<Record<string, unknown>>(id, "resume"); }
+  private conversationControl<T>(id: string, action: "halt" | "resume") { return this.request<T>(`/v1/conversations/${encodeURIComponent(id)}/${action}`, { method: "POST" }).catch((error: unknown) => { if (error instanceof Error && error.message === "Not found.") return null; throw error; }); }
 }

@@ -10,6 +10,15 @@ export type CredentialRow = { ref: string; label: string; provider: string; mode
 
 const VALUE_MAX = 10000;
 
+// Only the coordinator opts into bootstrap adoption; auxiliary vaults never inherit keys.
+export function adoptBootstrapCredentials(secrets: Pick<SecretStore, 'names' | 'set'>, environment: Record<string, string | undefined>) {
+  const saved = new Set(secrets.names());
+  for (const name of ['XAI_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'MODEL_API_KEY']) {
+    const value = environment[name];
+    if (!saved.has(name) && typeof value === 'string' && value.trim()) secrets.set(name, value);
+  }
+}
+
 // Metadata lives here; values never do. SecretStore.environment() is consumed raw by the
 // run pipeline, so the vault stays a flat name -> value map. The vault is authoritative for
 // presence, this table for everything else, and adopt() reconciles them on every boot.

@@ -6,6 +6,8 @@ import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, s
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
+import { Store } from "../runtime/db";
+import { generateRunnerKeyPair } from '../lib/runner-crypto';
 
 // A generous budget: these loops only need to outlast a slow or loaded machine, and
 // `npm test --test-timeout` is the real backstop. Fixed iteration counts gave them four
@@ -151,14 +153,113 @@ test("runs independently of event polling and replays stable events", async () =
   assert.deepEqual(replay.events.map((event: any) => event.seq), first.events.slice(2).map((event: any) => event.seq));
 });
 
+test("stops all active runs through the POST-only fixed route", async () => {
+  const run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_APPROVAL" }) });
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < deadline && (await request(`/v1/runs/${run.id}`)).state !== "waiting_approval") await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal((await request(`/v1/runs/${run.id}`)).state, "waiting_approval");
+
+  const get = await fetch(`${base}/v1/runs/stop-all`, { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(get.status, 404);
+  assert.deepEqual(await get.json(), { error: "Run not found." });
+  assert.equal((await request(`/v1/runs/${run.id}`)).state, "waiting_approval");
+
+  const response = await fetch(`${base}/v1/runs/stop-all`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.ok(result.stopped >= 1);
+  assert.ok(["completed","failed","interrupted","cancelled"].includes((await waitRun(run.id)).state));
+});
+
 test("pauses for approval and resumes only after an explicit decision", async () => {
   const run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_APPROVAL" }) });
   let approval: any;
   const approvalDeadline = Date.now() + POLL_BUDGET_MS;
   while (Date.now() < approvalDeadline) { const events = await request(`/v1/runs/${run.id}/events?after=0`); approval = events.events.find((event: any) => event.type === "approval.request"); if (approval) break; await new Promise(resolve => setTimeout(resolve, 50)); }
   assert.ok(approval); assert.equal((await request(`/v1/runs/${run.id}`)).state, "waiting_approval");
+  assert.equal((await fetch(`${base}/v1/approvals`)).status, 401);
+  const scoped = createHmac("sha256", token).update("agent:atlas").digest("hex");
+  assert.equal((await fetch(`${base}/v1/approvals`, { headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas" } })).status, 401);
+  const inbox = await request('/v1/approvals?state=pending&agentId=atlas&limit=1');
+  assert.ok(inbox.pendingCount >= 1); assert.equal(inbox.approvals[0].id, approval.payload.approvalId); assert.equal(inbox.approvals[0].agentName, 'Atlas');
+
   await request(`/v1/runs/${run.id}/approval`, { method: "POST", body: JSON.stringify({ approvalId: approval.payload.approvalId, decision: "approve" }) });
+  const duplicate = await fetch(`${base}/v1/runs/${run.id}/approval`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ approvalId: approval.payload.approvalId, decision: 'approve' }) });
+  assert.equal(duplicate.status, 409); assert.match((await duplicate.json()).error, /already been resolved/);
+  const audit = await request(`/v1/audit?action=run.approval&targetId=${run.id}`);
+  assert.deepEqual(audit.events[0].detail, { decision: 'approve', approvalId: approval.payload.approvalId });
   assert.equal((await waitRun(run.id)).state, "completed");
+});
+
+test("scopes the approvals inbox and removes a deleted agent's approvals while retaining its runs", async () => {
+  const agentIds = ['inbox-a', 'inbox-b'];
+  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: agentIds.map(id => ({ id, name: id, role: 'Generalist', instructions: '', config: { model: 'mock' } })) }) });
+  const runs: any[] = [];
+  try {
+    for (const agentId of agentIds) {
+      const saved = await request(`/v1/agents/${agentId}/profile`);
+      await request(`/v1/agents/${agentId}/profile`, { method: 'PUT', body: JSON.stringify({ ...saved.profile, allowedTools: ['terminal'], terminalConsent: true }) });
+      const run = await request('/v1/runs', { method: 'POST', body: JSON.stringify({ agentId, prompt: 'MOCK_APPROVAL' }) });
+      runs.push(run);
+      const deadline = Date.now() + POLL_BUDGET_MS;
+      while (Date.now() < deadline && (await request(`/v1/runs/${run.id}`)).state !== 'waiting_approval') await new Promise(resolve => setTimeout(resolve, 50));
+      assert.equal((await request(`/v1/runs/${run.id}`)).state, 'waiting_approval');
+    }
+    for (const [index, agentId] of agentIds.entries()) {
+      const scoped = await request(`/v1/approvals?agentId=${agentId}&state=all`);
+      assert.equal(scoped.pendingCount, 1);
+      assert.deepEqual(scoped.approvals.map((item: any) => item.runId), [runs[index].id]);
+      assert.ok(scoped.approvals.every((item: any) => item.agentId === agentId));
+    }
+    const before = await request('/v1/approvals?state=all');
+    assert.ok(runs.every(run => before.approvals.some((item: any) => item.runId === run.id)));
+    const aApprovals = before.approvals.filter((item: any) => item.runId === runs[0].id);
+    const aPendingCount = aApprovals.filter((item: any) => item.state === 'pending').length;
+    const rejected = await fetch(`${base}/v1/agents/inbox-a`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(rejected.status, 409);
+    const unchanged = await request('/v1/approvals?state=all');
+    assert.equal(unchanged.pendingCount, before.pendingCount);
+    assert.deepEqual(unchanged.approvals.filter((item: any) => item.runId === runs[0].id).map(({ ageMs, ...rest }: any) => { void ageMs; return rest; }), aApprovals.map(({ ageMs, ...rest }: any) => { void ageMs; return rest; }));
+    assert.equal((await request(`/v1/runs/${runs[0].id}`)).state, 'waiting_approval');
+    await request(`/v1/runs/${runs[0].id}/stop`, { method: 'POST' });
+    assert.equal((await waitRun(runs[0].id)).state, 'cancelled');
+    const deleted = await fetch(`${base}/v1/agents/inbox-a`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(await deleted.json(), { ok: true, id: 'inbox-a' });
+    const after = await request('/v1/approvals?state=all');
+    assert.equal(after.pendingCount, before.pendingCount - aPendingCount);
+    assert.ok(after.approvals.every((item: any) => item.agentId !== 'inbox-a'));
+    assert.ok(after.approvals.some((item: any) => item.runId === runs[1].id && item.state === 'pending'));
+    const removed = await request('/v1/approvals?agentId=inbox-a&state=all');
+    assert.deepEqual(removed, { approvals: [], pendingCount: 0 });
+    const survivor = await request('/v1/approvals?agentId=inbox-b');
+    assert.equal(survivor.pendingCount, 1);
+    assert.deepEqual(survivor.approvals.map((item: any) => item.runId), [runs[1].id]);
+    assert.equal((await request(`/v1/runs/${runs[1].id}`)).state, 'waiting_approval');
+    const store = new Store(join(stateDir, 'state.db'));
+    try { assert.equal((store.db.prepare('SELECT COUNT(*) n FROM approvals WHERE run_id=?').get(runs[0].id) as { n: number }).n, 0); }
+    finally { store.db.close(); }
+  } finally {
+    for (const run of runs) { await request(`/v1/runs/${run.id}/stop`, { method: 'POST' }); await waitRun(run.id); }
+  }
+});
+
+test("rejects expired approvals without changing the row, audit or events", async () => {
+  const store = new Store(join(stateDir, "state.db"));
+  try {
+    const now = new Date().toISOString(), runId = crypto.randomUUID(), approvalId = crypto.randomUUID();
+    store.createRun({ id: runId, agent_id: "atlas", conversation_id: "c1", prompt: "", state: "completed", session_id: null, parent_run_id: null, depth: 0, created_at: now, updated_at: now, result: null, error: null });
+    store.createApproval(approvalId, runId, "expired-request", { tool_name: "terminal", command: "ls" });
+    const before = store.approval(approvalId);
+    const auditBefore = store.db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
+    const eventsBefore = store.db.prepare("SELECT * FROM events ORDER BY seq").all();
+    const response = await fetch(`${base}/v1/runs/${runId}/approval`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ approvalId, decision: "approve" }) });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error, "Approval expired because the run has ended.");
+    assert.deepEqual(store.approval(approvalId), before);
+    assert.deepEqual(store.db.prepare("SELECT * FROM audit_events ORDER BY seq").all(), auditBefore);
+    assert.deepEqual(store.db.prepare("SELECT * FROM events ORDER BY seq").all(), eventsBefore);
+  } finally { store.db.close(); }
 });
 
 test("separates private workspaces and supports shared files and run-now routines", async () => {
@@ -197,11 +298,13 @@ test("delegates to another named agent and records the handoff", async () => {
   const parent = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_SLOW prepare final artifact" }) });
   await new Promise(resolve => setTimeout(resolve, 80));
   const scoped = createHmac("sha256", token).update("agent:atlas").digest("hex");
-  const response = await fetch(`${base}/internal/handoff`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "Content-Type": "application/json" }, body: JSON.stringify({ agentId: "scout", prompt: "Analyze the inputs" }) });
-  assert.equal(response.status, 200); const delegated = await response.json() as any; assert.equal(delegated.state, "completed");
+  const response = await fetch(`${base}/internal/handoff`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "Content-Type": "application/json" }, body: JSON.stringify({ agentId: "scout", prompt: "Analyze the inputs", detached: true }) });
+  assert.equal(response.status, 202); const delegated = await response.json() as any; assert.equal(delegated.state, "queued");
+  assert.ok(delegated.childRunId); assert.ok(delegated.conversationId);
+  await waitRun(delegated.childRunId);
   const events = await request(`/v1/runs/${parent.id}/events?after=0`);
   assert.ok(events.events.some((event: any) => event.type === "handoff.created"));
-  assert.ok(events.events.some((event: any) => event.type === "handoff.completed"));
+
   assert.equal((await waitRun(parent.id)).state, "completed");
 });
 
@@ -523,4 +626,106 @@ test("stop-all reaches its dedicated route and stops all active agents", async (
   assert.ok(response.stopped >= 2);
   assert.equal((await waitRun(first.id)).state, 'cancelled');
   assert.equal((await waitRun(second.id)).state, 'cancelled');
+});
+
+test("routine POST and PUT share validation and persist cron schedules", async () => {
+  const input = { agentId: 'atlas', name: 'Cron report', prompt: 'Write report', timezone: 'America/Denver', intervalMinutes: 60 };
+  const created = await request('/v1/routines', { method: 'POST', body: JSON.stringify(input) });
+  try {
+    for (const patch of [{ name: '' }, { prompt: '  ' }, { agentId: 'missing-agent' }, { intervalMinutes: 'Infinity' }, { timezone: 'bad/zone' }, { scheduleKind: 'cron', cronExpression: '60 * * * *' }]) {
+      for (const method of ['POST', 'PUT']) {
+        const response = await fetch(`${base}/v1/routines${method === 'PUT' ? `/${created.id}` : ''}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, ...patch }) });
+        assert.equal(response.status, 400);
+        assert.ok((await response.json() as { error: string }).error);
+      }
+    }
+    await request(`/v1/routines/${created.id}`, { method: 'PUT', body: JSON.stringify({ scheduleKind: 'cron', cronExpression: '30 9 * * 1-5', timezone: 'Asia/Tokyo' }) });
+    const routine = (await request('/v1/routines')).routines.find((item: any) => item.id === created.id);
+    assert.equal(routine.schedule_kind, 'cron');
+    assert.equal(routine.cron_expression, '30 9 * * 1-5');
+    assert.equal(routine.timezone, 'Asia/Tokyo');
+    assert.equal(routine.misfire_policy, 'run_once');
+  } finally { await request(`/v1/routines/${created.id}`, { method: 'DELETE' }); }
+});
+
+test('group messages schedule mentions or all speakers and halt/resume controls admission', async () => {
+  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: [{ id: 'msg-a', name: 'Msg A', role: 'Generalist', instructions: '', config: { model: 'mock' } }, { id: 'msg-b', name: 'Msg B', role: 'Generalist', instructions: '', config: { model: 'mock' } }] }) });
+  const group = await request('/v1/conversations', { method: 'POST', body: JSON.stringify({ kind: 'group', members: [{ kind: 'agent', id: 'msg-a' }, { kind: 'agent', id: 'msg-b' }] }) });
+  const post = (body: string) => request(`/v1/conversations/${group.id}/messages`, { method: 'POST', body: JSON.stringify({ body }) });
+  const directed = await post('@msg-a please answer');
+  assert.deepEqual(directed.scheduledRuns.map((r: any) => r.agentId), ['msg-a']);
+  await waitRun(directed.scheduledRuns[0].runId);
+  const all = await post('Everyone, please answer');
+  assert.deepEqual(all.scheduledRuns.map((r: any) => r.agentId).sort(), ['msg-a', 'msg-b']);
+  const halted = await request(`/v1/conversations/${group.id}/halt`, { method: 'POST' });
+  assert.equal(halted.halted, true); assert.equal(typeof halted.stopped, 'number');
+  assert.deepEqual((await post('While halted')).scheduledRuns, []);
+  assert.deepEqual(await request(`/v1/conversations/${group.id}/resume`, { method: 'POST' }), { resumed: true });
+  const resumed = await post('@msg-b resume'); assert.equal(resumed.scheduledRuns[0].agentId, 'msg-b');
+  await waitRun(resumed.scheduledRuns[0].runId);
+});
+
+test('late runner requests cannot revive terminal runs or create pending approvals', async () => {
+  const pairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ name: 'Late events', platform: 'linux' }) });
+  const paired = await request('/v1/runner/pair', { method: 'POST', body: JSON.stringify({ code: pairing.code }) });
+  const headers = { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId };
+  const store = new Store(join(stateDir, 'state.db'));
+  try {
+    for (const state of ['completed', 'failed', 'cancelled', 'interrupted', 'running'] as const) {
+      const id = crypto.randomUUID(), commandId = crypto.randomUUID(), stamp = new Date().toISOString();
+      store.createRun({ id, agent_id: 'late-events', conversation_id: 'late-events', prompt: '', state, session_id: null, parent_run_id: null, depth: 0, created_at: stamp, updated_at: stamp, result: null, error: null });
+      store.db.prepare('INSERT INTO runner_commands VALUES(?,?,?,?,?,?,?,NULL,NULL,NULL)').run(commandId, paired.machineId, 'late-events', 'run', JSON.stringify({ runId: id }), 'leased', stamp);
+      const before = await request('/v1/approvals?state=all');
+      const activeBefore = store.activeCount();
+      for (const type of ['approval.request', 'clarify.request', 'secret.request', 'sudo.request']) {
+        await request(`/v1/runner/commands/${commandId}/events`, { method: 'POST', headers, body: JSON.stringify({ runId: id, eventId: crypto.randomUUID(), event: { type, payload: { request_id: crypto.randomUUID() } } }) });
+        if (state === 'running') {
+          assert.equal(store.getRun(id)?.state, type === 'approval.request' ? 'waiting_approval' : 'waiting_input');
+        } else {
+          assert.equal(store.getRun(id)?.state, state);
+          const after = await request('/v1/approvals?state=all');
+          assert.equal(after.pendingCount, before.pendingCount);
+          assert.equal(after.approvals.length, before.approvals.length);
+          assert.equal(store.activeCount(), activeBefore);
+          assert.equal(store.events(id, 0).at(-1)?.type, type, 'buffered transcript events are retained without changing terminal state');
+          assert.equal(store.pendingInputs(id).length, 0);
+        }
+      }
+      if (state === 'running') {
+        assert.equal((store.db.prepare('SELECT COUNT(*) n FROM approvals WHERE run_id=? AND state=?').get(id, 'pending') as { n: number }).n, 1);
+        store.db.prepare('DELETE FROM approvals WHERE run_id=?').run(id);
+        store.setRun(id, { state: 'completed' });
+      }
+      await request(`/v1/runner/commands/${commandId}/events`, { method: 'POST', headers, body: JSON.stringify({ runId: id, eventId: crypto.randomUUID(), event: { type: 'message.delta', payload: { text: 'trailing output' } } }) });
+      assert.equal(store.events(id, 0).at(-1)?.type, 'message.delta');
+      assert.equal(store.getRun(id)?.state, state === 'running' ? 'completed' : state);
+    }
+  } finally { store.db.close(); }
+});
+
+test('revoking a computer ends the run active on it and frees its execution slot', async () => {
+  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: [{ id: 'remote-r', name: 'Remote R', role: 'Generalist', instructions: '', config: { model: 'mock' } }] }) });
+  const pairing = await request('/v1/machines', { method: 'POST', body: JSON.stringify({ name: 'Revoked VPS', platform: 'linux' }) });
+  const encryption = await generateRunnerKeyPair();
+  const paired = await (await fetch(`${base}/v1/runner/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, encryptionPublicKey: encryption.publicKey, platform: 'linux', capabilities: { container: true, direct: false, desktop: false, virtualDesktop: true, features: ['browser-state-transfer', 'sealed-agent-transfer', 'workspace-tools', 'run-leases', 'scoped-tool-review'] } }) })).json() as { machineId: string; token: string };
+  const runnerHeaders = { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId, 'Content-Type': 'application/json' };
+  const commands = async () => (await (await fetch(`${base}/v1/runner/commands`, { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { runId?: string; sealedTransfer?: { checksum: string } } }> }).commands;
+  const saved = await request('/v1/agents/remote-r/profile');
+  await request('/v1/agents/remote-r/profile', { method: 'PUT', body: JSON.stringify({ ...saved.profile, computer: { ...saved.profile.computer, machineId: paired.machineId, access: 'private', desktop: 'none', reserveMachine: false } }) });
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while ((await request('/v1/agents/remote-r/profile')).profile.computer.machineId !== paired.machineId) {
+    if (Date.now() > deadline) throw new Error('Transfer did not complete.');
+    for (const item of await commands()) if (item.kind === 'import-agent') await request(`/v1/runner/commands/${item.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { checksum: item.payload.sealedTransfer?.checksum, validated: true } }) });
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const run = await request('/v1/runs', { method: 'POST', body: JSON.stringify({ agentId: 'remote-r', prompt: 'remote work that never returns' }) });
+  let leased = false;
+  while (!leased) { if (Date.now() > deadline) throw new Error('Run was not dispatched.'); leased = (await commands()).some(item => item.kind === 'run' && item.payload.runId === run.id); if (!leased) await new Promise(resolve => setTimeout(resolve, 50)); }
+  assert.equal((await request(`/v1/runs/${run.id}`)).state, 'running');
+  const activeBefore = (await request('/v1/health')).activeRuns;
+  await request(`/v1/machines/${paired.machineId}/revoke`, { method: 'POST' });
+  const ended = await waitRun(run.id);
+  assert.equal(ended.state, 'failed'); assert.equal(ended.error, 'Computer was revoked.');
+  assert.ok((await request('/v1/health')).activeRuns <= activeBefore - 1, 'the revoked run no longer holds an execution slot');
+  assert.equal((await fetch(`${base}/v1/runner/commands`, { headers: runnerHeaders })).status, 401);
 });

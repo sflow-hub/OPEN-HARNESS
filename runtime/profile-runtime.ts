@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { copyFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
-import { COMPUTER_TOOL, HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, runToolGrants, type AgentProfile, type ModelChoice, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
+import { COMPUTER_TOOL, HANDOFF_TOOL, MESSAGE_TOOL, ROUTINE_TOOL, TASK_TOOL, runToolGrants, type AgentProfile, type ModelChoice, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
 import { dockerStatusCached, ensureContainerAsync, HermesGateway } from './hermes';
 import { WORKSPACE_TOOL } from '../lib/product';
 import { profileMemory } from './profile-memory';
@@ -18,6 +18,7 @@ export const COORDINATION_TOOLS: ToolInfo[] = [
   { id: GROUP_CHAT_TOOL, name: 'Group conversations', group: 'delegation', description: 'Read and message teammates in shared group conversations.', available: true },
   { id: TASK_TOOL, name: 'Task board', group: 'other', description: 'Read and update assigned board tasks.', available: true },
   { id: HANDOFF_TOOL, name: 'Hand off to another agent', group: 'delegation', description: 'Assign explicit task context to a named agent on a shared team.', available: true },
+  { id: MESSAGE_TOOL, name: 'Post a message', group: 'delegation', description: 'Post an update to the current conversation without starting another run.', available: true },
   { id: ROUTINE_TOOL, name: 'Create a routine', group: 'scheduling', description: 'Schedule work through Open Harness.', available: true },
 ];
 const mockTools: ToolInfo[] = [
@@ -53,11 +54,11 @@ export function runtimeProbe(container: string, input: object): Promise<Record<s
   });
 }
 export function nativeRuntimeProbe(..._input: unknown[]): never { void _input; throw new Error(UNSANDBOXED_COMPUTER_MESSAGE); }
-export async function discoverTools(agentId: string, root: string, profile?: AgentProfile): Promise<ToolCatalog> {
+export async function discoverTools(agentId: string, root: string, profile?: AgentProfile, teamIds: string[] = [], isBusy: () => boolean = () => false, runtime = { dockerStatusCached, ensureContainerAsync, runtimeProbe }): Promise<ToolCatalog> {
   assertSandboxedComputer(profile?.computer);
   if (process.env.OPEN_HARNESS_MOCK === '1') return { source: 'mock', tools: runtimeToolCatalog(mockTools, profile) };
-  const status = await dockerStatusCached(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
-  try { const result = await runtimeProbe(await ensureContainerAsync(agentId, root, profile?.computer), { action: 'catalog' }); return { source: 'runtime', tools: runtimeToolCatalog(result.tools as ToolInfo[], profile) }; }
+  const status = await runtime.dockerStatusCached(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
+  try { const result = await runtime.runtimeProbe(await runtime.ensureContainerAsync(agentId, root, profile?.computer, false, teamIds, isBusy), { action: 'catalog' }); return { source: 'runtime', tools: runtimeToolCatalog(result.tools as ToolInfo[], profile) }; }
   catch (error) { return { source: 'unavailable', tools: [], error: error instanceof Error ? error.message : 'Tool inventory is unavailable.' }; }
 }
 export type PrepareProfileOptions = { cwd?: string; coordinationCommand?: string; controlUrl?: string; controlSocket?: string; idle?: boolean;reviewUnclassified?:boolean };
