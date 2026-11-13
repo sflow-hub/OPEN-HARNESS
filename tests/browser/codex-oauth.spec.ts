@@ -15,12 +15,15 @@ test.beforeEach(async({page,request})=>{
   await page.addInitScript(()=>{localStorage.setItem('open-harness.onboarding.v1','done');localStorage.setItem('open-harness.advanced.v1','on');});
 });
 
+// Provider changes can leave a credential fetch running after the last UI assertion.
+test.afterEach(async({page})=>{await page.unrouteAll({behavior:'wait'});});
+
 async function authFixture(page:Page){
   const state={connected:false,declined:false};
   await page.route('**/v1/credentials',async route=>{if(route.request().method()!=='GET')return route.continue();const response=await route.fetch();const value=await response.json();return route.fulfill({json:{...value,credentials:[...value.credentials,...(state.connected?[account]:[])]}});});
   await page.route('**/v1/codex/auth',route=>route.fulfill({json:{id:'fixture-flow',authorizationUrl:'https://auth.openai.com/api/accounts/authorize?state=fixture-flow',callbackUrl:'http://127.0.0.1:4317/auth/callback',expiresAt:Date.now()+600000}}));
   await page.route('**/v1/codex/auth/fixture-flow',route=>route.fulfill({json:state.declined?{state:'error',message:'ChatGPT plan usage was not authorized.'}:state.connected?{state:'connected',credentialRef:account.ref,message:'ChatGPT is connected.'}:{state:'waiting'}}));
-  await page.route('**/v1/models?**',route=>new URL(route.request().url()).searchParams.get('provider')==='openai-codex'?route.fulfill({json:{models:state.connected?['fixture-codex-model']:[],error:state.connected?undefined:'Sign in with ChatGPT to load models for your account.'}}):route.continue());
+  await page.route('**/v1/models?**',route=>{const query=new URL(route.request().url()).searchParams;if(query.get('provider')!=='openai-codex')return route.continue();const connected=state.connected&&query.get('credentialRef')===account.ref;return route.fulfill({json:{models:connected?['fixture-codex-model']:[],error:connected?undefined:'Sign in with ChatGPT to load models for your account.'}});});
   return state;
 }
 
@@ -57,6 +60,7 @@ test('workspace model chooses Codex OAuth, loads account models, and tests the s
   if(isMobile)await page.getByRole('button',{name:'Open navigation'}).click();await page.getByRole('button',{name:/Settings/}).first().click();
   const settings=page.getByRole('dialog').filter({has:page.getByRole('heading',{name:'Workspace settings',exact:true})});await settings.getByRole('combobox',{name:'Provider',exact:true}).selectOption('openai-codex');
   await settings.getByRole('button',{name:'Sign in with ChatGPT',exact:true}).click();auth.connected=true;
+  await expect(settings.getByRole('button',{name:'Sign in with ChatGPT again',exact:true})).toBeVisible();
   await expect(settings.getByLabel('Available models')).toContainText('fixture-codex-model');await settings.getByLabel('Available models').selectOption('fixture-codex-model');
   const sent=page.waitForRequest(request=>request.url().endsWith('/v1/onboarding/model-test'));
   await page.route('**/v1/onboarding/model-test',route=>{const input=route.request().postDataJSON();return route.fulfill({json:{ok:true,message:'Fixture model completed.',model:input.model,revision:input.revision+1}});});

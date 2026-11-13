@@ -30,19 +30,11 @@ const soak = soakMode(process.argv.slice(2));
 const buildRuntime = process.env.OPEN_HARNESS_COMPOSE_BUILD_RUNTIME === '1';
 assert.ok(configOnly || process.env.OPEN_HARNESS_COMPOSE_SMOKE === '1', 'Set OPEN_HARNESS_COMPOSE_SMOKE=1 to build and run the isolated Compose stack.');
 assert.notEqual(process.env.OPEN_HARNESS_MOCK, '1', 'Compose acceptance must exercise real Hermes.');
-// Emulated AMD64 only: `packet.py acceptance-launch --browser-overrides emulated-amd64` sets this marker, and the two
-// private-desktop helper execs then get the direct Chromium binary and flags of that reviewed profile. Unset keeps
-// every exec unchanged.
+// Retain the emulated AMD64 marker for its timing allowances. Desktop checks now reuse
+// the coordinator's canonical browser; the helper no longer launches an overridden browser.
 const browserOverrides = process.env.OPEN_HARNESS_BROWSER_OVERRIDES;
 assert.ok(browserOverrides === undefined || browserOverrides === 'emulated-amd64', 'OPEN_HARNESS_BROWSER_OVERRIDES may only be emulated-amd64.');
 const desktopHelper = ['python', '/workspace/exchange/compose-desktop.py'];
-const helperEnvironment = { AGENT_BROWSER_EXECUTABLE_PATH: '/usr/lib/chromium/chromium', AGENT_BROWSER_ARGS: '--force-renderer-accessibility,--disable-gpu,--no-zygote,--disable-dev-shm-usage' };
-let helperOverrides = 0;
-const execOverrides = args => {
-  if (!browserOverrides || args.length !== desktopHelper.length || args.some((arg, index) => arg !== desktopHelper[index])) return [];
-  helperOverrides += 1;
-  return Object.entries(helperEnvironment).flatMap(([name, value]) => ['-e', `${name}=${value}`]);
-};
 // Emulated AMD64 only: the coordinator starts each agent container with synchronous Docker CLI calls (runtime/hermes.ts
 // ensureContainer, at most 147 s by their own limits in Compose) and cannot answer its API until they return. Under QEMU
 // user mode they outlast the native 15 s request budget, so the marker allows 180 s per API request and 600 s per run
@@ -449,9 +441,9 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
   assert.ok(waiting.run.pendingInputs.length); assert.equal(await nestedRunning(), true);
   const peerRun = await api('/v1/runs', 'POST', { agentId: otherId, prompt: 'COMPOSE_SHUTDOWN: Keep the second private desktop alive for isolation checks.' });
   await waitRun(peerRun, { waitForInput: true });
-  const nested = (id, args, timeout) => dc(['exec', '-T', 'docker', 'docker', 'exec', ...execOverrides(args), `open-harness-${id}`, ...args], timeout);
+  const nested = (id, args, timeout) => dc(['exec', '-T', 'docker', 'docker', 'exec', `open-harness-${id}`, ...args], timeout);
   const desktopPaths = id => desktopResourcePaths(id, '/data', id === agentId ? saved.profile.computer : peerSaved.profile.computer);
-  const nestedDesktop = (id, args, timeout) => dc(['exec', '-T', 'docker', 'docker', 'exec', ...execOverrides(args), '-e', 'AGENT_BROWSER_PROFILE=/tmp/compose-browser-fixture', desktopPaths(id).name, ...args], timeout);
+  const nestedDesktop = (id, args, timeout) => dc(['exec', '-T', 'docker', 'docker', 'exec', desktopPaths(id).name, ...args], timeout);
   // The shared runtime image creates empty execution directories; only execution containers mount agent data there.
   const desktopIsolationProbe = String.raw`
 import os
@@ -613,8 +605,8 @@ for name in ['/workspace/private', '/workspace/shared']:
   evidence = { ok: true, mode: 'real Compose stack and pinned Hermes with scripted completion fixture; not model reasoning', project, restoreProject, root, deployment, packaged, coordinatorImage, image: HERMES_IMAGE, providerIp, dashboardCsp: true, authenticatedApi: true, browserPairing: { required: true, invalidDenied: true, expiredDenied: true, replayDenied: true }, hostFolderPermissions, explicitHostFolders: { physicalPathsContainSpaces: true, readOnlyCeiling: true, selectedAgentWrite: true, otherAgentDenied: true, unexportedPathsDenied: true }, savedCredentialRotation: true, teamTaskPersistence: true, localBootstrap: true, forgedHostDenied: true, nestedBootstrapDenied: nestedBootstrap, privateDockerTcp: tcp, identity, agentMounts, fileTool: true, clarification: true, taskMcp: true, deniedTerminal: true, freshSessionContext: true, replayStable: true, restartPersistence: true, gracefulAgentCleanup: true, privateDesktop: desktop, twoAgentDesktopIsolation: true, sharedFilesPreserved: true, backupRestore: { destinationWasEmpty: true, stoppedFileOwnerModeHashesEqual: true, entries: restoredManifest.length, profiles: true, credentialsUsedByRealRun: true, privateFiles: true, sharedFiles: true, memory: true, skills: true, tasks: true, history: true, interruptedRunsNotReplayed: true, freshEngineCache: true }, firstRun: first.id, followupRun: second.id, restoredRun: restoredRun.run.id };
   if (soakResult) evidence.soak = soakResult;
   if (browserOverrides) {
-    evidence.mode = `emulated AMD64 with browser overrides: ${evidence.mode}`;
-    evidence.browserOverrides = { profile: browserOverrides, execEnvironment: helperEnvironment, desktopHelperExecs: helperOverrides };
+    evidence.mode = `emulated AMD64 with timing allowances and canonical managed browser: ${evidence.mode}`;
+    evidence.browserOverrides = { profile: browserOverrides, browser: 'canonical managed browser', helperBrowserLaunches: 0, timingAllowancesOnly: true };
     evidence.emulatedTiming = { ...timing, overNativeBudget, retriedReads };
   }
 } catch (error) { failure = error; }
