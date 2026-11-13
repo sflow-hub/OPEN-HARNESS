@@ -61,6 +61,15 @@ async function openAgent(page: Page, name: string, isMobile: boolean) {
   await expect(page.getByRole('textbox', { name: `Message ${name}` })).toBeVisible();
 }
 
+async function delayedScribeHistory(page: Page) {
+  const pending = gate();
+  const state = await fixture(page, { ...initialWorkspace, conversations: [{ id: 'cached-scribe', agentId: 'scribe', title: 'Saved writing task', updatedAt: '2026-01-01T00:00:00.000Z', messages: [{ id: 'cached-reply', role: 'assistant', content: 'Earlier saved writing.', settled: true }] }] });
+  const run: PersistentRun = { id: 'newer-scribe-run', agent_id: 'scribe', conversation_id: 'newer-scribe', prompt: 'Writing from another client', state: 'completed', result: 'The latest writing is ready.' };
+  state.history = [{ id: run.conversation_id, agentId: 'scribe', title: run.prompt, updatedAt: '2026-02-01T00:00:00.000Z', runs: [run] }];
+  state.before = async path => { if (path === '/v1/conversations') await pending.promise; };
+  return { pending, state };
+}
+
 test('shows connecting while cached conversations remain usable', async ({ page, isMobile }) => {
   const pending = gate();
   const state = await fixture(page, { ...initialWorkspace, conversations: [{ id: 'cached', agentId: 'atlas', title: 'Saved notes', updatedAt: new Date().toISOString(), messages: [{ id: 'saved', role: 'assistant', content: 'Your saved work is still here.', settled: true }] }] });
@@ -133,6 +142,95 @@ test('choosing a new conversation cancels pending restoration of an agent histor
   await expect(page.getByText('Refreshing conversations…')).toHaveCount(0);
   await expect(page.locator('.transcript .message')).toHaveCount(0);
   await expect(page.getByRole('textbox', { name: 'Message Scribe' })).toHaveValue('Start a separate writing task.');
+});
+
+test('opening an agent refreshes its cached latest conversation without discarding the draft', async ({ page, isMobile }) => {
+  const { pending } = await delayedScribeHistory(page);
+  try {
+    await page.goto(`/?controlPort=${port}`);
+    await openAgent(page, 'Scribe', isMobile);
+    await expect(page.locator('.transcript')).toContainText('Earlier saved writing.');
+    await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Continue editing the introduction.');
+  } finally { pending.release(); }
+  await expect(page.locator('.transcript')).toContainText('The latest writing is ready.');
+  await expect(page.getByRole('textbox', { name: 'Message Scribe' })).toHaveValue('Continue editing the introduction.');
+});
+
+test('an agent refresh follows coordinator history order when a cached chat has newer remote activity', async ({ page, isMobile }) => {
+  const { pending, state } = await delayedScribeHistory(page);
+  const resumed: PersistentRun = { id: 'resumed-scribe-run', agent_id: 'scribe', conversation_id: 'cached-scribe', prompt: 'Resume the earlier writing', state: 'completed', result: 'The earlier chat now has the latest result.' };
+  state.history.unshift({ id: resumed.conversation_id, agentId: 'scribe', title: 'Saved writing task', updatedAt: '2026-03-01T00:00:00.000Z', runs: [resumed] });
+  try {
+    await page.goto(`/?controlPort=${port}`);
+    await openAgent(page, 'Scribe', isMobile);
+  } finally { pending.release(); }
+  await expect(page.locator('.transcript')).toContainText('The earlier chat now has the latest result.');
+  await expect(page.locator('.transcript')).not.toContainText('The latest writing is ready.');
+});
+
+test('an agent keeps its pending history selection through a failed request and retry', async ({ page, isMobile }) => {
+  const { pending } = await delayedScribeHistory(page), failure = gate();
+  let attempts = 0;
+  await page.route(`${control}/v1/conversations`, async route => {
+    if (++attempts > 1) return route.fallback();
+    await failure.promise;
+    await route.fulfill({ status: 503, headers, json: { error: 'History is temporarily unavailable.' } });
+  });
+  try {
+    await page.goto(`/?controlPort=${port}`);
+    await openAgent(page, 'Scribe', isMobile);
+    await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Keep this draft through reconnection.');
+    failure.release();
+    await expect(page.getByText('History is temporarily unavailable.', { exact: false }).first()).toBeVisible();
+    await expect.poll(() => attempts).toBe(2);
+  } finally { failure.release(); pending.release(); }
+  await expect(page.locator('.transcript')).toContainText('The latest writing is ready.');
+  await expect(page.getByRole('textbox', { name: 'Message Scribe' })).toHaveValue('Keep this draft through reconnection.');
+});
+
+test('explicitly selecting the cached conversation cancels a pending latest-chat refresh', async ({ page, isMobile }) => {
+  const { pending } = await delayedScribeHistory(page);
+  try {
+    await page.goto(`/?controlPort=${port}`);
+    await openAgent(page, 'Scribe', isMobile);
+    if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+    await page.locator('aside.sidebar .recent', { hasText: 'Saved writing task' }).click();
+    await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Keep working in this saved chat.');
+  } finally { pending.release(); }
+  await expect(page.getByText('Refreshing conversations…')).toHaveCount(0);
+  await expect(page.locator('.transcript')).toContainText('Earlier saved writing.');
+  await expect(page.locator('.transcript')).not.toContainText('The latest writing is ready.');
+  await expect(page.getByRole('textbox', { name: 'Message Scribe' })).toHaveValue('Keep working in this saved chat.');
+});
+
+test('sending in the cached conversation cancels a pending latest-chat refresh', async ({ page, isMobile }) => {
+  const { pending, state } = await delayedScribeHistory(page);
+  try {
+    await page.goto(`/?controlPort=${port}`);
+    await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
+    await openAgent(page, 'Scribe', isMobile);
+    await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Continue this saved writing task.');
+    await page.getByRole('button', { name: 'Send message' }).click();
+    await expect.poll(() => state.submissions).toBe(1);
+    expect(state.runs[0].conversation_id).toBe('cached-scribe');
+  } finally { pending.release(); }
+  await expect(page.getByText('Refreshing conversations…')).toHaveCount(0);
+  await expect(page.locator('.transcript')).toContainText('Earlier saved writing.');
+  await expect(page.locator('.transcript')).toContainText('Continue this saved writing task.');
+  await expect(page.locator('.transcript')).not.toContainText('The latest writing is ready.');
+});
+
+test('selecting another agent supersedes a pending cached-history refresh', async ({ page, isMobile }) => {
+  const { pending } = await delayedScribeHistory(page);
+  try {
+    await page.goto(`/?controlPort=${port}`);
+    await openAgent(page, 'Scribe', isMobile);
+    await openAgent(page, 'Scout', isMobile);
+    await page.getByRole('textbox', { name: 'Message Scout' }).fill('Keep this research draft.');
+  } finally { pending.release(); }
+  await expect(page.getByText('Refreshing conversations…')).toHaveCount(0);
+  await expect(page.locator('.transcript .message')).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Message Scout' })).toHaveValue('Keep this research draft.');
 });
 
 test('shows sending before acceptance, prevents duplicates, and preserves a newer draft', async ({ page, isMobile }) => {

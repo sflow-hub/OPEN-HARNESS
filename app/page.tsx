@@ -166,6 +166,7 @@ export default function Home() {
   const [retiredTeams, setRetiredTeams] = useState<Team[]>([]);
   const [ready, setReady] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(true);
+  const [latestAgentHistory, setLatestAgentHistory] = useState<Record<string, string> | null>(null);
   const [view, setView] = useState<View>("assistant");
   const navigated = useRef(false);
   const pendingAgentHistory = useRef<string | null>(null);
@@ -257,6 +258,14 @@ export default function Home() {
   const submitting = conversationId ? submissions[conversationId] : undefined;
   const composerRef = useRef({ conversationId, agentId: agent.id, view });
   useLayoutEffect(() => { composerRef.current = { conversationId, agentId: agent.id, view }; }, [conversationId, agent.id, view]);
+  useEffect(() => {
+    const requestedAgent = pendingAgentHistory.current;
+    if (loadingHistory || !latestAgentHistory || !requestedAgent || view !== 'chat' || selectedAgent !== requestedAgent) return;
+    // Resolve after history and navigation commit, including a click that overtakes the history render.
+    pendingAgentHistory.current = null;
+    const latest = latestAgentHistory[requestedAgent] || workspace.conversations.find(item => item.agentId === requestedAgent)?.id;
+    if (latest) setConversationId(latest);
+  }, [loadingHistory, latestAgentHistory, workspace.conversations, selectedAgent, view]);
   const file = workspace.files.find((f) => f.id === selectedFile);
   // The deterministic adapter exists for automated tests only. Treating it as a
   // connected runtime let a source preview display canned prose as an agent reply.
@@ -491,6 +500,7 @@ export default function Home() {
       const epoch = ++connectionEpoch;
       const isCurrent = () => !cancelled && epoch === connectionEpoch;
       setLoadingHistory(true);
+      setLatestAgentHistory(null);
       // The launcher opens http://localhost:3000/#pair=<code>. The code is read once, taken
       // out of the address bar before anything else happens, and exchanged only with this
       // page's own coordinator. A browser that already holds a token keeps working even if
@@ -558,13 +568,6 @@ export default function Home() {
             hydrateHistory(history.conversations);
             const liveNow = runs.filter(run => !run.parent_run_id && isLiveRun(run));
             for (const run of liveNow) attachRun(run);
-            // Opening an agent before history arrives still means its latest chat; an explicit new chat or later navigation wins.
-            const requestedAgent = pendingAgentHistory.current, composer = composerRef.current;
-            pendingAgentHistory.current = null;
-            if (requestedAgent && composer.view === 'chat' && composer.agentId === requestedAgent && !composer.conversationId) {
-              const latest = history.conversations.find(item => item.agentId === requestedAgent && item.runs.some(run => !run.parent_run_id));
-              setConversationId(latest?.id || liveNow.find(run => run.agent_id === requestedAgent)?.conversation_id || null);
-            }
             // A late response may reattach work, but must not undo the user's navigation.
             if (liveNow[0] && !navigated.current) {
               setSelectedAgent(liveNow[0].agent_id);
@@ -577,6 +580,10 @@ export default function Home() {
               attachRun(notified); setSelectedAgent(notified.agent_id); setConversationId(notified.conversation_id); setView("chat");
               const clean = new URL(window.location.href); clean.searchParams.delete("run"); window.history.replaceState(null, "", clean);
             }
+            const latest: Record<string, string> = Object.create(null);
+            for (const item of history.conversations) if (item.runs.some(run => !run.parent_run_id)) latest[item.agentId] ||= item.id;
+            for (const run of liveNow) latest[run.agent_id] ||= run.conversation_id;
+            setLatestAgentHistory(latest);
             setLoadingHistory(false);
           }),
         ]);
@@ -844,7 +851,7 @@ export default function Home() {
 
   function openAgent(id: string, fresh = false) {
     const latest = fresh ? null : workspace.conversations.find((c) => c.agentId === id)?.id || null;
-    pendingAgentHistory.current = loadingHistory && !fresh && !latest ? id : null;
+    pendingAgentHistory.current = loadingHistory && !fresh ? id : null;
     setSelectedAgent(id);
     setView("chat");
     setMobileOpen(false);
@@ -852,6 +859,7 @@ export default function Home() {
     setConversationId(latest);
   }
   function openTaskRun(run: PersistentRun, title: string) {
+    pendingAgentHistory.current = null;
     attachRun(run, title);
     setSelectedAgent(run.agent_id);
     setConversationId(run.conversation_id);
@@ -1078,6 +1086,7 @@ export default function Home() {
     if (sending.current.has(cid)) return;
     const agentId = agent.id;
     const beginSending = (label: string) => {
+      pendingAgentHistory.current = null;
       sending.current.add(cid);
       setSubmissions(current => ({ ...current, [cid]: label }));
     };
@@ -1437,6 +1446,7 @@ export default function Home() {
                   className={`recent ${c.id === conversationId && view === "chat" ? "selected" : ""}`}
                   key={c.id}
                   onClick={() => {
+                    pendingAgentHistory.current = null;
                     setSelectedAgent(c.agentId);
                     setConversationId(c.id);
                     setView("chat");
