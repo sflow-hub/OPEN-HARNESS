@@ -190,7 +190,7 @@ async function volumeArchive(volume, restore = false) {
   } finally { clearTimeout(timer); }
 }
 
-let token, endpoint, firstSnapshot, followupSnapshot, evidence;
+let token, endpoint, firstSnapshot, followupSnapshot, evidence, hostFolderPermissions;
 const snapshots = [];
 const publishedEndpoints = [];
 async function refreshEndpoint() {
@@ -277,6 +277,32 @@ try {
   catch { await command(docker, ['pull', config.services.docker.image], 5 * 60_000); }
   projects.add(project);
   await dc(['up', '-d', '--wait', '--wait-timeout', '180', '--no-build', '--pull', 'never', 'docker', 'open-harness', 'fixture'], 210_000);
+  const hostFolderSnapshot = String.raw`
+import assert from 'node:assert/strict'; import fs from 'node:fs';
+const folders = Object.fromEntries(['/host-folders/fixture-ro', '/host-folders/fixture-rw'].map(path => {
+  const info = fs.lstatSync(path); assert.ok(info.isDirectory() && !info.isSymbolicLink(), 'Fixture export must be a real directory: ' + path);
+  return [path, { uid: info.uid, gid: info.gid, mode: info.mode & 0o7777 }];
+}));
+console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), folders }));
+`;
+  hostFolderPermissions = { before: await nodeIn('open-harness', hostFolderSnapshot) };
+  assert.equal(hostFolderPermissions.before.uid, 1000); assert.equal(hostFolderPermissions.before.gid, 1000);
+  // This nonce-owned export must be writable by the Compose user even when the host test runner has another UID.
+  await dc(['exec', '-T', '--user', '0:0', 'docker', 'chown', '1000:1000', '/host-folders/fixture-rw']);
+  hostFolderPermissions.after = await nodeIn('open-harness', hostFolderSnapshot);
+  assert.deepEqual(hostFolderPermissions.after.folders['/host-folders/fixture-ro'], hostFolderPermissions.before.folders['/host-folders/fixture-ro'], 'Writable fixture setup must not change the read-only export.');
+  assert.deepEqual(hostFolderPermissions.after.folders['/host-folders/fixture-rw'], { ...hostFolderPermissions.before.folders['/host-folders/fixture-rw'], uid: 1000, gid: 1000 }, 'Only the writable export root ownership may change.');
+  const hostWriteProbe = String.raw`
+import assert from 'node:assert/strict'; import { randomUUID } from 'node:crypto'; import fs from 'node:fs';
+const path = '/host-folders/fixture-rw/.compose-permission-' + randomUUID(), marker = 'COMPOSE_WRITE_PREFLIGHT_729';
+const fd = fs.openSync(path, 'wx', 0o600);
+try { fs.writeFileSync(fd, marker); assert.equal(fs.readFileSync(path, 'utf8'), marker); }
+finally { try { fs.closeSync(fd); } finally { fs.unlinkSync(path); } }
+assert.equal(fs.existsSync(path), false, 'The fixture permission probe must be removed.');
+console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), writeReadDelete: true }));
+`;
+  hostFolderPermissions.preflight = await nodeIn('open-harness', hostWriteProbe);
+  assert.deepEqual(hostFolderPermissions.preflight, { uid: 1000, gid: 1000, writeReadDelete: true });
   if (!buildRuntime && !pullRuntime) {
     console.log('Loading the pinned Hermes image into the private nested daemon.');
     await loadNestedImage();
@@ -584,7 +610,7 @@ for name in ['/workspace/private', '/workspace/shared']:
       },
     });
   }
-  evidence = { ok: true, mode: 'real Compose stack and pinned Hermes with scripted completion fixture; not model reasoning', project, restoreProject, root, deployment, packaged, coordinatorImage, image: HERMES_IMAGE, providerIp, dashboardCsp: true, authenticatedApi: true, browserPairing: { required: true, invalidDenied: true, expiredDenied: true, replayDenied: true }, explicitHostFolders: { physicalPathsContainSpaces: true, readOnlyCeiling: true, selectedAgentWrite: true, otherAgentDenied: true, unexportedPathsDenied: true }, savedCredentialRotation: true, teamTaskPersistence: true, localBootstrap: true, forgedHostDenied: true, nestedBootstrapDenied: nestedBootstrap, privateDockerTcp: tcp, identity, agentMounts, fileTool: true, clarification: true, taskMcp: true, deniedTerminal: true, freshSessionContext: true, replayStable: true, restartPersistence: true, gracefulAgentCleanup: true, privateDesktop: desktop, twoAgentDesktopIsolation: true, sharedFilesPreserved: true, backupRestore: { destinationWasEmpty: true, stoppedFileOwnerModeHashesEqual: true, entries: restoredManifest.length, profiles: true, credentialsUsedByRealRun: true, privateFiles: true, sharedFiles: true, memory: true, skills: true, tasks: true, history: true, interruptedRunsNotReplayed: true, freshEngineCache: true }, firstRun: first.id, followupRun: second.id, restoredRun: restoredRun.run.id };
+  evidence = { ok: true, mode: 'real Compose stack and pinned Hermes with scripted completion fixture; not model reasoning', project, restoreProject, root, deployment, packaged, coordinatorImage, image: HERMES_IMAGE, providerIp, dashboardCsp: true, authenticatedApi: true, browserPairing: { required: true, invalidDenied: true, expiredDenied: true, replayDenied: true }, hostFolderPermissions, explicitHostFolders: { physicalPathsContainSpaces: true, readOnlyCeiling: true, selectedAgentWrite: true, otherAgentDenied: true, unexportedPathsDenied: true }, savedCredentialRotation: true, teamTaskPersistence: true, localBootstrap: true, forgedHostDenied: true, nestedBootstrapDenied: nestedBootstrap, privateDockerTcp: tcp, identity, agentMounts, fileTool: true, clarification: true, taskMcp: true, deniedTerminal: true, freshSessionContext: true, replayStable: true, restartPersistence: true, gracefulAgentCleanup: true, privateDesktop: desktop, twoAgentDesktopIsolation: true, sharedFilesPreserved: true, backupRestore: { destinationWasEmpty: true, stoppedFileOwnerModeHashesEqual: true, entries: restoredManifest.length, profiles: true, credentialsUsedByRealRun: true, privateFiles: true, sharedFiles: true, memory: true, skills: true, tasks: true, history: true, interruptedRunsNotReplayed: true, freshEngineCache: true }, firstRun: first.id, followupRun: second.id, restoredRun: restoredRun.run.id };
   if (soakResult) evidence.soak = soakResult;
   if (browserOverrides) {
     evidence.mode = `emulated AMD64 with browser overrides: ${evidence.mode}`;
@@ -593,7 +619,7 @@ for name in ['/workspace/private', '/workspace/shared']:
   }
 } catch (error) { failure = error; }
 finally {
-  save('diagnostics.json', { error: failure ? String(failure.stack || failure) : null, runtimeSetup, publishedEndpoints, snapshots, ...(browserOverrides ? { emulatedTiming: { ...timing, overNativeBudget, retriedReads } } : {}) });
+  save('diagnostics.json', { error: failure ? String(failure.stack || failure) : null, runtimeSetup, hostFolderPermissions, publishedEndpoints, snapshots, ...(browserOverrides ? { emulatedTiming: { ...timing, overNativeBudget, retriedReads } } : {}) });
   if (token && endpoint && failure) for (const name of ['compose-browser.png', 'compose-desktop.png']) {
     try { const file = await api(`/v1/files?scope=shared&name=${name}`); writeFileSync(join(root, name), Buffer.from(file.content, 'base64')); }
     catch { /* the desktop or coordinator may not have started */ }

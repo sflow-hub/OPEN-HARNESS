@@ -44,6 +44,8 @@ The coordinator runs as UID/GID `1000:1000`. Its privileged `docker` sidecar lis
 
 No host folders are exported by default. Copy `compose.host-folders.example.yaml`, replace its example source with an existing physical folder, and pass the edited file explicitly with `docker compose -f compose.yaml -f <your-override.yaml>` for every lifecycle command. Both outer services must mount the same folder at the same `/host-folders/<name>` path with the same read-only setting. Stop the stack before changing these mounts. Grant only an exact exported mount root; to share a subfolder, export it separately in both services first. Then grant that exported path to a specific agent in **Agent settings → Computer → Selected folders**. The UI cannot grant paths outside the exports or make a read-only export writable. On Docker Desktop, grant Docker access to only the physical folders you select.
 
+On Linux, the host folder's filesystem permissions must already allow UID/GID `1000:1000` the requested access; a write grant does not override operating-system permissions.
+
 ## Update
 
 Back up first and stop the stack. For an extracted source archive, extract the new source
@@ -62,7 +64,7 @@ docker compose ps
 
 Database migrations run when the coordinator starts. Existing SQLite state, credentials, profiles, and the private container engine remain in named volumes.
 
-The current source requires runtime contract 7. It refreshes the runtime base and dependency packages, keeps confirmed desktop initialization for selected-folder startup, and enables the private desktop's accessibility bus before applications launch, including browsers opened before the first computer-control call. If Readiness reports **Update agent runtime**, run runtime setup from the dashboard before starting agents. Rebuilding the coordinator alone does not rebuild the image inside the private engine. A policy-only patch cannot upgrade an older full runtime.
+The current source requires runtime contract 9. It refreshes the runtime base and dependency packages, keeps confirmed desktop initialization for selected-folder startup, and enables the private desktop's accessibility bus before applications launch, including browsers opened before the first computer-control call. If Readiness reports **Update agent runtime**, run runtime setup from the dashboard before starting agents. Rebuilding the coordinator alone does not rebuild the image inside the private engine. A policy-only patch cannot upgrade an older full runtime.
 
 To roll back, stop the stack and restore the backup taken before the update into empty volumes, then start the previous release. Do not run older code against a state volume that has already been opened by a newer release.
 
