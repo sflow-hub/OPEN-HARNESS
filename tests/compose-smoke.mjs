@@ -354,7 +354,7 @@ try {
     const refused = await fetch(endpoint + `/api/local/v1/agents/${agentId}/profile`, { method: 'PUT', signal: AbortSignal.timeout(15_000), headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...profile, computer: { ...profile.computer, access: 'folders', folders: [grant] } }) });
     assert.equal(refused.status, 400, 'An agent cannot widen a read-only export or grant an unexported host path/descendant.');
   }
-  const saved = await api(`/v1/agents/${agentId}/profile`, 'PUT', { ...profile, model: { inherit: false, provider: 'local', model: 'compose-fixture', baseUrl, credentialRef: 'COMPOSE_FIXTURE_KEY' }, allowedTools: ['write_file', 'clarify', 'mcp__open_harness__task', 'computer_use'], computer: { ...profile.computer, access: 'folders', folders, desktop: 'virtual' } });
+  const saved = await api(`/v1/agents/${agentId}/profile`, 'PUT', { ...profile, model: { inherit: false, provider: 'local', model: 'compose-fixture', baseUrl, credentialRef: 'COMPOSE_FIXTURE_KEY' }, allowedTools: ['write_file', 'clarify', 'mcp__open_harness__task', 'mcp__open_harness__computer'], computer: { ...profile.computer, access: 'folders', folders, desktop: 'virtual' } });
   const { profile: peerProfile } = await api(`/v1/agents/${otherId}/profile`);
   const peerSaved = await api(`/v1/agents/${otherId}/profile`, 'PUT', { ...peerProfile, model: saved.profile.model, allowedTools: saved.profile.allowedTools, computer: { ...peerProfile.computer, desktop: 'virtual' } });
   const contextPath = `/v1/agents/${agentId}/context`, skillPath = `${contextPath}/skills/compose-restore`;
@@ -396,7 +396,7 @@ try {
   assert.ok(requests.every(request => request.fixtureCredential !== 'invalid'), 'Every real provider request must resolve the saved credential.');
   const mainRequests = requests.filter(body => body.tools?.some(tool => tool.function?.name === 'write_file') && body.messages?.some(message => String(message.content).includes('COMPOSE_SMOKE')));
   assert.ok(mainRequests.length >= 5);
-  for (const body of mainRequests) assert.ok(body.tools.every(tool => ['write_file', 'clarify', 'mcp__open_harness__task', 'computer_use'].includes(tool.function?.name)));
+  for (const body of mainRequests) assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), ['clarify', 'mcp__open_harness__computer', 'mcp__open_harness__task', 'write_file'], 'Only the four explicitly granted tools may be model-visible.');
   assert.ok(mainRequests.some(body => body.messages.some(message => message.role === 'tool' && message.tool_call_id === 'compose-terminal' && /tool_disabled|does not exist/.test(String(message.content)))), 'Ungrantable fixture tool calls must be rejected by the real dispatch policy.');
   console.log('Restarting the coordinator and checking durable state.');
   await dc(['restart', 'open-harness'], 45_000);
