@@ -17,3 +17,16 @@ test-results
 work
 *.log
 *.tsbuildinfo
+
+# Private collaboration history and portable repositories are not application assets.
+COORDINATION.md
+Claude outputs
+*.bundle
+**/node_modules
+apps/mobile/dist
+apps/mobile/.expo
+deploy/control-plane/config.json
+deploy/control-plane/private.env
+deploy/control-plane/secrets
+artifacts
+dist *

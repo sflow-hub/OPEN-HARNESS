@@ -45,7 +45,8 @@ test('scopes task assignment choices to the selected team', async ({ page, reque
   const teamName = `Task crew ${Date.now()}`;
   await request.post(control + '/v1/teams', { headers, data: { name: teamName, description: '', color: 'sage', icon: 'people', memberAgentIds: ['atlas', 'scout'] } });
   await page.reload();
-  await page.getByRole('button', { name: 'Tasks' }).click();
+  if (await page.getByRole('button', { name: 'Open navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: 'Tasks',exact:true }).click();
   await page.getByRole('button', { name: 'New task' }).click();
   const drawer = page.locator('.task-drawer');
   await drawer.getByLabel('Team').selectOption({ label: teamName });

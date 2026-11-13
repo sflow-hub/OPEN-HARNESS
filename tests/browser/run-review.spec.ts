@@ -1,0 +1,23 @@
+import { test, expect } from '@playwright/test';
+import { initialWorkspace } from '../../lib/types';
+const control = `http://127.0.0.1:${process.env.OPEN_HARNESS_TEST_PORT || 4317}`;
+test('notification opens the completed task for an evidence-backed operator review', async ({ page, request }, testInfo) => {
+  const { token } = await (await request.get(`${control}/v1/bootstrap`)).json(), headers = { Authorization: `Bearer ${token}` };
+  await request.post(`${control}/v1/agents/sync`, { headers, data: { agents: initialWorkspace.agents } });
+  const run = await (await request.post(`${control}/v1/runs`, { headers, data: { agentId: 'atlas', prompt: `Review fixture ${testInfo.project.name}`, conversationId: crypto.randomUUID() } })).json();
+  await expect.poll(async () => (await (await request.get(`${control}/v1/runs/${run.id}`, { headers })).json()).state).toBe('completed');
+  await page.addInitScript(() => { localStorage.setItem('open-harness.onboarding.v1', 'done'); });
+  await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}&run=${run.id}`);
+  await page.getByRole('button', { name: 'Review task result', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review task result' });
+  await expect(review.getByRole('button', { name: 'Accept result' })).toBeDisabled();
+  await review.getByLabel('What did you check?').fill('Opened the output and checked its required fields against the request.');
+  await review.getByRole('button', { name: 'Accept result' }).click();
+  await expect(review.getByRole('status')).toHaveText('Result accepted. Your evidence was saved.');
+  const saved = await (await request.get(`${control}/v1/runs/${run.id}/outcome`, { headers })).json();
+  expect(saved.accepted).toBe(true); expect(saved.evidence).toContain('required fields');
+  expect(new URL(page.url()).searchParams.has('run')).toBe(false);
+  await page.reload();
+  const metrics = await (await request.get(`${control}/v1/metrics`, { headers })).json();
+  expect(metrics.outcomes.accepted).toBeGreaterThan(0);
+});

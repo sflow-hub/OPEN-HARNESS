@@ -1,0 +1,10 @@
+# Use with compose.yaml from the repository root. Requires Compose 2.24.4+.
+services:
+  open-harness:
+    ports: !override
+      - "127.0.0.1:3000:3000"
+    environment:
+      OPEN_HARNESS_PUBLIC_URL: ${OPEN_HARNESS_REMOTE_ORIGIN:?Set the private HTTPS origin}/api/local
+      OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD: "1"
+      OPEN_HARNESS_REQUIRE_BROWSER_PAIRING: "1"
+    restart: unless-stopped

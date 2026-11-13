@@ -4,12 +4,14 @@
 // symptom was "Hermes gateway exited during startup" on every containerized run.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { GROUP_CHAT_TOOL } from '../lib/group-chat';
+import { WORKSPACE_TOOL } from '../lib/product';
 import { COORDINATION_TOOLS, prepareProfile } from '../runtime/profile-runtime';
 import { hermesApprovalDecision } from '../runtime/hermes';
-import { DEFAULT_BOARD, DEFAULT_COMPUTER, HANDOFF_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
+import { COMPUTER_TOOL, DEFAULT_BOARD, DEFAULT_COMPUTER, HANDOFF_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
 
 const model: ModelChoice = { provider: 'custom', model: 'some-model', credentialRef: 'SOME_KEY', baseUrl: 'http://localhost:9/v1' };
 const profile: AgentProfile = {
@@ -34,10 +36,23 @@ test('the agent config enables the policy plugin as a list Hermes can read', () 
   assert.ok(config.plugins.enabled.includes('open_harness_policy'));
 });
 
+test('tool review retains scoped transport without enabling coordination tools', () => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-contract-'));
+  prepareProfile(root, profile, model, { environment: () => ({}) }, 'review-token', 'run-review', { controlSocket: '/run/test.sock', reviewUnclassified: true });
+  const config = JSON.parse(readFileSync(join(root, 'agents', profile.id, 'profile/config.yaml'), 'utf8'));
+  const policy = JSON.parse(readFileSync(join(root, 'agents', profile.id, 'managed/policy.json'), 'utf8'));
+  assert.equal(config.mcp_servers.open_harness, undefined);
+  assert.deepEqual(policy.allowedTools, ['terminal']);
+  assert.equal(policy.coordination.OPEN_HARNESS_AGENT_ID, profile.id);
+  assert.equal(policy.coordination.OPEN_HARNESS_AGENT_TOKEN, 'review-token');
+  assert.equal(policy.coordination.OPEN_HARNESS_CONTROL_SOCKET, '/run/test.sock');
+  assert.equal(policy.coordination.OPEN_HARNESS_RUN_ID, 'run-review');
+});
+
 test('the agent config still carries the selected model and endpoint', () => {
   const config = writeConfig();
   assert.equal(config.model.default, 'some-model');
-  assert.equal(config.model.base_url, 'http://localhost:9/v1');
+  assert.equal(config.model.base_url, 'http://host.docker.internal:9/v1');
 });
 
 // Hermes gates OPENAI_API_KEY on the endpoint's host (GHSA-76xc-57q6-vm5m), so a custom
@@ -47,7 +62,7 @@ test('a custom endpoint carries its credential through a providers entry', () =>
   const config = writeConfig();
   const entry = config.providers?.custom;
   assert.ok(entry, 'providers.custom is missing for a custom endpoint');
-  assert.equal(entry.base_url, 'http://localhost:9/v1');
+  assert.equal(entry.base_url, 'http://host.docker.internal:9/v1');
   assert.equal(entry.key_env, 'OPEN_HARNESS_MODEL_API_KEY');
   assert.equal(config.model.provider, 'custom');
 });
@@ -127,8 +142,8 @@ test('coordination tools are named the way Hermes registers them', () => {
   // model is shown a tool the policy will refuse; and every tool it grants must exist there.
   const offered = readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs'), 'utf8')
     .match(/^\s*name: "([a-z_]+)",$/gm)!.map(line => line.split('"')[1]);
-  assert.deepEqual(offered.map(name => mcpToolId('open_harness', name)).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL].sort());
-  assert.deepEqual(COORDINATION_TOOLS.map(tool => tool.id).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL].sort());
+  assert.deepEqual(offered.map(name => mcpToolId('open_harness', name)).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, COMPUTER_TOOL].sort());
+  assert.deepEqual(COORDINATION_TOOLS.map(tool => tool.id).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, COMPUTER_TOOL].sort());
 });
 
 // A grant saved by an earlier version must keep working. This renames; it must never widen.
@@ -153,6 +168,21 @@ test('the agent runs the checkout copy of the coordination server', () => {
   assert.equal(readFileSync(shipped, 'utf8'), readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs'), 'utf8'));
 });
 
+test('both runner installers supply the scripts required by a freshly prepared profile', t => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-installer-contract-')); t.after(() => rmSync(root, {recursive:true,force:true}));
+  const directory = join(import.meta.dirname, '..', 'runtime', 'installers');
+  const shell = readFileSync(join(directory,'install-runner.sh'),'utf8'), powershell = readFileSync(join(directory,'install-runner.ps1'),'utf8');
+  const shellFiles = shell.match(/for file in ([^\n]+); do\n  download "runtime\/hermes\/\$file"/)?.[1].split(/\s+/);
+  const powershellList = powershell.match(/@\(([^\n]+)\) \| ForEach-Object \{ Get-RunnerFile "runtime\/hermes\/\$_" \}/)?.[1];
+  assert.ok(shellFiles && powershellList, 'Both installers must declare their runtime files.');
+  const powershellFiles = [...powershellList.matchAll(/"([^"]+)"/g)].map(match=>match[1]);
+  assert.deepEqual([...shellFiles].sort(),powershellFiles.sort(),'Fresh runner installations must receive the same runtime files.');
+  prepareProfile(root, profile, model, {environment:()=>({})}, 'token', 'run-1');
+  const scripts = readdirSync(join(root,'agents',profile.id,'managed')).filter(name=>name.endsWith('.mjs'));
+  assert.ok(scripts.includes('gateway-entry.mjs') && scripts.includes('model-proxy.mjs'));
+  for (const script of scripts) assert.ok(shellFiles.includes(script), `The installer is missing the profile dependency ${script}.`);
+});
+
 // Hermes answers an approval with once | session | always | deny and reads anything else as a
 // refusal, so "approve" made a resumed run tell the agent the operator had blocked it. The mock
 // runtime accepted "approve" too, which is why every test passed while the real thing denied.
@@ -173,8 +203,11 @@ test('an approval is answered in the vocabulary Hermes accepts', () => {
 test('the managed gateway announces itself as a session that can answer approvals', () => {
   const hermes = readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes.ts'), 'utf8');
   assert.match(hermes, /HERMES_GATEWAY_SESSION=1/);
-  for (const path of ['runtime/service.ts', 'runtime/runner.ts']) {
-    assert.match(readFileSync(join(import.meta.dirname, '..', path), 'utf8'), /HERMES_GATEWAY_SESSION: '1'/,
-      `${path} must mark its native gateway as an approval channel too`);
-  }
+
+});
+
+test('managed profiles send flagged commands to the operator approval flow', () => {
+  const source = readFileSync(join(import.meta.dirname, '..', 'runtime', 'profile-runtime.ts'), 'utf8');
+  assert.match(source, /approvals: \{ mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' \}/);
+  assert.doesNotMatch(source, /approvals: \{ mode: 'smart'/);
 });

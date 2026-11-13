@@ -1,0 +1,10 @@
+# Packages one architecture's reviewed engine inputs as data. The image is never run.
+# Build it only from a directory that this command reports as clean (exit 0):
+#   node scripts/release-images.mjs check-engine-inputs <dir> <amd64|arm64>
+# Build for that target architecture, recording native or emulated execution,
+# without network, provenance or SBOM attestations:
+#   docker buildx build --platform linux/<arch> --network none --provenance=false --sbom=false \
+#     -f runtime/engine/Dockerfile.inputs <dir>
+# After review, record the pushed single-platform manifest digest as `inputs` in inputs.lock.json.
+FROM scratch
+COPY . /

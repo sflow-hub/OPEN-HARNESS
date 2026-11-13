@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import './docker-path.mjs';
 import { pathToFileURL } from "node:url";
 
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -12,7 +13,7 @@ function dockerReady() {
 }
 
 function startCommand(platform, context) {
-  if (platform === "darwin") return ["open", ["-gja", "Docker"]];
+  if (platform === "darwin") return ["open", ["-gja", "/Applications/Docker.app"]];
   if (platform === "win32") return ["powershell.exe", ["-NoProfile", "-Command", "Start-Process \"$Env:ProgramFiles\\Docker\\Docker\\Docker Desktop.exe\""]];
   if (platform === "linux" && context.startsWith("desktop")) return ["systemctl", ["--user", "start", "docker-desktop.service"]];
   if (platform === "linux") return ["systemctl", ["start", "--no-block", "docker.service"]];

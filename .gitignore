@@ -33,16 +33,24 @@ yarn-error.log*
 .vercel
 next-env.d.ts
 /dist/
+/dist */
+/.wrangler/
 /outputs/
 /work/
+/Claude outputs/
+/*.bundle
 
 !.env.example
 *.tsbuildinfo
-.open-harness*/
+.open-harness*
 
 /test-results/
 /playwright-report/
 /release-assets/
+/deploy/control-plane/config.json
+/deploy/control-plane/private.env
+/deploy/control-plane/secrets/
+/artifacts/acceptance/
 __pycache__/
 /src-tauri/target/
 /src-tauri/binaries/

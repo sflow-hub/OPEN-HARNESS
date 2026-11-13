@@ -1,0 +1,15 @@
+export type WorkspaceRole = 'owner' | 'operator' | 'viewer';
+export const PRIMARY_ASSISTANT_ID = 'openharness-assistant';
+export const WORKSPACE_TOOL = 'mcp__open_harness__workspace';
+export type Actor = { id: string; workspaceId: string; role: WorkspaceRole; source: 'local' | 'oidc' };
+export type Workspace = { id: string; name: string; edition: 'self-hosted' | 'managed'; actor: Actor; retention: { eventsDays: number; auditDays: number; backupsDays: number } };
+export type SetupJob = { id: string; kind: 'start-container-engine' | 'prepare-runtime' | 'verify-task'; state: 'queued' | 'running' | 'completed' | 'interrupted' | 'failed'; detail: string; runId: string | null; createdAt: string; updatedAt: string };
+export type Responsibility = { id: string; agentId: string; title: string; goal: string; state: 'active' | 'paused' | 'completed'; revision: number; nextCheckAt: string | null; intervalMinutes: number; maxRuns: number; runs: number; activeRunId: string | null; lastError: string | null; lastCheckedAt?: string | null; lastResult?: string | null; createdAt: string; updatedAt: string };
+export type ActionState = 'awaiting_approval' | 'approved' | 'dispatching' | 'completed' | 'uncertain' | 'denied' | 'failed';
+export type ActionIntent = { id: string; runId: string | null; connectionId: string; operation: string; resource: string; summary: string; state: ActionState; request: Record<string, unknown>; result: unknown; createdAt: string; updatedAt: string };
+export type AppId = 'gmail' | 'calendar' | 'drive' | 'sheets' | 'github';
+export type Connection = { id: string; app: AppId; account: string; ownerId: string; sharedAgentIds: string[]; scopes: string[]; state: 'connected' | 'needs_authorization' | 'revoked' | 'error'; lastError: string | null; updatedAt: string };
+export type Checkpoint = { id: string; runId: string; summary: string; evidence: string; createdAt: string };
+export type WorkflowDraft = { id: string; agentId: string; sourceRunId: string | null; title: string; instructions: string; successCriteria: string; state: 'draft' | 'promoted'; revision: number; workflowId: string | null; createdAt: string; updatedAt: string };
+export type Verification = { runId: string; state: 'unknown' | 'passed' | 'failed'; evidence: string; source: 'operator' | 'readback'; checkedAt: string };
+export type ProductCapabilities = { protocol: 1; features: string[]; edition: Workspace['edition']; productionCloudEnabled: boolean };

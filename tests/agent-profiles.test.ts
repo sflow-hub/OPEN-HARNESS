@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHmac } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import type { AgentProfile, ProfileResponse, ModelChoice } from '../lib/agent-profile';
 import type { PersistentRun } from '../lib/control-client';
 import { decryptRunnerSecret, generateRunnerKeyPair, type EncryptedRunnerSecret } from '../lib/runner-crypto';
@@ -26,7 +27,7 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
   const value = await r.json(); if (!r.ok) throw Object.assign(new Error(JSON.stringify(value)), { status: r.status }); return value as T;
 }
 async function profile(id = 'atlas') { return (await request<ProfileResponse>(`/v1/agents/${id}/profile`)).profile; }
-async function save(p: AgentProfile) { return request<ProfileResponse>(`/v1/agents/${p.id}/profile`, 'PUT', p); }
+async function save(p: AgentProfile, terminalConsent = false) { return request<ProfileResponse>(`/v1/agents/${p.id}/profile`, 'PUT', { ...p, terminalConsent }); }
 async function waitTransfer(id: string, states = ['completed','failed']) {
   const deadline = Date.now() + POLL_BUDGET_MS;
   while (Date.now() < deadline) { const value = await request<ProfileResponse>(`/v1/agents/${id}/profile`); if (value.transfer && states.includes(value.transfer.state)) return value; await new Promise(r => setTimeout(r, 25)); } throw new Error('Transfer timed out.');
@@ -41,7 +42,7 @@ test.after(async () => { if (child && child.exitCode === null) { const exited = 
 
 test('independent model overrides survive workspace updates and stale browser sync', async () => {
   const atlas = await profile(), scout = await profile('scout');
-  await save({ ...atlas, model: { inherit: false, provider: 'mock', model: 'atlas-model', credentialRef: '', baseUrl: '' }, prompt: { enabled: true, text: 'Atlas custom system prompt' }, allowedTools: ['terminal'] });
+  await save({ ...atlas, model: { inherit: false, provider: 'mock', model: 'atlas-model', credentialRef: '', baseUrl: '' }, prompt: { enabled: true, text: 'Atlas custom system prompt' }, allowedTools: ['terminal'] }, true);
   await save({ ...scout, model: { ...scout.model, inherit: true }, prompt: { enabled: false, text: 'Keep this draft' } });
   const defaults = await request<{ revision: number }>('/v1/workspace/model');
   await request('/v1/workspace/model', 'PUT', { revision: defaults.revision, model: { provider: 'mock', model: 'workspace-new', credentialRef: '', baseUrl: '' } });
@@ -64,15 +65,17 @@ test('stale saves return a conflict and never replace the winning revision', asy
   await assert.rejects(save({ ...old, description: 'Losing edit' }), { status: 409 });
   assert.equal((await profile()).revision, latest.profile.revision); assert.equal((await profile()).description, 'Winning edit');
 });
-test('a running task keeps its snapshot; the next queued task uses the new profile', async () => {
-  const old = await profile(); await save({ ...old, allowedTools: ['terminal'] });
-  const first = await run('MOCK_SLOW MOCK_TOOL:terminal'); await waitRun(first.id, ['running']);
-  const next = await run('MOCK_TOOL:terminal');
+test('a running task keeps its non-terminal snapshot; the next queued task uses the new profile', async () => {
+  const old = await profile(); await save({ ...old, allowedTools: ['read_file'] });
+  const first = await run('MOCK_SLOW MOCK_TOOL:read_file'); await waitRun(first.id, ['running']);
+  const next = await run('MOCK_TOOL:read_file');
   const current = await profile(); const saved = await save({ ...current, allowedTools: [], prompt: { enabled: false, text: current.prompt.text } }); assert.equal(saved.pending, true);
-  const policy = JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')); assert.deepEqual(policy.allowedTools, ['terminal', 'mcp__open_harness__task']);
+  const policy = JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')); assert.deepEqual(policy.allowedTools, ['read_file', 'mcp__open_harness__task']);
   assert.equal((await waitRun(first.id)).state, 'completed'); assert.equal((await waitRun(next.id)).state, 'failed');
   assert.deepEqual(JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')).allowedTools, ['mcp__open_harness__task']);
   assert.equal(readFileSync(join(state, 'agents/atlas/profile/SOUL.md'), 'utf8'), '');
+  const config = JSON.parse(readFileSync(join(state, 'agents/atlas/profile/config.yaml'), 'utf8'));
+  assert.deepEqual(config.approvals, { mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' });
 });
 test('disabling a connector removes its tools at execution even if individually selected', async () => {
   const p = await profile(); await save({ ...p, allowedTools: ['mcp_research_lookup'], connectors: [{ id: 'r', name: 'research', command: 'npx', args: [], secretRef: '', enabled: false }] });
@@ -113,23 +116,23 @@ test('MCP inventory survives refresh without claiming a stale handshake is conne
   const connector = { id: 'catalog-test', name: 'catalog_test', command: 'npx', args: [], enabled: true, secretRef: '' };
   await request('/v1/agents/atlas/connector-check', 'POST', { connector });
   const catalog = await request<{ tools: Array<{ id: string; available: boolean; reason?: string }> }>('/v1/agents/atlas/tools');
-  const tool = catalog.tools.find(t => t.id === 'mcp_catalog_test_lookup');
+  const tool = catalog.tools.find(t => t.id === 'mcp__catalog_test__lookup');
   assert.ok(tool); assert.equal(tool.available, false); assert.match(tool.reason || '', /Test this connection again/);
 });
 
 test('pairs and authenticates a remote runner, dispatches work once, and revokes it', async () => {
   const encryption = await generateRunnerKeyPair();
   const pairing = await request<{ code: string }>('/v1/machines', 'POST', { name: 'Test VPS', platform: 'linux' });
-  const pairedResponse = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, name: 'Test VPS', platform: 'linux', arch: 'x64', encryptionPublicKey: encryption.publicKey, capabilities: { container: true, direct: true, desktop: false, virtualDesktop: true } }) });
+  const pairedResponse = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, name: 'Test VPS', platform: 'linux', arch: 'x64', encryptionPublicKey: encryption.publicKey, capabilities: { container: true, direct: true, desktop: false, virtualDesktop: true, features:['workspace-tools','scoped-tool-review','run-leases','browser-state-transfer','sealed-agent-transfer'] } }) });
   assert.equal(pairedResponse.status, 201); const paired = await pairedResponse.json() as { machineId: string; token: string };
   const reused = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code }) }); assert.equal(reused.status, 410);
   const runnerHeaders = { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId, 'Content-Type': 'application/json' };
-  assert.equal((await fetch(base + '/v1/runner/heartbeat', { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ capabilities: { container: true, direct: true, desktop: false, virtualDesktop: true } }) })).status, 200);
-  const current = await profile(); const moving = await save({ ...current, computer: { ...current.computer, machineId: paired.machineId, access: 'private', desktop: 'virtual', reserveMachine: true } });
+  assert.equal((await fetch(base + '/v1/runner/heartbeat', { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ capabilities: { container: true, direct: true, desktop: false, virtualDesktop: true, features:['workspace-tools','scoped-tool-review','run-leases','browser-state-transfer','sealed-agent-transfer'] } }) })).status, 200);
+  const current = await profile(); const moving = await save({ ...current, computer: { ...current.computer, machineId: paired.machineId, access: 'private', desktop: 'none', reserveMachine: true } });
   assert.equal(moving.profile.computer.machineId, 'local'); assert.ok(moving.transfer && ['queued','exporting','importing'].includes(moving.transfer.state));
   const created = await run('remote test');
   let command: { id: string; payload: { runId: string; secrets?: unknown; encryptedSecrets?: Record<string, EncryptedRunnerSecret> } } | undefined;
-  for (let i = 0; i < 80 && !command; i++) { const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { runId: string; bundle?: { checksum: string } } }> }; for (const item of value.commands) { if (item.kind === 'import-agent') await fetch(`${base}/v1/runner/commands/${item.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { checksum: item.payload.bundle?.checksum, validated: true } }) }); if (item.kind === 'run' && item.payload.runId === created.id) command = item; } if (!command) await new Promise(resolve => setTimeout(resolve, 20)); }
+  for (let i = 0; i < 80 && !command; i++) { const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { runId: string; sealedTransfer?: { checksum: string } } }> }; for (const item of value.commands) { if (item.kind === 'import-agent') await fetch(`${base}/v1/runner/commands/${item.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { checksum: item.payload.sealedTransfer?.checksum, validated: true } }) }); if (item.kind === 'run' && item.payload.runId === created.id) command = item; } if (!command) await new Promise(resolve => setTimeout(resolve, 20)); }
   assert.ok(command);
   // A dispatched command is a durable row in state.db. The agent's provider key has to
   // travel as ciphertext only this runner can open, and never as plaintext beside it.
@@ -138,12 +141,50 @@ test('pairs and authenticates a remote runner, dispatches work once, and revokes
   assert.doesNotMatch(JSON.stringify(command.payload), /secret-atlas-value/);
   assert.equal(await decryptRunnerSecret(encryption.privateKey, command.payload.encryptedSecrets.ATLAS_KEY), 'secret-atlas-value');
   const duplicate = crypto.randomUUID();
+  await assert.rejects(request('/v1/agents/atlas/context', 'PUT', { memory: 'Cannot edit an active runner.' }), { status: 409 });
+  // C5: an event claiming a run other than the one this command was issued for is rejected
+  // before it can touch any run's event log (verified below by the message.delta count staying 1).
+  assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: crypto.randomUUID(), runId: `${created.id}-other`, event: { type: 'session.started', session_id: 'forged-session', payload: {} } }) })).status, 403);
+  assert.equal((await request<{ session_id: string | null }>(`/v1/runs/${created.id}`)).session_id, null);
+  assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: crypto.randomUUID(), runId: created.id, event: { type: 'session.info', session_id: 'remote-hermes-session', payload: { stored_session_id: 'stored-conversation-id' } } }) })).status, 200);
+  assert.equal((await request<{ session_id: string | null }>(`/v1/runs/${created.id}`)).session_id, 'remote-hermes-session');
+
   // C5: an event claiming a run other than the one this command was issued for is rejected
   // before it can touch any run's event log (verified below by the message.delta count staying 1).
   assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: crypto.randomUUID(), runId: `${created.id}-other`, event: { type: 'message.delta', payload: { text: 'forged' } } }) })).status, 403);
   for (let i = 0; i < 2; i++) assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/events`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ eventId: duplicate, runId: created.id, event: { type: 'message.delta', payload: { text: 'once' } } }) })).status, 200);
   assert.equal((await fetch(`${base}/v1/runner/commands/${command.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { final_response: 'remote complete' } }) })).status, 200);
   assert.equal((await waitRun(created.id)).result, 'remote complete');
+  // Context belongs to the assigned runner. Reserve its placement until the
+  // reply arrives so a concurrent computer change cannot write to the old host.
+  const remoteContext = request<{ memory: string; skills: string[] }>('/v1/agents/atlas/context');
+  let contextCommand: { id: string; payload: { operation: string } } | undefined;
+  for (let i = 0; i < 80 && !contextCommand; i++) {
+    const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { operation: string } }> };
+    contextCommand = value.commands.find(item => item.kind === 'agent-context');
+    if (!contextCommand) await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.ok(contextCommand); assert.equal(contextCommand.payload.operation, 'get');
+  const beforeMove = await profile();
+  await assert.rejects(save({ ...beforeMove, computer: { ...beforeMove.computer, machineId: 'local', desktop: 'none', reserveMachine: false } }), { status: 409 });
+  assert.equal((await fetch(`${base}/v1/runner/commands/${contextCommand.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { status: 200, value: { memory: 'Memory from the runner.', user: '', skills: ['runner-skill'] } } }) })).status, 200);
+  const read = await remoteContext;
+  assert.equal(read.memory, 'Memory from the runner.'); assert.deepEqual(read.skills, ['runner-skill']);
+  const checking = request<{ ok: boolean }>('/v1/agents/atlas/connection-check', 'POST', { model: { provider: 'custom', model: 'test-model', credentialRef: 'ATLAS_KEY', baseUrl: 'http://127.0.0.1:11434/v1' } });
+  let probeCommand: { id: string; payload: { input: { apiKey?: string }; encryptedApiKey: EncryptedRunnerSecret } } | undefined;
+  const probeDeadline = Date.now() + POLL_BUDGET_MS;
+  while (!probeCommand && Date.now() < probeDeadline) {
+    const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { input: { apiKey?: string }; encryptedApiKey: EncryptedRunnerSecret } }> };
+    probeCommand = value.commands.find(item => item.kind === 'probe-runtime');
+    if (!probeCommand) await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.ok(probeCommand);
+  assert.equal(probeCommand.payload.input.apiKey, undefined);
+  assert.doesNotMatch(JSON.stringify(probeCommand.payload), /secret-atlas-value/);
+  assert.equal(await decryptRunnerSecret(encryption.privateKey, probeCommand.payload.encryptedApiKey), 'secret-atlas-value');
+  assert.equal((await fetch(`${base}/v1/runner/commands/${probeCommand.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { ok: true } }) })).status, 200);
+  assert.equal((await checking).ok, true);
+
   const events = await request<{ events: Array<{ type: string }> }>(`/v1/runs/${created.id}/events`); assert.equal(events.events.filter(item => item.type === 'message.delta').length, 1);
   const spent = await (await fetch(`${base}/v1/runner/commands`, { headers: runnerHeaders })).json() as { commands: Array<{ id: string }> };
   assert.equal(spent.commands.some(item => item.id === command!.id), false, 'a completed command should not be handed out again');
@@ -153,8 +194,9 @@ test('pairs and authenticates a remote runner, dispatches work once, and revokes
 });
 
 test('failed destination validation preserves the source assignment', async () => {
+  const encryption = await generateRunnerKeyPair();
   const pairing = await request<{ code: string }>('/v1/machines', 'POST', { name: 'Unready VPS', platform: 'linux' });
-  const pairedResponse = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, name: 'Unready VPS', platform: 'linux', arch: 'x64', capabilities: { container: true, direct: false, desktop: false, virtualDesktop: true } }) });
+  const pairedResponse = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, name: 'Unready VPS', platform: 'linux', arch: 'x64', encryptionPublicKey: encryption.publicKey, capabilities: { container: true, direct: false, desktop: false, virtualDesktop: true, features: ['browser-state-transfer','sealed-agent-transfer'] } }) });
   const paired = await pairedResponse.json() as { machineId: string; token: string }, runnerHeaders = { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId, 'Content-Type': 'application/json' };
   const scout = await profile('scout'), saved = await save({ ...scout, computer: { ...scout.computer, machineId: paired.machineId, access: 'private', desktop: 'none', reserveMachine: true } });
   assert.equal(saved.profile.computer.machineId, 'local');
@@ -166,20 +208,41 @@ test('failed destination validation preserves the source assignment', async () =
   await request(`/v1/machines/${paired.machineId}/revoke`, 'POST');
 });
 
-test('explicit transfer runs once and switches only after verified import', async () => {
+test('explicit transfer switches after verified import and rejects plaintext export receipts before persistence', async () => {
+  const encryption = await generateRunnerKeyPair();
   const pairing = await request<{ code: string }>('/v1/machines', 'POST', { name: 'Transfer VPS', platform: 'linux' });
-  const response = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, platform: 'linux', capabilities: { container: true, direct: false, desktop: false, virtualDesktop: true } }) });
+  const response = await fetch(base + '/v1/runner/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: pairing.code, platform: 'linux', encryptionPublicKey: encryption.publicKey, capabilities: { container: true, direct: false, desktop: false, virtualDesktop: true, features: ['browser-state-transfer','sealed-agent-transfer'] } }) });
   const paired = await response.json() as { machineId: string; token: string }, runnerHeaders = { Authorization: `Bearer ${paired.token}`, 'X-Open-Harness-Machine': paired.machineId, 'Content-Type': 'application/json' };
   const transfer = await request<{ id: string }>(`/v1/agents/scout/transfer`, 'POST', { destinationMachineId: paired.machineId });
   assert.ok(transfer.id); assert.equal((await profile('scout')).computer.machineId, 'local');
   await assert.rejects(request(`/v1/agents/scout/transfer`, 'POST', { destinationMachineId: paired.machineId }), { status: 409 });
   let imported = false;
   for (let i = 0; i < 100 && !imported; i++) {
-    const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { bundle?: { checksum: string } } }> };
-    for (const item of value.commands) if (item.kind === 'import-agent') { assert.equal((await profile('scout')).computer.machineId, 'local'); await fetch(`${base}/v1/runner/commands/${item.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { checksum: item.payload.bundle?.checksum, validated: true } }) }); imported = true; }
+    const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string; payload: { sealedTransfer?: { checksum: string } } }> };
+    for (const item of value.commands) if (item.kind === 'import-agent') { assert.equal((await profile('scout')).computer.machineId, 'local'); await fetch(`${base}/v1/runner/commands/${item.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: { checksum: item.payload.sealedTransfer?.checksum, validated: true } }) }); imported = true; }
     if (!imported) await new Promise(resolve => setTimeout(resolve, 20));
   }
   assert.equal(imported, true); const completed = await waitTransfer('scout'); assert.equal(completed.transfer?.state, 'completed'); assert.equal(completed.profile.computer.machineId, paired.machineId);
+  await request('/v1/agents/scout/transfer', 'POST', { destinationMachineId: 'local' });
+  let exported: { id: string } | undefined;
+  for (let i = 0; i < 100 && !exported; i++) {
+    const value = await (await fetch(base + '/v1/runner/commands', { headers: runnerHeaders })).json() as { commands: Array<{ id: string; kind: string }> };
+    exported = value.commands.find(item => item.kind === 'export-agent');
+    if (!exported) await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.ok(exported);
+  const marker = 'private-browser-cookie-must-never-persist', plaintext = { files: [{ path: 'Cookies', data: Buffer.from(marker).toString('base64') }], checksum: 'unsealed' };
+  const rejected = await fetch(`${base}/v1/runner/commands/${exported.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ result: plaintext }) });
+  assert.equal(rejected.ok, false); assert.doesNotMatch(await rejected.text(), new RegExp(marker));
+  const db = new DatabaseSync(join(state, 'state.db'), { readOnly: true });
+  try {
+    assert.deepEqual({ ...db.prepare('SELECT state,result_json FROM runner_commands WHERE id=?').get(exported.id) }, { state: 'leased', result_json: null });
+    assert.equal((await fetch(`${base}/v1/runner/commands/${exported.id}/complete`, { method: 'POST', headers: runnerHeaders, body: JSON.stringify({ error: marker, result: plaintext }) })).status, 200);
+    const row = db.prepare('SELECT state,result_json,payload_json FROM runner_commands WHERE id=?').get(exported.id) as { state: string; result_json: string; payload_json: string };
+    assert.equal(row.state, 'failed'); assert.match(row.result_json, /Source data was preserved/);
+    assert.ok(!JSON.stringify(row).includes(marker)); assert.ok(!JSON.stringify(row).includes(Buffer.from(marker).toString('base64')));
+  } finally { db.close(); }
+  const failed = await waitTransfer('scout'); assert.equal(failed.transfer?.state, 'failed'); assert.equal(failed.profile.computer.machineId, paired.machineId);
   await request(`/v1/machines/${paired.machineId}/revoke`, 'POST');
 });
 

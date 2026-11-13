@@ -1,0 +1,21 @@
+# Copy to compose.host-folders.yaml and replace the source paths you want to share.
+# Pass that file explicitly to the launcher with --override (PowerShell: -Override).
+# Both services must have the SAME target and read_only setting.
+# A read/write export still needs a separate per-agent grant in Computer settings.
+services:
+  docker:
+    volumes:
+      - type: bind
+        source: /replace/with/your/project
+        target: /host-folders/project
+        read_only: true
+        bind:
+          create_host_path: false
+  open-harness:
+    volumes:
+      - type: bind
+        source: /replace/with/your/project
+        target: /host-folders/project
+        read_only: true
+        bind:
+          create_host_path: false

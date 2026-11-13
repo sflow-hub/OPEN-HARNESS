@@ -1,0 +1,24 @@
+{
+  "realm": "open-harness",
+  "enabled": true,
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "verifyEmail": true,
+  "loginWithEmailAllowed": true,
+  "sslRequired": "external",
+  "clients": [{
+    "clientId": "open-harness",
+    "name": "Open Harness",
+    "enabled": true,
+    "protocol": "openid-connect",
+    "publicClient": false,
+    "secret": "${OPEN_HARNESS_OIDC_CLIENT_SECRET}",
+    "standardFlowEnabled": true,
+    "directAccessGrantsEnabled": false,
+    "serviceAccountsEnabled": false,
+    "redirectUris": ["${OPEN_HARNESS_PUBLIC_ORIGIN}/auth/callback"],
+    "webOrigins": ["${OPEN_HARNESS_PUBLIC_ORIGIN}"],
+    "attributes": { "pkce.code.challenge.method": "S256" },
+    "defaultClientScopes": ["profile", "email"]
+  }]
+}

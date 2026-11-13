@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: ${OPEN_HARNESS_POSTGRES_IMAGE:?Use a reviewed PostgreSQL image pinned by digest}
+    environment:
+      POSTGRES_DB: open_harness
+      POSTGRES_USER: open_harness
+      POSTGRES_PASSWORD: ${OPEN_HARNESS_POSTGRES_PASSWORD:?Configure a database password}
+    volumes: [postgres:/var/lib/postgresql/data, ./init.sql:/docker-entrypoint-initdb.d/10-keycloak.sql:ro]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U open_harness -d open_harness]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  keycloak:
+    image: ${OPEN_HARNESS_KEYCLOAK_IMAGE:?Use a reviewed Keycloak image pinned by digest}
+    command: [start, --import-realm]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/open_harness
+      KC_DB_SCHEMA: keycloak
+      KC_DB_USERNAME: open_harness
+      KC_DB_PASSWORD: ${OPEN_HARNESS_POSTGRES_PASSWORD}
+      KC_HOSTNAME: https://${OPEN_HARNESS_IDENTITY_HOST:?Configure the identity domain}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${OPEN_HARNESS_KEYCLOAK_ADMIN:?Configure the reference realm administrator}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${OPEN_HARNESS_KEYCLOAK_ADMIN_PASSWORD:?Configure the reference realm administrator password}
+      OPEN_HARNESS_PUBLIC_ORIGIN: https://${OPEN_HARNESS_PUBLIC_HOST}
+      OPEN_HARNESS_OIDC_CLIENT_SECRET: ${OPEN_HARNESS_OIDC_CLIENT_SECRET}
+    volumes: [./keycloak-realm.json:/opt/keycloak/data/import/open-harness.json:ro]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: unless-stopped
+  control-plane:
+    image: ${OPEN_HARNESS_CONTROL_PLANE_IMAGE:?Build and accept the control-plane image before deployment}
+    environment:
+      DATABASE_URL: postgresql://open_harness:${OPEN_HARNESS_POSTGRES_PASSWORD}@postgres:5432/open_harness
+      OPEN_HARNESS_CLOUD_CONFIG: /config/config.json
+      OPEN_HARNESS_CLOUD_BIND: 0.0.0.0
+      OPEN_HARNESS_PRODUCTION_PROVIDER: ${OPEN_HARNESS_PRODUCTION_PROVIDER:-}
+    env_file: [./private.env]
+    volumes: [./config.json:/config/config.json:ro, ./secrets:/config/secrets:ro]
+    depends_on:
+      postgres: {condition: service_healthy}
+      keycloak: {condition: service_started}
+    restart: unless-stopped
+  dashboard:
+    image: ${OPEN_HARNESS_CLOUD_DASHBOARD_IMAGE:?Build the dashboard with NEXT_PUBLIC_OPEN_HARNESS_CLOUD=1}
+    environment: { PORT: "3000", HOST: 0.0.0.0 }
+    restart: unless-stopped
+  proxy:
+    image: ${OPEN_HARNESS_CADDY_IMAGE:?Use a reviewed Caddy image pinned by digest}
+    ports: [80:80,443:443]
+    environment:
+      OPEN_HARNESS_PUBLIC_HOST: ${OPEN_HARNESS_PUBLIC_HOST:?Configure the workspace domain}
+      OPEN_HARNESS_IDENTITY_HOST: ${OPEN_HARNESS_IDENTITY_HOST}
+    volumes: [./Caddyfile:/etc/caddy/Caddyfile:ro,caddy:/data]
+    depends_on: [control-plane,dashboard,keycloak]
+    restart: unless-stopped
+volumes:
+  postgres:
+  caddy:

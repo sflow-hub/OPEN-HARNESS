@@ -8,6 +8,9 @@ if (process.platform === 'win32' && !process.env.WINDOWS_CERTIFICATE_THUMBPRINT)
 const path = resolve(import.meta.dirname, '..', 'src-tauri', 'tauri.conf.json');
 const config = JSON.parse(await readFile(path, 'utf8'));
 config.bundle.createUpdaterArtifacts = true;
+const updateEndpoint=process.env.OPEN_HARNESS_UPDATE_ENDPOINT||`https://github.com/sflow-hub/OPEN-HARNESS/releases/latest/download/latest.json`;
+if(new URL(updateEndpoint).protocol!=='https:')throw new Error('Desktop update manifests require HTTPS.');
+config.plugins.updater={pubkey:process.env.OPEN_HARNESS_UPDATE_PUBKEY,endpoints:[updateEndpoint]};
 if (process.platform === 'win32') config.bundle.windows = { ...(config.bundle.windows || {}), certificateThumbprint: process.env.WINDOWS_CERTIFICATE_THUMBPRINT, digestAlgorithm: 'sha256', timestampUrl: 'http://timestamp.digicert.com' };
 await writeFile(path, JSON.stringify(config, null, 2) + '\n');
 console.log('Signed updater artifacts enabled for this release build.');

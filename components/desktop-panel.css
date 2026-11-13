@@ -1,0 +1,58 @@
+.desktop-panel-backdrop { padding: 12px; }
+.modal.desktop-panel { width: min(1000px, 100%); min-width: 0; max-width: 100%; max-height: 94dvh; overflow: auto; padding: 24px; }
+.desktop-panel > *, .desktop-panel section > * { min-width: 0; max-width: 100%; }
+.desktop-panel p { line-height: 1.55; overflow-wrap: anywhere; }
+.desktop-panel button { min-height: 40px; border: 1px solid #42474a; border-radius: 8px; padding: 9px 12px; font-size: 12px; line-height: 1.4; white-space: normal; text-align: center; }
+.desktop-panel .modal-heading button { min-width: 40px; }
+.desktop-panel .light-button { color: #17200f; background: #d3e8b9; }
+.desktop-panel label { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; margin: 12px 0; }
+.desktop-panel label input, .desktop-panel label select, .desktop-panel label textarea { display: block; width: 100%; max-width: 100%; min-width: 0; margin: 0; font-size: 14px; }
+.desktop-panel textarea { height: 260px; min-height: 160px; max-height: 45dvh; resize: vertical; line-height: 1.5; }
+.desktop-panel .desktop-draft { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin-top: 20px; }
+.desktop-panel .desktop-draft > h3, .desktop-panel .desktop-draft > p, .desktop-panel .desktop-draft > label { margin: 0; }
+.desktop-panel .desktop-draft-actions { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; padding-block: 6px; }
+.desktop-panel .desktop-draft-actions > button { flex: 1 1 150px; }
+.desktop-panel .desktop-text-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.desktop-panel .desktop-text-form > label { margin: 0; }
+.desktop-panel .desktop-consent { display: flex; align-items: flex-start; gap: 10px; line-height: 1.5; }
+.desktop-panel .desktop-consent > input { width: 18px; height: 18px; flex: 0 0 18px; margin-top: 2px; }
+.desktop-panel details { margin-top: 20px; border-top: 1px solid #393f42; padding-top: 14px; }
+.desktop-panel summary { cursor: pointer; padding-block: 8px; }
+.desktop-panel .desktop-header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid #393f42; border-radius: 10px; font-size: 13px; }
+.desktop-panel .desktop-owner { font-weight: 600; }
+.desktop-panel .desktop-owner.human { color: #d3e8b9; }
+.desktop-panel .desktop-owner.blocked, .desktop-panel .desktop-owner.taking-control, .desktop-panel .desktop-owner.handing-back { color: #f0c987; }
+.desktop-panel .desktop-handoff, .desktop-panel .desktop-revocation { font-size: 13px; color: #c9cdd0; }
+.desktop-panel .desktop-actions, .desktop-panel .desktop-watch-actions, .desktop-panel .desktop-key-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block: 12px; }
+.desktop-panel .desktop-actions small { flex-basis: 100%; }
+.desktop-panel .desktop-confirm { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px; border: 1px solid #6b5a33; border-radius: 10px; }
+.desktop-panel .desktop-confirm p { flex-basis: 100%; margin: 0; }
+.desktop-panel .desktop-tabs { display: flex; gap: 6px; border-bottom: 1px solid #393f42; margin-block: 12px; }
+.desktop-panel .desktop-tabs button { display: inline-flex; gap: 6px; align-items: center; border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: none; background: transparent; }
+.desktop-panel .desktop-tabs button[aria-selected="true"] { background: #2a2f32; font-weight: 600; }
+.desktop-panel .desktop-screen { position: relative; background: #17191d; border-radius: 10px; overflow: hidden; min-height: 100px; }
+.desktop-panel .desktop-screen-media { display: block; width: 100%; aspect-ratio: 1440 / 900; }
+.desktop-panel .desktop-input-surface { position: absolute; inset: 0; outline: none; touch-action: none; }
+.desktop-panel .desktop-input-surface.enabled { cursor: crosshair; }
+.desktop-panel .desktop-input-surface.view-only { cursor: default; touch-action: pan-y; }
+.desktop-panel .desktop-input-surface.captured { box-shadow: inset 0 0 0 2px #d3e8b9; }
+.desktop-panel .desktop-view-only, .desktop-panel .desktop-mock-label { position: absolute; top: 10px; left: 10px; margin: 0; padding: 3px 8px; border-radius: 6px; background: rgba(0, 0, 0, .65); color: #fff; font-size: 12px; pointer-events: none; }
+.desktop-panel .desktop-mock-label { top: auto; bottom: 10px; }
+.desktop-panel .desktop-keyboard-bar { position: absolute; right: 10px; bottom: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; max-width: calc(100% - 20px); padding: 4px 6px; border-radius: 8px; background: rgba(0, 0, 0, .7); color: #fff; font-size: 12px; }
+.desktop-panel .desktop-keyboard-bar button { min-height: 32px; padding: 5px 10px; }
+.desktop-panel .desktop-waiting { padding: 16px; color: #fff; }
+.desktop-panel .workspace-terminal-screen { height: min(420px, 55dvh); padding: 6px; background: #111315; border-radius: 10px; overflow: hidden; }
+.desktop-panel .workspace-terminal-keys { display: flex; flex-wrap: wrap; gap: 6px; margin-block: 10px; }
+.desktop-panel .workspace-terminal-keys button { min-height: 34px; padding: 6px 10px; }
+@media (max-width: 600px) {
+  .desktop-panel .desktop-header { flex-direction: column; }
+  .desktop-panel .workspace-terminal-screen { height: 45dvh; }
+  .modal.desktop-panel { padding: 18px; }
+  .desktop-panel .desktop-text-form { grid-template-columns: minmax(0, 1fr); }
+  .desktop-panel .desktop-draft-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .desktop-panel label input, .desktop-panel label select, .desktop-panel label textarea { font-size: 16px; }
+}
+/* The agent toolbar's Computer entry (page.tsx) loads with this panel's stylesheet. */
+.toolbar-actions .toolbar-computer { display: inline-flex; align-items: center; gap: 6px; width: auto; padding-inline: 10px; }
+.toolbar-actions .toolbar-computer span { font-size: 13px; }
+@media (max-width: 600px) { .toolbar-actions .toolbar-computer span { display: none; } }

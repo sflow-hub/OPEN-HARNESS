@@ -1,3 +1,7 @@
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { Readable } from 'node:stream';
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
@@ -17,7 +21,7 @@ const LOOPBACK_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 // caller's agent token and check its per-run tool grant. Anything else is closed.
 const PROXYABLE_ROOTS = new Set(['v1', 'internal']);
 function proxyable(path: string[]) {
-  return path.length > 0 && PROXYABLE_ROOTS.has(path[0]);
+  return path.length > 0 && PROXYABLE_ROOTS.has(path[0]) || path.length === 3 && path[0] === 'hooks' && path[1] === 'workflows';
 }
 
 // /v1/bootstrap returns the master control token, which authorizes arbitrary run
@@ -28,6 +32,22 @@ function bootstrapAllowed(request: Request) {
   if (process.env.OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD === '1') return true;
   const host = request.headers.get('host');
   return Boolean(host && LOOPBACK_HOST.test(host));
+}
+
+// A cold runtime build can outlast fetch's five-minute response-header deadline.
+// Keep this one setup request bounded without changing other proxy traffic.
+async function forwardSetup(request: Request, target: string, headers: Headers) {
+  const body = Buffer.from(await request.arrayBuffer());
+  return new Promise<Response>((resolve, reject) => {
+    const send = new URL(target).protocol === 'https:' ? httpsRequest : httpRequest;
+    const upstream = send(target, { method: request.method, headers: Object.fromEntries(headers), signal: AbortSignal.any([request.signal, AbortSignal.timeout(60 * 60_000)]) }, response => {
+      const status = response.statusCode || 502;
+      const stream = [204, 205, 304].includes(status) ? null : Readable.toWeb(response) as ReadableStream<Uint8Array>;
+      resolve(new Response(stream, { status, headers: { 'Content-Type': response.headers['content-type'] || 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }));
+    });
+    upstream.once('error', reject);
+    upstream.end(body);
+  });
 }
 
 async function proxy(request: Request, context: Context) {
@@ -42,12 +62,18 @@ async function proxy(request: Request, context: Context) {
   const base = String(process.env.OPEN_HARNESS_INTERNAL_CONTROL_URL || 'http://127.0.0.1:4317').replace(/\/$/, '');
   const target = `${base}/${path.map(encodeURIComponent).join('/')}${incoming.search}`;
   const headers = new Headers();
-  for (const name of ['authorization', 'content-type', 'x-open-harness-machine', 'x-open-harness-agent', 'x-open-harness-run']) {
+  for (const name of ['authorization', 'content-type', 'idempotency-key', 'x-open-harness-machine', 'x-open-harness-agent', 'x-open-harness-run']) {
     const value = request.headers.get(name); if (value) headers.set(name, value);
   }
+  if(request.method==='POST'&&/^v1\/connections\/[^/]+\/authorize$/.test(path.join('/'))){const origin=request.headers.get('origin')||incoming.origin;try{headers.set('x-open-harness-connection-callback',new URL('/api/local/v1/connections/callback',origin).href);}catch{/* The coordinator validates the fallback callback. */}}
+  const binding=(request.headers.get('cookie')||'').split(';').map(part=>part.trim()).filter(part=>/^oh_oauth_[a-f0-9]{20}=[A-Za-z0-9_-]{43}$/.test(part)).join('; ');if(binding)headers.set('cookie',binding);
   try {
-    const response = await fetch(target, { method: request.method, headers, body: ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer(), redirect: 'manual', cache: 'no-store' });
-    return new Response(response.body, { status: response.status, headers: { 'Content-Type': response.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+    if (request.method === 'POST' && path.join('/') === 'v1/onboarding/action') return await forwardSetup(request, target, headers);
+    const timeout = request.method === 'POST' && /^v1\/agents\/[^/]+\/desktop\/(take-control|release)$/.test(path.join('/')) ? 95_000 : 35_000;
+    const response = await fetch(target, { method: request.method, headers, body: ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer(), redirect: 'manual', cache: 'no-store', signal: AbortSignal.any([request.signal, AbortSignal.timeout(timeout)]) });
+    const outgoing = new Headers({ 'Content-Type': response.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    for (const cookie of response.headers.getSetCookie()) if(/^oh_oauth_[a-f0-9]{20}=/.test(cookie))outgoing.append('Set-Cookie', cookie);
+    return new Response(response.body, { status: response.status, headers: outgoing });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : 'The coordinator is unavailable.' }, { status: 502 });
   }
@@ -56,4 +82,5 @@ async function proxy(request: Request, context: Context) {
 export const GET = proxy;
 export const POST = proxy;
 export const PUT = proxy;
+export const PATCH = proxy;
 export const DELETE = proxy;

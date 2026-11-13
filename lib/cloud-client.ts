@@ -1,0 +1,7 @@
+export type CloudAccount={accountId:string;workspaces:Array<{id:string;name:string;state:string;edition?:'managed'|'self-hosted';role:'owner'|'operator'|'viewer'}>};
+export class CloudClient {
+  constructor(readonly origin:string,private credentials:()=>{token?:string;csrf?:string} = ()=>({})) {const url=new URL(origin);if(url.protocol!=='https:'&&!['localhost','127.0.0.1'].includes(url.hostname))throw new Error('A shared workspace requires HTTPS.');}
+  async request<T>(path:string,method='GET',input?:unknown):Promise<T>{if(!path.startsWith('/')||path.startsWith('//'))throw new Error('Use a workspace API path.');const credentials=this.credentials(),response=await fetch(this.origin+path,{method,credentials:'include',headers:{'Content-Type':'application/json',...(credentials.token?{Authorization:`Bearer ${credentials.token}`}:{'X-CSRF-Token':credentials.csrf||''})},...(input===undefined?{}:{body:JSON.stringify(input)}),signal:AbortSignal.timeout(35000),redirect:'error'});let result;try{result=await response.json();}catch{throw new Error(`The workspace returned HTTP ${response.status}.`);}if(!response.ok)throw new Error(result.error||`Workspace request failed (HTTP ${response.status}).`);return result as T;}
+  me(){return this.request<CloudAccount>('/cloud/v1/me');}
+  runtime<T>(workspaceId:string,path:string,method='GET',input?:unknown){return this.request<T>(`/cloud/v1/workspaces/${encodeURIComponent(workspaceId)}/runtime${path}`,method,input);}
+}

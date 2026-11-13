@@ -4,7 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createConnection } from "node:net";
 import { dockerStatus, stateSharing } from "./hermes";
-import { onboardingStatus, imageContract, HERMES_IMAGE } from "./readiness";
+import { onboardingStatusAsync, imageContract, HERMES_IMAGE, prepareRuntime } from "./readiness";
 import { chooseStateDir, withEnvValue } from "./state-dir";
 
 const argv = process.argv.slice(2);
@@ -33,6 +33,8 @@ Commands:
   install-service   Install the control service as a user service (Linux)
   runner            Run a machine runner in the foreground
   runner-install    Pair this machine and install the runner to start automatically
+  backup            Download an encrypted snapshot from the running local coordinator (--out FILE)
+  restore           Restore an encrypted snapshot into a new folder (--from FILE --to FOLDER)
 
 Options:
   --json            Print machine-readable output (status, doctor)
@@ -66,7 +68,7 @@ async function diagnose() {
   const port = Number(process.env.OPEN_HARNESS_PORT || 4317);
   const listening = await reachable(port);
   const initialized = existsSync(`${state}/state.db`);
-  const status = onboardingStatus([], state);
+  const status = await onboardingStatusAsync([], state, true);
   return {
     version,
     node: { version: process.versions.node, required: ">=22.13.0", ok: nodeOk },
@@ -100,6 +102,13 @@ if (command === "help") {
   console.log(USAGE);
 } else if (command === "version") {
   console.log(version);
+} else if(command==='restore'){
+  const option=(name:string)=>{const index=argv.indexOf(name);return index>=0?argv[index+1]||'':'';},keyName=option('--key-env')||'OPEN_HARNESS_BACKUP_KEY',key=process.env[keyName]||'';
+  if(!option('--from')||!option('--to')||!key){console.error('Use restore --from FILE --to NEW_FOLDER and supply the recovery key through OPEN_HARNESS_BACKUP_KEY or --key-env NAME.');process.exitCode=2;}
+  else {const {restoreBackup}=await import('./backups');console.log(JSON.stringify(await restoreBackup({archive:resolve(option('--from')),target:resolve(option('--to')),key,workspaceId:option('--workspace-id')||undefined,edition:'self-hosted'}),null,2));}
+} else if(command==='backup'){
+  const index=argv.indexOf('--out'),output=index>=0?argv[index+1]:'';if(!output){console.error('Use backup --out FILE. Configure a recovery key in the workspace first.');process.exitCode=2;}
+  else {const {SecretStore}=await import('./secrets'),token=new SecretStore(join(state,'secrets.json')).token,base=`http://127.0.0.1:${process.env.OPEN_HARNESS_PORT||4317}`,headers={Authorization:`Bearer ${token}`,'Content-Type':'application/json'},response=await fetch(base+'/v1/backups',{method:'POST',headers,body:JSON.stringify({requestId:crypto.randomUUID()}),signal:AbortSignal.timeout(10000)}),job=await response.json() as {id:string;error?:string};if(!response.ok)throw new Error(job.error||'Could not start the workspace backup.');let complete=false;for(let attempt=0;attempt<300;attempt++){const status=await fetch(base+'/v1/backups',{headers,signal:AbortSignal.timeout(10000)}),list=await status.json() as {backups:Array<{id:string;state:string;detail:string}>},saved=list.backups.find(item=>item.id===job.id);if(saved?.state==='completed'){complete=true;break;}if(saved&&['failed','interrupted'].includes(saved.state))throw new Error(saved.detail);await new Promise(resolve=>setTimeout(resolve,1000));}if(!complete)throw new Error('Backup is still running. Check its status in the workspace.');const download=await fetch(`${base}/v1/backups/${job.id}/download`,{headers,signal:AbortSignal.timeout(30000)});if(!download.ok||!download.body)throw new Error('The encrypted backup could not be downloaded.');const {pipeline}=await import('node:stream/promises'),{Readable}=await import('node:stream'),{createWriteStream}=await import('node:fs');await pipeline(Readable.fromWeb(download.body as never),createWriteStream(resolve(output),{flags:'wx',mode:0o600}));console.log(`Encrypted backup saved to ${resolve(output)}. Its recovery key is required to restore it.`);}
 } else if (command === "doctor" || command === "status") {
   const data = await diagnose();
   if (wantsJson) console.log(JSON.stringify(data, null, 2));
@@ -112,7 +121,7 @@ if (command === "help") {
 } else if (command === "setup") {
   const docker = dockerStatus(false); if (!docker.available) { console.error(docker.message); process.exitCode = 1; }
   else {
-    run("docker", ["build", "-f", "runtime/hermes/Dockerfile", "-t", HERMES_IMAGE, "."]);
+    try { await prepareRuntime(); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
     if (!process.exitCode) {
       // The sharing probe runs a container from the image, so it has to come after the build.
       const choice = chooseStateDir({
@@ -144,10 +153,9 @@ if (command === "help") {
 } else if (command === 'runner-install') {
   const docker = dockerStatus(false);
   if (docker.available && imageContract() !== 'current') {
-    const built = spawnSync('docker', ['build', '-f', 'runtime/hermes/Dockerfile', '-t', HERMES_IMAGE, '.'], { cwd: project, stdio: 'inherit' }); if (built.status !== 0) process.exit(built.status || 1);
+    try { await prepareRuntime(); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); }
   }
-  const nativeReady = spawnSync(process.env.HERMES_PYTHON || 'python3', ['-c', 'import hermes_cli, open_harness_policy'], { stdio: 'ignore', timeout: 8_000 }).status === 0;
-  if (!docker.available && !nativeReady) { console.error('This machine needs Docker for isolated agents or a local Hermes installation for direct access.'); process.exit(1); }
+  if (!docker.available) { console.error('This machine needs Docker for sandboxed agents. Install and start Docker, then retry.'); process.exit(1); }
   const forwarded = process.argv.slice(3), paired = spawnSync(process.execPath, ['--import', 'tsx', 'runtime/runner.ts', ...forwarded, '--once', '1'], { cwd: project, stdio: 'inherit' });
   if (paired.status !== 0) process.exitCode = paired.status || 1;
   else if (process.platform === 'linux') {

@@ -29,6 +29,8 @@ export type Message = {
   id: string;
   runId?: string;
   eventCursor?: number;
+  settled?: boolean;
+  progress?: "starting" | "thinking" | "responding" | "finishing";
   role: "user" | "assistant";
   content: string;
   activities?: Activity[];
@@ -50,6 +52,7 @@ export type Workspace = {
 };
 export type RunEvent =
   | { type: "text"; text: string }
+  | { type: "progress"; phase: NonNullable<Message["progress"]> }
   | { type: "activity"; activity: Activity }
   | { type: "memory"; memory: string[] }
   | { type: "error"; message: string };

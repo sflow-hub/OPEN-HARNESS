@@ -1,0 +1,9 @@
+import {randomUUID} from 'node:crypto';
+import type {Database} from './database';
+import {UsageLedger} from './usage';
+import {ProductError,text} from '../runtime/product-error';
+export class Operations{
+  constructor(private db:Database){}
+  async reconcile(input:{reservationId:string;inputTokens:number;outputTokens:number;providerReceipt:string;evidence:string;operator:string}){const evidence=text(input.evidence,'Independent provider usage evidence',3000),operator=text(input.operator,'Service operator identity',200),ledger=new UsageLedger(this.db),result=await ledger.settle(input.reservationId,input.inputTokens,input.outputTokens,input.providerReceipt);await this.db.query('INSERT INTO audit_metadata VALUES($1,$2,$3,$4,$5,now())',[randomUUID(),result.workspace_id,operator,'usage.reconcile',evidence]);return {reservationId:result.id,state:result.state};}
+  async unfreeze(workspaceId:string,operator:string,evidence:string){text(operator,'Service operator identity',200);text(evidence,'Billing adjustment evidence',3000);return this.db.transaction(async sql=>{const wallet=(await sql.query('SELECT * FROM wallets WHERE workspace_id=$1 FOR UPDATE',[workspaceId])).rows[0];if(!wallet)throw new ProductError('Wallet not found.',404);if(BigInt(wallet.debt)!==BigInt(0)||BigInt(wallet.reserved)>BigInt(wallet.balance)||(await sql.query("SELECT 1 FROM usage_reservations WHERE workspace_id=$1 AND state='uncertain' LIMIT 1",[workspaceId])).rows.length)throw new ProductError('Reconcile all uncertain usage and outstanding billing debt before resuming spending.',409);await sql.query('UPDATE wallets SET frozen=false,auto_recharge=false WHERE workspace_id=$1',[workspaceId]);await sql.query('INSERT INTO audit_metadata VALUES($1,$2,$3,$4,$5,now())',[randomUUID(),workspaceId,operator,'usage.unfreeze',evidence]);return {ok:true,autoRecharge:false};});}
+}

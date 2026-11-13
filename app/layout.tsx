@@ -5,6 +5,8 @@ export const metadata: Metadata = {
   // self-hosted deployment resolved its social-card image against someone else's host.
   metadataBase: new URL(process.env.OPEN_HARNESS_PUBLIC_URL || "http://localhost:3000"),
   title: "Open Harness — Your personal agent workspace",
+  manifest: "/open-harness.webmanifest",
+  appleWebApp: { capable: true, title: "Open Harness", statusBarStyle: "default" },
   description:
     "An open-source workspace for persistent agents, useful tools, and work you own.",
   openGraph: {

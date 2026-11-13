@@ -3,6 +3,9 @@ import runpy
 import os
 from hermes_cli.plugins import discover_plugins
 import open_harness_policy
+from cua_compat import install as install_cua_compat
+
+install_cua_compat()
 
 discover_plugins()
 if not open_harness_policy._REGISTERED:

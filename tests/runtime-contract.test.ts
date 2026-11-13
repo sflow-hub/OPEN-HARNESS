@@ -6,7 +6,7 @@ import test from 'node:test';
 import { HERMES_COMMIT, HERMES_IMAGE_TAG, HERMES_RELEASE } from '../lib/hermes-pin';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { RUNTIME_CONTRACT, RUNTIME_LABEL, classifyContract, imageContract } from '../runtime/readiness';
 import { containerSignature } from '../runtime/hermes';
 import { chooseStateDir, withEnvValue } from '../runtime/state-dir';
@@ -24,11 +24,12 @@ for (const file of ['runtime/hermes/Dockerfile', 'runtime/hermes/extension/Docke
   });
 }
 
-test('the full Dockerfile installs Open Harness files after the upstream layers', () => {
+test('the full Dockerfile installs managed policy files after the upstream layers', () => {
   const text = readFileSync(join(root, 'runtime/hermes/Dockerfile'), 'utf8');
-  const upstream = text.indexOf('hermes computer-use install'), ours = text.indexOf('COPY runtime/hermes/');
-  assert.ok(upstream > 0 && ours > upstream, 'COPY runtime/hermes/ must come after the heavy upstream layers so a change there does not rebuild them');
-  assert.ok(text.indexOf('LABEL ') > ours, 'the contract label must be the last layer so bumping it invalidates nothing');
+  // Dependency constraints must precede installation; policy-only changes must still reuse it.
+  const upstream = text.indexOf('hermes computer-use install'), ours = text.search(/^COPY runtime\/hermes\/ \/opt\/open-harness\/$/m);
+  assert.ok(upstream > 0 && ours > upstream, 'The managed-policy directory copy must come after the heavy upstream layers so a policy change does not rebuild them');
+  assert.ok(text.indexOf(`LABEL ${RUNTIME_LABEL}=`) > ours, 'the contract label must be the last layer so bumping it invalidates nothing');
 });
 
 test('classifyContract: no image, unlabeled image, older label, current label', () => {
@@ -63,10 +64,10 @@ test('a container signature changes with the image and with nothing else', () =>
 
 test('chooseStateDir: explicit, then existing state, then a readable project folder, then home', () => {
   const base = { projectDefault: '/proj/.open-harness', homeDefault: '/home/u/.open-harness/proj' };
-  assert.deepEqual(chooseStateDir({ ...base, explicit: '/elsewhere', hasState: () => true, dockerCanRead: () => false }), { path: '/elsewhere', reason: 'explicit' });
-  assert.deepEqual(chooseStateDir({ ...base, hasState: () => true, dockerCanRead: () => false }), { path: '/proj/.open-harness', reason: 'existing' });
-  assert.deepEqual(chooseStateDir({ ...base, hasState: () => false, dockerCanRead: () => true }), { path: '/proj/.open-harness', reason: 'project' });
-  assert.deepEqual(chooseStateDir({ ...base, hasState: () => false, dockerCanRead: () => false }), { path: '/home/u/.open-harness/proj', reason: 'home' });
+  assert.deepEqual(chooseStateDir({ ...base, explicit: '/elsewhere', hasState: () => true, dockerCanRead: () => false }), { path: resolve('/elsewhere'), reason: 'explicit' });
+  assert.deepEqual(chooseStateDir({ ...base, hasState: () => true, dockerCanRead: () => false }), { path: resolve('/proj/.open-harness'), reason: 'existing' });
+  assert.deepEqual(chooseStateDir({ ...base, hasState: () => false, dockerCanRead: () => true }), { path: resolve('/proj/.open-harness'), reason: 'project' });
+  assert.deepEqual(chooseStateDir({ ...base, hasState: () => false, dockerCanRead: () => false }), { path: resolve('/home/u/.open-harness/proj'), reason: 'home' });
 });
 
 test('withEnvValue appends, fills an empty assignment, and never overrides a set one', () => {

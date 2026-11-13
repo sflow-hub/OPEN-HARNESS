@@ -1,0 +1,11 @@
+{
+  "identity": {
+    "issuer": "https://auth.example.com/realms/open-harness",
+    "clientId": "open-harness",
+    "clientSecretEnv": "OPEN_HARNESS_OIDC_CLIENT_SECRET",
+    "publicOrigin": "https://harness.example.com"
+  },
+  "relaySigningKeyFile": "./secrets/relay-private.jwk",
+  "models": [],
+  "billing": { "products": [] }
+}
