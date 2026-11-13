@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-const python = spawnSync('python3', ['--version']).status === 0 ? 'python3' : '';
+const pythonProbe = spawnSync('python3', ['--version'], { timeout: 30_000 });
+assert.ok(!pythonProbe.error || (pythonProbe.error as NodeJS.ErrnoException).code === 'ENOENT', pythonProbe.error?.message);
+const python = pythonProbe.status === 0 ? 'python3' : '';
 const source = readFileSync(new URL('../runtime/hermes/browser_shutdown.py', import.meta.url), 'utf8');
 function check(script: string) {
-  const result = spawnSync(python, ['-I', '-S', '-c', `import sys\nscope={'__name__':'browser_shutdown_test'}\nexec(compile(sys.argv[1],'browser_shutdown','exec'),scope)\n${script}`, source], { encoding: 'utf8', timeout: 5000 });
-  assert.equal(result.status, 0, result.stderr);
+  const result = spawnSync(python, ['-I', '-S', '-c', `import sys\nscope={'__name__':'browser_shutdown_test'}\nexec(compile(sys.argv[1],'browser_shutdown','exec'),scope)\n${script}`, source], { encoding: 'utf8', timeout: 30_000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `Python exited with ${result.status ?? result.signal}: ${result.stderr}`);
 }
 
 test('browser shutdown matches the exact managed profile and excludes workers and zombies', { skip: !python }, () => check(String.raw`

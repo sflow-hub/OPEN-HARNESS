@@ -426,6 +426,19 @@ try {
   const nested = (id, args, timeout) => dc(['exec', '-T', 'docker', 'docker', 'exec', ...execOverrides(args), `open-harness-${id}`, ...args], timeout);
   const desktopPaths = id => desktopResourcePaths(id, '/data', id === agentId ? saved.profile.computer : peerSaved.profile.computer);
   const nestedDesktop = (id, args, timeout) => dc(['exec', '-T', 'docker', 'docker', 'exec', ...execOverrides(args), '-e', 'AGENT_BROWSER_PROFILE=/tmp/compose-browser-fixture', desktopPaths(id).name, ...args], timeout);
+  // The shared runtime image creates empty execution directories; only execution containers mount agent data there.
+  const desktopIsolationProbe = String.raw`
+import os
+from pathlib import Path
+assert os.environ.get('DISPLAY') == ':99', 'The private desktop display must be :99'
+for name in ['/workspace/private/desktop-owner.txt', '/workspace/private/private-proof.txt', '/workspace/shared/compose-verified.txt', '/run/open-harness', '/var/run/docker.sock', '/run/open-harness-docker/docker.sock']:
+ path = Path(name)
+ assert not path.exists() and not path.is_symlink(), 'The desktop exposes an execution file or control path: ' + name
+for name in ['/workspace/private', '/workspace/shared']:
+ path = Path(name)
+ assert not path.is_symlink(), 'The desktop execution directory is a symlink: ' + name
+ assert not path.exists() or path.is_dir() and not any(path.iterdir()), 'The desktop execution directory must be absent or empty: ' + name
+`;
   for (const id of [agentId, otherId]) {
     const peer = id === agentId ? otherId : agentId;
     const isolation = JSON.parse(await nested(id, ['python', '-c', `import json,os\nfrom pathlib import Path\nassert not os.environ.get('DISPLAY')\nassert not os.environ.get('DBUS_SESSION_BUS_ADDRESS')\nfor path in ['/tmp/.X11-unix/X99','/workspace/desktop','/data','/var/run/docker.sock','/run/open-harness-docker/docker.sock','/home/node','/data/agents/${peer}']:\n assert not Path(path).exists(),path\nPath('/workspace/private/desktop-owner.txt').write_text('${id}')\nprint(json.dumps({'privateOwner':'${id}','hostAndOtherAgentDenied':True}))`]));
@@ -434,7 +447,7 @@ try {
     const desktopInfo = JSON.parse(await dc(['exec', '-T', 'docker', 'docker', 'inspect', desktopPaths(id).name]))[0];
     assert.deepEqual(desktopInfo.Mounts.map(mount => mount.Destination).sort(), ['/workspace/desktop', '/workspace/exchange']);
     assert.ok(desktopInfo.Mounts.every(mount => mount.Source.startsWith(`/data/computers/${desktopPaths(id).key}/`)));
-    await nestedDesktop(id, ['python', '-c', "import os; from pathlib import Path; assert os.environ['DISPLAY']==':99'; assert not Path('/workspace/private').exists(); assert not Path('/workspace/shared').exists(); assert not Path('/run/open-harness').exists(); assert not Path('/var/run/docker.sock').exists()"]);
+    await nestedDesktop(id, ['python', '-c', desktopIsolationProbe]);
   }
   await nested(agentId, ['python', '-c', "from pathlib import Path\nassert Path('/workspace/mounts/folder-1/host-proof.txt').read_text()=='COMPOSE_HOST_729'\ntry: Path('/workspace/mounts/folder-1/denied.txt').write_text('denied')\nexcept OSError: pass\nelse: raise AssertionError('Read-only export was writable')\nPath('/workspace/mounts/folder-2/agent-proof.txt').write_text('COMPOSE_GRANTED_WRITE_729')"]);
   assert.equal(readFileSync(join(writeFolder, 'agent-proof.txt'), 'utf8'), 'COMPOSE_GRANTED_WRITE_729');
