@@ -50,7 +50,7 @@ async function start(hooked = false): Promise<Service> {
       const counts = new Map();
       for (const phase of ['beforeTerminalOp', 'betweenReaddirAndLstat']) {
         fs.__setSafeFsHook(phase, ({ name }) => {
-          if (!name?.startsWith('race-')) return;
+          if (!/^race-(read|write|create|delete|list)\\.txt$/.test(name || '')) return;
           const id = name.replace('.txt', '');
           if ((phase === 'betweenReaddirAndLstat') !== (id === 'race-list')) return;
           const count = (counts.get(name) || 0) + 1; counts.set(name, count);
@@ -281,7 +281,7 @@ fdTest("HTTP operations survive hook-driven parent swaps in the service process"
     assert.ok(lstatSync(parent).isSymbolicLink());
     assert.ok(!JSON.stringify(result.body).includes("OUTSIDE RACE SECRET"));
     // GET's first terminal operation is stat; the hook fires on its second (read).
-    assert.equal(result.status, operation === "write" || operation === "create" ? 201 : operation === "list" ? 400 : 200);
+    assert.equal(result.status, operation === "write" || operation === "create" ? 201 : operation === "list" ? 400 : 200, `${operation}: ${JSON.stringify(result.body)}`);
     if (operation === "read") assert.equal(result.body.content, "inside");
     if (operation === "write" || operation === "create") assert.equal(readFileSync(join(`${parent}.moved`, name), "utf8"), "written inside");
     if (operation === "delete") assert.ok(!existsSync(join(`${parent}.moved`, name)));
