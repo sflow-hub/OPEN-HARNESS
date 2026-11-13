@@ -43,7 +43,7 @@ const visit = async (container, port, path) => {
 };
 console.log(`Browser migration acceptance artifacts: ${root}`);
 try {
-  const imageInfo = JSON.parse(docker(['image', 'inspect', image]))[0]; assert.equal(imageInfo.Config.Labels['dev.openharness.runtime'], '10');
+  const imageInfo = JSON.parse(docker(['image', 'inspect', image]))[0]; assert.equal(imageInfo.Config.Labels['dev.openharness.runtime'], '11');
   prepareProfile(root, profile, profile.model, { environment: () => ({}) }, 'fixture-token', 'fixture-run');
   mkdirSync(privateHome, { recursive: true, mode: 0o700 }); mkdirSync(join(root, 'shared'), { recursive: true, mode: 0o700 }); writeFileSync(join(privateHome, 'agent-note.txt'), note);
   await new Promise(resolve => web.listen(0, '0.0.0.0', resolve)); const port = web.address().port;

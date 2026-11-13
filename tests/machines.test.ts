@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { generateKeyPairSync } from 'node:crypto';
 import { Machines, MachineError } from '../runtime/machines';
 import { generateRunnerKeyPair } from '../lib/runner-crypto';
 import { draftProfile } from '../lib/agent-profile';
@@ -31,6 +32,7 @@ test('pairing codes expire and remain single use', () => {
   db.prepare('UPDATE machine_pairings SET expires_at=? WHERE id=?').run(new Date(Date.now() - 1_000).toISOString(), pairing.id);
   assert.throws(() => machines.pair({ code: pairing.code }), (error: unknown) => error instanceof MachineError && error.status === 410);
   const fresh = machines.createPairing({ name: 'VPS', platform: 'linux' }, 'https://coordinator.example'), paired = machines.pair({ code: fresh.code });
+  assert.equal(machines.get(paired.machineId).capabilities.direct, false);
   assert.ok(paired.machineId); assert.throws(() => machines.pair({ code: fresh.code }), (error: unknown) => error instanceof MachineError && error.status === 410);
 });
 
@@ -72,11 +74,67 @@ test('a runner encryption key is stored at pairing, backfilled by heartbeat, and
   // A later heartbeat without one must not wipe it, and nothing that is not an RSA JWK is kept.
   machines.heartbeat(keyless.machineId, {});
   assert.equal(machines.encryptionKey(keyless.machineId), publicKey);
-  const rejected = machines.pair({ code: machines.createPairing({ name: 'Bad VPS', platform: 'linux' }, 'https://coordinator.example').code, encryptionPublicKey: 'not-a-jwk' });
-  assert.equal(machines.encryptionKey(rejected.machineId), '');
+  assert.throws(() => machines.pair({ code: machines.createPairing({ name: 'Bad VPS', platform: 'linux' }, 'https://coordinator.example').code, encryptionPublicKey: 'not-a-jwk' }), /invalid encryption key/);
 
   const fresh = machines.pair({ code: machines.createPairing({ name: 'New VPS', platform: 'linux' }, 'https://coordinator.example').code, encryptionPublicKey: publicKey });
   assert.equal(machines.encryptionKey(fresh.machineId), publicKey);
+});
+
+test('invalid runner encryption keys neither consume pairing codes nor mutate heartbeats', async () => {
+  const db = database(), machines = new Machines(db), key = await generateRunnerKeyPair(), jwk = JSON.parse(key.publicKey);
+  try {
+    const pairing = machines.createPairing({ name: 'VPS', platform: 'linux' }, 'https://coordinator.example');
+    const weak = generateKeyPairSync('rsa', { modulusLength: 1024 }).publicKey.export({ format: 'jwk' });
+    const invalid = [null, {}, 'not-json', 'null', '[]', JSON.stringify({ kty: 'RSA' }), JSON.stringify(weak), key.privateKey, JSON.stringify({ ...jwk, d: '' }), JSON.stringify({ ...jwk, alg: 'RSA-OAEP' }), JSON.stringify({ ...jwk, use: 'sig' }), JSON.stringify({ ...jwk, key_ops: ['decrypt'] }), `${key.publicKey}${' '.repeat(16_000)}`];
+    const rejected = (error: unknown) => error instanceof MachineError && error.status === 400 && /invalid encryption key/.test(error.message);
+    for (const encryptionPublicKey of invalid) {
+      assert.throws(() => machines.pair({ code: pairing.code, encryptionPublicKey }), rejected);
+      assert.equal(db.prepare('SELECT used_at FROM machine_pairings WHERE id=?').get(pairing.id)?.used_at, null);
+      assert.equal(db.prepare('SELECT COUNT(*) AS total FROM machines WHERE local=0').get()?.total, 0);
+    }
+    const paired = machines.pair({ code: pairing.code, encryptionPublicKey: key.publicKey });
+    const before = db.prepare('SELECT * FROM machines WHERE id=?').get(paired.machineId);
+    for (const encryptionPublicKey of invalid) {
+      assert.throws(() => machines.heartbeat(paired.machineId, { encryptionPublicKey, capabilities: { container: false, detail: 'must not persist' } }), rejected);
+      assert.deepEqual(db.prepare('SELECT * FROM machines WHERE id=?').get(paired.machineId), before);
+    }
+    machines.heartbeat(paired.machineId, { encryptionPublicKey: '' });
+    assert.equal(machines.encryptionKey(paired.machineId), key.publicKey);
+    const rotated = await generateRunnerKeyPair(); machines.heartbeat(paired.machineId, { encryptionPublicKey: rotated.publicKey });
+    assert.equal(machines.encryptionKey(paired.machineId), rotated.publicKey);
+  } finally { db.close(); }
+});
+
+test('revoking a computer invalidates its runner and ends the work queued for it', () => {
+  const db = database(), machines = new Machines(db), status = (error: unknown) => error instanceof MachineError ? error.status : 0;
+  const paired = machines.pair({ code: machines.createPairing({ name: 'VPS', platform: 'linux' }, 'https://coordinator.example').code });
+  assert.equal(machines.authenticate(paired.machineId, paired.token), true);
+  assert.throws(() => machines.revoke('machine-missing'), (error: unknown) => status(error) === 404);
+  assert.throws(() => machines.revoke('local'), (error: unknown) => status(error) === 409);
+  const queued = machines.enqueue(paired.machineId, 'atlas', 'run', { runId: 'run-1' }), leased = machines.enqueue(paired.machineId, 'atlas', 'run', { runId: 'run-2' });
+  db.prepare("UPDATE runner_commands SET state='leased',leased_at=? WHERE id=?").run(new Date().toISOString(), leased.id);
+  const done = machines.enqueue(paired.machineId, 'atlas', 'probe-tools', {}); db.prepare("UPDATE runner_commands SET state='completed' WHERE id=?").run(done.id);
+  const elsewhere = machines.enqueue('local', 'nova', 'run', { runId: 'run-3' });
+
+  assert.deepEqual(machines.revoke(paired.machineId), { ok: true, cancelledCommands: 2 });
+  assert.equal(machines.authenticate(paired.machineId, paired.token), false, 'the runner credential stops working at once');
+  for (const id of [queued.id, leased.id]) { const command = machines.command(id); assert.equal(command?.state, 'failed'); assert.equal((command?.result as { error: string }).error, 'Computer was revoked.'); }
+  assert.equal(machines.command(done.id)?.state, 'completed', 'finished work keeps its outcome');
+  assert.equal(machines.command(elsewhere.id)?.state, 'queued', 'other computers are untouched');
+  assert.deepEqual(machines.poll(paired.machineId), []);
+  assert.ok(!machines.list().some(machine => machine.id === paired.machineId));
+  assert.throws(() => machines.revoke(paired.machineId), (error: unknown) => status(error) === 409);
+});
+
+test('a computer revoked after assignment checks cannot receive the command', () => {
+  const db = database(), machines = new Machines(db), revoked = (error: unknown) => error instanceof MachineError && error.status === 409 && error.message === 'Computer was revoked.';
+  const paired = machines.pair({ code: machines.createPairing({ name: 'VPS', platform: 'linux' }, 'https://coordinator.example').code });
+  assert.equal(machines.canAssign(paired.machineId, 'atlas').status, 'online');
+  machines.revoke(paired.machineId);
+  assert.throws(() => machines.enqueue(paired.machineId, 'atlas', 'probe-tools', {}), revoked);
+  assert.throws(() => machines.enqueue('machine-missing', 'atlas', 'run', { runId: 'run-1' }), revoked);
+  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM runner_commands').get() as { count: number }).count, 0);
+  assert.deepEqual(machines.poll(paired.machineId), []);
 });
 
 test('a finished command stops carrying the credentials it was dispatched with', () => {
@@ -123,4 +181,42 @@ test('old runners cannot advertise native access or receive a persisted unsafe c
       assert.equal(machines.command(command.id)?.state, 'failed');
     }
   } finally { db.close(); }
+});
+
+for (const failed of [false, true]) test(`a ${failed ? 'failed' : 'completed'} probe drops its input credentials`, () => {
+  const db = database(), machines = new Machines(db);
+  const input = { apiKey: 'probe-api-key', env: { SECRET: 'probe-env-secret' }, baseUrl: 'https://provider.example' };
+  const command = machines.enqueue('local', 'atlas', 'probe-runtime', { runId: 'run-probe', input });
+  const stored = () => (db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(command.id) as { payload_json: string }).payload_json;
+  assert.deepEqual(JSON.parse(stored()).input, input);
+  assert.deepEqual(machines.poll('local')[0].payload.input, input);
+  assert.deepEqual(JSON.parse(stored()).input, input, 'leasing must preserve probe credentials');
+  const result = failed ? { error: 'Connection failed.' } : { status: 'connected' };
+  machines.finish('local', command.id, result, failed);
+  assert.doesNotMatch(stored(), /probe-api-key|probe-env-secret/);
+  assert.equal(JSON.parse(stored()).input, undefined);
+  assert.equal(machines.command(command.id)?.runId, 'run-probe');
+  assert.equal(machines.command(command.id)?.state, failed ? 'failed' : 'completed');
+  assert.deepEqual(machines.command(command.id)?.result, result);
+  assert.equal(machines.receiveEvent('local', command.id, 'trailing-event', 'run-probe'), true);
+});
+
+test('startup scrubs historical terminal payloads and preserves pending credentials', () => {
+  const db = database(), machines = new Machines(db);
+  const payload = { runId: 'run-old', transferId: 'transfer-old', input: { apiKey: 'historical-api-key', env: { SECRET: 'historical-env-secret' }, baseUrl: 'https://provider.example' }, secrets: { KEY: 'old-secret' }, encryptedSecrets: { KEY: 'old-encrypted-secret' }, bundle: 'old-bundle', encrypted: 'old-encrypted' };
+  const commands = ['completed', 'failed', 'queued', 'leased'].map(state => {
+    const command = machines.enqueue('local', 'atlas', 'probe-runtime', payload);
+    db.prepare('UPDATE runner_commands SET state=? WHERE id=?').run(state, command.id);
+    return { ...command, state };
+  });
+  const restarted = new Machines(db);
+  for (const command of commands) {
+    const stored = (db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(command.id) as { payload_json: string }).payload_json;
+    if (['completed', 'failed'].includes(command.state)) {
+      assert.doesNotMatch(stored, /historical-api-key|historical-env-secret|old-secret|old-encrypted-secret|old-bundle|old-encrypted/);
+      assert.deepEqual(JSON.parse(stored), { runId: 'run-old', transferId: 'transfer-old' });
+    } else assert.deepEqual(JSON.parse(stored), payload, `${command.state} credentials must survive startup`);
+    assert.equal(restarted.command(command.id)?.runId, 'run-old');
+    assert.equal(restarted.command(command.id)?.state, command.state);
+  }
 });

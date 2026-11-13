@@ -44,3 +44,39 @@ test('managed workspace switches hydrate only the selected workspace and preserv
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('open-harness.settings.v1') || '{}').model)).toBe('private-cached-model');
   }
 });
+
+test('an empty managed workspace offers setup without inventing local agents', async ({ page, isMobile }) => {
+  test.skip(process.env.NEXT_PUBLIC_OPEN_HARNESS_CLOUD !== '1', 'Requires the managed dashboard build.');
+  const writes: string[] = [], pageErrors: string[] = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
+  await page.addInitScript(() => {
+    localStorage.setItem('open-harness.onboarding.v1', 'done');
+    localStorage.setItem('open-harness.workspace.v2', JSON.stringify({ version: 2, agents: [{ id: 'private-cached', name: 'Private cached agent' }], teams: [], conversations: [], files: [] }));
+  });
+  await page.route('**/cloud/**', async route => {
+    const url = new URL(route.request().url()), path = url.pathname.split('/runtime')[1] || '';
+    if (!['GET', 'OPTIONS'].includes(route.request().method())) writes.push(path || url.pathname);
+    let body: unknown = {};
+    if (url.pathname === '/cloud/v1/me') body = { accountId: 'operator', workspaces: [{ id: 'empty', name: 'Empty workspace', role: 'operator', state: 'ready' }] };
+    else if (path === '/v1/client-status') body = { mode: 'live', token: '', runtime: { available: true, version: 'test', message: 'Ready' }, workspaceRole: 'operator', features: [], version: 'test', hermes: { release: 'test', commit: 'test' } };
+    else if (path === '/v1/client-agents') body = { agents: [] };
+    else if (path === '/v1/assistant') body = { profile: null, runs: [], responsibilities: [], pending: [], workspace: { id: 'empty', name: 'Empty workspace', actor: { id: 'operator', role: 'operator' } }, connections: [], catalog: [], actions: [], drafts: [] };
+    else if (path === '/v1/workspace/model') body = { revision: 1, model: { provider: 'openai', model: 'test-model', baseUrl: '', credentialRef: '' } };
+    else if (['/v1/teams', '/v1/credentials', '/v1/routines', '/v1/runs', '/v1/conversations', '/v1/files'].includes(path)) body = { [path.split('/').at(-1)!]: [] };
+    else if (path === '/v1/approvals') body = { approvals: [], pendingCount: 0 };
+    else if (url.pathname.endsWith('/usage')) body = { wallet: { balance: '0', hard_limit: '0', reserved: '0' }, periods: [] };
+    else if (url.pathname.endsWith('/models')) body = { models: [] };
+    else if (url.pathname.endsWith('/billing/products')) body = { products: [] };
+    await route.fulfill({ json: body });
+  });
+  await page.goto('/?workspace=empty');
+  await expect(page.getByRole('heading', { name: 'Meet your primary assistant' })).toBeVisible();
+  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: /^Agents\b/ }).click();
+  await expect(page.getByRole('heading', { name: 'No agents yet' })).toBeVisible();
+  await expect(page.locator('.agent-card')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Create agent', exact: true })).toBeEnabled();
+  expect(pageErrors).toEqual([]);
+  expect(writes).toEqual([]);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('open-harness.workspace.v2')!).agents[0].id)).toBe('private-cached');
+});

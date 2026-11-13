@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes, timingSafeEqual } from 'node:crypto';
 import { hostname, platform, arch } from 'node:os';
 import { isSandboxedComputer, UNSANDBOXED_COMPUTER_MESSAGE, type AgentProfile, type MachineInfo } from '../lib/agent-profile';
 import { assertSandboxedComputer } from './computer-validation';
@@ -14,12 +14,21 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const safeEqual = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 export class MachineError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
+export const COMPUTER_REVOKED = 'Computer was revoked.';
 
 // An RSA JWK from a runner. Stored only when it parses, so a malformed value cannot make
 // every later dispatch throw somewhere further away.
 function publicKey(value: unknown) {
-  if (typeof value !== 'string' || !value.trim()) return null;
-  try { const jwk = JSON.parse(value); return jwk && typeof jwk === 'object' && (jwk as { kty?: string }).kty === 'RSA' ? value : null; } catch { return null; }
+  if (value === undefined || value === '') return null;
+  try {
+    if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 16_000) throw new Error();
+    const jwk = JSON.parse(value);
+    if (!jwk || typeof jwk !== 'object' || Array.isArray(jwk) || jwk.kty !== 'RSA' || ['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth'].some(name => name in jwk) || (jwk.alg !== undefined && jwk.alg !== 'RSA-OAEP-256')) throw new Error();
+    if (jwk.use !== undefined && jwk.use !== 'enc' || jwk.key_ops !== undefined && (!Array.isArray(jwk.key_ops) || !jwk.key_ops.includes('encrypt') || jwk.key_ops.some((operation: unknown) => operation !== 'encrypt' && operation !== 'wrapKey'))) throw new Error();
+    const key = createPublicKey({ key: jwk, format: 'jwk' });
+    if ((key.asymmetricKeyDetails?.modulusLength || 0) < 2048) throw new Error();
+    return value;
+  } catch { throw new MachineError('The runner supplied an invalid encryption key.'); }
 }
 
 export class Machines {
@@ -52,6 +61,8 @@ export class Machines {
     );`);
     addColumn(db, 'agent_transfers', 'pending_profile_json', 'TEXT');
     addColumn(db, 'machines', 'encryption_public_key', 'TEXT');
+    const finished = db.prepare("SELECT id FROM runner_commands WHERE state IN ('completed','failed')").all() as Array<{ id: string }>;
+    for (const command of finished) db.prepare('UPDATE runner_commands SET payload_json=? WHERE id=?').run(this.spentPayload(command.id), command.id);
     const interrupted = db.prepare("SELECT agent_id,destination_machine_id FROM agent_transfers WHERE state IN ('queued','exporting','importing','verifying')").all() as Array<{ agent_id: string; destination_machine_id: string }>;
     for (const transfer of interrupted) db.prepare('UPDATE machines SET reserved_agent_id=NULL,updated_at=? WHERE id=? AND reserved_agent_id=?').run(now(), transfer.destination_machine_id, transfer.agent_id);
     db.prepare("UPDATE agent_transfers SET state='failed',detail='The coordinator restarted during transfer. The source assignment and data were preserved.',updated_at=? WHERE state IN ('queued','exporting','importing','verifying')").run(now());
@@ -137,7 +148,20 @@ export class Machines {
     this.db.prepare('UPDATE machines SET reserved_agent_id=?,updated_at=? WHERE id=?').run(reserve ? agentId : row.reserved_agent_id === agentId ? null : row.reserved_agent_id, now(), machineId);
   }
   canAssign(machineId: string, agentId: string) { const machine = this.get(machineId); if (machine.status === 'revoked') throw new MachineError('This computer has been revoked.', 409); if (machine.reservedAgentId && machine.reservedAgentId !== agentId) throw new MachineError('This computer is reserved for another agent.', 409); return machine; }
-  revoke(machineId: string) { if (machineId === 'local') throw new MachineError('The computer hosting this coordinator cannot be revoked.', 409); const stamp = now(); this.db.prepare("UPDATE machines SET status='revoked',revoked_at=?,credential_hash=NULL,updated_at=? WHERE id=?").run(stamp, stamp, machineId); return { ok: true }; }
+  // Leased commands are failed too: the runner holding them can no longer report back, and
+  // whatever waits on them (a run, a probe, a transfer) should end now rather than time out.
+  revoke(machineId: string) {
+    if (machineId === 'local') throw new MachineError('The computer hosting this coordinator cannot be revoked.', 409);
+    const row = this.row(machineId); if (!row) throw new MachineError('Computer not found.', 404); if (row.revoked_at) throw new MachineError(`${row.name} has already been revoked.`, 409);
+    const stamp = now();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare("UPDATE machines SET status='revoked',revoked_at=?,credential_hash=NULL,updated_at=? WHERE id=?").run(stamp, stamp, machineId);
+      const cancelled = this.db.prepare("UPDATE runner_commands SET state='failed',finished_at=?,result_json=? WHERE machine_id=? AND state IN ('queued','leased')").run(stamp, JSON.stringify({ error: COMPUTER_REVOKED, revoked: true }), machineId);
+      this.db.exec('COMMIT');
+      return { ok: true, cancelledCommands: Number(cancelled.changes) };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   reconnect(machineId: string) { const machine = this.get(machineId); return { ok: machine.status === 'online', message: machine.status === 'online' ? `${machine.name} is connected.` : `Waiting for ${machine.name} to reconnect. The runner only needs outbound HTTPS access.` }; }
   test(machineId: string, profile?: AgentProfile) {
     const machine = this.get(machineId), issues: string[] = [];
@@ -147,7 +171,10 @@ export class Machines {
     if (profile?.computer.desktop === 'virtual' && !machine.capabilities.virtualDesktop) issues.push('Private virtual desktops are available on Linux runners only.');
     return { ok: !issues.length, message: issues.length ? issues.join(' ') : `${machine.name} is ready for this agent.`, machine };
   }
-  enqueue(machineId: string, agentId: string | null, kind: string, payload: unknown) { this.checkSandbox(payload); const command = { id: crypto.randomUUID(), machineId, agentId, kind, state: 'queued', createdAt: now() }; this.db.prepare('INSERT INTO runner_commands VALUES(?,?,?,?,?,?,?,?,?,?)').run(command.id, machineId, agentId, kind, JSON.stringify(payload), command.state, command.createdAt, null, null, null); this.onCommand?.(machineId); return command; }
+  // Callers validate the machine and then await (secret sealing), so a revoke can land in
+  // between. Guarding inside the insert keeps a revoked machine from ever gaining a command
+  // nobody will lease or fail.
+  enqueue(machineId: string, agentId: string | null, kind: string, payload: unknown) { this.checkSandbox(payload); const command = { id: crypto.randomUUID(), machineId, agentId, kind, state: 'queued', createdAt: now() }; const inserted = this.db.prepare('INSERT INTO runner_commands SELECT ?,?,?,?,?,?,?,NULL,NULL,NULL FROM machines WHERE id=? AND revoked_at IS NULL').run(command.id, machineId, agentId, kind, JSON.stringify(payload), command.state, command.createdAt, machineId); if (!inserted.changes) throw new MachineError(COMPUTER_REVOKED, 409); this.onCommand?.(machineId); return command; }
   command(id: string) { const row = this.db.prepare('SELECT * FROM runner_commands WHERE id=?').get(id) as CommandRow | undefined; if (!row) return null; let runId = ''; try { runId = String((JSON.parse(row.payload_json) as { runId?: unknown })?.runId || ''); } catch { runId = ''; } return { id: row.id, machineId: row.machine_id, agentId: row.agent_id, kind: row.kind, state: row.state, runId, result: row.result_json ? JSON.parse(row.result_json) : null }; }
   // Ownership of the command is not enough: without pinning the run as well, any paired
   // runner could post approval or clarification events against an unrelated agent's run
@@ -179,7 +206,7 @@ export class Machines {
     const row = this.db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(commandId) as { payload_json: string } | undefined;
     try {
       const payload = JSON.parse(row?.payload_json || '{}') as Record<string, unknown>;
-      delete payload.secrets; delete payload.encryptedSecrets; delete payload.bundle; delete payload.sealedTransfer; delete payload.encrypted;
+      delete payload.secrets; delete payload.encryptedSecrets; delete payload.bundle; delete payload.sealedTransfer; delete payload.encrypted; delete payload.input;
       return JSON.stringify(payload);
     } catch { return '{}'; }
   }

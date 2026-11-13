@@ -24,6 +24,10 @@ test('workspace roles fail closed for writes, configuration, and agent-only rout
   const { store, workspace } = fixture();
   actorContext.run({ id: 'reader', workspaceId: workspace.id, role: 'viewer', source: 'oidc' }, () => {
     workspace.authorize('GET', '/v1/runs');
+    workspace.authorize('GET', '/v1/agents');
+    workspace.authorize('GET', '/v1/routines/example/history');
+    for (const path of ['/v1/approvals', '/v1/audit', '/v1/workspace/security']) assert.throws(() => workspace.authorize('GET', path), /role/);
+    for (const method of ['POST', 'DELETE']) assert.throws(() => workspace.authorize(method, '/v1/conversations/example/members/atlas'), /role/);
     workspace.authorize('GET', '/v1/agents/atlas/desktop/status');
     for(const [method,path] of [['GET','/v1/agents/atlas/desktop/frame'],['POST','/v1/agents/atlas/desktop/status'],['POST','/v1/agents/atlas/desktop/stream'],['POST','/v1/agents/atlas/terminal'],['POST','/v1/agents/atlas/desktop/take-control'],['POST','/v1/agents/atlas/desktop/release'],['POST','/v1/agents/atlas/desktop/input']])assert.throws(()=>workspace.authorize(method,path),/role/);
     assert.throws(() => workspace.authorize('POST', '/v1/runs'), /role/);
@@ -32,6 +36,10 @@ test('workspace roles fail closed for writes, configuration, and agent-only rout
   });
   actorContext.run({ id: 'operator', workspaceId: workspace.id, role: 'operator', source: 'oidc' }, () => {
     workspace.authorize('POST', '/v1/runs');
+    workspace.authorize('GET', '/v1/approvals');
+    workspace.authorize('POST', '/v1/conversations/example/messages');
+    workspace.authorize('DELETE', '/v1/conversations/example/members/atlas');
+    for (const path of ['/v1/audit', '/v1/workspace/security', '/v1/machines', '/v1/agents/atlas/profile', '/v1/agents/atlas/sandbox-selftest']) assert.throws(() => workspace.authorize('GET', path), /role/);
     assert.throws(() => workspace.authorize('PATCH', '/v1/agents/atlas/profile'), /role/);
     assert.throws(() => workspace.authorize('POST', '/internal/workspace'), /identity/);
   }); store.db.close();

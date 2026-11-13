@@ -30,6 +30,25 @@ class PolicyTests(unittest.TestCase):
     def test_allowed(self):
         self.dispatch('read_file')
         self.assertEqual(self.executions, ['read_file'])
+    def test_messaging_and_inbox_share_an_explicit_grant_and_active_lease(self):
+        names = ['mcp__open_harness__post_message', 'mcp__open_harness__read_inbox']
+        policy._GRANT = frozenset([names[0]])
+        policy._REVIEW_UNCLASSIFIED = True
+        with patch.object(policy, 'coordination', side_effect=RuntimeError('must use scoped endpoint')) as review:
+            for name in names:
+                self.assertTrue(policy.permitted(name))
+                self.dispatch(name)
+            review.assert_not_called()
+        self.assertEqual(self.executions, names)
+        self.assertEqual(policy.filter_request({'tools': [{'name': name} for name in names]})['tools'], [{'name': name} for name in names])
+        with patch.object(policy, 'active_lease', return_value=False):
+            for name in names:
+                self.assertFalse(policy.permitted(name))
+        policy._GRANT = frozenset()
+        self.assertEqual(policy.filter_request({'tools': [{'name': name} for name in names]}), {})
+        for name in names:
+            self.assertIn('tool_disabled', self.dispatch(name))
+        self.assertEqual(self.executions, names)
     def test_schema_formats(self):
         request = {'tools': [{'function': {'name': 'read_file'}}, {'function': {'name': 'terminal'}}]}
         self.assertEqual(len(policy.filter_request(request)['tools']), 1)

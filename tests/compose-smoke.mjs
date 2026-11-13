@@ -470,6 +470,10 @@ for name in ['/workspace/private', '/workspace/shared']:
   await nested(agentId, ['python', '-c', "from pathlib import Path\nassert Path('/workspace/mounts/folder-1/host-proof.txt').read_text()=='COMPOSE_HOST_729'\ntry: Path('/workspace/mounts/folder-1/denied.txt').write_text('denied')\nexcept OSError: pass\nelse: raise AssertionError('Read-only export was writable')\nPath('/workspace/mounts/folder-2/agent-proof.txt').write_text('COMPOSE_GRANTED_WRITE_729')"]);
   assert.equal(readFileSync(join(writeFolder, 'agent-proof.txt'), 'utf8'), 'COMPOSE_GRANTED_WRITE_729');
   await nested(otherId, ['python', '-c', "from pathlib import Path\nassert not Path('/workspace/mounts/folder-1').exists()\nassert not Path('/workspace/mounts/folder-2').exists()\nassert not Path('/host-folders').exists()"]);
+  const teamFile = `/workspace/teams/${team.id}/team-proof.txt`;
+  await nested(agentId, ['python', '-c', `from pathlib import Path\npath=Path(${JSON.stringify(teamFile)})\npath.write_text('COMPOSE_TEAM_729')\nassert path.read_text()=='COMPOSE_TEAM_729'`]);
+  assert.equal(await nodeIn('open-harness', `import fs from 'node:fs';console.log(JSON.stringify(fs.readFileSync(${JSON.stringify(`/data/teams/${team.id}/shared/team-proof.txt`)},'utf8')));`), 'COMPOSE_TEAM_729');
+  await nested(otherId, ['python', '-c', `from pathlib import Path\npath=Path(${JSON.stringify(`/workspace/teams/${team.id}`)})\nassert not path.exists() and not path.is_symlink(), 'A nonmember can access the team folder'`]);
   const desktopScript = readFileSync(join(repository, 'tests/helpers/compose-desktop.py'), 'utf8').replaceAll('/workspace/shared/', '/workspace/exchange/');
   await nodeIn('open-harness', `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(join(desktopPaths(agentId).staging, 'compose-desktop.py'))},${JSON.stringify(desktopScript)});console.log('true');`);
   console.log('Checking real private desktop input, shared files, and isolation between two agents.');
@@ -490,6 +494,7 @@ for name in ['/workspace/private', '/workspace/shared']:
     { source: '/data/agents/compose-smoke/managed', destination: '/run/open-harness', type: 'bind', writable: false },
     { source: '/data/agents/compose-smoke/private', destination: '/workspace/private', type: 'bind', writable: true },
     { source: '/data/shared', destination: '/workspace/shared', type: 'bind', writable: true },
+    { source: `/data/teams/${team.id}/shared`, destination: `/workspace/teams/${team.id}`, type: 'bind', writable: true },
     { source: '/host-folders/fixture-ro', destination: '/workspace/mounts/folder-1', type: 'bind', writable: false },
     { source: '/host-folders/fixture-rw', destination: '/workspace/mounts/folder-2', type: 'bind', writable: true },
   ].sort((a, b) => a.destination.localeCompare(b.destination)));
@@ -557,6 +562,9 @@ for name in ['/workspace/private', '/workspace/shared']:
   assert.ok(restoredRequests.length && restoredRequests.every(request => request.fixtureCredential === 'rotated'), 'Real work after restore must use the saved rotated credential.');
   const restoredDesktopRun = await api('/v1/runs', 'POST', { agentId, prompt: 'COMPOSE_SHUTDOWN: Keep the restored private desktop alive for input verification.' });
   await waitRun(restoredDesktopRun, { waitForInput: true });
+  assert.equal(await nested(agentId, ['cat', teamFile]), 'COMPOSE_TEAM_729', 'Team files must survive stopped-volume backup and restore.');
+  const restoredAgentContainer = JSON.parse(await dc(['exec', '-T', 'docker', 'docker', 'inspect', 'open-harness-compose-smoke']))[0];
+  assert.deepEqual(restoredAgentContainer.Mounts.map(mount => ({ source: mount.Source, destination: mount.Destination, type: mount.Type, writable: mount.RW })).sort((a, b) => a.destination.localeCompare(b.destination)), agentMounts, 'Restored execution must retain exactly its authorized mounts.');
   const restoredDesktopOutput = await nestedDesktop(agentId, desktopHelper, 150_000);
   const restoredDesktop = JSON.parse(restoredDesktopOutput.split('\n').findLast(line => line.startsWith('{') && line.includes('screenshotBytes')));
   assert.equal(restoredDesktop.clickReadback, desktop.clickReadback); assert.equal(restoredDesktop.typeReadback, desktop.typeReadback);
@@ -602,7 +610,7 @@ for name in ['/workspace/private', '/workspace/shared']:
       },
     });
   }
-  evidence = { ok: true, mode: 'real Compose stack and pinned Hermes with scripted completion fixture; not model reasoning', project, restoreProject, root, deployment, packaged, coordinatorImage, image: HERMES_IMAGE, providerIp, dashboardCsp: true, authenticatedApi: true, browserPairing: { required: true, invalidDenied: true, expiredDenied: true, replayDenied: true }, hostFolderPermissions, explicitHostFolders: { physicalPathsContainSpaces: true, readOnlyCeiling: true, selectedAgentWrite: true, otherAgentDenied: true, unexportedPathsDenied: true }, savedCredentialRotation: true, teamTaskPersistence: true, localBootstrap: true, forgedHostDenied: true, nestedBootstrapDenied: nestedBootstrap, privateDockerTcp: tcp, identity, agentMounts, fileTool: true, clarification: true, taskMcp: true, deniedTerminal: true, freshSessionContext: true, replayStable: true, restartPersistence: true, gracefulAgentCleanup: true, privateDesktop: desktop, twoAgentDesktopIsolation: true, sharedFilesPreserved: true, backupRestore: { destinationWasEmpty: true, stoppedFileOwnerModeHashesEqual: true, entries: restoredManifest.length, profiles: true, credentialsUsedByRealRun: true, privateFiles: true, sharedFiles: true, memory: true, skills: true, tasks: true, history: true, interruptedRunsNotReplayed: true, freshEngineCache: true }, firstRun: first.id, followupRun: second.id, restoredRun: restoredRun.run.id };
+  evidence = { ok: true, mode: 'real Compose stack and pinned Hermes with scripted completion fixture; not model reasoning', project, restoreProject, root, deployment, packaged, coordinatorImage, image: HERMES_IMAGE, providerIp, dashboardCsp: true, authenticatedApi: true, browserPairing: { required: true, invalidDenied: true, expiredDenied: true, replayDenied: true }, hostFolderPermissions, explicitHostFolders: { physicalPathsContainSpaces: true, readOnlyCeiling: true, selectedAgentWrite: true, otherAgentDenied: true, unexportedPathsDenied: true }, savedCredentialRotation: true, teamTaskPersistence: true, teamSharedFiles: { memberWrite: true, hostReadback: true, nonmemberDenied: true, restoredReadback: true }, localBootstrap: true, forgedHostDenied: true, nestedBootstrapDenied: nestedBootstrap, privateDockerTcp: tcp, identity, agentMounts, fileTool: true, clarification: true, taskMcp: true, deniedTerminal: true, freshSessionContext: true, replayStable: true, restartPersistence: true, gracefulAgentCleanup: true, privateDesktop: desktop, twoAgentDesktopIsolation: true, sharedFilesPreserved: true, backupRestore: { destinationWasEmpty: true, stoppedFileOwnerModeHashesEqual: true, entries: restoredManifest.length, profiles: true, credentialsUsedByRealRun: true, privateFiles: true, sharedFiles: true, memory: true, skills: true, tasks: true, history: true, interruptedRunsNotReplayed: true, freshEngineCache: true }, firstRun: first.id, followupRun: second.id, restoredRun: restoredRun.run.id };
   if (soakResult) evidence.soak = soakResult;
   if (browserOverrides) {
     evidence.mode = `emulated AMD64 with timing allowances and canonical managed browser: ${evidence.mode}`;

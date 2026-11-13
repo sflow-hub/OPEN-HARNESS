@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { containerSignature, containerStateKey, ensureContainer, stopAgentContainers } from '../runtime/hermes';
 import { RUNTIME_CONTRACT } from '../runtime/readiness';
-import type { ComputerConfig } from '../lib/agent-profile';
+import { DEFAULT_NETWORK, type ComputerConfig } from '../lib/agent-profile';
 
-const computer = { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
+const computer = { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, network: DEFAULT_NETWORK, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
 const base = 'open-harness-atlas';
 function fixture(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), 'harness-owner-')), root = join(dir, 'selected'), stateFile = join(dir, 'docker-state.json'), log = join(dir, 'calls.jsonl');

@@ -1,5 +1,100 @@
 # Runtime verification
 
+## Branch integration review — November 13, 2026
+
+Candidate `89a4ae6b3fff4640b117247cd971379d560ff863` includes all reviewed
+local and remote branch tips. The dev/test work is integrated with the
+current managed workspace; the older browser-release and MVP branch history
+is included after retaining useful changes and verifying superseded work.
+Database schema 5 rejects older interval-only readers. Runtime contract 11
+and the regenerated runner require rebuilding cached agent images and
+updating runners.
+
+[Verify run 43491430478](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43491430478)
+passed all four jobs on this candidate. Each platform ran 690 Node tests:
+Linux passed 689 with one skip, macOS passed 651 with 39 skips, and Windows
+passed 589 with 101 skips. Typecheck, lint, production/desktop preparation
+and Tauri debug builds passed. The hosted Python package suite passed 134
+of 165 tests with 31 expected evidence-dependent skips.
+
+The browser job passed 365 tests with seven skips on attempt 2, after one
+bounded browser-only retry on unchanged source. The retained first-failure
+trace shows the fixture's synthetic 50 ms deadline aborting a readiness
+request; the final screenshot already contains the expected prepared state.
+Local checks of the same application/runtime source at `7fe1a97` also
+passed 365 browser tests with seven skips, plus four separate managed
+workspace desktop/mobile checks. Local Node 22 passed 649 tests with 41 skips;
+Python 3.12 passed 14 policy and four sandbox probe tests. Lint has zero errors
+and five existing fixture warnings.
+
+[Real-runtime run 43491430537](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43491430537),
+job `132113319410`, passed on its first attempt with native Ubuntu 24.04 AMD64,
+Node 22.23.4, Docker 28.0.4 and Compose 2.38.2. All individual fixtures passed:
+real Hermes runs, durable memory/skills/delegation/schedules, eight sandbox
+boundary checks, Chromium/private desktop, human/shared-browser control,
+paired streams and terminal revocation, local and paired managed computer
+reviews/continuation, sealed transfers and legacy browser migration.
+
+The complete Compose fixture passed pairing, credential rotation, host-folder
+permissions, private desktop input, restart persistence and cleanup. Its exact
+seven execution mounts include the authorized team folder. Actual member
+writes, host readback, nonmember denial and restored team-file readback passed.
+The stopped backup restored 868 entries into an empty destination with
+identical owners, modes and file hashes. A new real run used the restored
+credential; restored private/shared files, memory, skills, tasks, history and
+desktop input passed without replaying interrupted work. Both Compose projects
+and all fixture resources were removed; all three CI cleanup steps passed.
+
+Compose preserved the canonical managed browser with independent click/type
+readbacks and a valid 63,812-byte PNG. Before/after snapshots showed 128 tasks
+against a 256-task limit, no PID-limit or memory events, and memory below the
+unchanged 1 GiB limit. Sealed transfer preserved private files and browser
+cookie/local storage in both directions; seven spool samples and one sealed
+completion contained no plaintext transfer payload.
+
+The observed native Hermes image ID was
+`sha256:4fb8c950a6e03ec607e55b56207a8172bd505a5b9425c5c6a7108d683326d7a8`;
+its recorded runtime-source SHA256 was
+`a02a2da30b58ff1511aa377b412af15a9b2a86dae7748a0315069e67247827d8`.
+This was a source-built stack (`packaged: false`); the coordinator is recorded
+by fixture tag, without an immutable image identity. Runtime evidence artifact
+`14073336167` has 39 safe ZIP members, passed CRC validation, and matches
+GitHub's SHA256:
+`49c09bffeadd95f095a4eebb82e436b23ae47be122f04503e42ac782f9b718cb`.
+
+Review fixes retain actor permissions and current computer ownership while
+adding group conversations, approvals, agent lifecycle controls, cron
+routines, team folders and sandbox diagnostics. Stopped or uncertain
+follow-ups are not replayed automatically; removed members cannot publish
+late replies; agent deletion requires confirmed computer cleanup before
+removing the profile. Additional checks cover old-schema rejection,
+remote deletion failure/acknowledgement, messaging grants, RSA public-key
+validation and allowlisted bootstrap credential adoption.
+
+Hosted Linux exercises fd-relative file access and deterministic/adversarial
+parent swaps. macOS and Windows exercise the path fallback, whose concurrent
+parent-replacement limitation remains. Real Compose file/context paths and
+paired transfers provide integration evidence; they do not inject every
+file-operation race inside containers. The exact Node 22.13 minimum was not
+separately exercised. The new sandbox self-test API remains without dedicated
+real-container acceptance; the runtime sandbox fixture tests boundaries
+directly. Per-agent network policy remains metadata, not enforced egress.
+
+Successful evidence, logs, hashes and the prior failed/cancelled attempts are
+retained separately with private permissions under
+`~/.local/state/open-harness-verification/all-branches-20261113`. The earlier
+Linux race-hook and Compose team-mount assertion failures were corrected in
+test fixtures, retaining outside-file, exact-mount and member/nonmember
+checks. Failed attempts have not been relabeled. The merge adds only
+verification and security-documentation updates to the tested candidate.
+
+These source-built real-runtime fixtures use a scripted local provider.
+They establish tool, transport, isolation and persistence behavior, not
+paid-model reasoning, cross-version upgrade/rollback, published-image
+security/qualification, signed-installer or device acceptance, or a
+final-image 24-hour soak. Linux remains the supported beta installation;
+this integration is not a release.
+
 ## Final integration review — November 13, 2026
 
 Candidate `ba0bd82174d549a0b79ab6359377a82a20f6a18d` passed all four jobs in
