@@ -160,9 +160,6 @@ test('every coordination tool schema describes each field a model must fill in',
   const tools = Function(`${source.slice(source.indexOf('const tools = ['), source.indexOf('class Unreachable'))}; return tools;`)() as Array<{ name: string; inputSchema: Schema }>;
   const walk = (schema: Schema | undefined, path: string): string[] => {
     if (path.endsWith('.body')) return []; // api_request forwards any JSON body unchanged.
-    // Upstream's workspace tool passes a free-form input object. Pinned Hermes empties property-less
-    // objects, so this field needs typed properties before models can fill it in; tracked separately.
-    if (path === 'workspace.input') return [];
     if (!schema?.type) return [`${path} has no type`];
     if (schema.type === 'array') return walk(schema.items, `${path}[]`);
     if (schema.type !== 'object') return [];

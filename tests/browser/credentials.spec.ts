@@ -353,34 +353,41 @@ test('onboarding inline creation seeds the provider, endpoint, and default model
   await expect(setup.getByLabel('Model API base URL')).toHaveValue('https://gateway.example.test/v1');
   await expect(setup.getByRole('textbox', { name: 'Model', exact: true })).toHaveValue('operator-custom-model');
   await setup.getByRole('button', { name: 'Save and test' }).click();
-  await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeVisible();
+  // The model test is a fixture here, so setup stops at task verification; the saved selection is what this checks.
+  await expect(page.getByRole('dialog', { name: 'Verify a task' })).toBeVisible();
   expect(saved).toMatchObject({ provider: 'anthropic', baseUrl: 'https://gateway.example.test/v1', model: 'operator-custom-model', credentialRef: 'REGISTERED_MODEL_ENDPOINT' });
 });
 
-test('credential library creates typed accounts and filters without exposing saved fields', async ({ page }, testInfo) => {
+test('typed credentials save each field type without exposing saved fields', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: 'Credentials', exact: true }).click();
-  const library = page.getByRole('region', { name: 'Saved credentials' });
-  await library.getByRole('button', { name: 'Add credential' }).click();
-  await library.getByLabel('Name', { exact: true }).fill('Vendor account');
-  await library.getByLabel('Credential type').selectOption('basic');
-  await library.getByLabel('Username', { exact: true }).fill('private-username');
-  await library.getByLabel('Password', { exact: true }).fill('private-password');
-  await library.getByRole('button', { name: 'Save credential' }).click();
-  await expect(library.getByText('Vendor account', { exact: true })).toBeVisible();
+  const repo = page.getByRole('region', { name: 'Credentials' });
+  await repo.getByRole('button', { name: 'Add credential', exact: true }).click();
+  const picker = page.getByRole('dialog', { name: 'Add new credential' });
+  await picker.getByRole('option', { name: /Typed credential/ }).click();
+  await picker.getByRole('button', { name: 'Continue' }).click();
+  const form = page.getByRole('dialog', { name: 'New typed credential' });
+  await form.getByLabel('Name', { exact: true }).fill('Vendor account');
+  await form.getByLabel('Credential type').selectOption('basic');
+  await form.getByLabel('Username', { exact: true }).fill('private-username');
+  await form.getByLabel('Password', { exact: true }).fill('private-password');
+  await form.getByRole('button', { name: 'Save credential' }).click();
+  await expect(form).toHaveCount(0);
+  await expect(repo.getByText('Vendor account', { exact: true })).toBeVisible();
   expect(await page.content()).not.toContain('private-password');
   expect(await page.content()).not.toContain('private-username');
-  await library.getByLabel('Filter type').selectOption('oauth2');
-  await expect(library.getByText('No credentials match these filters.')).toBeVisible();
-  await library.getByLabel('Filter type').selectOption('basic');
-  await library.getByLabel('Search credentials').fill('Vendor');
-  await expect(library.getByText('Vendor account', { exact: true })).toBeVisible();
-  await library.getByRole('button', { name: 'Edit', exact: true }).click();
-  await expect(library.getByLabel('Password', { exact: true })).toHaveValue('');
-  await library.getByLabel('Name', { exact: true }).fill('Vendor production');
-  await library.getByRole('button', { name: 'Save changes' }).click();
-  await expect(library.getByText('Vendor production', { exact: true })).toBeVisible();
-  await page.screenshot({ path: `/tmp/credential-library-${testInfo.project.name}.png`, fullPage: true });
+  await repo.getByLabel('Search credentials').fill('no such account');
+  await expect(repo.getByText('No credentials match these filters.')).toBeVisible();
+  await repo.getByLabel('Search credentials').fill('Vendor');
+  await expect(repo.getByText('Vendor account', { exact: true })).toBeVisible();
+  await repo.getByRole('button', { name: 'Open Vendor account' }).click();
+  const edit = page.getByRole('dialog', { name: 'Edit Vendor account' });
+  await expect(edit.getByLabel('Password', { exact: true })).toHaveValue('');
+  await edit.getByLabel('Name', { exact: true }).fill('Vendor production');
+  await edit.getByRole('button', { name: 'Save changes' }).click();
+  await expect(repo.getByText('Vendor production', { exact: true })).toBeVisible();
+  expect(await page.content()).not.toContain('private-password');
+  await page.screenshot({ path: testInfo.outputPath(`credential-typed-${testInfo.project.name}.png`), fullPage: true });
 });
 
 test('inline model credential creation selects the saved account and preserves an agent draft', async ({ page }) => {

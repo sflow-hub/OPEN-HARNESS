@@ -156,3 +156,29 @@ test('socket coordination through the agent-side server reaches the coordinator'
     assert.deepEqual(JSON.parse(received.body!), apiInput);
   } finally { child.kill(); await socket.close(); }
 });
+
+// Pinned Hermes empties object fields that declare no properties, so the workspace tool takes flat,
+// typed fields and re-nests them for the coordinator's { action, input } route.
+test('the workspace tool sends flat fields as the coordinator input and refuses unreadable operation input locally', async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  const server = createServer((req, res) => { let body = ''; req.on('data', part => { body += part; }); req.on('end', () => { bodies.push(JSON.parse(body)); res.writeHead(201, { 'Content-Type': 'application/json' }); res.end('{"ok":true}'); }); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs')], { env: { ...process.env, OPEN_HARNESS_CONTROL_SOCKET: join(tmpdir(), 'absent-workspace-tool.sock'), OPEN_HARNESS_CONTROL_URL: `http://127.0.0.1:${address.port}`, OPEN_HARNESS_AGENT_ID: 'atlas', OPEN_HARNESS_AGENT_TOKEN: 'run-token', OPEN_HARNESS_RUN_ID: 'run-1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let id = 0;
+  const send = (args: Record<string, unknown>) => new Promise<{ error?: unknown; result: { isError?: boolean; content: Array<{ text: string }> } }>((resolve, reject) => {
+    child.stdout.once('data', part => resolve(JSON.parse(String(part)))); child.once('error', reject);
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: ++id, method: 'tools/call', params: { name: 'workspace', arguments: args } }) + '\n');
+  });
+  try {
+    const artifacts = [{ label: 'Report', kind: 'file', path: 'report.md' }];
+    assert.equal((await send({ action: 'report_result', title: 'Done', summary: 'Checked', artifacts })).error, undefined);
+    assert.deepEqual(bodies[0], { action: 'report_result', input: { title: 'Done', summary: 'Checked', artifacts } });
+    await send({ action: 'prepare_action', requestId: 'r-1', connectionId: 'c-1', operation: 'gmail.create_draft', operationInput: '{"to":"a@example.com","subject":"Hi","body":"Text"}' });
+    assert.deepEqual(bodies[1], { action: 'prepare_action', input: { requestId: 'r-1', connectionId: 'c-1', operation: 'gmail.create_draft', input: { to: 'a@example.com', subject: 'Hi', body: 'Text' } } });
+    const refused = await send({ action: 'prepare_action', operation: 'gmail.create_draft', operationInput: '["not", "an object"]' });
+    assert.equal(refused.error, undefined); assert.equal(refused.result.isError, undefined);
+    assert.deepEqual(JSON.parse(refused.result.content[0].text).missing, ['operationInput']);
+    assert.equal(bodies.length, 2, 'Unreadable operation input never reaches the coordinator.');
+  } finally { child.kill(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});

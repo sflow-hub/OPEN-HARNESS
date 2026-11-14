@@ -21,6 +21,7 @@ test('a project shares a folder and gives each agent its own access, capped by t
   mkdirSync(folder);
   const headers = await operator(request);
   await request.post(control + '/v1/boards', { headers, data: { name } });
+  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await page.getByRole('button', { name: 'Projects', exact: true }).click();
   await page.getByRole('button', { name: `Settings for ${name}` }).click();

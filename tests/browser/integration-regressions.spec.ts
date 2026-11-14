@@ -167,7 +167,8 @@ test('an older unavailable response cannot overwrite a newer successful runtime 
     await page.getByRole('button', { name: 'Run setup again' }).click();
     await page.getByRole('button', { name: 'Use this computer' }).click();
     await page.getByRole('button', { name: 'Check again' }).click();
-    await expect.poll(() => reads).toBe(2);
+    // The background runtime poll may add a newer read; what matters is that read 2 is held.
+    await expect.poll(() => reads).toBeGreaterThanOrEqual(2);
     await page.getByRole('button', { name: 'Set up later' }).click();
     if (isMobile && !await page.getByRole('button', { name: 'Close navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click();
     await expect(page.getByText('Agent runtime ready')).toBeVisible();

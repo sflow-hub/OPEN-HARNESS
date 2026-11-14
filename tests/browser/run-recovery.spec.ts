@@ -69,7 +69,7 @@ test.beforeEach(async ({ request, page }) => {
 });
 test.afterEach(async ({ request }) => { await stopEverything(request); });
 
-test('refresh waits for both connection and history restoration before accepting chat', async ({ page, isMobile }) => {
+test('refresh waits for the connection, not history, before accepting chat', async ({ page, isMobile }) => {
   await openAgent(page, 'Atlas', isMobile);
   await expect(page.locator('.model-choice')).toContainText('Hermes');
   let restoreBootstrap!: () => void, restoreHistory!: () => void;
@@ -95,14 +95,13 @@ test('refresh waits for both connection and history restoration before accepting
     expect(submissions).toBe(0);
     restoreBootstrap();
     await expect.poll(() => historyRequested).toBe(true);
-    await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
-    await draft.press('Enter');
-    expect(submissions).toBe(0);
-    await expect(page.getByText('Start the local Hermes runtime before sending a task.')).toHaveCount(0);
-    restoreHistory();
+    // Once connected, the cached conversation accepts work while history is still loading.
     await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
     await expect(draft).toHaveValue('Continue after refreshing');
+    await expect(page.getByText('Start the local Hermes runtime before sending a task.')).toHaveCount(0);
     await page.getByRole('button', { name: 'Send message' }).click();
+    await expect.poll(() => submissions).toBe(1);
+    restoreHistory();
     await expect(replies(page).last()).toContainText(MOCK_REPLY);
     expect(submissions).toBe(1);
   } finally { restoreBootstrap(); restoreHistory(); }

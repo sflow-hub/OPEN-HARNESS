@@ -32,9 +32,11 @@ const SERVICE_DETAIL: Record<string, string> = {
   custom: "Any OpenAI-compatible endpoint.",
 };
 // Monograms, not vendor logos: the app ships no third-party marks.
-const MONOGRAM: Record<string, string> = { xai: "xA", openai: "OA", [CODEX_PROVIDER]: "CX", openrouter: "OR", anthropic: "AN", local: "LO", custom: "CU" };
-const serviceLabel = (id: string) => id ? providerLabel(id) : "Generic secret";
-const SERVICES = CREDENTIAL_PROVIDERS.map(option => ({ id: option.id, label: serviceLabel(option.id), detail: SERVICE_DETAIL[option.id] || "" }));
+// Not a provider: picking it opens the typed editor for credentials with more than one value.
+const TYPED = "__typed";
+const MONOGRAM: Record<string, string> = { [TYPED]: "TY", xai: "xA", openai: "OA", [CODEX_PROVIDER]: "CX", openrouter: "OR", anthropic: "AN", local: "LO", custom: "CU" };
+const serviceLabel = (id: string) => id === TYPED ? "Typed credential" : id ? providerLabel(id) : "Generic secret";
+const SERVICES = [...CREDENTIAL_PROVIDERS.map(option => ({ id: option.id, label: serviceLabel(option.id), detail: SERVICE_DETAIL[option.id] || "" })), { id: TYPED, label: serviceLabel(TYPED), detail: "A bearer token, basic authentication, several headers, OAuth2, or an API key sent in a chosen header or query parameter." }];
 
 function ServiceIcon({ provider, size = 34 }: { provider: string; size?: number }) {
   let hue = 95; for (const char of provider) hue = (hue * 31 + char.charCodeAt(0)) % 360;
@@ -231,13 +233,12 @@ export function CredentialRepository({ client, provider = "", embedded = false, 
   const form = step?.kind === "form" && (() => {
     const { draft, original, tab } = step;
     const codex = draft.provider === CODEX_PROVIDER;
-    // A generic secret can be any credential type (bearer, basic, headers, OAuth2); one beyond a
-    // single key value is edited field by field in the typed editor.
-    if (!codex && (original ? !["model-api-key", "api-key"].includes(original.type) : !draft.provider)) return <Layer embedded={embedded} wide guard={busy} label={original ? `Edit ${original.label}` : "New credential"} onClose={close}>
+    // Typed credentials (more than a single key value) are edited field by field in the typed editor.
+    if (!codex && (original ? !["model-api-key", "api-key"].includes(original.type) : draft.provider === TYPED)) return <Layer embedded={embedded} wide guard={busy} label={original ? `Edit ${original.label}` : "New typed credential"} onClose={close}>
       <div className="credential-form-heading">
         {embedded && <button className="profile-icon-button" aria-label="Back to saved credentials" disabled={busy} onClick={close}><ArrowLeft size={16} /></button>}
         <ServiceIcon provider={draft.provider} size={38} />
-        <div className="credential-form-title"><strong>{original ? original.label : "New credential"}</strong><small>{original ? `${CREDENTIAL_TYPES.find(item => item.id === original.type)?.label || original.type} · ${original.ref}` : "Choose its type below"}</small></div>
+        <div className="credential-form-title"><strong>{original ? original.label : "New typed credential"}</strong><small>{original ? `${CREDENTIAL_TYPES.find(item => item.id === original.type)?.label || original.type} · ${original.ref}` : "Choose its type below"}</small></div>
         {!embedded && <button className="profile-icon-button" aria-label="Close" disabled={busy} onClick={close}><X size={17} /></button>}
       </div>
       {error && <div className="task-error" role="alert">{error}</div>}

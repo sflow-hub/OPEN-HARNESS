@@ -51,6 +51,7 @@ import {
 import { PROVIDERS, type Provider } from "../lib/provider";
 import {
   ControlClient,
+  ControlRequestError,
   PairingRequiredError,
   type PersistentRun,
   type RuntimeStatus,
@@ -620,9 +621,9 @@ export default function Home() {
           setPairing({ state: linkFailure ? "invalid" : "required", message: linkFailure || error.message });
           return;
         }
-        // A dropped connection while refreshing is ordinary reconnection, not setup.
-        // Keep the draft usable while the first automatic retries restore the workspace.
-        if (connectAttempt.current >= 2) setOffline(error instanceof Error ? error.message : "The local agent runtime is unavailable.");
+        // Not setup: the draft stays usable while automatic retries restore the workspace. A coordinator
+        // that answered with an error says so at once; an unreachable one gets two quiet retries first.
+        if (error instanceof ControlRequestError || connectAttempt.current >= 2) setOffline(error instanceof Error ? error.message : "The local agent runtime is unavailable.");
         // First run needs the guide most when nothing is reachable yet, and the gate for it
         // used to sit inside the success path.
         if (!client.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
@@ -1111,7 +1112,8 @@ export default function Home() {
   }
   async function send(text = input) {
     const prompt = text.trim();
-    if (!prompt || !ready || !connectionReady) return;
+    // Work waits for the coordinator connection; a cached conversation need not wait for history.
+    if (!prompt || !ready || !runtime) return;
     if (testMode) {
       setNotice("Agent chat is disabled in automated test mode. Start Open Harness without mock mode to run a real agent.");
       return;
@@ -1516,7 +1518,7 @@ export default function Home() {
         </div>
         <div className="sidebar-bottom">
           <span className={`status-dot ${offline || pairing.state !== "none" ? "offline" : connected || testMode ? "" : "pending"}`} />
-          {pairing.state !== "none" ? "Browser not paired" : offline ? "Not connected" : !connectionReady ? "Reconnecting to workspace…" : testMode ? "Automated test mode" : !runtime ? "Connecting…" : connected ? "Agent runtime ready" : "Agent runtime needs setup"}
+          {testMode ? "Automated test mode" : pairing.state !== "none" ? "Browser not paired" : offline ? "Not connected" : !runtime ? "Connecting…" : connected ? "Agent runtime ready" : "Agent runtime not ready"}
           <button onClick={() => openSettings()}>
             <Settings size={15} /> Settings <span>↗</span>
           </button>
@@ -1848,7 +1850,7 @@ export default function Home() {
                       onClick={() => openSettings()}
                     >
                       <span className="status-dot" />
-                      {!connectionReady
+                      {!runtime
                         ? "Reconnecting…"
                         : testMode
                         ? "Automated test mode"
@@ -1896,7 +1898,7 @@ export default function Home() {
                         <button
                           className="send-button"
                           type="submit"
-                          disabled={!input.trim() || Boolean(submitting) || !connectionReady}
+                          disabled={!input.trim() || Boolean(submitting)}
                           aria-label={`Send ${inputMode}`}
                         >
                           <ArrowUp size={18} />
@@ -1933,7 +1935,7 @@ export default function Home() {
                       <button
                         className="send-button"
                         type="submit"
-                        disabled={!input.trim() || !ready || Boolean(submitting) || !connectionReady || (!connected && !testMode)}
+                        disabled={!input.trim() || !ready || Boolean(submitting) || (!connected && !testMode)}
                         aria-label="Send message"
                       >
                         <ArrowUp size={18} />
@@ -1942,9 +1944,7 @@ export default function Home() {
                   </div>
                 </form>
                 <div className="composer-note">
-                  {submitting || (!connectionReady
-                    ? "Reconnecting to your workspace. You can type while your conversations and active tasks are restored."
-                    : !connected && !testMode && !running
+                  {submitting || (!connected && !testMode && !running
                     ? <>{runtime?.runtime.message || "Checking the agent runtime…"}{runtime && <> <button type="button" className="composer-note-action" onClick={() => setOnboardingOpen(true)}>Open setup</button></>}</>
                     : running
                     ? "This task continues if you close the browser. Send guidance or queue a follow-up."
@@ -2159,9 +2159,7 @@ export default function Home() {
                 <p className="panel-help">{agent.profile?.allowedTools.length ? `${agent.profile.allowedTools.length} tools selected. Open Agent settings to check availability or change access.` : "No tools selected. Choose the capabilities this agent needs."}</p>
                 <button className="subtle-button" onClick={() => setEditingAgent({ ...agent })}><SlidersHorizontal size={13} /> Agent settings</button>
                 <div className="scope-note">
-                  {!connectionReady
-                    ? "Reconnecting to your workspace…"
-                    : testMode
+                  {testMode
                     ? "Automated test mode does not run agents. Open the installed desktop app for live work."
                     : runtime?.runtime.available
                     ? "Hermes is ready in this agent’s isolated workspace. External actions still follow the approval policy."

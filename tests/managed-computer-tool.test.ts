@@ -9,6 +9,9 @@ import { join } from 'node:path';
 import { COMPUTER_TOOL, DEFAULT_TOOLS, draftProfile, runToolGrants } from '../lib/agent-profile';
 import { prepareProfile, runtimeToolCatalog } from '../runtime/profile-runtime';
 
+// Failures are isError results and refusals are ordinary results; neither may be a JSON-RPC error.
+const failure = (response: { error?: unknown; result?: { isError?: boolean; content: Array<{ text: string }> } }) => { assert.equal(response.error, undefined); assert.equal(response.result?.isError, true); return response.result!.content[0].text; };
+const refusal = (response: { error?: unknown; result?: { isError?: boolean; content: Array<{ text: string }> } }) => { assert.equal(response.error, undefined); assert.equal(response.result?.isError, undefined); return JSON.parse(response.result!.content[0].text) as { ok: boolean; error: string; denied?: boolean }; };
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=';
 const capture = { ok: true, image: 'data:image/png;base64,' + png, width: 1, height: 1 };
 const profile = () => draftProfile({ id: 'managed-computer', name: 'Computer', role: 'Assistant', description: '', tone: 0, instructions: '', memory: [] });
@@ -71,7 +74,7 @@ test('managed capture is an MCP image with bounded metadata and scoped run authe
 test('managed capture rejects malformed, oversized and mismatched images', async t => {
   const responses = [ { ...capture, width: 2 }, { ...capture, image: 'data:image/png;base64,' + Buffer.from('not a png').toString('base64') }, { ...capture, width: 1441 }, { ...capture, image: 'data:image/png;base64,' + 'A'.repeat(8_000_004) }, { ...capture, image: 'data:image/png;base64,' + 'A'.repeat(8_200_000) } ];
   const call = await protocol(t, () => responses.shift());
-  for (let index = 0; index < 5; index++) { const response = await call({ action: 'capture' }); assert.match(response.error.message, /invalid capture|too large/); assert.equal(response.result, undefined); }
+  for (let index = 0; index < 5; index++) { const response = await call({ action: 'capture' }); assert.match(failure(response), /invalid capture|too large/); assert.equal(response.result.content.length, 1); }
 });
 
 test('computer approval polls one request identity and denied input does not claim dispatch', async t => {
@@ -80,7 +83,7 @@ test('computer approval polls one request identity and denied input does not cla
   const response = await call({ action: 'navigate', url: 'https://example.com/' }); assert.equal(response.error, undefined);
   assert.equal(requests.length, 2); assert.deepEqual(requests[0], requests[1]); assert.match(String(requests[0].requestId), /^[a-f0-9-]{36}$/);
   const denied = await call({ action: 'input', input: { type: 'text', text: 'private value' } });
-  assert.equal(denied.result.isError, true); assert.match(denied.result.content[0].text, /No action was dispatched/); assert.ok(!JSON.stringify(denied).includes('private value'));
+  const declined = refusal(denied); assert.equal(declined.ok, false); assert.equal(declined.denied, true); assert.match(declined.error, /No action was dispatched/); assert.ok(!JSON.stringify(denied).includes('private value'));
   assert.notEqual(requests[2].requestId, requests[0].requestId);
 });
 
@@ -90,7 +93,7 @@ test('approval polling stops when its run lease is revoked', async t => {
   let requests = 0;
   const call = await protocol(t, body => { requests++; writeFileSync(lease, JSON.stringify({ active: false })); return { state: 'pending', requestId: body.requestId }; }, { OPEN_HARNESS_RUN_LEASE: lease });
   const response = await call({ action: 'navigate', url: 'https://example.com/' });
-  assert.match(response.error.message, /No active task/); assert.equal(requests, 1);
+  assert.match(failure(response), /No active task/); assert.equal(requests, 1);
 });
 
 test('pending computer input never migrates to a newer run lease', async t => {
@@ -99,14 +102,14 @@ test('pending computer input never migrates to a newer run lease', async t => {
   let requests = 0;
   const call = await protocol(t, body => { requests++; writeFileSync(lease, JSON.stringify({ ...live, runId: 'new-run' })); return { state: 'pending', requestId: body.requestId }; }, { OPEN_HARNESS_RUN_LEASE: lease });
   const response = await call({ action: 'input', input: { type: 'key', key: 'Enter' } });
-  assert.match(response.error.message, /owning this computer request has changed/); assert.equal(requests, 1);
+  assert.match(failure(response), /owning this computer request has changed/); assert.equal(requests, 1);
 });
 
 test('computer errors and uncertain connections never poll or replay an action', async t => {
   let requests = 0;
   const call = await protocol(t, (_body, _req, res) => { requests++; if (requests === 1) { res.statusCode = 409; return { error: 'Human control owns this computer.' }; } res.destroy(); });
-  assert.match((await call({ action: 'navigate', url: 'https://example.com/' })).error.message, /Human control/);
-  assert.match((await call({ action: 'input', input: { type: 'key', key: 'Enter' } })).error.message, /not confirmed|interrupted/);
+  const refused = refusal(await call({ action: 'navigate', url: 'https://example.com/' })); assert.equal(refused.ok, false); assert.match(refused.error, /Human control/);
+  assert.match(failure(await call({ action: 'input', input: { type: 'key', key: 'Enter' } })), /not confirmed|interrupted/);
   assert.equal(requests, 2);
 });
 test('upload staging is discoverable and polls the exact provided request identity through approval', async t => {
@@ -124,4 +127,12 @@ test('capture includes workspace download receipts and a fixed file exchange war
   const call=await protocol(t,()=>({...capture,downloads,fileExchangeError:'untrusted detail',extra:'omitted'}));
   const response=await call({action:'capture'}),text=JSON.parse(response.result.content[0].text);
   assert.deepEqual(text.downloads,downloads);assert.match(text.fileExchangeError,/exchange limits/);assert.equal(text.extra,undefined);assert.doesNotMatch(JSON.stringify(text),/untrusted detail/);
+});
+
+test('repeated computer refusals stay ordinary results so the tool server is never blocked', async t => {
+  let requests = 0;
+  const call = await protocol(t, (_body, _req, res) => { requests++; res.statusCode = 409; return { error: 'Human control owns this computer.' }; });
+  for (let attempt = 0; attempt < 4; attempt++) assert.match(refusal(await call({ action: 'navigate', url: 'https://example.com/' })).error, /Human control/);
+  assert.equal(requests, 4);
+  assert.ok((await call({}, 'tools/list')).result.tools.some((tool: { name: string }) => tool.name === 'computer'));
 });

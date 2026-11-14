@@ -16,8 +16,27 @@ const tools = [
   },
   {
     name: "workspace",
-    description: 'Inspect current/delegated tasks, record verified checkpoints, and propose a paused responsibility for operator review. Only the current responsibility may be paused, completed, or assigned a bounded next check. This tool never grants new permissions.',
-    inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['status','checkpoint','report_result','propose_responsibility','update_responsibility','connections','prepare_action','execute_action'] }, input: { type: 'object', description: 'report_result: {title?,summary,artifacts?:[{label,kind:file|link,path?:flat shared filename,url?:http(s) URL}],sources?:[{label,url}]}; reported references are not verification, use only actual outputs. checkpoint: {summary,evidence}; propose_responsibility: {title,goal,intervalMinutes,maxRuns}; update_responsibility: {revision,state?,nextCheckAt?}. connections returns explicitly shared account IDs and operationInputs. prepare_action: {requestId,connectionId,operation,input: operation-specific fields from operationInputs,grantId?}; reuse requestId only for the same exact action. execute_action: {actionId}; a pending write must first be approved by its account owner. status reports durable task IDs. Never resubmit an uncertain action; ask the operator to check its destination.' } }, required: ['action'], additionalProperties: false },
+    description: 'Inspect current/delegated tasks, record verified checkpoints, report results, and propose a paused responsibility for operator review. Every field goes at the top level, next to action. Only the current responsibility may be paused, completed, or assigned a bounded next check. connections returns explicitly shared account IDs and operationInputs. status reports durable task IDs. Never resubmit an uncertain action; ask the operator to check its destination. This tool never grants new permissions.',
+    inputSchema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['status','checkpoint','report_result','propose_responsibility','update_responsibility','connections','prepare_action','execute_action'] },
+      title: { type: 'string', description: 'report_result (up to 150 characters) or propose_responsibility.' },
+      summary: { type: 'string', description: 'report_result (up to 4000 characters) or checkpoint.' },
+      artifacts: { type: 'array', maxItems: 20, description: 'report_result: actual outputs only. Reported references are not verification.', items: { type: 'object', properties: { label: { type: 'string' }, kind: { type: 'string', enum: ['file', 'link'] }, path: { type: 'string', description: 'A flat shared filename, for a file.' }, url: { type: 'string', description: 'An http(s) URL, for a link.' } }, required: ['label', 'kind'], additionalProperties: false } },
+      sources: { type: 'array', maxItems: 30, description: 'report_result: sources you inspected.', items: { type: 'object', properties: { label: { type: 'string' }, url: { type: 'string' } }, required: ['label', 'url'], additionalProperties: false } },
+      evidence: { type: 'string', description: 'checkpoint: what you verified and how.' },
+      goal: { type: 'string', description: 'propose_responsibility.' },
+      intervalMinutes: { type: 'integer', minimum: 1, description: 'propose_responsibility.' },
+      maxRuns: { type: 'integer', minimum: 1, description: 'propose_responsibility.' },
+      revision: { type: 'integer', description: 'update_responsibility.' },
+      state: { type: 'string', enum: ['paused', 'completed'], description: 'update_responsibility.' },
+      nextCheckAt: { type: 'string', description: 'update_responsibility: ISO timestamp of the next bounded check.' },
+      requestId: { type: 'string', description: 'prepare_action: reuse only to retry the same exact action.' },
+      connectionId: { type: 'string', description: 'prepare_action: an account ID from connections.' },
+      operation: { type: 'string', description: 'prepare_action: an operation listed by connections.' },
+      operationInput: { type: 'string', description: 'prepare_action: a JSON object with the operation-specific fields from operationInputs.' },
+      grantId: { type: 'string', description: 'prepare_action: optional routine allowance.' },
+      actionId: { type: 'string', description: 'execute_action. A pending write must first be approved by its account owner.' },
+    }, required: ['action'], additionalProperties: false },
   },
   {
     name: "group_chat",
@@ -158,7 +177,7 @@ function attempt(options, input) {
 }
 function computerResult(action, value) {
   if (action !== 'capture') {
-    if (value?.state === 'denied') return { isError: true, content: [{ type: 'text', text: 'The operator did not approve this computer action. No action was dispatched.' }] };
+    if (value?.state === 'denied') return { content: [{ type: 'text', text: JSON.stringify({ ok: false, denied: true, error: 'The operator did not approve this computer action. No action was dispatched.' }) }] };
     if (value?.ok !== true) throw new Error('The computer action was not confirmed. Inspect the browser before repeating it.');
     return { content: [{ type: 'text', text: JSON.stringify(value) }] };
   }
@@ -200,6 +219,15 @@ async function call(path, input, expectedRunId) {
   throw new Error("Open Harness is not reachable right now. This was not caused by your arguments: try once more, and if it fails again tell the user that Open Harness may be stopped.");
 }
 const routes = { workspace: "/internal/workspace", group_chat: "/internal/group-chat", api_request: "/internal/api-request", delegate_named_agent: "/internal/handoff", create_open_harness_routine: "/internal/schedule", task: "/internal/task", project: "/internal/project", routines: "/internal/routines", directory: "/internal/directory", runs: "/internal/runs", decide: "/internal/decide" };
+// Models fill flat, typed fields; the coordinator's workspace route keeps its { action, input } shape.
+function workspaceInput(args) {
+  const { action, operationInput, ...fields } = args || {};
+  if (operationInput === undefined) return { action, input: fields };
+  let operation; try { operation = JSON.parse(operationInput); } catch { operation = null; }
+  if (!operation || typeof operation !== 'object' || Array.isArray(operation)) throw new Refused(400, { error: 'operationInput must be a JSON object of the fields operationInputs lists for this operation.', missing: ['operationInput'] });
+  return { action, input: { ...fields, input: operation } };
+}
+const shapes = { workspace: workspaceInput };
 const rpcError = (code, message) => Object.assign(new Error(message), { code });
 // Pinned Hermes counts every JSON-RPC error AND every result with isError:true as a strike
 // against this server, and after three in a row reports it "unreachable" and blocks it for about
@@ -212,19 +240,21 @@ async function dispatch(message) {
   if (message.method === "tools/list") return { tools };
   if (message.method === "tools/call") {
     const name = message.params?.name, args = message.params?.arguments || {};
-    if (name === 'computer') {
-      const input = { ...args, ...(['navigate', 'input', 'stage-upload'].includes(args.action) ? { requestId: args.requestId || randomUUID() } : {}) };
-      const runId = activeRunId();
-      while (true) {
-        const value = await call('/internal/computer', input, runId);
-        if (value?.state !== 'pending') return computerResult(args.action, value);
-        if (!input.requestId || value.requestId !== input.requestId) throw new Error('The computer approval does not match this request.');
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    }
-    if (!Object.hasOwn(routes, name)) throw rpcError(-32602, `Unknown tool: ${name}`);
+    if (name !== 'computer' && !Object.hasOwn(routes, name)) throw rpcError(-32602, `Unknown tool: ${name}`);
+    // Pinned Hermes counts JSON-RPC errors and isError results as strikes and blocks the whole server
+    // after three, so refusals return as ordinary results; only real failures are marked isError.
     try {
-      return { content: [{ type: "text", text: JSON.stringify(await call(routes[name], args)) }] };
+      if (name === 'computer') {
+        const input = { ...args, ...(['navigate', 'input', 'stage-upload'].includes(args.action) ? { requestId: args.requestId || randomUUID() } : {}) };
+        const runId = activeRunId();
+        while (true) {
+          const value = await call('/internal/computer', input, runId);
+          if (value?.state !== 'pending') return computerResult(args.action, value);
+          if (!input.requestId || value.requestId !== input.requestId) throw new Error('The computer approval does not match this request.');
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+      return { content: [{ type: "text", text: JSON.stringify(await call(routes[name], shapes[name] ? shapes[name](args) : args)) }] };
     } catch (error) {
       if (error instanceof Refused) return { content: [{ type: "text", text: JSON.stringify({ ok: false, ...error.value, error: error.message }) }] };
       return { content: [{ type: "text", text: error instanceof Error ? error.message : "Open Harness could not complete this request." }], isError: true };

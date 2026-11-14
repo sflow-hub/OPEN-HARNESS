@@ -71,8 +71,8 @@ test('workspace model chooses Codex OAuth, loads account models, and tests the s
 test('agent settings offer Codex OAuth and preserve a declined sign-in draft',async({page})=>{
   const auth=await authFixture(page);await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);await page.getByRole('button',{name:'Edit Atlas profile'}).click();
   const editor=page.getByRole('dialog',{name:'Agent settings'});await expect(editor.getByText('Loading saved profile…')).toBeHidden();await editor.getByRole('tab',{name:'Model',exact:true}).click();await editor.getByLabel('Use workspace default').uncheck();await editor.getByLabel('Provider',{exact:true}).selectOption('openai-codex');
-  await editor.getByRole('combobox',{name:'Model',exact:true}).fill('my-unsaved-model');await editor.getByRole('button',{name:'Sign in with ChatGPT',exact:true}).click();auth.declined=true;
-  await expect(editor.getByRole('status').filter({hasText:'ChatGPT plan usage was not authorized.'})).toBeVisible();await expect(editor.getByRole('combobox',{name:'Model',exact:true})).toHaveValue('my-unsaved-model');await expect(editor.getByLabel('Provider',{exact:true})).toHaveValue('openai-codex');
+  await editor.getByLabel('Available models').selectOption('__custom');await editor.getByRole('textbox',{name:'Model',exact:true}).fill('my-unsaved-model');await editor.getByRole('button',{name:'Sign in with ChatGPT',exact:true}).click();auth.declined=true;
+  await expect(editor.getByRole('status').filter({hasText:'ChatGPT plan usage was not authorized.'})).toBeVisible();await expect(editor.getByRole('textbox',{name:'Model',exact:true})).toHaveValue('my-unsaved-model');await expect(editor.getByLabel('Provider',{exact:true})).toHaveValue('openai-codex');
 });
 
 test('first-run setup offers ChatGPT sign-in and no API-key field for Codex',async({page,isMobile})=>{
