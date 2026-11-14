@@ -8,15 +8,35 @@ The authenticated shared-workspace candidate adds owner/operator/viewer membersh
 
 The dashboard operator token authorizes run creation and profile/file management, including selected-folder grants. Compose requires browser pairing: a trusted local launcher issues a random, short-lived, single-use code through the coordinator's CLI, then the browser exchanges it for the operator token. Unauthenticated `/v1/bootstrap` never returns a token in this mode, regardless of the request's `Host` header. Pairing records remain outside agent mounts; there is no HTTP endpoint for minting codes. The public `/v1/ready` probe returns only `{"ok":true}`.
 
-Host-native development (`npm run dev`) retains the local bootstrap flow, requiring a loopback connection and `Host` header. Source-built Compose still requires browser pairing. The dashboard proxy also accepts only local clients by default. `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` permits that proxy to serve remote clients; it does not disable Compose pairing. Enable remote access only behind an authenticated HTTPS reverse proxy. A paired browser has full operator authority; treat its stored token and any unused pairing link like a password.
+Host-native development (`npm run dev`) retains direct coordinator bootstrap, requiring a loopback connection and `Host` header. Native production listeners default to loopback. Every dashboard-proxy bootstrap requires the operator token or a one-use browser pairing, including on a native coordinator; an incoming `Host` or forwarded-address header cannot establish client locality. `OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD=1` permits remote dashboard routing and never disables pairing. Enable remote access only behind an authenticated HTTPS reverse proxy. A paired browser has full operator authority; treat its stored token and any unused pairing link like a password.
 
 ## Isolation boundaries
 
 **Per-agent containers** (the default): each agent runs in its own Docker container. The host home directory, the Docker socket, and other agents' private directories are not mounted into it. The container is the filesystem boundary; Hermes's own execution guards apply inside it. Filesystem isolation and process-tree termination on stop are part of the security surface we care most about getting right — if you find a way to escape a container or to leave orphaned processes running after a stop, that's a security bug, not just a correctness bug.
 
-**Selected folders**: mounts only the host folders an operator names into the container, honoring the read-only/read-write setting chosen for each. A folder mounted read-write is fully writable by that agent. In Compose, the operator must first bind the same physical folder into both outer services under `/host-folders/<name>` using an explicit override. Only exact exported mount roots can be granted; subfolders need their own explicit export. This keeps a writable parent from replacing a descendant grant with a link between validation and mounting. A read-only export cannot become writable through an agent setting. No host folders are exported by default. Select real directory paths; files, sockets and paths containing symbolic links are refused, including when a previously selected path is replaced with a link.
+**Folders**: the Folders screen is the one list of host folders agents keep across runs. Each folder is on one computer and has the most access it allows; the operator gives each agent no access, read-only or read/write to each folder, never more than that. An agent mounts only the folders it was given on the computer it is working on, honoring that access. A folder mounted read-write is fully writable by that agent. Folders saved on individual agents by earlier versions are moved into this list on upgrade, each agent keeping exactly the access it had. In Compose, the operator must first bind the same physical folder into both outer services under `/host-folders/<name>` using an explicit override. Only exact exported mount roots can be granted; subfolders need their own explicit export. This keeps a writable parent from replacing a descendant grant with a link between validation and mounting. A read-only export cannot become writable through an agent setting. No host folders are exported by default. Select real directory paths; files, sockets and paths containing symbolic links are refused, including when a previously selected path is replaced with a link.
+
+**Project folders**: a project can also name host folders, each with the most access it allows, and give each agent no access, read-only, or read/write access to each one, never more than the folder allows. Those folders are mounted only for runs of that project's tasks, chats where the operator picks the project, and handoffs made from such runs, and only for agents the project granted them to. The folders an agent is given on the Folders screen still apply to every run. Project folders are paths on the coordinator's computer; a run of an agent assigned to another computer fails before it starts rather than resolving them there. Agents learn their mounted paths from their generated instructions; the task tool never returns host paths or other agents' access, and cannot change project folders.
+
+**Refused grants**: whatever the operator types, no grant may be the whole disk, the home folder of the user running the coordinator or runner (or any folder containing it), the Open Harness data folder, anything inside it or any folder containing it (it holds credentials and every agent's private files), or the folder holding the Docker control socket (or any folder containing it). Subfolders of the home folder can be granted. These are checked when a grant is saved and again when it is mounted.
 
 Native selected-folder execution requires a shared Linux kernel between the coordinator or runner and Docker. Each new admission creates an inert container, verifies the mounted directory identities and access modes against pinned directory handles, then initializes the desktop and gateway. Unverifiable mounts fail closed; native Mac/Windows coordinators and remote Docker daemons must use the Compose exported-folder path or a Linux runner instead. Such containers do not automatically resume agent processes after a Docker restart.
+
+**Agent workspace access**: an agent reaches Open Harness only through its coordination tools, authenticated per agent and per run. Every action is checked against the tools granted in the run's snapshot. The Projects, Routines, Teams and agents, and Runs and conversations permissions are off by default. Even with them on, an agent cannot delete a project, change project folders, enable agent dispatch or automatic starts, see or change another agent's routines, read other agents' instructions, models, credentials or tools, or read run events and approval payloads. It sees only its own runs and the runs it delegated. Agents never receive the operator token or the `/v1` API.
+
+Coordination tokens are bound to the exact run, agent and computer in its snapshot.
+Calls require the run header and a live run on that computer. Completion, runner
+revocation, or a placement change invalidates that authority; a previous run's token
+cannot adopt later work. Probes receive no run credential, and finished runner
+commands discard the coordination token. Stop existing work and restart the
+coordinator when upgrading this authentication contract; legacy per-agent tokens
+are deliberately rejected.
+
+Folder validation checks conventional engine sockets and all Unix endpoints stored
+in Docker context metadata, including `DOCKER_CONFIG` and `DOCKER_CONTEXT`. It
+rereads settings when admitting a mount and refuses grants if a selected context
+cannot be resolved or its metadata is unreadable. Literal names starting with two
+dots remain ordinary children for protected-directory containment checks.
 
 **Shared files and networking**: every container on a runner receives that workspace's `/workspace/shared` folder with read/write access. Keep private material in the agent's private files, not Shared files. Outbound networking, including reachable host services, remains enabled; tool switches are not a network firewall. Each agent can read its own selected model/connector credentials inside its profile. Other agents' profiles and the coordinator's credential store are not mounted.
 
@@ -85,3 +105,58 @@ Read-only active-run leases gate idle/prepared runtimes. Clean prewarming happen
 Platform model-provider keys stay in the control plane. Workers receive run-scoped leases, not provider keys. Requests reserve budget before dispatch; unknown usage stays held for independent reconciliation, and hard limits/credit balances cannot be bypassed by clients. Included usage currently has a text/tool contract; use user-provided keys for multimedia until a provider-specific metering bound is accepted. Billing/webhooks and native receipts require actual production configuration and platform acceptance.
 
 Portable encrypted backups omit credential stores, model `.env` files, browser profiles and runner pairings. Restoration authenticates the archive before exposing destination files, creates a new folder, preserves history/revisions and pauses recurring work. Credentials require destination authorization. See the deployment operations guide and experience acceptance record for outstanding release gates.
+
+## Typed credentials and authenticated API requests
+
+Credential metadata and field-presence indicators may reach the dashboard; secret
+fields, OAuth tokens, and encryption keys do not. Structured values live in a
+private SecretStore namespace, outside environment enumeration. File fallback is
+AES-256-GCM encrypted with a separately stored generated key or a deployment-supplied
+`OPEN_HARNESS_ENCRYPTION_KEY`. Possession of both the file and its generated key
+permits decryption. Existing plaintext migrates through a verified atomic write.
+Unreadable encrypted data or a missing/wrong key stops startup without resetting
+the store. Preserve the original key during backup and restore.
+
+OAuth2 supports authorization code with PKCE/S256 and client credentials. Pending
+state is short-lived, one-use, and checked against its credential, callback URI,
+configuration and PKCE verifier. Possession of the state authorizes the callback;
+the callback does not require a second browser-session check. Token exchange and refresh happen server-side;
+refresh is serialized per credential. Callback routes are the only OAuth paths
+that authenticate with state instead of the operator token. Hosted callback URLs
+must be explicitly configured. Disconnect removes local tokens; it does not revoke
+the account at the provider.
+
+The authenticated API tool starts disabled and requires run-snapshotted credential,
+origin, and method grants. Calls use HTTPS, pin a validated DNS address, refuse
+redirects and authentication overrides, and block metadata/loopback/coordinator
+destinations. Private network access requires an explicit grant. Requests are
+bounded. Response masking covers literal, URL-encoded, JSON-escaped and Basic
+authentication values; other encodings can evade this best-effort masking. Only
+grant endpoints trusted with the credential. MCP
+servers receive only explicitly mapped secret fields, encrypted to remote runners;
+OAuth refresh tokens and client secrets are never MCP field choices.
+
+## Decision model
+
+Decisions (`runtime/decisions.ts`) ask an external System One decision model, TypeSafe's
+Jev by default, to choose, rank, classify, score or check. They are off until the operator
+saves a Bearer token or Model API key credential and turns them on. The operator calls
+`/v1/decide`; an agent calls the `decide` coordination tool only with its own Decisions
+permission (off by default) and from a live run. Its `pool: "agents"` helper also needs the
+Teams and agents permission and lists only agents sharing an active team, the same circle as
+the directory tool; `pool: "stages"` lists a project's stages, which the task tool already
+shows. When on, the question, context and option text of each decision are
+sent to the saved `https://` origin through the same transport as authenticated API
+requests: one origin, POST only, no redirects, no private or metadata addresses, the
+coordinator never a destination, and the validated DNS answer pinned for the connection.
+Text matching a stored secret of eight or more characters, including the operator token,
+is replaced before sending. Shorter values and other encodings are not masked, so do not
+put secrets in decision text. Inputs are capped, and a daily request limit and a per-run
+limit bound spending. The audit log keeps the operation, sizes, timing and chosen IDs,
+never the text sent.
+
+Decision output is advisory. The engine cannot start work, change cards, answer approvals
+or touch files, and lint rules and tests enforce that. Approvals are answered only by a
+person: a model answering them once approved `chmod 777` on a host mount. A decision model
+can be swayed by instructions planted in option or context text, so never use a decision
+as an authorization or security gate.

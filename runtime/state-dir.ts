@@ -9,11 +9,11 @@ export type StateDirChoice = { path: string; reason: StateDirReason };
 // only bind-mounts folders on its file-sharing list, and a checkout on another drive mounts
 // as an empty directory -- in which case a folder under the home directory, which Docker
 // Desktop shares by default.
-export function chooseStateDir(input: { explicit?: string; projectDefault: string; homeDefault: string; hasState: (path: string) => boolean; dockerCanRead: (path: string) => boolean }): StateDirChoice {
+export async function chooseStateDir(input: { explicit?: string; projectDefault: string; homeDefault: string; hasState: (path: string) => boolean; dockerCanRead: (path: string) => Promise<boolean> }): Promise<StateDirChoice> {
   if (input.explicit) return { path: resolve(input.explicit), reason: 'explicit' };
   const project = resolve(input.projectDefault);
   if (input.hasState(project)) return { path: project, reason: 'existing' };
-  if (input.dockerCanRead(project)) return { path: project, reason: 'project' };
+  if (await input.dockerCanRead(project)) return { path: project, reason: 'project' };
   return { path: resolve(input.homeDefault), reason: 'home' };
 }
 

@@ -5,7 +5,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHmac } from "node:crypto";
+import { coordinationToken } from '../runtime/coordination-auth';
 
 // A generous budget: these loops only need to outlast a slow or loaded machine, and
 // `npm test --test-timeout` is the real backstop. Fixed iteration counts gave them four
@@ -26,7 +26,7 @@ async function waitReady() {
   throw new Error("Control service did not start.");
 }
 function start() {
-  child = spawn(process.execPath, ["--import", "tsx", "runtime/service.ts"], { cwd: join(import.meta.dirname, ".."), env: { ...process.env, OPEN_HARNESS_MOCK: "1", OPEN_HARNESS_DISABLE_OS_VAULT: "1", OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: stateDir }, stdio: "pipe" });
+  child = spawn(process.execPath, ["--import", "tsx", "runtime/service.ts"], { cwd: join(import.meta.dirname, ".."), env: { ...process.env, OPEN_HARNESS_MOCK: "1", OPEN_HARNESS_DISABLE_OS_VAULT: "1", OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: stateDir, OPEN_HARNESS_HANDOFF_WAIT_MS: "3000" }, stdio: "pipe" });
   return waitReady();
 }
 async function request(path: string, init: RequestInit = {}) {
@@ -197,8 +197,8 @@ test("delegates to another named agent and records the handoff", async () => {
   await request("/v1/agents/atlas/profile", { method: "PUT", body: JSON.stringify({ ...profile, allowedTools: ["mcp__open_harness__delegate_named_agent"] }) });
   const parent = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_SLOW prepare final artifact" }) });
   await new Promise(resolve => setTimeout(resolve, 80));
-  const scoped = createHmac("sha256", token).update("agent:atlas").digest("hex");
-  const response = await fetch(`${base}/internal/handoff`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "Content-Type": "application/json" }, body: JSON.stringify({ agentId: "scout", prompt: "Analyze the inputs" }) });
+  const scoped = coordinationToken(token, 'atlas', 'local');
+  const response = await fetch(`${base}/internal/handoff`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "X-Open-Harness-Run": parent.id, "Content-Type": "application/json" }, body: JSON.stringify({ agentId: "scout", prompt: "Analyze the inputs" }) });
   assert.equal(response.status, 200); const delegated = await response.json() as any; assert.equal(delegated.state, "completed");
   const events = await request(`/v1/runs/${parent.id}/events?after=0`);
   assert.ok(events.events.some((event: any) => event.type === "handoff.created"));
@@ -210,8 +210,8 @@ test("blocks named handoffs when agents do not share an active team", async () =
   await request("/v1/agents/sync", { method: "POST", body: JSON.stringify({ agents: [{ id: "solo", name: "Solo", role: "Independent", instructions: "Work alone.", config: { model: "mock" } }] }) });
   const parent = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_SLOW work independently" }) });
   await new Promise(resolve => setTimeout(resolve, 80));
-  const scoped = createHmac("sha256", token).update("agent:atlas").digest("hex");
-  const response = await fetch(`${base}/internal/handoff`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "Content-Type": "application/json" }, body: JSON.stringify({ agentId: "solo", prompt: "Try to join" }) });
+  const scoped = coordinationToken(token, 'atlas', 'local');
+  const response = await fetch(`${base}/internal/handoff`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "X-Open-Harness-Run": parent.id, "Content-Type": "application/json" }, body: JSON.stringify({ agentId: "solo", prompt: "Try to join" }) });
   assert.equal(response.status, 403);
   assert.match(JSON.stringify(await response.json()), /share an active team/);
   await waitRun(parent.id);
@@ -396,37 +396,291 @@ test("refuses unsafe project deletes and cascades the safe ones", async () => {
   assert.equal((await request(`/v1/runs/${started.run.id}`)).id, started.run.id);
 });
 
-test("gates agent project management on the board permission", async () => {
-  const setPermission = async (manageProjects: boolean) => {
+// A mock run asking for approval stays live until it is answered, so agent tool calls made
+// "from" it cannot race the run's end the way a fixed delay can.
+async function approvalOf(runId: string) {
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < deadline) { const found = (await request(`/v1/runs/${runId}/events?after=0`)).events.find((event: any) => event.type === "approval.request"); if (found) return String(found.payload.approvalId); await new Promise(resolve => setTimeout(resolve, 50)); }
+  throw new Error(`No approval request on ${runId}.`);
+}
+
+test("agent workspace tools: the old project switch is retired, and each permission gates its own tool", async () => {
+  const grant = async (patch: Record<string, unknown>) => {
     const { profile } = await request("/v1/agents/atlas/profile");
-    await request("/v1/agents/atlas/profile", { method: "PUT", body: JSON.stringify({ ...profile, board: { ...profile.board, manageProjects } }) });
+    const saved = await request("/v1/agents/atlas/profile", { method: "PUT", body: JSON.stringify({ ...profile, ...patch }) });
+    return saved.profile;
   };
-  await setPermission(false);
-  let run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_SLOW hold a board session open" }) });
-  await new Promise(resolve => setTimeout(resolve, 80));
-  const scoped = createHmac("sha256", token).update("agent:atlas").digest("hex");
-  const call = (payload: unknown) => fetch(`${base}/internal/task`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "X-Open-Harness-Run": run.id, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-  assert.equal((await call({ action: "board_create", input: { name: "Agent project" } })).status, 403);
+  let run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_APPROVAL hold a board session open" }) });
+  const call = async (tool: string, payload: unknown, runId = run.id) => { const response = await fetch(`${base}/internal/${tool}`, { method: "POST", headers: { Authorization: `Bearer ${coordinationToken(token, 'atlas', 'local')}`, "X-Open-Harness-Agent": "atlas", "X-Open-Harness-Run": runId, "Content-Type": "application/json" }, body: JSON.stringify(payload) }); return { status: response.status, body: await response.json() as any }; };
+  // The retired switch is cleared on save and grants nothing.
+  const { profile } = await request("/v1/agents/atlas/profile");
+  const saved = await grant({ allowedTools: profile.allowedTools.filter((id: string) => !id.startsWith("mcp__open_harness__") || id === "mcp__open_harness__task"), board: { ...profile.board, manageProjects: true } });
+  assert.equal(saved.board.manageProjects, false);
+  await approvalOf(run.id);
+  const refused = await call("task", { action: "board_create", name: "Agent project" });
+  assert.equal(refused.status, 403);
+  assert.match(refused.body.error, /"Projects" permission/);
+  for (const tool of ["project", "routines", "directory", "runs"]) assert.equal((await call(tool, { action: "list" })).status, 403, tool);
 
+  // Flat fields work, and a missing one is named rather than guessed at.
+  const missing = await call("task", { action: "create", boardId: "x" });
+  assert.equal(missing.status, 400);
+  assert.deepEqual(missing.body.missing, ["title"]);
+  const boards = (await call("task", { action: "list" })).body.boards;
+  const flat = await call("task", { action: "create", boardId: boards[0].id, title: "Flat fields", description: "Sent next to action" });
+  assert.equal(flat.status, 201);
+  assert.equal(flat.body.title, "Flat fields");
+  const unknownAction = await call("task", { action: "board_delete" });
+  assert.equal(unknownAction.status, 400);
+  assert.match(unknownAction.body.error, /Use one of/);
+
+  // A grant made during a run is reported as pending, not as missing.
+  await grant({ allowedTools: [...saved.allowedTools, "mcp__open_harness__project", "mcp__open_harness__routines", "mcp__open_harness__directory", "mcp__open_harness__runs"] });
+  assert.match((await call("project", { action: "list" })).body.error, /takes effect from this agent's next run/);
   await request(`/v1/runs/${run.id}/stop`, { method: "POST" });
-  await setPermission(true);
-  run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_SLOW use newly granted project permissions" }) });
-  await new Promise(resolve => setTimeout(resolve, 80));
-  const allowed = await call({ action: "board_create", input: { name: "Agent project", description: "Opened by an agent." } });
-  assert.equal(allowed.status, 201);
-  const board = await allowed.json() as any;
+  run = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_APPROVAL use newly granted workspace permissions" }) });
+  await approvalOf(run.id);
+
+  const created = await call("project", { action: "create", name: "Agent project", description: "Opened by an agent." });
+  assert.equal(created.status, 201);
+  const board = created.body;
   assert.equal(board.description, "Opened by an agent.");
-  assert.equal(board.settings.allowAgentDispatch, true);
-
+  assert.equal(board.folders, undefined);
   await request(`/v1/boards/${board.id}`, { method: "PUT", body: JSON.stringify({ revision: board.revision, settings: { ...board.settings, allowAgentDispatch: false } }) });
-  const changed = await call({ action: "board_update", boardId: board.id, input: { name: "Agent project v2", settings: { allowAgentDispatch: true }, archived: true } });
-  assert.equal(changed.status, 200);
-  const updated = await changed.json() as any;
-  assert.equal(updated.name, "Agent project v2");
-  // Automation and archive state stay under human control even with the permission on.
-  assert.equal(updated.settings.allowAgentDispatch, false);
-  assert.equal(updated.archived, false);
+  const updated = await call("project", { action: "update", boardId: board.id, name: "Agent project v2", allowAgentDispatch: true, autoRunOnDrop: true, folders: [{ path: "/etc", mode: "write" }] });
+  // Protected fields are dropped, not refused, so the rest of the change still lands.
+  assert.equal(updated.status, 200);
+  assert.equal(updated.body.name, "Agent project v2");
+  const stored = await request(`/v1/boards/${board.id}`);
+  // Automation and folders stay under human control even with the permission on.
+  assert.equal(stored.settings.allowAgentDispatch, false);
+  assert.deepEqual(stored.folders, []);
+  // The old aliases still work for agents holding a cached schema, under the new permission.
+  assert.equal((await call("task", { action: "board_update", boardId: board.id, input: { description: "Alias" } })).body.description, "Alias");
+
+  const added = await call("project", { action: "add_stage", boardId: board.id, name: "Blocked", category: "backlog" });
+  const blocked = added.body.stages.find((stage: any) => stage.name === "Blocked");
+  const reordered = await call("project", { action: "update_stage", stageId: blocked.id, position: 0, name: "On hold" });
+  assert.equal(reordered.body.stages[0].id, blocked.id);
+  assert.equal(reordered.body.stages[0].name, "On hold");
+  assert.equal((await call("project", { action: "remove_stage", stageId: blocked.id })).body.stages.some((stage: any) => stage.id === blocked.id), false);
+  assert.equal((await call("project", { action: "archive", boardId: board.id })).body.archived, true);
+  assert.equal((await call("project", { action: "restore", boardId: board.id })).body.archived, false);
+  assert.equal((await call("project", { action: "delete", boardId: board.id })).status, 400);
+
+  // Routines: only this agent's own, and another agent's is reported missing.
+  const mine = await request("/v1/routines", { method: "POST", body: JSON.stringify({ agentId: "atlas", name: "Mine", prompt: "Digest", intervalMinutes: 60 }) });
+  const theirs = await request("/v1/routines", { method: "POST", body: JSON.stringify({ agentId: "scout", name: "Theirs", prompt: "Other", intervalMinutes: 60 }) });
+  const listed = (await call("routines", { action: "list" })).body.routines;
+  assert.ok(listed.some((item: any) => item.id === mine.id));
+  assert.ok(!listed.some((item: any) => item.id === theirs.id));
+  assert.equal((await call("routines", { action: "pause", routineId: theirs.id })).status, 404);
+  assert.equal((await call("routines", { action: "pause", routineId: mine.id })).body.enabled, false);
+  assert.equal((await call("routines", { action: "update", routineId: mine.id, name: "Mine, renamed" })).body.name, "Mine, renamed");
+  assert.equal((await call("routines", { action: "delete", routineId: mine.id })).status, 200);
+  await request(`/v1/routines/${theirs.id}`, { method: "DELETE" });
+
+  // Directory: whitelisted fields only.
+  const agents = (await call("directory", { action: "agents" })).body.agents;
+  const self = agents.find((item: any) => item.id === "atlas");
+  assert.equal(self.status, "working");
+  assert.deepEqual(Object.keys(self).sort(), ["description", "id", "name", "role", "status", "teamIds", "you"]);
+
+  // Runs: its own are visible, another agent's are not, and a run cannot stop itself.
+  const listedRuns = (await call("runs", { action: "list" })).body.runs;
+  assert.ok(listedRuns.some((item: any) => item.id === run.id));
+  // Its own runs, plus work it delegated to teammates (those carry a parent run).
+  assert.ok(listedRuns.every((item: any) => item.agentId === "atlas" || item.parentRunId));
+  const other = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "scout", prompt: "MOCK_SLOW not yours" }) });
+  assert.equal((await call("runs", { action: "get", runId: other.id })).status, 404);
+  assert.equal((await call("runs", { action: "stop", runId: run.id })).status, 409);
+  await request(`/v1/runs/${other.id}/stop`, { method: "POST" });
   await request(`/v1/runs/${run.id}/stop`, { method: "POST" });
+});
+
+test("task moves enforce the same ownership permission as updates", async () => {
+  const agentId = 'move-permissions', helperId = 'move-recipient';
+  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: [agentId, helperId].map(id => ({ id, name: id, role: 'Assistant', instructions: 'Test move permissions.', memory: [] })) }) });
+  const grant = async (assignOthers: boolean) => {
+    const { profile } = await request(`/v1/agents/${agentId}/profile`);
+    await request(`/v1/agents/${agentId}/profile`, { method: 'PUT', body: JSON.stringify({ ...profile, terminalConsent: true, allowedTools: ['terminal'], board: { ...profile.board, assignOthers } }) });
+  };
+  await grant(false);
+  const board = await request('/v1/boards', { method: 'POST', body: JSON.stringify({ name: 'Move permissions' }) });
+  const ready = board.stages.find((stage: any) => stage.category === 'ready');
+  const card = await request('/v1/tasks', { method: 'POST', body: JSON.stringify({ boardId: board.id, title: 'Keep ownership', ownerAgentId: agentId }) });
+  let run = await request('/v1/runs', { method: 'POST', body: JSON.stringify({ agentId, prompt: 'MOCK_APPROVAL hold move permissions open' }) });
+  const call = async (payload: unknown) => { const response = await fetch(`${base}/internal/task`, { method: 'POST', headers: { Authorization: `Bearer ${coordinationToken(token, agentId, 'local')}`, 'X-Open-Harness-Agent': agentId, 'X-Open-Harness-Run': run.id, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); return { status: response.status, body: await response.json() as any }; };
+  try {
+    await approvalOf(run.id);
+    assert.equal((await call({ action: 'update', taskId: card.id, ownerAgentId: helperId })).status, 403);
+    const fields = { stageId: ready.id, ownerAgentId: helperId };
+    for (const spelling of [fields, { input: fields }, { input: JSON.stringify(fields) }]) {
+      const denied = await call({ action: 'move', taskId: card.id, ...spelling });
+      assert.equal(denied.status, 403);
+      assert.match(denied.body.error, /Change other agents' cards/);
+      const unchanged = await request(`/v1/tasks/${card.id}`);
+      assert.equal(unchanged.ownerAgentId, agentId);
+      assert.equal(unchanged.stageId, card.stageId);
+      assert.equal(unchanged.revision, card.revision);
+    }
+    const moved = await call({ action: 'move', taskId: card.id, stageId: ready.id });
+    assert.equal(moved.status, 200); assert.equal(moved.body.ownerAgentId, agentId); assert.equal(moved.body.stageId, ready.id);
+    const unassigned = await request('/v1/tasks', { method: 'POST', body: JSON.stringify({ boardId: board.id, title: 'Claim by moving', ownerAgentId: null }) });
+    assert.equal((await call({ action: 'move', taskId: unassigned.id, stageId: ready.id, ownerAgentId: helperId })).status, 403);
+    const claimed = await call({ action: 'move', taskId: unassigned.id, stageId: ready.id, ownerAgentId: agentId });
+    assert.equal(claimed.status, 200); assert.equal(claimed.body.ownerAgentId, agentId);
+
+    await request(`/v1/runs/${run.id}/stop`, { method: 'POST' });
+    await grant(true);
+    run = await request('/v1/runs', { method: 'POST', body: JSON.stringify({ agentId, prompt: 'MOCK_APPROVAL use assignment permission' }) });
+    await approvalOf(run.id);
+    const assigned = await call({ action: 'move', taskId: card.id, stageId: ready.id, ownerAgentId: helperId });
+    assert.equal(assigned.status, 200); assert.equal(assigned.body.ownerAgentId, helperId);
+  } finally {
+    await request(`/v1/runs/${run.id}/stop`, { method: 'POST' });
+  }
+});
+
+test("agent conversation access excludes private follow-ups to delegated work before applying the turn limit", async () => {
+  const agentId = 'conversation-reader', helperId = 'conversation-helper';
+  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: [agentId, helperId].map(id => ({ id, name: id, role: 'Assistant', instructions: 'Test conversation permissions.', memory: [] })) }) });
+  const { profile } = await request(`/v1/agents/${agentId}/profile`);
+  await request(`/v1/agents/${agentId}/profile`, { method: 'PUT', body: JSON.stringify({ ...profile, terminalConsent: true, allowedTools: ['terminal', 'mcp__open_harness__runs', 'mcp__open_harness__delegate_named_agent'] }) });
+  const team = await request('/v1/teams', { method: 'POST', body: JSON.stringify({ name: 'Conversation scope', color: 'blue', icon: 'people', memberAgentIds: [agentId, helperId] }) });
+  const parent = await request('/v1/runs', { method: 'POST', body: JSON.stringify({ agentId, prompt: 'MOCK_APPROVAL hold conversation access open' }) });
+  const call = async (tool: string, payload: unknown) => { const response = await fetch(`${base}/internal/${tool}`, { method: 'POST', headers: { Authorization: `Bearer ${coordinationToken(token, agentId, 'local')}`, 'X-Open-Harness-Agent': agentId, 'X-Open-Harness-Run': parent.id, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); return { status: response.status, body: await response.json() as any }; };
+  try {
+    await approvalOf(parent.id);
+    const handed = await call('handoff', { agentId: helperId, prompt: 'Delegated research' });
+    assert.equal(handed.status, 200); assert.equal(handed.body.done, true);
+    const delegated = await request(`/v1/runs/${handed.body.runId}`);
+    let privateRun: any;
+    // More private turns than the response limit must neither leak nor hide the authorized turn.
+    for (let turn = 0; turn < 21; turn++) {
+      privateRun = await request('/v1/runs', { method: 'POST', body: JSON.stringify({ agentId: helperId, conversationId: delegated.conversation_id, prompt: `Private follow-up ${turn}` }) });
+      await waitRun(privateRun.id);
+    }
+    for (const action of ['get', 'conversation', 'stop']) assert.equal((await call('runs', { action, runId: privateRun.id })).status, 404, action);
+    const conversation = await call('runs', { action: 'conversation', runId: delegated.id });
+    assert.equal(conversation.status, 200);
+    assert.deepEqual(conversation.body.runs.map((run: any) => run.id), [delegated.id]);
+    assert.equal(JSON.stringify(conversation.body).includes('Private follow-up'), false);
+    assert.deepEqual((await call('runs', { action: 'conversation', runId: parent.id })).body.runs.map((run: any) => run.id), [parent.id]);
+  } finally {
+    await request(`/v1/runs/${parent.id}/stop`, { method: 'POST' });
+    await request(`/v1/teams/${team.id}`, { method: 'DELETE' });
+  }
+});
+
+test("agent project edits preserve the human-selected automatic-start stage", async () => {
+  const agentId = 'automation-editor';
+  await request('/v1/agents/sync', { method: 'POST', body: JSON.stringify({ agents: [{ id: agentId, name: 'Automation editor', role: 'Assistant', instructions: 'Test project permissions.', memory: [] }] }) });
+  const { profile } = await request(`/v1/agents/${agentId}/profile`);
+  await request(`/v1/agents/${agentId}/profile`, { method: 'PUT', body: JSON.stringify({ ...profile, terminalConsent: true, allowedTools: ['terminal', 'mcp__open_harness__project'] }) });
+  const run = await request('/v1/runs', { method: 'POST', body: JSON.stringify({ agentId, prompt: 'MOCK_APPROVAL hold project access open' }) });
+  const call = async (payload: unknown, tool = 'project') => { const response = await fetch(`${base}/internal/${tool}`, { method: 'POST', headers: { Authorization: `Bearer ${coordinationToken(token, agentId, 'local')}`, 'X-Open-Harness-Agent': agentId, 'X-Open-Harness-Run': run.id, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); return { status: response.status, body: await response.json() as any }; };
+  try {
+    await approvalOf(run.id);
+    const board = (await call({ action: 'create', name: 'Protected automation' })).body;
+    // Unsaved defaults derive the trigger from stage categories; stage edits must pin that choice.
+    const originalTrigger = board.settings.runStageId;
+    // Like removing it, recategorizing the only In progress stage would leave tasks nowhere to run.
+    const stranded = await call({ action: 'update_stage', stageId: originalTrigger, category: 'backlog' });
+    assert.equal(stranded.status, 400); assert.match(stranded.body.error, /Keep at least one/);
+    const extra = await call({ action: 'add_stage', boardId: board.id, name: 'Another progress stage', category: 'in_progress' });
+    assert.equal(extra.status, 201); assert.equal(extra.body.settings.runStageId, originalTrigger);
+    const recategorized = await call({ action: 'update_stage', stageId: originalTrigger, category: 'backlog', position: 0 });
+    assert.equal(recategorized.status, 200); assert.equal(recategorized.body.settings.runStageId, originalTrigger);
+    assert.equal(recategorized.body.stages[0].id, originalTrigger);
+    const extraId = extra.body.stages.find((stage: any) => stage.name === 'Another progress stage').id;
+    const reordered = await call({ action: 'update_stage', stageId: extraId, position: 0 });
+    assert.equal(reordered.status, 200); assert.equal(reordered.body.settings.runStageId, originalTrigger);
+    // A human can choose any stage as the trigger, including a removable Backlog stage.
+    const trigger = board.stages.find((stage: any) => stage.category === 'backlog');
+    const target = board.stages.find((stage: any) => stage.category === 'ready');
+    const completion = board.stages.find((stage: any) => stage.category === 'done');
+    let selected = await request(`/v1/boards/${board.id}`);
+    selected = await request(`/v1/boards/${board.id}`, { method: 'PUT', body: JSON.stringify({ revision: selected.revision, settings: { ...selected.settings, runStageId: trigger.id } }) });
+    const updated = await call({ action: 'update', boardId: board.id, name: 'Permitted rename', runStageId: target.id, doneStageId: completion.id, settings: { runStageId: target.id, autoRunOnDrop: false, allowAgentDispatch: false } });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.name, 'Permitted rename');
+    assert.equal(updated.body.settings.runStageId, trigger.id);
+    assert.equal(updated.body.settings.doneStageId, completion.id);
+    assert.equal(updated.body.settings.autoRunOnDrop, true);
+    assert.equal(updated.body.settings.allowAgentDispatch, true);
+    assert.equal((await call({ action: 'board_update', boardId: board.id, input: { runStageId: target.id, settings: { runStageId: target.id } } }, 'task')).body.settings.runStageId, trigger.id);
+    for (const automatic of [true, false]) {
+      selected = await request(`/v1/boards/${board.id}`);
+      await request(`/v1/boards/${board.id}`, { method: 'PUT', body: JSON.stringify({ revision: selected.revision, settings: { ...selected.settings, autoRunOnDrop: automatic } }) });
+      const removed = await call({ action: 'remove_stage', stageId: trigger.id, moveToStageId: target.id });
+      assert.equal(removed.status, 403);
+      assert.match(removed.body.error, /person|user/);
+      selected = await request(`/v1/boards/${board.id}`);
+      assert.equal(selected.settings.runStageId, trigger.id);
+      assert.equal(selected.settings.autoRunOnDrop, automatic);
+      assert.ok(selected.stages.some((stage: any) => stage.id === trigger.id));
+    }
+    const edited = await call({ action: 'update_stage', stageId: trigger.id, name: 'Start here', category: 'ready', position: 1 });
+    assert.equal(edited.status, 200); assert.equal(edited.body.settings.runStageId, trigger.id);
+    const added = (await call({ action: 'add_stage', boardId: board.id, name: 'Safe to remove', category: 'backlog' })).body.stages.find((stage: any) => stage.name === 'Safe to remove');
+    assert.equal((await call({ action: 'remove_stage', stageId: added.id })).status, 200);
+    selected = await request(`/v1/boards/${board.id}`);
+    const human = await request(`/v1/boards/${board.id}`, { method: 'PUT', body: JSON.stringify({ revision: selected.revision, settings: { ...selected.settings, runStageId: target.id } }) });
+    assert.equal(human.settings.runStageId, target.id);
+    const unconfigured = await request('/v1/boards', { method: 'POST', body: JSON.stringify({ name: 'No run destination' }) });
+    await request(`/v1/stages/${unconfigured.settings.runStageId}`, { method: 'PUT', body: JSON.stringify({ category: 'backlog' }) });
+    assert.equal((await request(`/v1/boards/${unconfigured.id}`)).settings.runStageId, '');
+    const refused = await call({ action: 'add_stage', boardId: unconfigured.id, name: 'Would enable starts', category: 'in_progress' });
+    assert.equal(refused.status, 403);
+    const unchanged = await request(`/v1/boards/${unconfigured.id}`);
+    assert.equal(unchanged.settings.runStageId, '');
+    assert.equal(unchanged.stages.some((stage: any) => stage.name === 'Would enable starts'), false, 'Refused stage changes must roll back.');
+  } finally {
+    await request(`/v1/runs/${run.id}/stop`, { method: 'POST' });
+  }
+});
+
+test("agents collaborate: one plans a project, starts a teammate's card, and keeps waiting on a long handoff", async () => {
+  const team = await request("/v1/teams", { method: "POST", body: JSON.stringify({ name: "Collaboration", description: "Atlas and Scout", color: "violet", icon: "people", memberAgentIds: ["atlas", "scout"] }) });
+  const { profile } = await request("/v1/agents/atlas/profile");
+  await request("/v1/agents/atlas/profile", { method: "PUT", body: JSON.stringify({ ...profile, allowedTools: [...new Set([...profile.allowedTools, "mcp__open_harness__project", "mcp__open_harness__directory", "mcp__open_harness__runs", "mcp__open_harness__delegate_named_agent"])], board: { ...profile.board, assignOthers: true, dispatch: true } }) });
+  // Approval keeps Atlas's own run live for as long as the test needs.
+  const parent = await request("/v1/runs", { method: "POST", body: JSON.stringify({ agentId: "atlas", prompt: "MOCK_APPROVAL plan the launch with Scout" }) });
+  const parentApproval = await approvalOf(parent.id);
+  const scoped = coordinationToken(token, 'atlas', 'local');
+  const call = async (tool: string, payload: unknown) => { const response = await fetch(`${base}/internal/${tool === "delegate_named_agent" ? "handoff" : tool}`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "X-Open-Harness-Run": parent.id, "Content-Type": "application/json" }, body: JSON.stringify(payload) }); return { status: response.status, body: await response.json() as any }; };
+  try {
+    const teammates = (await call("directory", { action: "agents" })).body.agents;
+    assert.ok(teammates.some((agent: any) => agent.id === "scout" && agent.teamIds.includes(team.id)));
+    const board = (await call("project", { action: "create", name: "Launch plan" })).body;
+    const card = await call("task", { action: "create", boardId: board.id, title: "Write test.md", description: "A file that says test", ownerAgentId: "scout" });
+    assert.equal(card.status, 201); assert.equal(card.body.ownerAgentId, "scout");
+    const started = await call("task", { action: "run", taskId: card.body.id });
+    assert.equal(started.status, 202); assert.equal(started.body.run.agent_id, "scout");
+    // Atlas follows Scout's work through the card: its run state and result are on it.
+    let followed: any; const deadline = Date.now() + POLL_BUDGET_MS;
+    while (Date.now() < deadline) { followed = (await call("task", { action: "get", taskId: card.body.id })).body; if (followed.runs[0]?.state === "completed") break; await new Promise(resolve => setTimeout(resolve, 50)); }
+    assert.equal(followed.runs[0].agent_id, "scout"); assert.equal(followed.runs[0].state, "completed"); assert.ok(followed.runs[0].result);
+    // The list stays a summary however much the cards accumulate.
+    const summary = (await call("task", { action: "list", boardId: board.id })).body.tasks;
+    assert.deepEqual(summary.map((task: any) => task.id), [card.body.id]);
+    assert.equal(typeof summary[0].comments, "number"); assert.equal(summary[0].runs, undefined);
+
+    // A handoff that outlasts the wait returns its run ID instead of failing the call.
+    const handed = await call("delegate_named_agent", { agentId: "scout", prompt: "MOCK_APPROVAL review the plan" });
+    assert.equal(handed.status, 200); assert.equal(handed.body.done, false); assert.match(handed.body.message, /only this runId/);
+    assert.equal((await call("runs", { action: "get", runId: handed.body.runId })).body.agentId, "scout");
+    await request(`/v1/runs/${handed.body.runId}/approval`, { method: "POST", body: JSON.stringify({ approvalId: await approvalOf(handed.body.runId), decision: "approve" }) });
+    const resumed = await call("delegate_named_agent", { runId: handed.body.runId });
+    assert.equal(resumed.body.done, true); assert.equal(resumed.body.state, "completed");
+    assert.equal((await call("delegate_named_agent", { runId: started.body.run.id })).status, 404, "a run this agent did not hand off cannot be waited on");
+    assert.deepEqual((await call("delegate_named_agent", { agentId: "scout" })).body.missing, ["prompt"]);
+  } finally {
+    await request(`/v1/runs/${parent.id}/approval`, { method: "POST", body: JSON.stringify({ approvalId: parentApproval, decision: "approve" }) });
+    await waitRun(parent.id);
+    await request(`/v1/teams/${team.id}`, { method: "DELETE" }).catch(() => {});
+  }
 });
 
 test("moves, checks, and deletes task records", async () => {
@@ -459,6 +713,9 @@ test("a routine can be corrected and removed, not just paused", async () => {
   assert.equal(updated.interval_minutes, 10_080);
   // Shortening or lengthening an interval should take effect from now, not after the old one.
   assert.ok(new Date(updated.next_run_at).getTime() > Date.now());
+  // A rename, even one resending the same interval, must not push back the run that is due.
+  const renamed = await request(`/v1/routines/${created.id}`, { method: "PUT", body: JSON.stringify({ name: "Weekly summary", intervalMinutes: 10_080 }) });
+  assert.equal(renamed.next_run_at, updated.next_run_at);
 
   // An interval of zero or less would otherwise mean "every minute, forever".
   const clamped = await request(`/v1/routines/${created.id}`, { method: "PUT", body: JSON.stringify({ intervalMinutes: -5 }) });
@@ -497,7 +754,7 @@ test("the task tool accepts its fields nested, alongside the action, or as a JSO
   const parked = Date.now() + POLL_BUDGET_MS;
   while (Date.now() < parked && (await request(`/v1/runs/${held.id}`)).state !== "waiting_approval") await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal((await request(`/v1/runs/${held.id}`)).state, "waiting_approval");
-  const scoped = createHmac("sha256", token).update("agent:atlas").digest("hex");
+  const scoped = coordinationToken(token, 'atlas', 'local');
   async function move(body: object) {
     const created = await request("/v1/tasks", { method: "POST", body: JSON.stringify({ boardId: board.id, title: `Nested ${crypto.randomUUID()}`, ownerAgentId: "atlas" }) });
     const response = await fetch(`${base}/internal/task`, { method: "POST", headers: { Authorization: `Bearer ${scoped}`, "X-Open-Harness-Agent": "atlas", "X-Open-Harness-Run": held.id, "Content-Type": "application/json" }, body: JSON.stringify({ action: "move", taskId: created.id, ...body }) });

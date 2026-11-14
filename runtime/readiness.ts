@@ -9,24 +9,48 @@ import { stateSharing, stateSharingAsync, imageContractAsync } from './hermes';
 
 const releaseImageFile=join(import.meta.dirname,'release-image.json');
 const releaseImage=existsSync(releaseImageFile)?JSON.parse(readFileSync(releaseImageFile,'utf8')) as {ref:string;contract:number}:null;
-if(releaseImage&&(!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref)||releaseImage.contract!==11))throw new Error('The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.');
-export const HERMES_IMAGE = releaseImage?.ref || process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`;
+if(releaseImage&&(!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref)||releaseImage.contract!==12))throw new Error('The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.');
+// Docker Desktop can list the local tag yet fail to resolve its shorthand. Use
+// the same fully qualified reference for inspection, builds, and container starts.
+// Docker's rule: the first path part names a registry only when it is localhost or
+// contains '.', ':' or an uppercase letter; otherwise the image lives on docker.io.
+export function qualifiedImage(reference: string) {
+  const slash = reference.indexOf('/'), first = slash < 0 ? '' : reference.slice(0, slash);
+  if (first && (first === 'localhost' || /[.:A-Z]/.test(first))) return reference;
+  return `docker.io/${slash < 0 ? 'library/' : ''}${reference}`;
+}
+export const HERMES_IMAGE = releaseImage?.ref || qualifiedImage(process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`);
 const pullRuntime=Boolean(releaseImage)||process.env.OPEN_HARNESS_HERMES_PULL==='1';
 
 // Every layer of the managed-run handshake -- the policy extension, managed_entry.py,
 // inspect_runtime.py, the config shape -- ships inside the image, so an image built before
 // a fix keeps the bug while its tag never changes. The image carries this number as a
 // label. Anything else means "rebuild", including no label at all: contract 1 is the set
-// of images built before the label existed. Bump it whenever runtime/hermes/ changes.
-export const RUNTIME_CONTRACT = 11;
+// of images built before the label existed. Bump it whenever runtime/hermes/ changes, except
+// coordination.mjs: prepareProfile copies the checkout's copy into every run, so it needs no rebuild.
+export const RUNTIME_CONTRACT = 12;
 export const RUNTIME_LABEL = 'dev.openharness.runtime';
-export type ImageContract = 'missing' | 'stale' | 'current';
-export function classifyContract(result: { status: number | null; stdout: string }): ImageContract {
-  if (result.status !== 0) return 'missing';
+export type ImageContract = 'missing' | 'unknown' | 'stale' | 'current';
+type ImageInspection = { status: number | null; stdout: string; stderr?: string };
+export function classifyContract(result: ImageInspection): ImageContract {
+  if (result.status !== 0) return result.status !== null && /no such image:/i.test(result.stderr || '') ? 'missing' : 'unknown';
   return result.stdout.trim() === String(RUNTIME_CONTRACT) ? 'current' : 'stale';
 }
-export function imageContract(run: (name: string, args: string[]) => { status: number | null; stdout: string } = command): ImageContract {
-  return classifyContract(run('docker', ['image', 'inspect', '-f', `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE]));
+export const imageInspectionArgs = () => ['image', 'inspect', '-f', `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE];
+export function imageContract(run: (name: string, args: string[]) => ImageInspection = command): ImageContract {
+  const result = run('docker', imageInspectionArgs());
+  // Docker Desktop can briefly fail to resolve a tag that is already installed.
+  return classifyContract(result.status === 0 ? result : run('docker', imageInspectionArgs()));
+}
+export async function imageContractWith(run: (name: string, args: string[]) => Promise<ImageInspection>): Promise<ImageContract> {
+  const result = await run('docker', imageInspectionArgs());
+  return classifyContract(result.status === 0 ? result : await run('docker', imageInspectionArgs()));
+}
+export function runtimeImageMessage(contract: ImageContract) {
+  // Name the screen that exists: Workspace settings → Run setup again opens the readiness checks.
+  if (contract === 'missing') return 'Docker is running, but the agent runtime is not set up in its current context yet. Open Workspace settings → Run setup again and choose Set up agent runtime.';
+  if (contract === 'unknown') return 'Docker could not check the agent runtime image. Check that Docker is responding, then try again.';
+  return 'Docker is ready, but the agent runtime on this computer was built before a fix. Open Workspace settings → Run setup again and choose Update agent runtime.';
 }
 
 const platform = (['linux', 'darwin', 'win32'].includes(process.platform) ? process.platform : 'unknown') as OnboardingStatus['platform'];
@@ -74,6 +98,8 @@ export function onboardingStatus(credentialNames: string[] = [], stateRoot = pro
       : { id: 'container-engine', label: 'Private workspaces', state: 'ready', detail: 'Docker is running.' };
   const runtime: ReadinessCheck = image
     ? { id: 'agent-runtime', label: 'Agent runtime', state: 'ready', detail: 'The pinned Hermes runtime is ready for isolated agents.' }
+    : contract === 'unknown'
+      ? { id: 'agent-runtime', label: 'Agent runtime', state: 'action', detail: runtimeImageMessage(contract) }
     : contract === 'stale'
       ? { id: 'agent-runtime', label: 'Agent runtime', state: 'action', detail: pullRuntime ? 'Download the agent runtime supplied with this Open Harness release.' : 'The agent runtime on this computer was built before a fix and must be rebuilt. Layers already downloaded are reused.', action: 'prepare-runtime', actionLabel: 'Update agent runtime' }
     : daemon
@@ -187,6 +213,8 @@ async function probeOnboardingStatus(credentialNames: string[] = [], stateRoot =
       : { id: 'container-engine', label: 'Private workspaces', state: 'ready', detail: 'Docker is running.' };
   const runtime: ReadinessCheck = image
     ? { id: 'agent-runtime', label: 'Agent runtime', state: 'ready', detail: 'The pinned Hermes runtime is ready for isolated agents.' }
+    : contract === 'unknown'
+      ? { id: 'agent-runtime', label: 'Agent runtime', state: 'action', detail: runtimeImageMessage(contract) }
     : contract === 'stale'
       ? { id: 'agent-runtime', label: 'Agent runtime', state: 'action', detail: pullRuntime ? 'Download the agent runtime supplied with this Open Harness release.' : 'The agent runtime on this computer was built before a fix and must be rebuilt. Layers already downloaded are reused.', action: 'prepare-runtime', actionLabel: 'Update agent runtime' }
     : daemon

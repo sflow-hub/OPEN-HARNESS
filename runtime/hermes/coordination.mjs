@@ -25,14 +25,101 @@ const tools = [
     inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'read', 'post'] }, groupId: { type: 'string' }, text: { type: 'string' }, recipientAgentIds: { type: 'array', items: { type: 'string' }, maxItems: 4 }, requestId: { type: 'string', description: 'Reuse this identifier when retrying the same message.' } }, required: ['action'], additionalProperties: false },
   },
   {
+    name: "api_request",
+    description: 'Call an API using a saved credential granted to this run. Credential references and allowed origins are listed in your API access instructions. Authentication is added by Open Harness.', inputSchema: { type: 'object', properties: { credentialRef: { type: 'string' }, url: { type: 'string' }, method: { type: 'string', enum: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] }, query: { type: 'object', additionalProperties: { type: 'string' } }, headers: { type: 'object', additionalProperties: { type: 'string' } }, body: {} }, required: ['credentialRef', 'url'], additionalProperties: false } },
+  {
     name: "task",
-    description: "Read and manage board tasks and projects. Team tasks are visible only to members; changing another agent's card requires that profile's board permission, and board_create and board_update require its manage-projects permission. A project's stages, automation settings, and archived state stay under human control.",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "columns", "get", "create", "update", "move", "comment", "check", "additem", "claim", "release", "run", "board_create", "board_update"] }, taskId: { type: "string", description: "The task to act on: required for get, update, move, comment, check, additem, claim, release and run." }, boardId: { type: "string", description: "The board to act on: required for create and board_update." }, input: { type: "object", description: "The fields for this action, always nested here rather than alongside action. move: {stageId} from action columns, optionally {beforeId} to place it. create: {title, description, teamId, ownerAgentId}. update: {revision, and the fields to change}. comment: {text}. check: {item, done}. additem: {text}. release: {reason}. board_create and board_update: {name, description, color}." } }, required: ["action"], additionalProperties: false },
+    description: "Read and change task cards on Open Harness projects. Send every field at the top level, next to action. list: a summary of the cards you can see (boardId to show one project's), plus projects and their stages. get: taskId, with its checklist, comments and runs. create: title (boardId optional when there is one project; stageId, description, priority, dueAt, labels, ownerAgentId, teamId optional). update: taskId plus the fields to change. move: taskId, stageId (beforeId to place it). comment and additem: taskId, text. check: taskId, item (the checklist item ID), done. claim: taskId. release: taskId, reason. run: taskId (needs the project to allow agent dispatch). Team cards are visible only to members; changing or assigning another agent's card needs the \"Change other agents' cards\" permission. Use the project tool to create or change projects.",
+    inputSchema: { type: "object", properties: {
+      action: { type: "string", enum: ["list", "get", "create", "update", "move", "comment", "check", "additem", "claim", "release", "run"] },
+      taskId: { type: "string", description: "The card to act on: every action except list and create." },
+      boardId: { type: "string", description: "create: the project (optional when only one exists). list: show only this project's cards." },
+      stageId: { type: "string", description: "The stage for move, or the starting stage for create. Stage IDs come from list." },
+      beforeId: { type: "string", description: "move: place the card before this card." },
+      title: { type: "string" },
+      description: { type: "string" },
+      priority: { type: "string", enum: ["low", "normal", "high", "urgent"] },
+      dueAt: { type: "string", description: "ISO 8601 date-time." },
+      labels: { type: "array", items: { type: "string" } },
+      ownerAgentId: { type: "string", description: "Assign the card to this agent ID. An empty string unassigns it." },
+      teamId: { type: "string" },
+      text: { type: "string", description: "comment and additem: the text to add." },
+      item: { type: "string", description: "check: the checklist item ID." },
+      done: { type: "boolean", description: "check: true to tick the item, false to clear it." },
+      reason: { type: "string", description: "release: why the card is being handed back." },
+    }, required: ["action"], additionalProperties: false },
+  },
+  {
+    name: "project",
+    description: "Create and change Open Harness projects (task boards). Send every field at the top level, next to action. list: projects and their stages (includeArchived to add archived ones). get: boardId. create: name (description, color, defaultOwnerAgentId optional). update: boardId plus name, description, color, defaultOwnerAgentId or doneStageId. archive and restore: boardId. add_stage: boardId, name, category. update_stage: stageId plus name, category or position (0 is first). remove_stage: stageId, plus moveToStageId when it holds cards; the project's run stage cannot be removed until a person chooses another one. Deleting projects, sharing folders and automatic task starts stay with a person.",
+    inputSchema: { type: "object", properties: {
+      action: { type: "string", enum: ["list", "get", "create", "update", "archive", "restore", "add_stage", "update_stage", "remove_stage"] },
+      boardId: { type: "string" },
+      name: { type: "string", description: "Project name for create and update, or stage name for add_stage and update_stage." },
+      description: { type: "string" },
+      color: { type: "string", enum: ["sage", "blue", "amber", "violet", "rose", "teal"] },
+      defaultOwnerAgentId: { type: "string", description: "Agent ID new cards are assigned to. An empty string clears it." },
+      doneStageId: { type: "string", description: "update: the stage a card moves to when its run finishes." },
+      stageId: { type: "string" },
+      category: { type: "string", enum: ["backlog", "ready", "in_progress", "review", "done"] },
+      position: { type: "integer", minimum: 0 },
+      moveToStageId: { type: "string", description: "remove_stage: where the stage's cards go." },
+      includeArchived: { type: "boolean" },
+    }, required: ["action"], additionalProperties: false },
+  },
+  {
+    name: "routines",
+    description: "See and manage this agent's own Open Harness routines. list. get, history, pause, resume, run (run now) and delete: routineId. update: routineId plus name, prompt or intervalMinutes. Create routines with create_open_harness_routine.",
+    inputSchema: { type: "object", properties: {
+      action: { type: "string", enum: ["list", "get", "history", "update", "pause", "resume", "run", "delete"] },
+      routineId: { type: "string" },
+      name: { type: "string" },
+      prompt: { type: "string" },
+      intervalMinutes: { type: "integer", minimum: 1 },
+    }, required: ["action"], additionalProperties: false },
+  },
+  {
+    name: "directory",
+    description: "See the Open Harness teams this agent belongs to and its teammates. teams: your active teams and their member IDs. agents: you and your teammates with name, role and status (working, queued or idle). agent: agentId for one of them.",
+    inputSchema: { type: "object", properties: {
+      action: { type: "string", enum: ["teams", "agents", "agent"] },
+      agentId: { type: "string" },
+    }, required: ["action"], additionalProperties: false },
+  },
+  {
+    name: "runs",
+    description: "See this agent's runs and the work it delegated, and stop them. list (optional state filter and limit). get: runId, with its direct child runs. conversation: runId, this agent's own or delegated turns in that conversation; other agents' private turns are excluded. stop: runId; a run cannot stop itself.",
+    inputSchema: { type: "object", properties: {
+      action: { type: "string", enum: ["list", "get", "conversation", "stop"] },
+      runId: { type: "string" },
+      state: { type: "string", enum: ["queued", "running", "waiting_approval", "waiting_input", "completed", "failed", "interrupted", "cancelled"] },
+      limit: { type: "integer", minimum: 1, maximum: 50 },
+    }, required: ["action"], additionalProperties: false },
+  },
+  {
+    name: "decide",
+    description: "Ask the workspace decision model for a fast, structured decision. It returns option IDs, probabilities and confidence, never actions: act on the answer with your other tools. When decided is false, ask the user instead of guessing. Send every field at the top level, next to op. choose: pick k of options (default 1), for routing; debias asks twice in opposite orders. rank: order every option by how well it meets question. classify: give each option one of labels. score: rate each option on levels (lowest first; a default five-level scale otherwise). check: the probability that question is true of context; no options. Instead of options, pool fills them: agents (you and teammates, needs the Teams and agents permission) or stages (boardId's stages). Phrase question literally: the model answers exactly what is written. It does not count, compare numbers or order dates, so sort by those yourself. Its answers are advice and never authorize anything.",
+    inputSchema: { type: "object", properties: {
+      op: { type: "string", enum: ["choose", "rank", "classify", "score", "check"] },
+      question: { type: "string", description: "The decision, phrased literally: say exactly what counts." },
+      context: { type: "string", description: "Only what the decision needs; unrelated text lowers accuracy. Required for check." },
+      options: { type: "array", maxItems: 255, items: { type: "object", properties: {
+        id: { type: "string", description: "Returned in the answer. Letters, digits and _ . : -, not only digits." },
+        text: { type: "string", description: "What the model reads about this option." },
+      }, required: ["id", "text"], additionalProperties: false } },
+      pool: { type: "string", enum: ["agents", "stages"], description: "Fill options from Open Harness instead of sending them." },
+      boardId: { type: "string", description: "pool stages: the project whose stages to use." },
+      k: { type: "integer", minimum: 1, description: "choose: how many options to return." },
+      labels: { type: "array", items: { type: "string" }, description: "classify: the allowed labels." },
+      levels: { type: "array", minItems: 2, maxItems: 10, items: { type: "string" }, description: "score: ordered levels, lowest first." },
+      minConfidence: { type: "number", minimum: 0, maximum: 1, description: "Below this, decided is false. Default 0.6." },
+      debias: { type: "boolean", description: "choose: ask twice in opposite orders and average." },
+    }, required: ["op", "question"], additionalProperties: false },
   },
   {
     name: "delegate_named_agent",
-    description: "Assign a bounded task to another named Open Harness agent who shares an active team and return the durable run ID. Delegation depth is limited to two and cycles are rejected.",
-    inputSchema: { type: "object", properties: { agentId: { type: "string", description: "Target agent ID" }, prompt: { type: "string" } }, required: ["agentId", "prompt"], additionalProperties: false },
+    description: "Hand a bounded piece of work to another named Open Harness agent who shares an active team, and wait for its result. Send agentId and prompt to start. If the reply says done is false, the agent is still working: call again with only runId to keep waiting, never with the prompt again. Delegation depth is limited to two and cycles are rejected.",
+    inputSchema: { type: "object", properties: { agentId: { type: "string", description: "The agent to hand the work to." }, prompt: { type: "string", description: "Everything that agent needs to do the work." }, runId: { type: "string", description: "Keep waiting on an earlier handoff's run instead of starting a new one." } }, required: [], additionalProperties: false },
   },
   {
     name: "create_open_harness_routine",
@@ -41,6 +128,9 @@ const tools = [
   },
 ];
 class Unreachable extends Error {}
+// The coordinator's answer to a well-formed call it will not carry out: a missing field, a
+// permission, a conflict. Returned to the model as an ordinary result, never as an error.
+class Refused extends Error { constructor(status, value) { super(value?.error || "Request refused."); this.status = status; this.value = value; } }
 let reported = false;
 function attempt(options, input) {
   return new Promise((resolve, reject) => {
@@ -50,7 +140,13 @@ function attempt(options, input) {
       let body = "", size = 0;
       response.on("data", chunk => { size += chunk.length; if (size > 8_100_000) { reject(new Error('Coordination response is too large.')); response.destroy(); req.destroy(); } else body += chunk; });
       response.on('error', () => reject(new Error('Coordination response was interrupted. Inspect the destination before repeating an action.')));
-      response.on("end", () => { try { const value = JSON.parse(body); if ((response.statusCode || 500) >= 400) reject(new Error(value.error || "Coordination request failed.")); else resolve(value); } catch { reject(new Error("Invalid coordination response.")); } });
+      response.on("end", () => {
+        const status = response.statusCode || 500;
+        let value; try { value = JSON.parse(body); } catch { reject(new Error("Open Harness returned an unreadable response. This was not caused by your arguments.")); return; }
+        if (status >= 500) reject(new Error(value.error || "Open Harness could not complete this request. This was not caused by your arguments."));
+        else if (status >= 400) reject(new Refused(status, value));
+        else resolve(value);
+      });
     });
     req.on('socket', socket => { if (!socket.connecting) connected = true; else socket.once('connect', () => { connected = true; }); });
     if (options.path.endsWith('/internal/computer')) req.setTimeout(30000, () => req.destroy(new Error('Computer request timed out.')));
@@ -101,10 +197,18 @@ async function call(path, input, expectedRunId) {
       return value;
     } catch (error) { if (!(error instanceof Unreachable)) throw error; }
   }
-  throw new Error("The local coordination service is unavailable. Check Open Harness runtime status.");
+  throw new Error("Open Harness is not reachable right now. This was not caused by your arguments: try once more, and if it fails again tell the user that Open Harness may be stopped.");
 }
+const routes = { workspace: "/internal/workspace", group_chat: "/internal/group-chat", api_request: "/internal/api-request", delegate_named_agent: "/internal/handoff", create_open_harness_routine: "/internal/schedule", task: "/internal/task", project: "/internal/project", routines: "/internal/routines", directory: "/internal/directory", runs: "/internal/runs", decide: "/internal/decide" };
+const rpcError = (code, message) => Object.assign(new Error(message), { code });
+// Pinned Hermes counts every JSON-RPC error AND every result with isError:true as a strike
+// against this server, and after three in a row reports it "unreachable" and blocks it for about
+// a minute. A refusal ("Task title is required.", a missing permission) means the coordinator is
+// working, so it comes back as an ordinary result the model can read and correct. Only a real
+// outage is isError, and only a malformed request is a protocol error.
 async function dispatch(message) {
-  if (message.method === "initialize") return { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "open-harness-coordination", version: "0.2.0" } };
+  if (message.method === "initialize") return { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "open-harness-coordination", version: "0.3.0" } };
+  if (message.method === "ping") return {};
   if (message.method === "tools/list") return { tools };
   if (message.method === "tools/call") {
     const name = message.params?.name, args = message.params?.arguments || {};
@@ -118,16 +222,21 @@ async function dispatch(message) {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
-    const value = name === 'workspace' ? await call('/internal/workspace', args) : name === 'group_chat' ? await call('/internal/group-chat', args) : name === "delegate_named_agent" ? await call("/internal/handoff", args) : name === "create_open_harness_routine" ? await call("/internal/schedule", args) : name === "task" ? await call("/internal/task", args) : (() => { throw new Error(`Unknown tool: ${name}`); })();
-    return { content: [{ type: "text", text: JSON.stringify(value) }] };
+    if (!Object.hasOwn(routes, name)) throw rpcError(-32602, `Unknown tool: ${name}`);
+    try {
+      return { content: [{ type: "text", text: JSON.stringify(await call(routes[name], args)) }] };
+    } catch (error) {
+      if (error instanceof Refused) return { content: [{ type: "text", text: JSON.stringify({ ok: false, ...error.value, error: error.message }) }] };
+      return { content: [{ type: "text", text: error instanceof Error ? error.message : "Open Harness could not complete this request." }], isError: true };
+    }
   }
-  if (message.method === "notifications/initialized") return undefined;
-  throw new Error(`Unsupported MCP method: ${message.method}`);
+  if (message.method?.startsWith("notifications/")) return undefined;
+  throw rpcError(-32601, `Unsupported MCP method: ${message.method}`);
 }
 const lines = readline.createInterface({ input: process.stdin });
 lines.on("line", async line => {
   let message; try { message = JSON.parse(line); } catch { return; }
   if (message.id == null) { try { await dispatch(message); } catch {} return; }
   try { const result = await dispatch(message); process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\n"); }
-  catch (error) { process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: error instanceof Error ? error.message : "Tool failed" } }) + "\n"); }
+  catch (error) { process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: typeof error?.code === "number" ? error.code : -32603, message: error instanceof Error ? error.message : "Request failed" } }) + "\n"); }
 });

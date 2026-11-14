@@ -16,7 +16,7 @@ import { coordinationSocket } from '../runtime/coordination-socket';
 const scope = 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct';
 async function fixture() {
   const root = mkdtempSync(join(tmpdir(),'harness-codex-')), db = new DatabaseSync(':memory:');
-  const values: Record<string,string> = {}, secrets = { token:'fixture-control-token', backend:'fixture', environment:()=>({...values}), names:()=>Object.keys(values), has:(ref:string)=>Boolean(values[ref]), set:(ref:string,value:string)=>{values[ref]=value;}, delete:(ref:string)=>{delete values[ref];return true;} };
+  const values: Record<string,string> = {}, secrets = { token:'fixture-control-token', backend:'fixture', environment:()=>({...values}), names:()=>Object.keys(values), has:(ref:string)=>Boolean(values[ref]), set:(ref:string,value:string)=>{values[ref]=value;}, delete:(ref:string)=>{delete values[ref];return true;}, credentialFields:()=>({}), setCredentialFields:()=>{}, deleteCredentialFields:()=>{} };
   const credentials = new Credentials(db,secrets as never);
   const {privateKey,publicKey}=await generateKeyPair('RS256');
   let now=Date.now(), refreshes=0, requests=0, refreshGate:Promise<void>|undefined;

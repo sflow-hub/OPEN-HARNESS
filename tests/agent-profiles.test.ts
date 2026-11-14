@@ -4,8 +4,8 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHmac } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { coordinationToken } from '../runtime/coordination-auth';
 import type { AgentProfile, ProfileResponse, ModelChoice } from '../lib/agent-profile';
 import type { PersistentRun } from '../lib/control-client';
 import { decryptRunnerSecret, generateRunnerKeyPair, type EncryptedRunnerSecret } from '../lib/runner-crypto';
@@ -83,7 +83,7 @@ test('disabling a connector removes its tools at execution even if individually 
 });
 test('coordination cannot bypass disabled delegation or scheduling', async () => {
   const r = await run('MOCK_SLOW'); await waitRun(r.id, ['running']);
-  const scoped = createHmac('sha256', token).update('agent:atlas').digest('hex');
+  const scoped = coordinationToken(token, 'atlas', 'local');
   for (const path of ['/internal/handoff','/internal/schedule']) {
     const response = await fetch(base + path, { method: 'POST', headers: { Authorization: `Bearer ${scoped}`, 'X-Open-Harness-Agent': 'atlas', 'X-Open-Harness-Run': r.id, 'Content-Type': 'application/json' }, body: JSON.stringify({ agentId: 'scout', prompt: 'Bypass', name: 'Bypass' }) }); assert.equal(response.status, 403);
   }
@@ -250,5 +250,5 @@ test('computer settings reject unsafe mode combinations and invalid resource lim
   const current = await profile();
   await assert.rejects(save({ ...current, computer: { ...current.computer, access: 'private', desktop: 'existing' } }), { status: 400 });
   await assert.rejects(save({ ...current, computer: { ...current.computer, resources: { ...current.computer.resources, memoryMb: 128 } } }), { status: 400 });
-  await assert.rejects(save({ ...current, computer: { ...current.computer, access: 'folders', folders: [{ id: 'bad', path: '', mode: 'write' }] } }), { status: 400 });
+  await assert.rejects(save({ ...current, computer: { ...current.computer, access: 'folders', folders: [{ id: 'bad', name: 'bad', path: '', mode: 'write' }] } }), { status: 400 });
 });

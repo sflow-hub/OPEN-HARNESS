@@ -82,11 +82,11 @@ test('a runner encryption key is stored at pairing, backfilled by heartbeat, and
 test('a finished command stops carrying the credentials it was dispatched with', () => {
   const db = database(), machines = new Machines(db);
   const paired = machines.pair({ code: machines.createPairing({ name: 'VPS', platform: 'linux' }, 'https://coordinator.example').code });
-  const command = machines.enqueue(paired.machineId, 'atlas', 'run', { runId: 'run-1', encryptedSecrets: { ATLAS_KEY: { version: 1, key: 'k', iv: 'i', data: 'd' } } });
+  const command = machines.enqueue(paired.machineId, 'atlas', 'run', { runId: 'run-1', coordinationToken: 'run-capability', encryptedSecrets: { ATLAS_KEY: { version: 1, key: 'k', iv: 'i', data: 'd' } } });
   machines.poll(paired.machineId);
   machines.finish(paired.machineId, command.id, { final_response: 'done' });
   const stored = db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(command.id) as { payload_json: string };
-  assert.doesNotMatch(stored.payload_json, /encryptedSecrets|ATLAS_KEY/);
+  assert.doesNotMatch(stored.payload_json, /encryptedSecrets|ATLAS_KEY|coordinationToken|run-capability/);
   // What a later lookup still needs is kept, so a trailing event can still be matched to its run.
   assert.equal(machines.command(command.id)?.runId, 'run-1');
 });

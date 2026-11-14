@@ -21,7 +21,7 @@ const image = JSON.parse(docker(['image', 'inspect', HERMES_IMAGE]))[0];
 evidence.imageId = image.Id;
 evidence.platform = { os: image.Os, architecture: image.Architecture };
 const python = (name, script) => docker(['exec', name, 'python', '-c', script]);
-const check = (name, action) => { action(); evidence.checks.push(name); console.log(`PASS ${name}`); };
+const check = async (name, action) => { await action(); evidence.checks.push(name); console.log(`PASS ${name}`); };
 const profiles = ['one', 'two'].map(name => {
   const profile = draftProfile({ id: `sandbox-${name}-${randomUUID().slice(0, 8)}`, name, role: 'Sandbox fixture', description: '', tone: 0, instructions: '', memory: [] });
   profile.allowedTools = [];
@@ -31,8 +31,8 @@ const profiles = ['one', 'two'].map(name => {
 function prepare(profile) {
   prepareProfile(root, profile, { provider: 'mock', model: 'unused', credentialRef: 'MODEL_KEY', baseUrl: '' }, { environment: () => ({ MODEL_KEY: `credential-${profile.name}` }) }, `agent-token-${profile.name}`, 'sandbox-fixture');
 }
-function container(profile) {
-  const name = ensureContainer(profile.id, root, profile.computer), info = inspect(name);
+async function container(profile) {
+  const name = await ensureContainer(profile.id, root, profile.computer), info = inspect(name);
   created.add(info.Id);
   assert.equal(info.Image, evidence.imageId, 'Every tested container must use the recorded runtime image.');
   evidence.containers.push({ id: info.Id, name, imageId: info.Image, user: info.Config.User, mounts: info.Mounts, hostConfig: info.HostConfig });
@@ -42,8 +42,8 @@ mkdirSync(join(root, 'shared'), { recursive: true });
 const sentinel = join(fixture, 'host-only.txt'); writeFileSync(sentinel, 'host-private');
 try {
   profiles.forEach(prepare);
-  const [first, second] = profiles.map(container);
-  check('each agent has only its own profile and private mounts plus the common shared folder', () => {
+  const [first, second] = [await container(profiles[0]), await container(profiles[1])];
+  await check('each agent has only its own profile and private mounts plus the common shared folder', async () => {
     for (const [index, name] of [first, second].entries()) {
       const mounts = inspect(name).Mounts;
       assert.equal(mounts.length, 4);
@@ -66,25 +66,25 @@ for path in ${JSON.stringify([sentinel, join(root, 'agents', profiles[1 - index]
     assert.equal(python(first, "from pathlib import Path; print(Path('/workspace/private/owner.txt').read_text())"), 'one');
     assert.equal(python(second, "from pathlib import Path; print(Path('/workspace/private/owner.txt').read_text())"), 'two');
   });
-  check('folder grants refuse files, control sockets and agent-planted links', () => {
+  await check('folder grants refuse files, control sockets and agent-planted links', async () => {
     const id = inspect(first).Id;
     python(first, "import socket; s = socket.socket(socket.AF_UNIX); s.bind('/workspace/private/control.sock'); s.close()");
     for (const path of [sentinel, join(root, 'agents', profiles[0].id, 'private/control.sock')]) {
-      assert.throws(() => ensureContainer(profiles[0].id, root, { ...profiles[0].computer, access: 'folders', folders: [{ id: 'invalid', path, mode: 'write' }] }), /not a directory/);
+      await assert.rejects(ensureContainer(profiles[0].id, root, { ...profiles[0].computer, access: 'folders', folders: [{ id: 'invalid', path, mode: 'write' }] }), /not a directory/);
       assert.equal(inspect(first).Id, id);
     }
     python(first, "import os; os.symlink('/', '/workspace/shared/host-link')");
     for (const path of [join(root, 'shared/host-link'), join(root, 'shared/host-link/tmp')]) {
-      assert.throws(() => ensureContainer(profiles[0].id, root, { ...profiles[0].computer, access: 'folders', folders: [{ id: 'invalid', path, mode: 'write' }] }), /symbolic links/);
+      await assert.rejects(ensureContainer(profiles[0].id, root, { ...profiles[0].computer, access: 'folders', folders: [{ id: 'invalid', path, mode: 'write' }] }), /symbolic links/);
       assert.equal(inspect(first).Id, id);
     }
   });
-  check('shared files remain mutually readable and writable', () => {
+  await check('shared files remain mutually readable and writable', async () => {
     python(first, "from pathlib import Path; Path('/workspace/shared/team.txt').write_text('one')");
     python(second, "from pathlib import Path; p=Path('/workspace/shared/team.txt'); assert p.read_text() == 'one'; p.write_text('two')");
     assert.equal(readFileSync(join(root, 'shared/team.txt'), 'utf8'), 'two');
   });
-  check('kernel applies non-root execution, dropped capabilities, seccomp and resource limits', () => {
+  await check('kernel applies non-root execution, dropped capabilities, seccomp and resource limits', async () => {
     for (const name of [first, second]) {
       const info = inspect(name), limits = info.HostConfig;
       assert.notEqual(info.Config.User.split(':')[0], '0');
@@ -112,7 +112,7 @@ else:
 `);
     }
   });
-  check('profile regeneration cannot follow temporary symlinks planted from inside the container', () => {
+  await check('profile regeneration cannot follow temporary symlinks planted from inside the container', async () => {
     python(first, `import os
 for name in ['config.yaml', 'SOUL.md', '.env']:
     os.symlink(${JSON.stringify(sentinel)}, '/home/hermes/.hermes/' + name + '.tmp')
@@ -123,12 +123,12 @@ for name in ['config.yaml', 'SOUL.md', '.env']:
   });
   const readonly = join(fixture, 'readonly'), writable = join(fixture, 'writable');
   for (const path of [readonly, writable]) { mkdirSync(path); writeFileSync(join(path, 'file.txt'), 'original'); }
-  const selected = { ...profiles[0], computer: { ...profiles[0].computer, access: 'folders', folders: [{ id: 'read', path: readonly, mode: 'read' }, { id: 'write', path: writable, mode: 'write' }] } };
-  const selectedName = container(selected), selectedId = inspect(selectedName).Id;
-  check('selected folders enforce actual read-only and read/write access', () => {
+  const selected = { ...profiles[0], computer: { ...profiles[0].computer, access: 'folders', folders: [{ id: 'read', name: 'readonly', path: readonly, mode: 'read' }, { id: 'write', name: 'writable', path: writable, mode: 'write' }] } };
+  const selectedName = await container(selected), selectedId = inspect(selectedName).Id;
+  await check('selected folders enforce actual read-only and read/write access', async () => {
     python(selectedName, `from pathlib import Path
 import errno
-read = Path('/workspace/mounts/folder-1/file.txt')
+read = Path('/workspace/folders/readonly/file.txt')
 assert read.read_text() == 'original'
 try:
     read.write_text('forbidden')
@@ -136,17 +136,17 @@ except OSError as error:
     assert error.errno == errno.EROFS, error
 else:
     raise AssertionError('Read-only folder was writable')
-Path('/workspace/mounts/folder-2/file.txt').write_text('allowed')
+Path('/workspace/folders/writable/file.txt').write_text('allowed')
 `);
     assert.equal(readFileSync(join(readonly, 'file.txt'), 'utf8'), 'original');
     assert.equal(readFileSync(join(writable, 'file.txt'), 'utf8'), 'allowed');
-    python(second, "from pathlib import Path; assert not Path('/workspace/mounts/folder-1/file.txt').exists(); assert not Path('/workspace/mounts/folder-2/file.txt').exists()");
+    python(second, "from pathlib import Path; assert not Path('/workspace/folders/readonly/file.txt').exists(); assert not Path('/workspace/folders/writable/file.txt').exists()");
   });
-  check('returning to Private workspace replaces the container and revokes selected-folder access', () => {
-    const privateName = container(profiles[0]);
+  await check('returning to Private workspace replaces the container and revokes selected-folder access', async () => {
+    const privateName = await container(profiles[0]);
     assert.notEqual(inspect(privateName).Id, selectedId);
     assert.equal(inspect(privateName).Mounts.length, 4);
-    python(privateName, "from pathlib import Path; assert not Path('/workspace/mounts/folder-1/file.txt').exists(); assert not Path('/workspace/mounts/folder-2/file.txt').exists(); assert Path('/workspace/private/owner.txt').read_text() == 'one'");
+    python(privateName, "from pathlib import Path; assert not Path('/workspace/folders/readonly/file.txt').exists(); assert not Path('/workspace/folders/writable/file.txt').exists(); assert Path('/workspace/private/owner.txt').read_text() == 'one'");
   });
   const stopped = await stopManagedContainers(root);
   assert.deepEqual(stopped.failures, []);

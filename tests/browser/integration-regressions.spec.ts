@@ -99,14 +99,14 @@ test('workspace Save and test keeps a rejected model draft without committing it
   const settings = page.getByRole('dialog', { name: 'Workspace settings' });
   // Type only once the saved model has arrived in the form: an untouched form takes the
   // coordinator's answer, and a value replaced under a selection would be appended to.
-  await expect(settings.getByRole('combobox', { name: 'Workspace model' })).toHaveValue(before.model.model);
-  await settings.getByRole('combobox', { name: 'Workspace model' }).fill('rejected-workspace-model');
+  await expect(settings.getByLabel('Workspace model', { exact: true })).toHaveValue(before.model.model);
+  await settings.getByLabel('Workspace model', { exact: true }).fill('rejected-workspace-model');
   const validation = page.waitForRequest(candidate => candidate.url().endsWith('/v1/onboarding/model-test'));
   await settings.getByRole('button', { name: 'Save and test' }).click();
   expect((await validation).postDataJSON()).toMatchObject({ save: true, revision: before.revision });
   await expect(page.getByRole('status').filter({ hasText: 'Workspace candidate rejected' })).toBeVisible();
   expect(await (await request.get(control + '/v1/workspace/model', { headers })).json()).toEqual(before);
-  await expect(settings.getByRole('combobox', { name: 'Workspace model' })).toHaveValue('rejected-workspace-model');
+  await expect(settings.getByLabel('Workspace model', { exact: true })).toHaveValue('rejected-workspace-model');
 });
 
 test('task labels can be typed one comma at a time', async ({ page }) => {
@@ -127,6 +127,56 @@ test('task labels can be typed one comma at a time', async ({ page }) => {
   const card = page.locator('.task-card').filter({ hasText: 'Label this' }).first();
   await expect(card.locator('.task-labels')).toContainText('research');
   await expect(card.locator('.task-labels')).toContainText('launch');
+});
+
+test('chat recovers from an unavailable runtime without setup or a reload and keeps the draft', async ({ page, isMobile }) => {
+  let available = false, setups = 0;
+  await page.route(`${control}/v1/bootstrap`, async route => {
+    const response = await route.fetch(), body = await response.json();
+    await route.fulfill({ response, json: { ...body, mode: 'live', runtime: { available, version: '29.5.3', message: available ? 'Docker is ready.' : 'Docker could not check the agent runtime image.' } } });
+  });
+  await page.route('**/v1/onboarding/action', async route => { setups++; await route.abort(); });
+  await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+  await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
+  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await expect(page.getByText('Agent runtime not ready')).toBeVisible();
+  if (isMobile) await page.getByRole('button', { name: /^Agents \d/ }).click();
+  await page.getByRole('button', { name: 'Meet Atlas' }).click();
+  const composer = page.locator('.composer textarea');
+  await composer.fill('Keep this draft while Docker recovers');
+  available = true;
+  await expect(page.locator('.model-choice')).toContainText('Hermes', { timeout: 12_000 });
+  await expect(composer).toHaveValue('Keep this draft while Docker recovers');
+  expect(setups).toBe(0);
+});
+
+test('an older unavailable response cannot overwrite a newer successful runtime check', async ({ page, isMobile }) => {
+  let reads = 0, releaseOld!: () => void;
+  const oldGate = new Promise<void>(resolve => { releaseOld = resolve; });
+  await page.route(`${control}/v1/bootstrap`, async route => {
+    const read = ++reads, response = await route.fetch(), body = await response.json();
+    if (read === 2) await oldGate;
+    await route.fulfill({ response, json: { ...body, mode: 'live', runtime: { available: read >= 3, version: '29.5.3', message: read >= 3 ? 'Docker is ready.' : 'Docker could not check the agent runtime image.' } } });
+  });
+  try {
+    await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+    await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
+    if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+    await expect(page.getByText('Agent runtime not ready')).toBeVisible();
+    await page.getByRole('button', { name: /Settings/ }).first().click();
+    await page.getByRole('button', { name: 'Run setup again' }).click();
+    await page.getByRole('button', { name: 'Use this computer' }).click();
+    await page.getByRole('button', { name: 'Check again' }).click();
+    await expect.poll(() => reads).toBe(2);
+    await page.getByRole('button', { name: 'Set up later' }).click();
+    if (isMobile && !await page.getByRole('button', { name: 'Close navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click();
+    await expect(page.getByText('Agent runtime ready')).toBeVisible();
+    const late = page.waitForResponse(response => response.url() === `${control}/v1/bootstrap`);
+    releaseOld(); await (await late).finished();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    expect(await page.getByText('Agent runtime not ready').count()).toBe(0);
+    await expect(page.getByText('Agent runtime ready')).toBeVisible();
+  } finally { releaseOld(); }
 });
 
 test('the runtime label follows a successful set-up action without a reload, and never a failed one', async ({ page }) => {
@@ -158,23 +208,23 @@ test('the runtime label follows a successful set-up action without a reload, and
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
   await openNav();
-  await expect(page.getByText('Agent runtime needs setup')).toBeVisible();
+  await expect(page.getByText('Agent runtime not ready')).toBeVisible();
   // A failed action changes nothing: not while the guide is open, not after it is closed.
   failNext = true;
   await runSetup();
   await expect(page.getByText('The agent runtime image could not be built.')).toBeVisible();
   await page.getByRole('button', { name: 'Set up later' }).click();
   await openNav();
-  await expect(page.getByText('Agent runtime needs setup')).toBeVisible();
+  await expect(page.getByText('Agent runtime not ready')).toBeVisible();
   await page.waitForTimeout(400);
-  await expect(page.getByText('Agent runtime needs setup')).toBeVisible();
+  await expect(page.getByText('Agent runtime not ready')).toBeVisible();
   // A successful one is reflected as soon as the guide is closed — no reload.
   await runSetup();
   await expect(page.getByText('This setup step completed.')).toBeVisible();
   await page.getByRole('button', { name: 'Set up later' }).click();
   await openNav();
   await expect(page.getByText('Agent runtime ready')).toBeVisible();
-  await expect(page.getByText('Agent runtime needs setup')).toHaveCount(0);
+  await expect(page.getByText('Agent runtime not ready')).toHaveCount(0);
 });
 
 test('the runtime label still becomes ready when the guide is dismissed before the coordinator catches up', async ({ page }) => {
@@ -196,7 +246,7 @@ test('the runtime label still becomes ready when the guide is dismissed before t
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
   await openNav();
-  await expect(page.getByText('Agent runtime needs setup')).toBeVisible();
+  await expect(page.getByText('Agent runtime not ready')).toBeVisible();
   await page.getByRole('button', { name: /Settings/ }).first().click();
   await page.getByRole('button', { name: 'Run setup again' }).click();
   await page.getByRole('button', { name: 'Use this computer' }).click();
@@ -206,5 +256,5 @@ test('the runtime label still becomes ready when the guide is dismissed before t
   await openNav();
   await expect(page.getByText('Agent runtime ready')).toBeVisible({ timeout: 12_000 });
   expect(staleReads).toBeGreaterThanOrEqual(3);
-  await expect(page.getByText('Agent runtime needs setup')).toHaveCount(0);
+  await expect(page.getByText('Agent runtime not ready')).toHaveCount(0);
 });

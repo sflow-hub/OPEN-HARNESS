@@ -72,15 +72,16 @@ test('Computer settings stay available without Advanced features and offer only 
   const panel = page.getByRole('dialog', { name: 'Agent settings' });
   await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
   await expect(page.getByRole('tab', { selected: true })).toHaveAccessibleName('Computer');
-  await expect(panel.getByRole('radio', { name: 'Private workspace' })).toBeVisible();
-  await expect(panel.getByRole('radio', { name: 'Selected folders' })).toBeVisible();
+  // Lasting folder access is chosen on the Folders screen, for every agent at once.
+  await expect(panel.getByRole('button', { name: 'Manage folders' })).toBeVisible();
+  await expect(panel.getByRole('radio', { name: 'Selected folders' })).toHaveCount(0);
   await expect(panel.getByRole('switch', { name: 'Private agent desktop' })).toBeVisible();
   // Direct access and control of the signed-in desktop are gone, not hidden behind a switch.
   await expect(panel.getByRole('radio', { name: 'Direct computer access' })).toHaveCount(0);
   await expect(panel.getByLabel('Desktop access')).toHaveCount(0);
   // The extras that Advanced features still gates.
   await expect(panel.getByRole('switch', { name: 'Reserve this computer for this agent' })).toHaveCount(0);
-  await panel.getByText('Advanced resources and shared folders').click();
+  await expect(panel.getByText('Advanced resources')).toHaveCount(0);
   await expect(panel.getByLabel('CPU cores')).toHaveCount(0);
 });
 
@@ -166,15 +167,17 @@ test('downloads the exact contents of a workspace file', async ({ page }, testIn
 test('a coordinator that cannot be reached is stated plainly and recovered from', async ({ page }, testInfo) => {
   // The failure used to be a toast that cleared itself after a few seconds, leaving the app
   // looking healthy beside a status dot that was always green.
-  let reachable = false;
+  let reachable = false, attempts = 0;
   await page.route(`${control}/v1/bootstrap`, async route => {
+    attempts++;
     if (!reachable) return route.abort('connectionrefused');
     await route.continue();
   });
   await page.reload();
 
   const banner = page.getByRole('alert').filter({ hasText: 'cannot reach its control service' });
-  await expect(banner).toBeVisible();
+  await expect(banner).toBeVisible({ timeout: 12_000 });
+  expect(attempts).toBeGreaterThanOrEqual(3); // Brief failures reconnect before showing the persistent outage.
   const dot = page.locator('.status-dot.offline');
   await expect(dot).toHaveCount(1);
   if (testInfo.project.name === 'desktop') await expect(dot).toBeVisible();

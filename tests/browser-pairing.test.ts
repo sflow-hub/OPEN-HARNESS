@@ -1,7 +1,8 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { coordinationToken } from '../runtime/coordination-auth';
 import { execFile, spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { createHash, createHmac } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { createServer, request as httpRequest } from 'node:http';
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -114,6 +115,24 @@ async function coordinator(t: TestContext, requirePairing: boolean) {
   return { root, request, start, stop };
 }
 
+test('proxy bootstrap requires pairing even on a native coordinator with a forged localhost Host', async t => {
+  const f = await coordinator(t, false);
+  const direct = await f.request('/v1/bootstrap');
+  assert.equal(direct.status, 200, 'Direct loopback development bootstrap remains available.');
+  const proxyHeaders = { Host: 'localhost:3000', 'X-Open-Harness-Proxy': '1', 'X-Forwarded-For': '127.0.0.1' };
+  const denied = await f.request('/v1/bootstrap', undefined, proxyHeaders);
+  assert.equal(denied.status, 401); assert.equal(denied.value.pairingRequired, true); assert.equal(denied.value.token, undefined);
+  assert.equal((await f.request('/v1/browser/pair', { code: 'invalid' }, proxyHeaders)).status, 401);
+  const issued = issueBrowserPairing(f.root);
+  const connected = await f.request('/v1/browser/pair', { code: issued.code }, proxyHeaders);
+  assert.equal(connected.status, 200); assert.equal(connected.value.token, direct.value.token);
+  assert.equal((await f.request('/v1/browser/pair', { code: issued.code }, proxyHeaders)).status, 401);
+  for (let reload = 0; reload < 3; reload++) {
+    const restored = await f.request('/v1/bootstrap', undefined, { ...proxyHeaders, Authorization: `Bearer ${connected.value.token}` });
+    assert.equal(restored.status, 200); assert.equal(restored.value.token, direct.value.token);
+  }
+});
+
 test('HTTP bootstrap requires one-use filesystem pairing even with forged loopback Host, and survives restart', async t => {
   const f = await coordinator(t, true);
   assert.deepEqual(await f.request('/v1/ready'), { status: 200, value: { ok: true } });
@@ -134,7 +153,7 @@ test('HTTP bootstrap requires one-use filesystem pairing even with forged loopba
   const token = String(connected.value.token); assert.ok(token.length > 40);
   const auth = { Authorization: `Bearer ${token}` };
   assert.deepEqual((await f.request('/v1/bootstrap', undefined, auth)).value, connected.value);
-  const scoped = createHmac('sha256', token).update('agent:atlas').digest('hex');
+  const scoped = coordinationToken(token, 'atlas', 'local');
   const deniedAgent = await f.request('/v1/bootstrap', undefined, { Host: 'localhost:3000', Authorization: `Bearer ${scoped}`, 'X-Open-Harness-Agent': 'atlas' });
   assert.equal(deniedAgent.status, 401); assert.equal(deniedAgent.value.token, undefined);
   assert.equal((await f.request('/v1/browser/pair', { code: issued.code })).status, 401);

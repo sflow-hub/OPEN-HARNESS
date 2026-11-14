@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { DEFAULT_BOARD, DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, normalizeToolIds, runToolGrants, TASK_TOOL, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
+import { boardPermissions, DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, FOLDER_NAME, namedFolders, normalizeToolIds, runToolGrants, TASK_TOOL, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
 import type { Agent } from '../lib/types';
 import { isSandboxedComputer, UNSANDBOXED_COMPUTER_MESSAGE } from '../lib/agent-profile';
 
@@ -28,28 +28,60 @@ export function validateProfile(value: AgentProfile): AgentProfile {
     names.add(c.name);
     if (!Array.isArray(c.args) || c.args.length > 100 || c.args.some(a => typeof a !== 'string' || a.length > 4000) || typeof c.enabled !== 'boolean') throw new ProfileError('Invalid connection arguments.');
     if (c.secretRef && !/^[A-Z][A-Z0-9_]{1,79}$/.test(c.secretRef)) throw new ProfileError('Invalid connector secret reference.');
-    return { id: short(c.id, 'Connection ID', 100, true), name: c.name, command: short(c.command, 'Executable', 300, true), args: c.args, secretRef: c.secretRef || '', enabled: c.enabled };
+    const credentialBindings = (c.credentialBindings || []).map(binding => {
+      if (!binding || !/^[A-Z][A-Z0-9_]{1,79}$/.test(binding.credentialRef) || !/^[a-zA-Z][a-zA-Z0-9]{0,39}$/.test(binding.field) || !/^[A-Z][A-Z0-9_]{0,100}$/.test(binding.env)) throw new ProfileError('Credential bindings need a credential, field, and environment variable.');
+      return { credentialRef: binding.credentialRef, field: binding.field, env: binding.env };
+    });
+    if (credentialBindings.length > 50 || new Set(credentialBindings.map(binding => binding.env)).size !== credentialBindings.length) throw new ProfileError('A connection needs at most 50 unique credential environment variables.');
+    return { ...(credentialBindings.length ? { credentialBindings } : {}), id: short(c.id, 'Connection ID', 100, true), name: c.name, command: short(c.command, 'Executable', 300, true), args: c.args, secretRef: c.secretRef || '', enabled: c.enabled };
   });
+  // Origins arrive one per typed line, so blank lines and a trailing slash are ordinary input; a grant
+  // added and never filled in is dropped rather than blocking the whole save.
+  const credentialGrants = (value.credentialGrants || []).map(grant => grant && Array.isArray(grant.allowedOrigins) ? { ...grant, allowedOrigins: grant.allowedOrigins.map(origin => typeof origin === 'string' ? origin.trim() : origin).filter(origin => origin !== '') } : grant).filter(grant => !grant || grant.credentialRef || grant.allowedOrigins?.length).map(grant => {
+    if (!grant || !Array.isArray(grant.allowedOrigins) || !Array.isArray(grant.allowedMethods)) throw new ProfileError('API access needs a credential and allowed origins and methods.');
+    if (!/^[A-Z][A-Z0-9_]{1,79}$/.test(grant.credentialRef)) throw new ProfileError('Choose a credential for each API grant.');
+    if (!grant.allowedOrigins.length || grant.allowedOrigins.length > 30) throw new ProfileError('Give each API grant between 1 and 30 allowed origins.');
+    const allowedOrigins = grant.allowedOrigins.map(origin => {
+      let url; try { url = new URL(origin); } catch { throw new ProfileError('API origins must be valid HTTPS origins.'); }
+      if (url.protocol !== 'https:' || url.pathname !== '/' || url.search || url.hash || url.username || url.password) throw new ProfileError('API grants use exact HTTPS origins without paths.');
+      return url.origin;
+    });
+    if (!grant.allowedMethods.length || grant.allowedMethods.some(method => !['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].includes(method)) || grant.allowPrivateNetwork !== undefined && typeof grant.allowPrivateNetwork !== 'boolean') throw new ProfileError('Choose valid API methods and network access.');
+    return { credentialRef: grant.credentialRef, allowedOrigins: [...new Set(allowedOrigins)], allowedMethods: [...new Set(grant.allowedMethods)], allowPrivateNetwork: grant.allowPrivateNetwork === true };
+  });
+  if (credentialGrants.length > 50 || new Set(credentialGrants.map(grant => grant.credentialRef)).size !== credentialGrants.length) throw new ProfileError('Choose at most 50 unique API credential grants.');
   const computerInput = (value.computer || DEFAULT_COMPUTER) as ComputerConfig;
   if (!['private', 'folders', 'direct'].includes(computerInput.access) || !['none', 'virtual', 'existing'].includes(computerInput.desktop)) throw new ProfileError('Choose a valid computer access and desktop mode.');
   if (!isSandboxedComputer(computerInput)) throw new ProfileError(UNSANDBOXED_COMPUTER_MESSAGE);
   const resources = computerInput.resources || DEFAULT_COMPUTER.resources;
   if (![resources.cpu, resources.memoryMb, resources.concurrency].every(Number.isFinite) || resources.cpu < .25 || resources.cpu > 64 || resources.memoryMb < 256 || resources.memoryMb > 262144 || !Number.isInteger(resources.concurrency) || resources.concurrency < 1 || resources.concurrency > 32) throw new ProfileError('Computer resource limits are outside the supported range.');
-  const folders = (computerInput.folders || []).slice(0, 50).map(folder => {
+  const folderNames = new Set<string>();
+  const folders = namedFolders((computerInput.folders || []).slice(0, 50).map(folder => {
     if (!folder || typeof folder.path !== 'string' || !folder.path.trim() || folder.path.length > 4000 || !['read', 'write'].includes(folder.mode)) throw new ProfileError('Shared folders need a path and read or write access.');
-    return { id: short(folder.id || crypto.randomUUID(), 'Folder ID', 100, true), path: folder.path.trim(), mode: folder.mode };
-  });
+    if (folder.name !== undefined && folder.name !== '' && (typeof folder.name !== 'string' || !FOLDER_NAME.test(folder.name) || folderNames.has(folder.name))) throw new ProfileError('Folder names must be unique and use lowercase letters, numbers, dots, dashes, or underscores (up to 40).');
+    if (folder.name) folderNames.add(folder.name);
+    return { id: short(folder.id || crypto.randomUUID(), 'Folder ID', 100, true), name: folder.name || '', path: folder.path.trim(), mode: folder.mode };
+  }));
   const computer: ComputerConfig = { machineId: short(computerInput.machineId || 'local', 'Machine', 100, true), access: computerInput.access, desktop: computerInput.desktop, reserveMachine: Boolean(computerInput.reserveMachine), folders: computerInput.access === 'folders' ? folders : [], resources: { cpu: Math.round(resources.cpu * 100) / 100, memoryMb: Math.round(resources.memoryMb), concurrency: resources.concurrency } };
   if (computerInput.browserSessionTeamId) {
     if (typeof computerInput.browserSessionTeamId !== 'string') throw new ProfileError('Choose a valid browser sharing team.');
     computer.browserSessionTeamId = validId(computerInput.browserSessionTeamId);
     if (computer.desktop !== 'virtual') throw new ProfileError('Shared browser sessions require a private agent desktop.');
   }
-  const board = { ...DEFAULT_BOARD, ...(value.board || {}) };
+  const board = boardPermissions(value.board);
   if (![board.assignOthers, board.dispatch, board.manageProjects].every(permission => typeof permission === 'boolean')) throw new ProfileError('Invalid board permissions.');
-  return { id: validId(value.id), revision: value.revision, name: short(value.name, 'Name', 30, true).trim(), role: short(value.role, 'Role', 60, true).trim(), description: short(value.description, 'Description', 180), tone: value.tone, prompt: { enabled: value.prompt.enabled, text: short(value.prompt.text, 'System prompt', 12000) }, model: { ...validateModel(value.model.inherit ? { ...DEFAULT_MODEL, ...value.model, model: value.model.model || DEFAULT_MODEL.model } : value.model), inherit: value.model.inherit }, allowedTools: [...new Set([...normalizeToolIds(value.allowedTools, connectors.map(connector => connector.name)), TASK_TOOL])].filter(id => computer.desktop !== 'none' || id !== 'computer_use'), board, connectors, computer };
+  return { id: validId(value.id), revision: value.revision, name: short(value.name, 'Name', 30, true).trim(), role: short(value.role, 'Role', 60, true).trim(), description: short(value.description, 'Description', 180), tone: value.tone, prompt: { enabled: value.prompt.enabled, text: short(value.prompt.text, 'System prompt', 12000) }, model: { ...validateModel(value.model.inherit ? { ...DEFAULT_MODEL, ...value.model, model: value.model.model || DEFAULT_MODEL.model } : value.model), inherit: value.model.inherit }, allowedTools: [...new Set([...normalizeToolIds(value.allowedTools, connectors.map(connector => connector.name)), TASK_TOOL])].filter(id => computer.desktop !== 'none' || id !== 'computer_use'), board, connectors, computer, ...(credentialGrants.length ? { credentialGrants } : {}) };
 }
 export class Profiles {
+  // Lasting folder access lives in the workspace folder list; grants arriving on a profile (an older
+  // client, an import, a legacy save) are handed there and removed from the profile. Callers run it
+  // inside the profile's transaction, so a failed save never leaves the folders granted.
+  absorbFolders?: (agentId: string, machineId: string, folders: ComputerConfig['folders']) => void;
+  private absorb(profile: AgentProfile) {
+    if (!this.absorbFolders || !profile.computer.folders.length) return;
+    this.absorbFolders(profile.id, profile.computer.machineId, profile.computer.folders);
+    profile.computer = { ...profile.computer, access: 'private', folders: [] };
+  }
   constructor(readonly db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS agent_profiles(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS profile_revisions(agent_id TEXT NOT NULL, revision INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY(agent_id,revision));
@@ -57,7 +89,7 @@ export class Profiles {
       CREATE TABLE IF NOT EXISTS run_profiles(run_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, revision INTEGER NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tool_catalogs(agent_id TEXT PRIMARY KEY, json TEXT NOT NULL);`);
   }
-  get(id: string): AgentProfile | null { const row = this.db.prepare('SELECT json FROM agent_profiles WHERE id=?').get(id) as { json: string } | undefined; if (!row) return null; const profile = JSON.parse(row.json); return { ...profile, allowedTools: [...new Set([...normalizeToolIds(profile.allowedTools || [], (profile.connectors || []).map((connector: { name: string }) => connector.name)), TASK_TOOL])], board: { ...DEFAULT_BOARD, ...(profile.board || {}) }, computer: profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } }; }
+  get(id: string): AgentProfile | null { const row = this.db.prepare('SELECT json FROM agent_profiles WHERE id=?').get(id) as { json: string } | undefined; if (!row) return null; const profile = JSON.parse(row.json); return { ...profile, allowedTools: [...new Set([...normalizeToolIds(profile.allowedTools || [], (profile.connectors || []).map((connector: { name: string }) => connector.name)), TASK_TOOL])], board: boardPermissions(profile.board), computer: profile.computer ? { ...profile.computer, folders: namedFolders(profile.computer.folders || []) } : { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } }; }
   list(): AgentProfile[] { return (this.db.prepare('SELECT json FROM agent_profiles ORDER BY rowid').all() as Array<{ json: string }>).map(row => this.get(JSON.parse(row.json).id)!).filter(Boolean); }
   defaults(): { model: ModelChoice; revision: number } { const row = this.db.prepare('SELECT revision,json FROM workspace_settings WHERE id=1').get() as { revision: number; json: string } | undefined; return row ? { model: JSON.parse(row.json), revision: row.revision } : { model: DEFAULT_MODEL, revision: 0 }; }
   setDefaults(model: ModelChoice, revision: number) { const current = this.defaults(); if (revision !== current.revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409); this.db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(revision + 1, JSON.stringify(validateModel(model))); return this.defaults(); }
@@ -78,7 +110,7 @@ export class Profiles {
     if (deferComputer && current) profile.computer = current.computer;
     profile.revision++;
     this.db.exec('BEGIN IMMEDIATE');
-    try { this.db.prepare('INSERT INTO agent_profiles VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(profile.id, profile.revision, JSON.stringify(profile)); this.db.prepare('INSERT INTO profile_revisions VALUES(?,?,?)').run(profile.id, profile.revision, JSON.stringify(profile)); this.db.prepare(`INSERT INTO agents(id,name,role,instructions,config_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role=excluded.role,instructions=excluded.instructions,updated_at=excluded.updated_at`).run(profile.id, profile.name, profile.role, profile.prompt.text, '{}', new Date().toISOString()); onSaved?.(profile); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    try { this.absorb(profile); this.db.prepare('INSERT INTO agent_profiles VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(profile.id, profile.revision, JSON.stringify(profile)); this.db.prepare('INSERT INTO profile_revisions VALUES(?,?,?)').run(profile.id, profile.revision, JSON.stringify(profile)); this.db.prepare(`INSERT INTO agents(id,name,role,instructions,config_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role=excluded.role,instructions=excluded.instructions,updated_at=excluded.updated_at`).run(profile.id, profile.name, profile.role, profile.prompt.text, '{}', new Date().toISOString()); onSaved?.(profile); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return profile;
   }
   applyTransferredProfile(input: AgentProfile) {
@@ -86,7 +118,7 @@ export class Profiles {
     const profile = validateProfile({ ...input, revision: current.revision });
     this.validateBrowserSharing(profile);
     this.db.exec('BEGIN IMMEDIATE');
-    try { this.db.prepare('UPDATE agent_profiles SET json=? WHERE id=?').run(JSON.stringify(profile), profile.id); this.db.prepare('UPDATE profile_revisions SET json=? WHERE agent_id=? AND revision=?').run(JSON.stringify(profile), profile.id, profile.revision); this.db.prepare('UPDATE agents SET name=?,role=?,instructions=?,updated_at=? WHERE id=?').run(profile.name, profile.role, profile.prompt.text, new Date().toISOString(), profile.id); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    try { this.absorb(profile); this.db.prepare('UPDATE agent_profiles SET json=? WHERE id=?').run(JSON.stringify(profile), profile.id); this.db.prepare('UPDATE profile_revisions SET json=? WHERE agent_id=? AND revision=?').run(JSON.stringify(profile), profile.id, profile.revision); this.db.prepare('UPDATE agents SET name=?,role=?,instructions=?,updated_at=? WHERE id=?').run(profile.name, profile.role, profile.prompt.text, new Date().toISOString(), profile.id); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return profile;
   }
   import(agent: Agent & { config?: Partial<ModelChoice> }) {
@@ -97,7 +129,8 @@ export class Profiles {
     if (!agent.profile) draft.connectors = legacy.map(c => ({ id: c.id, name: c.name, command: c.command, args: JSON.parse(c.args_json), secretRef: c.secret_ref || '', enabled: Boolean(c.enabled) }));
     return this.save(draft);
   }
-  snapshot(runId: string, profile: AgentProfile) { this.validateBrowserSharing(profile); const allowedTools = runToolGrants(profile);
-    const value = { ...profile, allowedTools, effectiveModel: this.effective(profile), workspaceRevision: this.defaults().revision }; this.db.prepare('INSERT INTO run_profiles VALUES(?,?,?,?)').run(runId, profile.id, profile.revision, JSON.stringify(value)); return value; }
-  runSnapshot(runId: string): (AgentProfile & { effectiveModel: ModelChoice }) | null { const row = this.db.prepare('SELECT json FROM run_profiles WHERE run_id=?').get(runId) as { json: string } | undefined; return row ? JSON.parse(row.json) : null; }
+  // A project run stores the computer it actually mounted, so recovery and cleanup see the same folders.
+  snapshot(runId: string, profile: AgentProfile, project?: { id: string; name: string } | null) { this.validateBrowserSharing(profile); const allowedTools = runToolGrants(profile);
+    const value = { ...profile, allowedTools, effectiveModel: this.effective(profile), workspaceRevision: this.defaults().revision, ...(project ? { projectId: project.id, projectName: project.name } : {}) }; this.db.prepare('INSERT INTO run_profiles VALUES(?,?,?,?)').run(runId, profile.id, profile.revision, JSON.stringify(value)); return value; }
+  runSnapshot(runId: string): (AgentProfile & { effectiveModel: ModelChoice; projectId?: string; projectName?: string }) | null { const row = this.db.prepare('SELECT json FROM run_profiles WHERE run_id=?').get(runId) as { json: string } | undefined; return row ? JSON.parse(row.json) : null; }
 }

@@ -1,20 +1,25 @@
 // A credential is a named reference. Values live only in the coordinator's SecretStore
-// (OS vault, or a 0600 file); everything here is metadata safe to send to the browser.
+// (OS vault, or an encrypted 0600 file); everything here is metadata safe to send to the browser.
 import type { ModelChoice } from './agent-profile';
+import type { CredentialType } from './credential-types';
 
 export type CredentialUse =
   | { kind: 'workspace-default' }
+  | { kind: 'agent-api'; agentId: string; agentName: string }
   | { kind: 'agent-model'; agentId: string; agentName: string }
   | { kind: 'agent-connector'; agentId: string; agentName: string; connectorName: string; enabled: boolean };
 export type CredentialUsage = { uses: CredentialUse[]; agentCount: number; activeRuns: number };
 export type CredentialRecord = {
+  callbackUrl?: string;
+  type: CredentialType; config: Record<string, string>; fieldPresence: Record<string, boolean>; connectionStatus: 'untested' | 'connected' | 'failed' | 'needs-reconnection';
   ref: string; label: string; provider: string; model: string; baseUrl: string;
   fingerprint: string; length: number; present: boolean;
   createdAt: string; updatedAt: string; lastUsedAt: string | null;
   usage: CredentialUsage;
+  account?: { email?: string; name?: string };
 };
 export type CredentialList = { credentials: CredentialRecord[]; backend: string };
-export type CredentialDraft = { label?: string; provider?: string; value?: string; ref?: string; model?: string; baseUrl?: string };
+export type CredentialDraft = { label?: string; provider?: string; value?: string; ref?: string; model?: string; baseUrl?: string; type?: CredentialType; config?: Record<string, string>; fields?: Record<string, string> };
 
 // Defaults seed a selection; each agent owns its resulting model independently.
 export function modelForCredential(current: ModelChoice, credential: Pick<CredentialRecord, 'ref' | 'provider' | 'model' | 'baseUrl'>): ModelChoice {

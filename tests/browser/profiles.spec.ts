@@ -58,7 +58,8 @@ test('edits identity, model, prompt and tools, then persists on reload', async (
   await panel.getByRole('tab', { name: 'Model', exact: true }).click();
   await panel.getByRole('switch', { name: 'Use workspace default' }).uncheck();
   await panel.getByLabel('Provider', { exact: true }).selectOption('openrouter');
-  await panel.getByRole('combobox', { name: 'Model', exact: true }).fill('custom-research-model');
+  await panel.getByLabel('Available models').selectOption('__custom');
+  await panel.getByRole('textbox', { name: 'Model', exact: true }).fill('custom-research-model');
   await panel.getByRole('tab', { name: 'System prompt', exact: true }).click();
   await panel.getByLabel('System prompt / agent instructions').fill('Research thoroughly. Save source citations.');
   await panel.getByRole('switch', { name: 'Use custom instructions' }).uncheck();
@@ -75,7 +76,7 @@ test('edits identity, model, prompt and tools, then persists on reload', async (
   await page.reload(); await page.getByRole('button', { name: 'Edit Atlas Custom profile' }).click();
   await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Atlas Custom');
   await page.getByRole('tab', { name: 'Model', exact: true }).click();
-  await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toHaveValue('custom-research-model');
+  await expect(page.getByRole('textbox', { name: 'Model', exact: true })).toHaveValue('custom-research-model');
 });
 
 test('cancel preserves saved values and validates missing identity', async ({ page }) => {
@@ -150,11 +151,6 @@ test('configures computer access and automatically selects a paired computer', a
   await expect(panel.getByText('Loading saved profile…')).toBeHidden();
   await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
   await expect(panel.getByLabel('Connected computer')).toContainText(/online/);
-  await panel.getByText('Selected folders', { exact: true }).click();
-  await panel.getByText('Advanced resources and shared folders').click();
-  await panel.getByRole('button', { name: 'Add folder' }).click();
-  await panel.getByLabel('Shared folder 1 path').fill('/tmp/open-harness-project');
-  await panel.getByLabel('Shared folder 1 access').selectOption('write');
   // A private agent desktop needs a Linux computer with Docker; the mock local machine
   // reports whether it is one, and the switch follows that report.
   const { machines } = await (await request.get(control + '/v1/machines', { headers: { Authorization: `Bearer ${(await (await request.get(control + '/v1/bootstrap')).json()).token}` } })).json();
@@ -362,4 +358,26 @@ test('the task view polls on a timer instead of refetching continuously', async 
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await page.waitForTimeout(6000);
   expect(requests, `saw ${requests} task requests in six seconds`).toBeLessThanOrEqual(4);
+});
+
+test('workspace access is granted per agent without advanced features, and starts off', async ({ page, request }) => {
+  // Registered after beforeEach's script, so it wins on the reload.
+  await page.addInitScript(() => localStorage.setItem('open-harness.advanced.v1', 'off'));
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByRole('tab', { name: 'Tools & connections' }).click();
+  await expect(panel.getByRole('heading', { name: 'Workspace access' })).toBeVisible();
+  await expect(panel.getByText('Changes apply from this agent’s next run.', { exact: false })).toBeVisible();
+  for (const name of ['Projects', 'Routines', 'Teams and agents', 'Runs and conversations', 'Decisions']) await expect(panel.getByRole('switch', { name, exact: true })).not.toBeChecked();
+  await expect(panel.getByRole('switch', { name: 'Create and change projects' })).toHaveCount(0);
+  await expect(panel.getByRole('heading', { name: 'MCP connections' })).toHaveCount(0);
+  await panel.getByRole('switch', { name: 'Projects', exact: true }).check();
+  await panel.getByRole('button', { name: 'Save changes' }).click();
+  await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
+  const { token } = await (await request.get(control + '/v1/bootstrap')).json();
+  const { profile } = await (await request.get(control + '/v1/agents/atlas/profile', { headers: { Authorization: `Bearer ${token}` } })).json();
+  expect(profile.allowedTools).toContain('mcp__open_harness__project');
+  expect(profile.allowedTools).not.toContain('mcp__open_harness__runs');
 });

@@ -34,10 +34,11 @@ test('a fresh install writes a restricted file and records the backend it chose'
   withEnv({ OPEN_HARNESS_DISABLE_OS_VAULT: '1' }, () => {
     const secrets = new SecretStore(file);
     secrets.set('XAI_API_KEY', 'xai-value');
-    assert.equal(secrets.backend, 'restricted local file');
+    assert.equal(secrets.backend, 'encrypted local file');
     assert.deepEqual(secrets.names(), ['XAI_API_KEY']);
-    assert.equal(readFileSync(join(root, 'secrets.backend'), 'utf8'), 'file');
-    assert.equal(JSON.parse(readFileSync(file, 'utf8')).XAI_API_KEY, 'xai-value');
+    assert.equal(readFileSync(join(root, 'secrets.backend'), 'utf8'), 'encrypted-file');
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).format, 'open-harness-secrets');
+    assert.ok(!readFileSync(file, 'utf8').includes('xai-value'));
     // A restart keeps both the keys and the control token that authorizes every client.
     const reopened = new SecretStore(file);
     assert.equal(reopened.token, secrets.token);
@@ -70,7 +71,7 @@ test('the file copy survives a vault that accepts a write but returns nothing', 
   withEnv({ OPEN_HARNESS_DISABLE_OS_VAULT: undefined, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/dev/null', PATH: vault.path }, () => {
     const secrets = new SecretStore(file);
     secrets.set('XAI_API_KEY', 'xai-value');
-    assert.equal(secrets.backend, 'restricted local file');
+    assert.equal(secrets.backend, 'encrypted local file');
     assert.equal(existsSync(file), true, 'the only readable copy must not be deleted');
     assert.equal(new SecretStore(file).environment().XAI_API_KEY, 'xai-value');
   });

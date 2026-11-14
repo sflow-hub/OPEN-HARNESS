@@ -8,15 +8,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve,sep } from 'node:path';
 import type { ComputerConfig } from '../lib/agent-profile';
-import { HERMES_IMAGE, RUNTIME_LABEL, classifyContract, imageContract } from './readiness';
+import { HERMES_IMAGE, classifyContract, imageContract, imageContractWith, imageInspectionArgs, runtimeImageMessage } from './readiness';
 import { assertSandboxedComputer, sharedFolderSource } from './computer-validation';
-import { UNSANDBOXED_COMPUTER_MESSAGE } from '../lib/agent-profile';
+import { folderTarget, namedFolders, UNSANDBOXED_COMPUTER_MESSAGE } from '../lib/agent-profile';
 import { createVerifiedFolderContainer, createVerifiedFolderContainerAsync, pinSelectedFolders, requiresFolderVerification } from './folder-mounts';
 import { safeWorkspacePath } from './path-safety';
 import { assertContainerAdmission, withContainerAdmission } from './container-admission';
 
-const FIRST_SETUP_MESSAGE = "Docker is ready, but the pinned Hermes runtime still needs its first-time setup.";
-const STALE_IMAGE_MESSAGE = "Docker is ready, but the agent runtime on this computer was built before a fix. Open Settings → Readiness and update it.";
 function authorizeWorkspaceMounts(stateRoot:string,computer:ComputerConfig){if(process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY!=='1'||computer.access!=='folders'||computer.machineId!=='local')return;const shared=resolve(stateRoot,'shared');if(computer.folders.some(folder=>{const source=resolve(folder.path);return source!==shared&&!source.startsWith(shared+sep);}))throw new Error('Authenticated shared workspaces may mount only their shared files. Upload project files to the workspace or use a private agent computer.');}
 function prepareExecutionDirectories(agentId: string, stateRoot: string) {
   const names = ['shared', ...['profile', 'private', 'managed'].map(name => `agents/${agentId}/${name}`)];
@@ -223,6 +221,14 @@ export class HermesGateway extends EventEmitter {
         const decision = await new Promise<string>(resolve => { this.mockApproval = resolve; });
         if (decision === "deny") throw new Error("Mock action was denied.");
       }
+      if (prompt.includes('MOCK_CLARIFY_BATCH')) {
+        // The shape pinned Hermes's clarify tool actually emits; a reply that is not `{"answers":{...}}` JSON is a cancel-all there.
+        this.emit('event', { type: 'clarify.request', session_id: params.session_id, payload: { request_id: 'mock-clarify-batch', questions: [{ qid: 'q0', question: 'Which language?', choices: ['Python', 'Go'], multi_select: false }, { qid: 'q1', question: 'Any extras?', choices: [], multi_select: false }] } });
+        const raw = await new Promise<unknown>(resolve => { this.mockInput = resolve; });
+        let answers: Record<string, unknown> = {};
+        try { answers = JSON.parse(String(raw)).answers || {}; } catch { /* Cancel-all, as in Hermes. */ }
+        return { final_response: `Hermes mock completed the task. Answers: ${['q0', 'q1'].map(qid => `${qid}=${Array.isArray(answers[qid]) ? (answers[qid] as string[]).join('+') : String(answers[qid] ?? '')}`).join(', ')}` };
+      }
       if (prompt.includes('MOCK_CLARIFY')) {
         this.emit('event', { type: 'clarify.request', session_id: params.session_id, payload: { request_id: 'mock-clarify', question: 'What should I use?' } });
         const answer = await new Promise<unknown>(resolve => { this.mockInput = resolve; });
@@ -264,7 +270,7 @@ export function dockerStatus(requireImage = true) {
   if (version.status === 0) {
     if (requireImage) {
       const contract = imageContract();
-      if (contract !== 'current') return { available: false, version: version.stdout.trim(), message: contract === 'missing' ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE };
+      if (contract !== 'current') return { available: false, version: version.stdout.trim(), message: runtimeImageMessage(contract) };
     }
     return { available: true, version: version.stdout.trim(), message: "Docker is ready." };
   }
@@ -282,9 +288,11 @@ async function probeDockerStatus(): Promise<ReturnType<typeof dockerStatus>> {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { available: true, version: "mock", message: "Deterministic Hermes runtime is ready." };
   const version = await execDocker(["version", "--format", "{{.Server.Version}}"], 5000);
   if (version.code === 0) {
-    const label = await execDocker(["image", "inspect", "-f", `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE], 5000);
-    const contract = classifyContract({ status: label.code, stdout: label.stdout });
-    if (contract !== 'current') return { available: false, version: version.stdout.trim(), message: contract === 'missing' ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE };
+    let label = await execDocker(imageInspectionArgs(), 5000);
+    // Docker Desktop can briefly fail to resolve a tag that is already installed.
+    if (label.code !== 0) label = await execDocker(imageInspectionArgs(), 5000);
+    const contract = classifyContract({ status: label.code, stdout: label.stdout, stderr: label.stderr });
+    if (contract !== 'current') return { available: false, version: version.stdout.trim(), message: runtimeImageMessage(contract) };
     return { available: true, version: version.stdout.trim(), message: "Docker is ready." };
   }
   const detail = (version.stderr || version.stdout || "").trim();
@@ -302,7 +310,8 @@ const DOCKER_STATUS_TTL_MS = 5_000;
 export function dockerStatusCached(): Promise<ReturnType<typeof dockerStatus>> {
   const stale = !cachedStatus || Date.now() - cachedStatus.at > DOCKER_STATUS_TTL_MS;
   if (stale && !statusRefresh) statusRefresh = probeDockerStatus().then(value => { cachedStatus = { value, at: Date.now() }; }).finally(() => { statusRefresh = null; });
-  if (cachedStatus) return Promise.resolve(cachedStatus.value);
+  // A stale failure must not keep blocking chat after Docker has recovered.
+  if (cachedStatus && (!stale || cachedStatus.value.available)) return Promise.resolve(cachedStatus.value);
   return statusRefresh!.then(() => cachedStatus!.value);
 }
 
@@ -314,11 +323,12 @@ export function dockerStatusCached(): Promise<ReturnType<typeof dockerStatus>> {
 // the misleading "policy extension failed to load". Probe once per state root and say
 // the true cause instead. Reuses the pinned image so the check never pulls anything.
 export type SharingProbe = { ok: boolean; detail: string };
-let sharingCache: { root: string; value: SharingProbe } | null = null;
+let sharingCache: { root: string; value: SharingProbe; at: number } | null = null;
 export function stateSharing(stateRoot: string): SharingProbe {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { ok: true, detail: 'Deterministic test runtime shares state directly.' };
   const root = resolve(stateRoot);
-  if (sharingCache?.root === root) return sharingCache.value;
+  // A failure says nothing permanent, so it expires and the next check recovers without a restart.
+  if (sharingCache?.root === root && (sharingCache.value.ok || Date.now() - sharingCache.at < 15_000)) return sharingCache.value;
   let value: SharingProbe;
   try {
     const dir = join(root, '.mount-probe');
@@ -328,13 +338,18 @@ export function stateSharing(stateRoot: string): SharingProbe {
     writeFileSync(join(dir, 'canary'), token, { mode: 0o644 });
     const result = spawnSync("docker", ["run", "--rm", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`,
       "-v", `${dir}:/probe:ro`, HERMES_IMAGE, "cat", "/probe/canary"], { encoding: "utf8", timeout: 60_000 });
-    value = result.stdout.trim() === token
+    // Only a timeout or Docker's own exit code (125) means Docker did not answer; an unshared
+    // folder shows up empty on Docker Desktop, so cat exits 1 and gets the file-sharing advice.
+    const dockerFailed = result.status === null || (result.status === 125 && !/mounts? denied|is not shared/i.test(result.stderr || ''));
+    value = dockerFailed
+      ? { ok: false, detail: 'Docker could not verify access to the Open Harness data folder. Check that Docker is responding, then try again.' }
+      : result.status === 0 && result.stdout.trim() === token
       ? { ok: true, detail: 'Docker can read the Open Harness data folder.' }
       : { ok: false, detail: `Docker cannot read the Open Harness data folder at ${root}, so agent containers would start with an empty profile and never receive your model credential. Add this folder to Docker Desktop → Settings → Resources → File sharing, or set OPEN_HARNESS_STATE_DIR to a folder inside your home directory.` };
   } catch {
     value = { ok: false, detail: `Open Harness could not verify that Docker can read its data folder at ${root}.` };
   }
-  sharingCache = { root, value };
+  sharingCache = { root, value, at: Date.now() };
   return value;
 }
 
@@ -354,7 +369,9 @@ let imageIdCache: { id: string; at: number } | null = null;
 function currentImageId() {
   if (imageIdCache && Date.now() - imageIdCache.at < 5_000) return imageIdCache.id;
   const result = spawnSync("docker", ["image", "inspect", "-f", "{{.Id}}", HERMES_IMAGE], { encoding: "utf8", timeout: 10_000 });
-  imageIdCache = { id: result.status === 0 ? result.stdout.trim() : '', at: Date.now() };
+  // An empty ID would change the signature and remove a healthy agent container.
+  if (result.status !== 0 || !result.stdout.trim()) throw new Error('Docker could not verify the agent runtime image ID. Check that Docker is responding, then try again.');
+  imageIdCache = { id: result.stdout.trim(), at: Date.now() };
   return imageIdCache.id;
 }
 
@@ -456,19 +473,21 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
   assertContainerAdmission(stateRoot);
   assertSandboxedComputer(computer);
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
-  const sharing = stateSharing(stateRoot);
-  if (!sharing.ok) throw new Error(sharing.detail);
   // Refuse here, not just in readiness: a container from an image that predates a fix
   // would start and then die with "gateway exited during startup", which says nothing.
   const contract = imageContract();
-  if (contract !== 'current') throw new Error(contract === 'missing' ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE);
+  if (contract !== 'current') throw new Error(runtimeImageMessage(contract));
+  const sharing = stateSharing(stateRoot);
+  if (!sharing.ok) throw new Error(sharing.detail);
   const { safe, names } = agentContainerNames(agentId, stateRoot);
   prepareExecutionDirectories(safe, stateRoot);
-  const selected = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
+  // A runner can receive a snapshot from a coordinator that predates folder names.
+  const given = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
+  const selected: ComputerConfig = { ...given, folders: namedFolders(given.folders) };
   const mounts: string[] = [];
-  if (selected.access === 'folders') selected.folders.forEach((folder, index) => {
-    const source = sharedFolderSource(folder.path, folder.mode);
-    mounts.push('-v', `${source}:/workspace/mounts/folder-${index + 1}${folder.mode === 'read' ? ':ro' : ''}`);
+  if (selected.access === 'folders') selected.folders.forEach(folder => {
+    const source = sharedFolderSource(folder.path, folder.mode, stateRoot);
+    mounts.push('-v', `${source}:${folderTarget(folder)}${folder.mode === 'read' ? ':ro' : ''}`);
   });
   const pinned = requiresFolderVerification(selected) ? pinSelectedFolders(selected.folders) : null;
   try {
@@ -506,34 +525,40 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
 }
 
 
-export async function imageContractAsync() {
-  const result = await commandAsync('docker', ['image', 'inspect', '-f', `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE], 10_000);
-  return classifyContract(result);
+export function imageContractAsync() {
+  return imageContractWith((name, args) => commandAsync(name, args, 10_000));
 }
 async function currentImageIdAsync() {
   if (imageIdCache && Date.now() - imageIdCache.at < 5_000) return imageIdCache.id;
   const result = await commandAsync('docker', ['image', 'inspect', '-f', '{{.Id}}', HERMES_IMAGE], 10_000);
-  imageIdCache = { id: result.status === 0 ? result.stdout.trim() : '', at: Date.now() }; return imageIdCache.id;
+  // An empty ID would change the signature and remove a healthy agent container.
+  if (result.status !== 0 || !result.stdout.trim()) throw new Error('Docker could not verify the agent runtime image ID. Check that Docker is responding, then try again.');
+  imageIdCache = { id: result.stdout.trim(), at: Date.now() }; return imageIdCache.id;
 }
 async function inspectContainerAsync(name: string) {
   const result = await commandAsync('docker', ['inspect', '-f', '{{json .}}', name], 10_000);
   return inspectedContainer(result.status, result.stdout, result.stderr, name);
 }
-const asyncSharing = new Map<string, { at: number; value: Promise<SharingProbe> }>();
-export function stateSharingAsync(stateRoot: string): Promise<SharingProbe> {
+const asyncSharing = new Map<string, { at: number; value: Promise<SharingProbe>; ok?: boolean }>();
+export function stateSharingAsync(stateRoot: string, fresh = false): Promise<SharingProbe> {
   if (process.env.OPEN_HARNESS_MOCK === '1') return Promise.resolve({ ok: true, detail: 'Deterministic test runtime shares state directly.' });
   const root = resolve(stateRoot), cached = asyncSharing.get(root);
-  if (cached && Date.now() - cached.at < 60_000) return cached.value;
+  // A failure says nothing permanent, so it expires sooner and the next check recovers without a restart.
+  if (cached && !fresh && Date.now() - cached.at < (cached.ok === false ? 15_000 : 60_000)) return cached.value;
   const value = (async () => {
     try {
       const dir = join(root, '.mount-probe'), token = randomUUID(); mkdirSync(dir, { recursive: true });
       const canary = `canary-${token}`; writeFileSync(join(dir, canary), token, { mode: 0o644 });
       try {
         const result = await commandAsync('docker', ['run', '--rm', '--user', `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, '-v', `${dir}:/probe:ro`, HERMES_IMAGE, 'cat', `/probe/${canary}`], 60_000);
-        return result.status === 0 && result.stdout.trim() === token ? { ok: true, detail: 'Docker can read the Open Harness data folder.' } : { ok: false, detail: 'Docker cannot read the Open Harness data folder. Add it to Docker file sharing or choose a shared data folder before running work.' };
+        // Only a timeout or Docker's own exit code (125) means Docker did not answer. Docker Desktop
+        // runs the probe with an unshared folder showing up empty, so cat exits 1: that, and a
+        // "mounts denied" refusal, are the file-sharing problem the advice fixes.
+        if (result.status === null || (result.status === 125 && !/mounts? denied|is not shared/i.test(result.stderr || ''))) return { ok: false, detail: 'Docker could not verify access to the Open Harness data folder. Check that Docker is responding, then try again.' };
+        return result.status === 0 && result.stdout.trim() === token ? { ok: true, detail: 'Docker can read the Open Harness data folder.' } : { ok: false, detail: `Docker cannot read the Open Harness data folder at ${root}, so agent containers would start with an empty profile and never receive your model credential. Add this folder to Docker Desktop → Settings → Resources → File sharing, or set OPEN_HARNESS_STATE_DIR to a folder inside your home directory.` };
       } finally { try { unlinkSync(join(dir, canary)); } catch {} }
     } catch { return { ok: false, detail: 'Open Harness could not verify Docker access to its data folder.' }; }
-  })(); asyncSharing.set(root, { at: Date.now(), value }); return value;
+  })(); const entry: { at: number; value: Promise<SharingProbe>; ok?: boolean } = { at: Date.now(), value }; asyncSharing.set(root, entry); void value.then(probe => { entry.ok = probe.ok; }); return value;
 }
 
 export function ensureContainerAsync(agentId: string, stateRoot: string, computer?: ComputerConfig, fresh = false) {
@@ -543,19 +568,21 @@ async function startExecutionContainer(agentId: string, stateRoot: string, compu
   assertSandboxedComputer(computer);
   if(computer)authorizeWorkspaceMounts(stateRoot,computer);
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
-  const sharing = await stateSharingAsync(stateRoot);
-  if (!sharing.ok) throw new Error(sharing.detail);
   // Refuse here, not just in readiness: a container from an image that predates a fix
   // would start and then die with "gateway exited during startup", which says nothing.
   const contract = await imageContractAsync();
-  if (contract !== 'current') throw new Error(contract === 'missing' ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE);
+  if (contract !== 'current') throw new Error(runtimeImageMessage(contract));
+  const sharing = await stateSharingAsync(stateRoot);
+  if (!sharing.ok) throw new Error(sharing.detail);
   const { safe, names } = agentContainerNames(agentId, stateRoot);
   prepareExecutionDirectories(safe, stateRoot);
-  const selected = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
+  // A runner can receive a snapshot from a coordinator that predates folder names.
+  const given = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
+  const selected: ComputerConfig = { ...given, folders: namedFolders(given.folders) };
   const mounts: string[] = [];
-  if (selected.access === 'folders') selected.folders.forEach((folder, index) => {
-    const source = sharedFolderSource(folder.path, folder.mode);
-    mounts.push('-v', `${source}:/workspace/mounts/folder-${index + 1}${folder.mode === 'read' ? ':ro' : ''}`);
+  if (selected.access === 'folders') selected.folders.forEach(folder => {
+    const source = sharedFolderSource(folder.path, folder.mode, stateRoot);
+    mounts.push('-v', `${source}:${folderTarget(folder)}${folder.mode === 'read' ? ':ro' : ''}`);
   });
   const pinned = requiresFolderVerification(selected) ? pinSelectedFolders(selected.folders) : null;
   try {

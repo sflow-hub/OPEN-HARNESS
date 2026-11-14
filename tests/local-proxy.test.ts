@@ -60,6 +60,10 @@ test("the dashboard proxy forwards only coordinator paths and no hosted dispatch
     await proxyGet(new Request("http://localhost:3000/api/local/v1/runs", { headers: { Host: "localhost:3000", Authorization: "Bearer token", "OAI-Sites-Authorization": "Bearer dispatch" } }), { params: Promise.resolve({ path: ["v1", "runs"] }) });
     assert.equal(forwarded.get("authorization"), "Bearer token");
     assert.equal(forwarded.get("oai-sites-authorization"), null);
+    assert.equal(forwarded.get('x-open-harness-proxy'), '1');
+    await proxyGet(new Request('http://localhost:3000/api/local/v1/bootstrap', { headers: { Host: 'localhost:3000', 'X-Open-Harness-Proxy': '0', 'X-Forwarded-For': '127.0.0.1' } }), { params: Promise.resolve({ path: ['v1', 'bootstrap'] }) });
+    assert.equal(forwarded.get('x-open-harness-proxy'), '1', 'A forged header cannot disable upstream pairing.');
+    assert.equal(forwarded.get('x-forwarded-for'), null);
   } finally {
     globalThis.fetch = originalFetch;
   }

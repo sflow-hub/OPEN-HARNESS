@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import type { ClarifyAnswers } from "./clarify";
 export type RuntimeStatus = {
   token: string;
   mode: "live" | "test";
@@ -117,6 +118,14 @@ export class ControlClient {
   websocketUrl(path:string){const url=new URL(this.managed&&path.startsWith('/cloud/')?path:`${base()}${path}`,typeof window==='undefined'?'http://localhost':window.location.href);url.protocol=url.protocol==='https:'?'wss:':'ws:';return url.href;}
   async download(path:string){const response=await fetch(`${base()}${path}`,{credentials:'include',headers:this.managed?{}:{Authorization:`Bearer ${this.token}`},signal:AbortSignal.timeout(60000)});if(!response.ok){const value=await parseBody(response);throw new Error(String(value.error||'The file could not be downloaded.'));}if(Number(response.headers.get('content-length'))>100000000){await response.body?.cancel();throw new Error('Use the local backup command to download this file larger than 100 MB.');}return response.blob();}
   token = "";
+  chatGPTCallbackUri() {
+    const target = new URL(base());
+    // Native/desktop clients can return straight to their coordinator. A local Compose
+    // dashboard relays /auth/callback; remote dashboards offer manual callback completion.
+    if (target.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(target.hostname) && target.pathname === '/') return `http://127.0.0.1${target.port ? `:${target.port}` : ''}/auth/callback`;
+    if (typeof window !== 'undefined' && window.location.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(window.location.hostname)) return `http://127.0.0.1${window.location.port ? `:${window.location.port}` : ''}/auth/callback`;
+    return 'http://127.0.0.1:1455/auth/callback';
+  }
   // The token pairing produced, kept for this page as well as in storage: in a private
   // window or with site data blocked, storage throws or forgets, and the bootstrap that
   // follows pair() must still present what the coordinator just handed out. Scoped to the
@@ -180,11 +189,11 @@ export class ControlClient {
     return value;
   }
   conversations() { return this.request<{ conversations: RemoteConversation[] }>("/v1/conversations"); }
-  answerInput(runId: string, inputId: string, value: string | string[]) { return this.request<{ ok: boolean }>(`/v1/runs/${runId}/input`, { method: "POST", body: JSON.stringify({ inputId, value }) }); }
+  answerInput(runId: string, inputId: string, value: string | string[] | { answers: ClarifyAnswers }) { return this.request<{ ok: boolean }>(`/v1/runs/${runId}/input`, { method: "POST", body: JSON.stringify({ inputId, value }) }); }
   // Asks the coordinator to start the agent's runtime ahead of a message. Only a hint: it
   // never queues work, and a coordinator that is busy or cannot prepare simply declines.
   prepareAgent(agentId: string, replyOnly = false) { return this.request<{ preparing: boolean; ready: boolean }>(`/v1/agents/${encodeURIComponent(agentId)}/prepare`, { method: "POST", body: JSON.stringify({ replyOnly }) }); }
-  createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; requestId?:string;replyOnly?:boolean }) { return this.request<PersistentRun>("/v1/runs", { method: "POST", body: JSON.stringify({...input,requestId:input.requestId||crypto.randomUUID()}) }); }
+  createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; requestId?:string;replyOnly?:boolean;projectId?: string | null }) { return this.request<PersistentRun>("/v1/runs", { method: "POST", body: JSON.stringify({...input,requestId:input.requestId||crypto.randomUUID()}) }); }
   events(runId: string, after: number, options: { waitMs?: number; signal?: AbortSignal } = {}) {
     const wait = Math.min(25_000, Math.max(0, options.waitMs ?? 25_000));
     return this.request<{ events: Array<{ seq: number; id: string; type: string; payload: any }>; run: PersistentRun }>(`/v1/runs/${encodeURIComponent(runId)}/events?after=${Math.max(0, Math.floor(after) || 0)}&wait=${wait}`, { signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS) });

@@ -64,15 +64,17 @@ Service lifecycle: `harness:install-service`, `harness:start`, `harness:stop`,
 | `runtime/profiles.ts` | Profile validation, revisions, inheritance, migration, run snapshots |
 | `runtime/profile-runtime.ts` | Runtime catalogs, connection checks, configuration compiler, profile-home writer |
 | `runtime/tasks.ts` / `runtime/teams.ts` | Task board and team scoping |
+| `runtime/workspace-folders.ts` / `runtime/folder-list.ts` | Lasting per-agent host-folder access (the Folders screen); shared folder validation for it and project folders |
 | `runtime/secrets.ts` / `runtime/credentials.ts` | Restricted credential storage; saved-credential metadata, rotation, deletion |
+| `runtime/decisions.ts` | Advisory decisions (choose, rank, classify, score, check) from a System One decision model (TypeSafe Jev); off by default; `/v1/decide` for the operator, the `decide` agent tool behind the Decisions permission |
 | `runtime/cli.ts` | `npm run harness -- <command>` (setup, start, stop, doctor, status, install-service) |
 | `runtime/readiness.ts` | Host capability probing (async and bounded by design) |
 | `runtime/hermes/Dockerfile` | Reproducible pinned Hermes/Python 3.12 runtime |
 | `runtime/hermes/extension/` | Managed Hermes tool-allowlist middleware (Python) |
-| `runtime/hermes/coordination.mjs` | Agent-scoped named handoff and scheduling MCP tools |
+| `runtime/hermes/coordination.mjs` | The agent-side MCP server: task, project, routines, directory, runs, decision, handoff, routine and API tools |
 | `app/page.tsx` | The whole workspace UI — runtime, skills, memory, files, routines (~2.5k lines) |
 | `app/api/local/[...path]/route.ts` | The dashboard's proxy to the local coordinator; the only transport besides a direct loopback call |
-| `components/` | `agent-settings`, `onboarding`, `credential-manager`, `task-manager`, `team-manager` |
+| `components/` | `agent-settings`, `onboarding`, `credential-manager`, `decision-settings`, `task-manager`, `team-manager`, `folder-manager` |
 | `lib/` | Shared types and browser-side client (`control-client.ts`), profile/provider/crypto helpers |
 | `src-tauri/` | Desktop shell, tray, sidecar, signed updater |
 | `desktop/*.mjs` | Build and packaging scripts for the desktop bundle |
@@ -83,8 +85,9 @@ Service lifecycle: `harness:install-service`, `harness:start`, `harness:stop`,
 `SOUL.md` is Hermes's per-agent system prompt and is **generated, never authored in the repo**.
 `prepareProfile` in `runtime/profile-runtime.ts` writes it into each agent's profile home
 beside `config.yaml` and `.env`, using `profile.prompt.text` when `profile.prompt.enabled` is
-true and an empty file when it is false. `runtime/runner.mjs` contains the bundled copy of the
-same logic.
+true and an empty file when it is false. When the run mounts host folders (the agent's own or
+its project's), a generated "Folders you can use" notice is appended, even with instructions
+disabled. `runtime/runner.mjs` contains the bundled copy of the same logic.
 
 Consequences:
 
@@ -92,11 +95,12 @@ Consequences:
   and it reads as a contradiction of the runtime contract.
 - To change an agent's instructions, edit the profile: **Agent settings → System prompt**, or
   the `prompt.text` field on the stored profile. The cap is 12,000 characters, enforced in
-  `validateProfile`. Disabling instructions preserves the text but writes an empty `SOUL.md`.
+  `validateProfile`. Disabling instructions preserves the text but writes a `SOUL.md` that is
+  empty apart from any folder notice.
 - Every profile save creates a revision. Active work keeps its original revision; queued work
   snapshots the latest profile when it starts.
-- `tests/agent-profiles.test.ts` asserts the generated file's contents, so changes to this
-  plumbing show up there first.
+- `tests/agent-profiles.test.ts` and `tests/project-folders.test.ts` assert the generated file's
+  contents, so changes to this plumbing show up there first.
 
 ## Generated — do not hand-edit
 
@@ -124,8 +128,9 @@ Consequences:
 Trust model is a single trusted operator (`SECURITY.md`). Container isolation is the primary
 boundary; the host home directory, Docker socket, and other agents' private directories are
 never mounted. The dashboard operator token authorizes arbitrary run creation, host-path
-mounts and agent execution. Host-native bootstrap is loopback-only and `Host`-header checked;
-Compose instead requires a one-use pairing code from the coordinator CLI. Its public
+mounts and agent execution. Direct host-native bootstrap is loopback-only and `Host`-header checked;
+every bootstrap through the dashboard proxy requires authentication or one-use pairing.
+Compose requires a one-use pairing code from the coordinator CLI. Its public
 readiness endpoint returns only `{ok:true}`.
 
 Call out changes to authentication, the bootstrap token, container isolation, runner pairing,
@@ -134,8 +139,9 @@ suspected vulnerability.
 
 Credentials are written only to managed profiles and are never returned to the browser,
 diagnostics, or normal exports. Desktop uses the OS vault (Windows account encryption, macOS
-Keychain, Linux password vault); headless falls back to `.open-harness/secrets.json` mode
-`0600`.
+Keychain, Linux password vault); headless falls back to AES-256-GCM encrypted `.open-harness/secrets.json` and
+a separate key (`secrets.json.key` or `OPEN_HARNESS_ENCRYPTION_KEY`), mode `0600`.
+Preserve the original encryption key when backing up or restoring state; see `docs/CREDENTIALS.md`.
 
 Tool choices compile into an explicit allowlist, including an empty list when everything is
 off. Newly discovered tools start disabled. The managed Hermes extension filters model-visible
@@ -152,6 +158,8 @@ skills, shared-team handoffs, scheduled dispatch across restart, and the private
 desktop. Those integration fixtures use a scripted local provider, so they establish tool
 and transport behavior, not model reasoning. Earlier paid-provider evidence remains recorded
 separately. `runtime/VERIFICATION.md` is the evidence record; update it after real checks.
+`npm run decide:eval` (opt-in: `OPEN_HARNESS_LIVE_EVAL=1` and `TYPESAFE_API_KEY`) is the only check of
+decisions against the real decision service; everything else uses the mock backend.
 Private agent desktops require a Linux runner with Docker. Legacy native Direct Computer
 Access and Existing desktop modes are disabled; third-party MCP integrations and signed
 installers need separate platform acceptance.
@@ -172,6 +180,28 @@ installers need separate platform acceptance.
 - Concurrency caps: one task per agent, two top-level runs you started, four total including
   delegated subagents. A run paused on an unanswered approval still holds its slot.
 - Delegation depth is limited to two; cyclic handoffs are rejected.
+- Pass the agent image to Docker only as `HERMES_IMAGE` from `runtime/readiness.ts`, which
+  `qualifiedImage` turns into a full reference (`docker.io/library/open-harness-hermes:<tag>`).
+  Docker Desktop's containerd image store can reject the short `open-harness-hermes:<tag>`
+  with "No such image" while listing it, which the app used to report as first-time setup.
+  Readiness offers setup only when Docker answers "No such image"; any other failure is
+  reported as Docker not responding. User-facing setup instructions must name a screen that
+  exists: **Workspace settings → Run setup again**.
+- `runtime/hermes/coordination.mjs` is copied into each run's managed folder, so changing it needs
+  no image rebuild or `RUNTIME_CONTRACT` bump. Hermes caches tool schemas keyed only on the MCP
+  command and args, so `prepareProfile` passes `--schema=<hash>` to refresh them. Keep every schema
+  field explicitly typed: Hermes turns an object with no `properties` into an empty one, and models
+  then always send `{}`. Return coordinator refusals (4xx) as ordinary results, never JSON-RPC errors
+  or `isError` results: pinned Hermes counts both as strikes and blocks the whole server after three.
+- ChatGPT (Codex) sign-in tokens stay on the coordinator. Never add them to
+  `selectedSecrets`, runner payloads, MCP environment bindings or API grants;
+  `checkCredentialSelections` and `credentialApi` refuse them.
+- Coordination credentials are bound to one agent, run and computer. Always send the run ID
+  header; there is no active-run fallback or reusable per-agent token. Probes carry no credential.
+  Revoked runners and terminal runs cannot authenticate; stop work before upgrading this contract.
+- Hermes gives an MCP tool call 300 seconds. A coordination route must answer within that, so a
+  named handoff waits at most `OPEN_HARNESS_HANDOFF_WAIT_MS` (240 s) and then returns
+  `done:false` with the run ID; calling `delegate_named_agent` with only that `runId` keeps waiting.
 - After changing the Hermes adapter or the policy extension, rebuild with
   `npm run harness:setup` — existing containers must use the new image and its read-only
   managed-policy mount.

@@ -2287,7 +2287,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes, createHash: createHash8 } = __require("crypto");
+    var { randomBytes: randomBytes2, createHash: createHash9 } = __require("crypto");
     var { Duplex: Duplex3, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -2838,7 +2838,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes(16).toString("base64");
+      const key = randomBytes2(16).toString("base64");
       const request2 = isSecure ? https.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -2973,7 +2973,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest2 = createHash8("sha1").update(key + GUID).digest("base64");
+        const digest2 = createHash9("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest2) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -3342,7 +3342,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter2 = __require("events");
     var http = __require("http");
     var { Duplex: Duplex3 } = __require("stream");
-    var { createHash: createHash8 } = __require("crypto");
+    var { createHash: createHash9 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -3649,7 +3649,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest2 = createHash8("sha1").update(key + GUID).digest("base64");
+        const digest2 = createHash9("sha1").update(key + GUID).digest("base64");
         const headers2 = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -3737,9 +3737,9 @@ var require_websocket_server = __commonJS({
 });
 
 // runtime/runner.ts
-import { existsSync as existsSync10, mkdirSync as mkdirSync9, readFileSync as readFileSync10, writeFileSync as writeFileSync8, chmodSync as chmodSync3, readdirSync as readdirSync5, unlinkSync as unlinkSync4 } from "node:fs";
-import { homedir as homedir2, hostname, platform as platform2, arch } from "node:os";
-import { join as join9, resolve as resolve6 } from "node:path";
+import { existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync13, writeFileSync as writeFileSync9, chmodSync as chmodSync4, readdirSync as readdirSync6, unlinkSync as unlinkSync5 } from "node:fs";
+import { homedir as homedir3, hostname, platform as platform2, arch } from "node:os";
+import { join as join10, resolve as resolve6 } from "node:path";
 import { spawn as spawn6 } from "node:child_process";
 
 // runtime/docker-path.mjs
@@ -3813,7 +3813,7 @@ import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
 import { createHash, randomUUID as randomUUID3 } from "node:crypto";
 import { lstatSync as lstatSync3, mkdirSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join3, resolve as resolve4, sep } from "node:path";
+import { join as join4, resolve as resolve4, sep as sep2 } from "node:path";
 
 // lib/hermes-pin.ts
 var HERMES_RELEASE = "v2026.9.11";
@@ -3824,25 +3824,78 @@ import { existsSync, readFileSync } from "node:fs";
 import { join as join2 } from "node:path";
 var releaseImageFile = join2(import.meta.dirname, "release-image.json");
 var releaseImage = existsSync(releaseImageFile) ? JSON.parse(readFileSync(releaseImageFile, "utf8")) : null;
-if (releaseImage && (!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref) || releaseImage.contract !== 11)) throw new Error("The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.");
-var HERMES_IMAGE = releaseImage?.ref || process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`;
+if (releaseImage && (!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref) || releaseImage.contract !== 12)) throw new Error("The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.");
+function qualifiedImage(reference) {
+  const slash = reference.indexOf("/"), first = slash < 0 ? "" : reference.slice(0, slash);
+  if (first && (first === "localhost" || /[.:A-Z]/.test(first))) return reference;
+  return `docker.io/${slash < 0 ? "library/" : ""}${reference}`;
+}
+var HERMES_IMAGE = releaseImage?.ref || qualifiedImage(process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`);
 var pullRuntime = Boolean(releaseImage) || process.env.OPEN_HARNESS_HERMES_PULL === "1";
-var RUNTIME_CONTRACT = 11;
+var RUNTIME_CONTRACT = 12;
 var RUNTIME_LABEL = "dev.openharness.runtime";
 function classifyContract(result) {
-  if (result.status !== 0) return "missing";
+  if (result.status !== 0) return result.status !== null && /no such image:/i.test(result.stderr || "") ? "missing" : "unknown";
   return result.stdout.trim() === String(RUNTIME_CONTRACT) ? "current" : "stale";
+}
+var imageInspectionArgs = () => ["image", "inspect", "-f", `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE];
+async function imageContractWith(run2) {
+  const result = await run2("docker", imageInspectionArgs());
+  return classifyContract(result.status === 0 ? result : await run2("docker", imageInspectionArgs()));
+}
+function runtimeImageMessage(contract) {
+  if (contract === "missing") return "Docker is running, but the agent runtime is not set up in its current context yet. Open Workspace settings \u2192 Run setup again and choose Set up agent runtime.";
+  if (contract === "unknown") return "Docker could not check the agent runtime image. Check that Docker is responding, then try again.";
+  return "Docker is ready, but the agent runtime on this computer was built before a fix. Open Workspace settings \u2192 Run setup again and choose Update agent runtime.";
 }
 var platform = ["linux", "darwin", "win32"].includes(process.platform) ? process.platform : "unknown";
 
 // runtime/computer-validation.ts
-import { accessSync as accessSync2, constants as constants2, existsSync as existsSync2, lstatSync } from "node:fs";
-import { dirname as dirname2, resolve } from "node:path";
+import { accessSync as accessSync2, constants as constants2, existsSync as existsSync2, lstatSync, readdirSync, readFileSync as readFileSync3, realpathSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname2, isAbsolute, join as join3, relative, resolve, sep } from "node:path";
 
 // lib/agent-profile.ts
+function bindingSecretName(binding) {
+  return `OH_CREDENTIAL_${binding.credentialRef}_${binding.field.toUpperCase()}`;
+}
 var UNSANDBOXED_COMPUTER_MESSAGE = "Direct access to the signed-in computer is not sandboxed and is disabled. Open Agent settings \u2192 Computer and choose a private workspace or private agent desktop.";
 function isSandboxedComputer(computer) {
   return ["private", "folders"].includes(computer.access) && ["none", "virtual"].includes(computer.desktop);
+}
+var FOLDER_NAME = /^[a-z0-9][a-z0-9._-]{0,39}$/;
+var PERSONAL_FOLDER_ROOT = "/workspace/folders";
+var PROJECT_FOLDER_ROOT = "/workspace/project";
+function folderName(path2, taken = []) {
+  const used = new Set(taken), base = (path2.split(/[\\/]/).filter(Boolean).pop() || "folder").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[^a-z0-9]+/, "").slice(0, 32) || "folder";
+  for (let n = 1; ; n++) {
+    const name = n === 1 ? base : `${base}-${n}`;
+    if (!used.has(name)) return name;
+  }
+}
+function namedFolders(folders) {
+  const taken = { personal: /* @__PURE__ */ new Set(), project: /* @__PURE__ */ new Set() };
+  return folders.map((folder) => {
+    const used = taken[folder.scope === "project" ? "project" : "personal"];
+    const name = folder.name && FOLDER_NAME.test(folder.name) && !used.has(folder.name) ? folder.name : folderName(folder.path, used);
+    used.add(name);
+    return { ...folder, name };
+  });
+}
+function folderTarget(grant) {
+  return `${grant.scope === "project" ? PROJECT_FOLDER_ROOT : PERSONAL_FOLDER_ROOT}/${grant.name}`;
+}
+function runCwd(computer) {
+  const project = computer.access === "folders" ? computer.folders.filter((folder) => folder.scope === "project") : [];
+  return project.length === 1 && project[0].mode === "write" ? folderTarget(project[0]) : "/workspace/shared";
+}
+function folderNotice(computer, projectName = "") {
+  if (computer.access !== "folders" || !computer.folders.length) return "";
+  return [
+    "## Folders you can use",
+    "These host folders are mounted in your workspace. Nothing else on the host computer is available to you.",
+    ...computer.folders.map((folder) => `- ${folderTarget(folder)} (${folder.mode === "write" ? "read and write" : "read only"}): ${folder.scope === "project" ? `project folder "${folder.name}"${projectName ? ` of ${projectName}` : ""}` : `your folder "${folder.name}"`}`)
+  ].join("\n");
 }
 var MCP_PREFIX = "mcp__";
 var COORDINATION_SERVER = "open_harness";
@@ -3854,10 +3907,23 @@ function mcpServerOf(id) {
   const server = id.slice(MCP_PREFIX.length).split("__")[0];
   return server || null;
 }
+var API_TOOL = mcpToolId(COORDINATION_SERVER, "api_request");
 var TASK_TOOL = mcpToolId(COORDINATION_SERVER, "task");
 var HANDOFF_TOOL = mcpToolId(COORDINATION_SERVER, "delegate_named_agent");
 var ROUTINE_TOOL = mcpToolId(COORDINATION_SERVER, "create_open_harness_routine");
 var COMPUTER_TOOL = mcpToolId(COORDINATION_SERVER, "computer");
+var PROJECT_TOOL = mcpToolId(COORDINATION_SERVER, "project");
+var ROUTINES_TOOL = mcpToolId(COORDINATION_SERVER, "routines");
+var DIRECTORY_TOOL = mcpToolId(COORDINATION_SERVER, "directory");
+var RUNS_TOOL = mcpToolId(COORDINATION_SERVER, "runs");
+var DECIDE_TOOL = mcpToolId(COORDINATION_SERVER, "decide");
+var WORKSPACE_PERMISSIONS = [
+  [PROJECT_TOOL, "Projects", "Create projects and change their name, details, stages and archive state. It can't delete projects, share folders, or change when tasks start automatically."],
+  [ROUTINES_TOOL, "Routines", "See, edit, pause, resume, run now and delete this agent's own routines."],
+  [DIRECTORY_TOOL, "Teams and agents", "See its teams and teammates' names, roles and status \u2014 never their instructions or credentials."],
+  [RUNS_TOOL, "Runs and conversations", "See its own runs and work it delegated, read results, and stop them."],
+  [DECIDE_TOOL, "Decisions", "Ask the workspace decision model to choose, rank, label, score or check, and get back IDs with confidence. Works only while decisions are on in the workspace; the question, context and option text are sent to the decision service."]
+];
 var LEGACY_TOOL_IDS = {
   mcp_open_harness_task: TASK_TOOL,
   mcp_open_harness_delegate_named_agent: HANDOFF_TOOL,
@@ -3911,8 +3977,73 @@ function validateFolderExport(path2, mode, exports = hostFolderExports()) {
 function assertSandboxedComputer(computer) {
   if (computer && !isSandboxedComputer(computer)) throw new Error(UNSANDBOXED_COMPUTER_MESSAGE);
 }
-function sharedFolderSource(value, mode = "read") {
+function within(parent, child) {
+  const path2 = relative(parent, child);
+  return path2 === "" || path2 !== ".." && !path2.startsWith(`..${sep}`) && !isAbsolute(path2);
+}
+function bothSpellings(path2) {
+  const resolved = resolve(path2);
+  try {
+    return [.../* @__PURE__ */ new Set([resolved, realpathSync(resolved)])];
+  } catch {
+    return [resolved];
+  }
+}
+function dockerSocketDirs() {
+  const host = process.env.DOCKER_HOST || "";
+  const sockets = ["/var/run/docker.sock", "/run/docker.sock", ...process.getuid ? [`/run/user/${process.getuid()}/docker.sock`] : [], ...process.env.XDG_RUNTIME_DIR ? [`${process.env.XDG_RUNTIME_DIR}/docker.sock`] : [], join3(homedir2(), ".docker/desktop/docker.sock"), join3(homedir2(), ".docker/run/docker.sock")];
+  const addEndpoint = (endpoint) => {
+    if (!endpoint.startsWith("unix://")) return;
+    const socket = endpoint.slice("unix://".length);
+    if (!isAbsolute(socket)) throw new Error("Docker has an invalid socket path. Repair its endpoint settings before sharing folders.");
+    sockets.push(socket);
+  };
+  addEndpoint(host);
+  const configRoot = resolve(process.env.DOCKER_CONFIG || join3(homedir2(), ".docker"));
+  const readJson = (path2) => {
+    try {
+      const value = JSON.parse(readFileSync3(path2, "utf8"));
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid Docker metadata.");
+      return value;
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw new Error("Docker endpoint settings could not be read. Repair them before sharing folders.");
+    }
+  };
+  const config = readJson(join3(configRoot, "config.json"));
+  const activeContext = process.env.DOCKER_CONTEXT || (host ? "default" : config?.currentContext || "default");
+  let foundActive = activeContext === "default";
+  let entries2;
+  try {
+    entries2 = readdirSync(join3(configRoot, "contexts/meta"), { withFileTypes: true });
+  } catch (error) {
+    if (error.code !== "ENOENT") throw new Error("Docker contexts could not be read. Repair them before sharing folders.");
+    entries2 = [];
+  }
+  for (const entry of entries2) {
+    if (!entry.isDirectory()) continue;
+    const context = readJson(join3(configRoot, "contexts/meta", entry.name, "meta.json"));
+    if (!context || typeof context.Name !== "string") throw new Error("Docker context endpoints could not be read. Repair them before sharing folders.");
+    if (context.Endpoints?.docker === void 0) continue;
+    if (typeof context.Endpoints.docker?.Host !== "string") throw new Error("Docker context endpoints could not be read. Repair them before sharing folders.");
+    addEndpoint(context.Endpoints.docker.Host);
+    if (context.Name === activeContext) foundActive = true;
+  }
+  if (!foundActive) throw new Error("The active Docker context could not be resolved. Repair it before sharing folders.");
+  return sockets.flatMap((socket) => bothSpellings(socket).flatMap((path2) => bothSpellings(dirname2(path2))));
+}
+function assertGrantAllowed(value, stateRoot2) {
+  const source = resolve(value), refuse = (reason) => {
+    throw new Error(`Open Harness never shares ${value} with agents because ${reason}. Choose a more specific folder.`);
+  };
+  if (dirname2(source) === source) refuse("it is the whole disk");
+  if (bothSpellings(homedir2()).some((home) => within(source, home))) refuse("it contains your home folder");
+  if (bothSpellings(stateRoot2).some((state) => within(source, state) || within(state, source))) refuse("it holds Open Harness data, credentials, and other agents\u2019 private folders");
+  if (dockerSocketDirs().some((dir) => within(source, dir))) refuse("it contains the Docker control socket");
+}
+function sharedFolderSource(value, mode, stateRoot2) {
   const source = resolve(value);
+  assertGrantAllowed(source, stateRoot2);
   validateFolderExport(source, mode);
   if (!existsSync2(source)) throw new Error(`Shared folder does not exist on this computer: ${value}`);
   for (let current = source; ; current = dirname2(current)) {
@@ -3923,7 +4054,7 @@ function sharedFolderSource(value, mode = "read") {
   }
   return source;
 }
-function validateComputerTarget(profile, capabilities2, requiredSecrets = [], hasSecret = () => true) {
+function validateComputerTarget(profile, capabilities2, stateRoot2, requiredSecrets = [], hasSecret = () => true) {
   assertSandboxedComputer(profile.computer);
   const issues = [];
   if (profile.computer.access !== "direct" && !capabilities2.container) issues.push("Container execution is unavailable. Install and start Docker, then retry the transfer.");
@@ -3931,7 +4062,7 @@ function validateComputerTarget(profile, capabilities2, requiredSecrets = [], ha
   if (profile.computer.access === "folders") {
     for (const folder of profile.computer.folders) {
       try {
-        accessSync2(sharedFolderSource(folder.path, folder.mode), constants2.R_OK | (folder.mode === "write" ? constants2.W_OK : 0));
+        accessSync2(sharedFolderSource(folder.path, folder.mode, stateRoot2), constants2.R_OK | (folder.mode === "write" ? constants2.W_OK : 0));
       } catch (error) {
         issues.push(`${folder.path} is not an accessible ${folder.mode === "write" ? "read/write" : "read-only"} folder on this computer.${process.env.OPEN_HARNESS_DEPLOYMENT === "compose" && error instanceof Error ? ` ${error.message}` : ""}`);
       }
@@ -3944,7 +4075,7 @@ function validateComputerTarget(profile, capabilities2, requiredSecrets = [], ha
 
 // runtime/folder-mounts.ts
 import { randomUUID } from "node:crypto";
-import { closeSync, constants as constants3, fstatSync, openSync, readFileSync as readFileSync3 } from "node:fs";
+import { closeSync, constants as constants3, fstatSync, openSync, readFileSync as readFileSync4 } from "node:fs";
 import { resolve as resolve2 } from "node:path";
 var NATIVE_FOLDER_GUIDANCE = "Selected host folders require Open Harness and Docker to use the same Linux kernel. Use the local browser Compose installation with explicitly exported folders, or a native Linux runner.";
 var BOOT_ID = "/proc/sys/kernel/random/boot_id";
@@ -3975,7 +4106,7 @@ function pinSelectedFolders(folders) {
   if (process.platform !== "linux") throw new Error(NATIVE_FOLDER_GUIDANCE);
   let bootId;
   try {
-    bootId = readFileSync3(BOOT_ID, "utf8").trim();
+    bootId = readFileSync4(BOOT_ID, "utf8").trim();
   } catch {
     throw new Error(NATIVE_FOLDER_GUIDANCE);
   }
@@ -3985,10 +4116,10 @@ function pinSelectedFolders(folders) {
     for (const fd of fds.splice(0)) closeSync(fd);
   };
   try {
-    folders.forEach((folder, index) => {
+    folders.forEach((folder) => {
       const pinned = pinDirectory(folder.path);
       fds.push(pinned.fd);
-      mounts.push({ path: `/workspace/mounts/folder-${index + 1}`, device: pinned.device, inode: pinned.inode, readOnly: folder.mode === "read" });
+      mounts.push({ path: folderTarget(folder), device: pinned.device, inode: pinned.inode, readOnly: folder.mode === "read" });
     });
     return { bootId, mounts, close };
   } catch (error) {
@@ -4070,7 +4201,7 @@ async function createVerifiedFolderContainerAsync(args2, pinned, desktop, comman
 }
 
 // runtime/path-safety.ts
-import { closeSync as closeSync2, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync2, openSync as openSync2, readFileSync as readFileSync4, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync as closeSync2, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync2, openSync as openSync2, readFileSync as readFileSync5, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID as randomUUID2 } from "node:crypto";
 import path from "node:path";
 function atomicWorkspaceWrite(target, data) {
@@ -4089,7 +4220,7 @@ function readWorkspaceFile(target) {
   try {
     const actual = fstatSync2(fd);
     if (!actual.isFile() || actual.dev !== expected.dev || actual.ino !== expected.ino) throw new Error("Workspace file changed while opening it. Try again.");
-    return readFileSync4(fd);
+    return readFileSync5(fd);
   } finally {
     closeSync2(fd);
   }
@@ -4100,8 +4231,8 @@ function resolveContainedPath(root, name, paths2 = path) {
   if (parts.some((part) => !part || part === "." || part === "..")) throw new Error("Invalid workspace path.");
   if (parts.some((part) => /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(part))) throw new Error("Invalid portable workspace path.");
   const target = paths2.resolve(root, parts.join(paths2.sep));
-  const relative3 = paths2.relative(paths2.resolve(root), target);
-  if (!relative3 || relative3 === ".." || relative3.startsWith(`..${paths2.sep}`) || paths2.isAbsolute(relative3)) throw new Error("Path escaped the workspace.");
+  const relative4 = paths2.relative(paths2.resolve(root), target);
+  if (!relative4 || relative4 === ".." || relative4.startsWith(`..${paths2.sep}`) || paths2.isAbsolute(relative4)) throw new Error("Path escaped the workspace.");
   return target;
 }
 function safeWorkspacePath(root, name) {
@@ -4155,14 +4286,12 @@ async function closeContainerAdmissions(root) {
 }
 
 // runtime/hermes.ts
-var FIRST_SETUP_MESSAGE = "Docker is ready, but the pinned Hermes runtime still needs its first-time setup.";
-var STALE_IMAGE_MESSAGE = "Docker is ready, but the agent runtime on this computer was built before a fix. Open Settings \u2192 Readiness and update it.";
 function authorizeWorkspaceMounts(stateRoot2, computer) {
   if (process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY !== "1" || computer.access !== "folders" || computer.machineId !== "local") return;
   const shared = resolve4(stateRoot2, "shared");
   if (computer.folders.some((folder) => {
     const source = resolve4(folder.path);
-    return source !== shared && !source.startsWith(shared + sep);
+    return source !== shared && !source.startsWith(shared + sep2);
   })) throw new Error("Authenticated shared workspaces may mount only their shared files. Upload project files to the workspace or use a private agent computer.");
 }
 function prepareExecutionDirectories(agentId, stateRoot2) {
@@ -4353,6 +4482,18 @@ var HermesGateway = class extends EventEmitter {
         });
         if (decision === "deny") throw new Error("Mock action was denied.");
       }
+      if (prompt.includes("MOCK_CLARIFY_BATCH")) {
+        this.emit("event", { type: "clarify.request", session_id: params.session_id, payload: { request_id: "mock-clarify-batch", questions: [{ qid: "q0", question: "Which language?", choices: ["Python", "Go"], multi_select: false }, { qid: "q1", question: "Any extras?", choices: [], multi_select: false }] } });
+        const raw = await new Promise((resolve7) => {
+          this.mockInput = resolve7;
+        });
+        let answers = {};
+        try {
+          answers = JSON.parse(String(raw)).answers || {};
+        } catch {
+        }
+        return { final_response: `Hermes mock completed the task. Answers: ${["q0", "q1"].map((qid) => `${qid}=${Array.isArray(answers[qid]) ? answers[qid].join("+") : String(answers[qid] ?? "")}`).join(", ")}` };
+      }
       if (prompt.includes("MOCK_CLARIFY")) {
         this.emit("event", { type: "clarify.request", session_id: params.session_id, payload: { request_id: "mock-clarify", question: "What should I use?" } });
         const answer = await new Promise((resolve7) => {
@@ -4435,10 +4576,10 @@ function ownsContainer(container, safe, stateRoot2) {
   if (labels[MANAGED_LABEL] !== "1") return false;
   if (labels[STATE_LABEL] !== void 0) return labels[STATE_LABEL] === containerStateKey(stateRoot2);
   const expected = /* @__PURE__ */ new Map([
-    ["/run/open-harness", join3(stateRoot2, "agents", safe, "managed")],
-    ["/home/hermes/.hermes", join3(stateRoot2, "agents", safe, "profile")],
-    ["/workspace/private", join3(stateRoot2, "agents", safe, "private")],
-    ["/workspace/shared", join3(stateRoot2, "shared")]
+    ["/run/open-harness", join4(stateRoot2, "agents", safe, "managed")],
+    ["/home/hermes/.hermes", join4(stateRoot2, "agents", safe, "profile")],
+    ["/workspace/private", join4(stateRoot2, "agents", safe, "private")],
+    ["/workspace/shared", join4(stateRoot2, "shared")]
   ]);
   return [...expected].every(([destination, source]) => container.Mounts?.some((mount) => mount.Destination === destination && resolve4(mount.Source) === resolve4(source)));
 }
@@ -4478,14 +4619,14 @@ async function stopManagedContainers(stateRoot2) {
   }));
   return result;
 }
-async function imageContractAsync() {
-  const result = await commandAsync("docker", ["image", "inspect", "-f", `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE], 1e4);
-  return classifyContract(result);
+function imageContractAsync() {
+  return imageContractWith((name, args2) => commandAsync(name, args2, 1e4));
 }
 async function currentImageIdAsync() {
   if (imageIdCache && Date.now() - imageIdCache.at < 5e3) return imageIdCache.id;
   const result = await commandAsync("docker", ["image", "inspect", "-f", "{{.Id}}", HERMES_IMAGE], 1e4);
-  imageIdCache = { id: result.status === 0 ? result.stdout.trim() : "", at: Date.now() };
+  if (result.status !== 0 || !result.stdout.trim()) throw new Error("Docker could not verify the agent runtime image ID. Check that Docker is responding, then try again.");
+  imageIdCache = { id: result.stdout.trim(), at: Date.now() };
   return imageIdCache.id;
 }
 async function inspectContainerAsync(name) {
@@ -4493,22 +4634,23 @@ async function inspectContainerAsync(name) {
   return inspectedContainer(result.status, result.stdout, result.stderr, name);
 }
 var asyncSharing = /* @__PURE__ */ new Map();
-function stateSharingAsync(stateRoot2) {
+function stateSharingAsync(stateRoot2, fresh = false) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return Promise.resolve({ ok: true, detail: "Deterministic test runtime shares state directly." });
   const root = resolve4(stateRoot2), cached = asyncSharing.get(root);
-  if (cached && Date.now() - cached.at < 6e4) return cached.value;
+  if (cached && !fresh && Date.now() - cached.at < (cached.ok === false ? 15e3 : 6e4)) return cached.value;
   const value = (async () => {
     try {
-      const dir = join3(root, ".mount-probe"), token = randomUUID3();
+      const dir = join4(root, ".mount-probe"), token = randomUUID3();
       mkdirSync(dir, { recursive: true });
       const canary = `canary-${token}`;
-      writeFileSync2(join3(dir, canary), token, { mode: 420 });
+      writeFileSync2(join4(dir, canary), token, { mode: 420 });
       try {
         const result = await commandAsync("docker", ["run", "--rm", "--user", `${process.getuid?.() ?? 1e3}:${process.getgid?.() ?? 1e3}`, "-v", `${dir}:/probe:ro`, HERMES_IMAGE, "cat", `/probe/${canary}`], 6e4);
-        return result.status === 0 && result.stdout.trim() === token ? { ok: true, detail: "Docker can read the Open Harness data folder." } : { ok: false, detail: "Docker cannot read the Open Harness data folder. Add it to Docker file sharing or choose a shared data folder before running work." };
+        if (result.status === null || result.status === 125 && !/mounts? denied|is not shared/i.test(result.stderr || "")) return { ok: false, detail: "Docker could not verify access to the Open Harness data folder. Check that Docker is responding, then try again." };
+        return result.status === 0 && result.stdout.trim() === token ? { ok: true, detail: "Docker can read the Open Harness data folder." } : { ok: false, detail: `Docker cannot read the Open Harness data folder at ${root}, so agent containers would start with an empty profile and never receive your model credential. Add this folder to Docker Desktop \u2192 Settings \u2192 Resources \u2192 File sharing, or set OPEN_HARNESS_STATE_DIR to a folder inside your home directory.` };
       } finally {
         try {
-          unlinkSync(join3(dir, canary));
+          unlinkSync(join4(dir, canary));
         } catch {
         }
       }
@@ -4516,7 +4658,11 @@ function stateSharingAsync(stateRoot2) {
       return { ok: false, detail: "Open Harness could not verify Docker access to its data folder." };
     }
   })();
-  asyncSharing.set(root, { at: Date.now(), value });
+  const entry = { at: Date.now(), value };
+  asyncSharing.set(root, entry);
+  void value.then((probe) => {
+    entry.ok = probe.ok;
+  });
   return value;
 }
 function ensureContainerAsync(agentId, stateRoot2, computer, fresh = false) {
@@ -4526,17 +4672,18 @@ async function startExecutionContainer(agentId, stateRoot2, computer, fresh = fa
   assertSandboxedComputer(computer);
   if (computer) authorizeWorkspaceMounts(stateRoot2, computer);
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
+  const contract = await imageContractAsync();
+  if (contract !== "current") throw new Error(runtimeImageMessage(contract));
   const sharing = await stateSharingAsync(stateRoot2);
   if (!sharing.ok) throw new Error(sharing.detail);
-  const contract = await imageContractAsync();
-  if (contract !== "current") throw new Error(contract === "missing" ? FIRST_SETUP_MESSAGE : STALE_IMAGE_MESSAGE);
   const { safe, names } = agentContainerNames(agentId, stateRoot2);
   prepareExecutionDirectories(safe, stateRoot2);
-  const selected = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
+  const given = computer || { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
+  const selected = { ...given, folders: namedFolders(given.folders) };
   const mounts = [];
-  if (selected.access === "folders") selected.folders.forEach((folder, index) => {
-    const source = sharedFolderSource(folder.path, folder.mode);
-    mounts.push("-v", `${source}:/workspace/mounts/folder-${index + 1}${folder.mode === "read" ? ":ro" : ""}`);
+  if (selected.access === "folders") selected.folders.forEach((folder) => {
+    const source = sharedFolderSource(folder.path, folder.mode, stateRoot2);
+    mounts.push("-v", `${source}:${folderTarget(folder)}${folder.mode === "read" ? ":ro" : ""}`);
   });
   const pinned = requiresFolderVerification(selected) ? pinSelectedFolders(selected.folders) : null;
   try {
@@ -4626,14 +4773,14 @@ async function runtimeImageIdentity() {
 
 // runtime/transfer-files.ts
 import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
-import { existsSync as existsSync4, lstatSync as lstatSync5, mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname4, join as join5, relative as relative2 } from "node:path";
+import { existsSync as existsSync4, lstatSync as lstatSync5, mkdirSync as mkdirSync2, readdirSync as readdirSync3, readFileSync as readFileSync6, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname4, join as join6, relative as relative3 } from "node:path";
 
 // runtime/computer-runtime.ts
 import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
 import { cp, mkdir, open, rename } from "node:fs/promises";
-import { constants as constants5, existsSync as existsSync3, lstatSync as lstatSync4, readdirSync, rmSync as rmSync2 } from "node:fs";
-import { dirname as dirname3, join as join4, relative, resolve as resolve5, sep as sep2 } from "node:path";
+import { constants as constants5, existsSync as existsSync3, lstatSync as lstatSync4, readdirSync as readdirSync2, rmSync as rmSync2 } from "node:fs";
+import { dirname as dirname3, join as join5, relative as relative2, resolve as resolve5, sep as sep3 } from "node:path";
 var ROLE_LABEL = "open-harness.role";
 var RESOURCE_LABEL = "open-harness.computer";
 var locks = /* @__PURE__ */ new Set(["SingletonLock", "SingletonSocket", "SingletonCookie"]);
@@ -4685,8 +4832,8 @@ async function assertLegacyIdle(source, stateRoot2) {
     const value = await inspect(id);
     if (!value?.State.Running) continue;
     if (value.Mounts?.some((mount) => {
-      const path2 = relative(resolve5(mount.Source), resolve5(source));
-      return path2 === "" || path2 !== ".." && !path2.startsWith(`..${sep2}`) && !path2.startsWith(sep2);
+      const path2 = relative2(resolve5(mount.Source), resolve5(source));
+      return path2 === "" || path2 !== ".." && !path2.startsWith(`..${sep3}`) && !path2.startsWith(sep3);
     })) throw new Error("Stop agents using the old browser before migrating the private desktop. Its browser profile has not been changed.");
   }
 }
@@ -4694,23 +4841,23 @@ function checkBrowserTree(path2) {
   const stat = lstatSync4(path2);
   if (stat.isSymbolicLink() || stat.isFile() && stat.nlink !== 1 || !stat.isDirectory() && !stat.isFile()) throw new Error("The saved browser profile contains an unsupported link or special file. It has not been migrated.");
   if (stat.isDirectory()) {
-    for (const name of readdirSync(path2)) if (!locks.has(name)) checkBrowserTree(join4(path2, name));
+    for (const name of readdirSync2(path2)) if (!locks.has(name)) checkBrowserTree(join5(path2, name));
   }
 }
 async function copyBrowser(source, target) {
   if (!lstatSync4(source).isDirectory()) throw new Error("The saved browser profile is not a directory. It has not been migrated.");
   checkBrowserTree(source);
-  await cp(source, target, { recursive: true, dereference: false, force: false, errorOnExist: true, filter: (path2) => !locks.has(path2.split(sep2).at(-1) || "") });
+  await cp(source, target, { recursive: true, dereference: false, force: false, errorOnExist: true, filter: (path2) => !locks.has(path2.split(sep3).at(-1) || "") });
   checkBrowserTree(target);
 }
 async function browserFingerprint(path2) {
   checkBrowserTree(path2);
   const digest2 = createHash2("sha256");
   const visit = async (directory) => {
-    for (const name of readdirSync(directory).sort()) {
+    for (const name of readdirSync2(directory).sort()) {
       if (locks.has(name)) continue;
-      const file = join4(directory, name), info = lstatSync4(file);
-      digest2.update(JSON.stringify([relative(path2, file), info.isDirectory() ? "directory" : "file"]));
+      const file = join5(directory, name), info = lstatSync4(file);
+      digest2.update(JSON.stringify([relative2(path2, file), info.isDirectory() ? "directory" : "file"]));
       if (info.isDirectory()) await visit(file);
       else {
         const content = createHash2("sha256"), handle = await open(file, constants5.O_RDONLY | (constants5.O_NOFOLLOW || 0));
@@ -4737,13 +4884,13 @@ async function migrateBrowser(agentId, stateRoot2, computer) {
     }
     if (![1, 2].includes(saved.version) || saved.resourceKey !== paths2.key || !existsSync3(paths2.browser) || !lstatSync4(paths2.browser).isDirectory()) throw new Error("The private desktop migration is incomplete. Restore its browser backup before starting the computer.");
     if (saved.version === 2) return;
-    const source2 = legacyBrowser(agentId, stateRoot2, computer), recordedSource = relative(stateRoot2, source2);
+    const source2 = legacyBrowser(agentId, stateRoot2, computer), recordedSource = relative2(stateRoot2, source2);
     if (saved.source === recordedSource && existsSync3(source2)) {
       await assertLegacyIdle(source2, stateRoot2);
-      if (saved.backup !== relative(stateRoot2, paths2.backup) || !existsSync3(paths2.backup) || existsSync3(paths2.archive) || await browserFingerprint(source2) !== await browserFingerprint(paths2.backup)) throw new Error("The old browser folder changed after migration. Keep both copies and resolve its migration record before starting the computer. No agent files were removed.");
-      atomicWorkspaceWrite(paths2.migration, JSON.stringify({ version: 0, resourceKey: paths2.key, source: recordedSource, archive: relative(stateRoot2, paths2.archive), backup: saved.backup, previousMigration: saved }));
+      if (saved.backup !== relative2(stateRoot2, paths2.backup) || !existsSync3(paths2.backup) || existsSync3(paths2.archive) || await browserFingerprint(source2) !== await browserFingerprint(paths2.backup)) throw new Error("The old browser folder changed after migration. Keep both copies and resolve its migration record before starting the computer. No agent files were removed.");
+      atomicWorkspaceWrite(paths2.migration, JSON.stringify({ version: 0, resourceKey: paths2.key, source: recordedSource, archive: relative2(stateRoot2, paths2.archive), backup: saved.backup, previousMigration: saved }));
       await rename(source2, paths2.archive);
-      saved.archive = relative(stateRoot2, paths2.archive);
+      saved.archive = relative2(stateRoot2, paths2.archive);
     } else if (saved.source === "agent-transfer" && existsSync3(source2) || saved.source !== null && saved.source !== "agent-transfer" && saved.source !== recordedSource) throw new Error("The old browser migration source is ambiguous. Restore its migration record before starting the computer.");
     atomicWorkspaceWrite(paths2.migration, JSON.stringify({ ...saved, version: 2 }));
     return;
@@ -4759,7 +4906,7 @@ async function migrateBrowser(agentId, stateRoot2, computer) {
   await mkdir(dirname3(paths2.browser), { recursive: true, mode: 448 });
   const temporary = safeWorkspacePath(stateRoot2, `computers/${paths2.key}/migration-${randomUUID4()}`);
   try {
-    const record2 = { resourceKey: paths2.key, source: hasSource ? relative(stateRoot2, source) : null, archive: hasSource ? relative(stateRoot2, paths2.archive) : null, backup: hasSource ? relative(stateRoot2, paths2.backup) : null };
+    const record2 = { resourceKey: paths2.key, source: hasSource ? relative2(stateRoot2, source) : null, archive: hasSource ? relative2(stateRoot2, paths2.archive) : null, backup: hasSource ? relative2(stateRoot2, paths2.backup) : null };
     atomicWorkspaceWrite(paths2.migration, JSON.stringify({ version: 0, ...record2 }));
     if (hasSource) {
       await rename(source, paths2.archive);
@@ -4912,22 +5059,22 @@ function exportFiles(stateRoot2, agentId, omitLegacy = false) {
   const agentRoot = safeWorkspacePath(stateRoot2, `agents/${agentId}`), files = [];
   let total = 0;
   const visit = (path2) => {
-    if (omitLegacy && relative2(agentRoot, path2).replaceAll("\\", "/") === "private/.config/chromium") return;
+    if (omitLegacy && relative3(agentRoot, path2).replaceAll("\\", "/") === "private/.config/chromium") return;
     if (!existsSync4(path2)) return;
     const stat = lstatSync5(path2);
     if (stat.isSymbolicLink()) return;
-    safeWorkspacePath(stateRoot2, relative2(stateRoot2, path2));
+    safeWorkspacePath(stateRoot2, relative3(stateRoot2, path2));
     if (stat.isDirectory()) {
-      for (const name of readdirSync2(path2)) visit(join5(path2, name));
+      for (const name of readdirSync3(path2)) visit(join6(path2, name));
       return;
     }
     if (!stat.isFile()) return;
-    const data = readFileSync5(path2);
+    const data = readFileSync6(path2);
     total += data.length;
     if (total > 2e7) throw new Error("Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.");
-    files.push({ path: relative2(agentRoot, path2).replaceAll("\\", "/"), data: Buffer.from(data).toString("base64"), checksum: digest(data) });
+    files.push({ path: relative3(agentRoot, path2).replaceAll("\\", "/"), data: Buffer.from(data).toString("base64"), checksum: digest(data) });
   };
-  for (const path2 of allowedRoots) visit(join5(agentRoot, path2));
+  for (const path2 of allowedRoots) visit(join6(agentRoot, path2));
   files.sort((a, b) => a.path.localeCompare(b.path));
   return { files, checksum: digest(files.map((file) => `${file.path}:${file.checksum}`).join("\n")) };
 }
@@ -4996,12 +5143,12 @@ async function exportAgentTransfer(stateRoot2, agentId, computer) {
   let total = bundle.files.reduce((sum, file) => sum + Buffer.byteLength(file.data, "base64"), 0);
   const visit = (path2, depth) => {
     if (depth > 30) throw new Error("The saved browser contains too many nested directories.");
-    const name = relative2(source, path2).replaceAll("\\", "/");
+    const name = relative3(source, path2).replaceAll("\\", "/");
     if (name.split("/").some((part) => volatileBrowser.has(part))) return;
-    safeWorkspacePath(stateRoot2, relative2(stateRoot2, path2));
+    safeWorkspacePath(stateRoot2, relative3(stateRoot2, path2));
     const stat = lstatSync5(path2);
     if (stat.isDirectory()) {
-      for (const entry of readdirSync2(path2)) visit(join5(path2, entry), depth + 1);
+      for (const entry of readdirSync3(path2)) visit(join6(path2, entry), depth + 1);
       return;
     }
     if (!stat.isFile() || stat.nlink !== 1) throw new Error("The saved browser contains a link or special file. It has not been transferred.");
@@ -5041,10 +5188,10 @@ async function importAgentTransfer(stateRoot2, agentId, bundle, computer) {
       mkdirSync2(dirname4(path2), { recursive: true, mode: 448 });
       writeFileSync3(path2, file.data, { mode: 384, flag: "wx" });
     }
-    writeManagedFiles(stateRoot2, validated.files.filter((file) => !relative2(safeWorkspacePath(stateRoot2, `agents/${agentId}`), file.target).replaceAll("\\", "/").startsWith(legacyPrefix)));
-    safeWorkspacePath(stateRoot2, relative2(stateRoot2, paths2.browser));
+    writeManagedFiles(stateRoot2, validated.files.filter((file) => !relative3(safeWorkspacePath(stateRoot2, `agents/${agentId}`), file.target).replaceAll("\\", "/").startsWith(legacyPrefix)));
+    safeWorkspacePath(stateRoot2, relative3(stateRoot2, paths2.browser));
     mkdirSync2(dirname4(paths2.browser), { recursive: true, mode: 448 });
-    atomicWorkspaceWrite(paths2.migration, JSON.stringify({ version: 0, resourceKey: paths2.key, source: "agent-transfer-incomplete", backup: existsSync4(paths2.browser) ? relative2(stateRoot2, backup) : null, staged: relative2(stateRoot2, temporary), previousMigration: oldMigration ? JSON.parse(oldMigration.toString("utf8")) : null }));
+    atomicWorkspaceWrite(paths2.migration, JSON.stringify({ version: 0, resourceKey: paths2.key, source: "agent-transfer-incomplete", backup: existsSync4(paths2.browser) ? relative3(stateRoot2, backup) : null, staged: relative3(stateRoot2, temporary), previousMigration: oldMigration ? JSON.parse(oldMigration.toString("utf8")) : null }));
     if (existsSync4(paths2.browser)) {
       if (!lstatSync5(paths2.browser).isDirectory()) throw new Error("The destination browser profile is not a directory.");
       renameSync2(paths2.browser, backup);
@@ -5052,7 +5199,7 @@ async function importAgentTransfer(stateRoot2, agentId, bundle, computer) {
     }
     renameSync2(temporary, paths2.browser);
     replaced = true;
-    atomicWorkspaceWrite(paths2.migration, JSON.stringify({ version: 2, resourceKey: paths2.key, source: "agent-transfer", archive: oldMigration ? JSON.parse(oldMigration.toString("utf8")).archive || null : null, backup: preserved ? relative2(stateRoot2, backup) : null, migratedAt: (/* @__PURE__ */ new Date()).toISOString() }));
+    atomicWorkspaceWrite(paths2.migration, JSON.stringify({ version: 2, resourceKey: paths2.key, source: "agent-transfer", archive: oldMigration ? JSON.parse(oldMigration.toString("utf8")).archive || null : null, backup: preserved ? relative3(stateRoot2, backup) : null, migratedAt: (/* @__PURE__ */ new Date()).toISOString() }));
   } catch (error) {
     if (replaced) rmSync3(paths2.browser, { recursive: true, force: true });
     if (preserved) renameSync2(backup, paths2.browser);
@@ -5097,14 +5244,15 @@ async function readRunnerResponse(response, limit = AGENT_TRANSFER_WIRE_LIMIT + 
 
 // runtime/profile-runtime.ts
 import { spawn as spawn3 } from "node:child_process";
-import { copyFileSync, mkdirSync as mkdirSync4, chmodSync } from "node:fs";
-import { join as join6 } from "node:path";
+import { copyFileSync, mkdirSync as mkdirSync4, chmodSync, readFileSync as readFileSync8 } from "node:fs";
+import { createHash as createHash4 } from "node:crypto";
+import { join as join7 } from "node:path";
 
 // lib/product.ts
 var WORKSPACE_TOOL = "mcp__open_harness__workspace";
 
 // runtime/profile-memory.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync3, readFileSync as readFileSync6, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync3, readFileSync as readFileSync7, writeFileSync as writeFileSync4 } from "node:fs";
 
 // runtime/profiles.ts
 var ProfileError = class extends Error {
@@ -5129,7 +5277,7 @@ function profileMemory(root, agentId) {
     const legacy = safeWorkspacePath(root, `${profile}/${file}`);
     if (!existsSync5(target) && existsSync5(legacy)) {
       try {
-        writeFileSync4(target, readFileSync6(legacy), { flag: "wx", mode: 384 });
+        writeFileSync4(target, readFileSync7(legacy), { flag: "wx", mode: 384 });
       } catch (error) {
         if (error.code !== "EEXIST") throw error;
       }
@@ -5212,9 +5360,12 @@ var COORDINATION_TOOLS = [
   { id: COMPUTER_TOOL, name: "Managed computer", group: "desktop", description: "See and control the private managed browser. Human takeover keeps its current page. Existing headless browser permissions do not enable this tool; select it explicitly.", available: true },
   { id: WORKSPACE_TOOL, name: "Workspace coordination", group: "delegation", description: "Track delegated work, record checkpoints, and propose bounded responsibilities.", available: true },
   { id: GROUP_CHAT_TOOL, name: "Group conversations", group: "delegation", description: "Read and message teammates in shared group conversations.", available: true },
+  { id: API_TOOL, name: "Authenticated API request", group: "other", description: "Call explicitly granted API origins with saved credentials.", available: true },
   { id: TASK_TOOL, name: "Task board", group: "other", description: "Read and update assigned board tasks.", available: true },
   { id: HANDOFF_TOOL, name: "Hand off to another agent", group: "delegation", description: "Assign explicit task context to a named agent on a shared team.", available: true },
-  { id: ROUTINE_TOOL, name: "Create a routine", group: "scheduling", description: "Schedule work through Open Harness.", available: true }
+  { id: ROUTINE_TOOL, name: "Create a routine", group: "scheduling", description: "Schedule work through Open Harness.", available: true },
+  // Workspace access: Agent settings lists these apart from the runtime's own tools.
+  ...WORKSPACE_PERMISSIONS.map(([id, name, description]) => ({ id, name, group: "workspace", description, available: true }))
 ];
 var mockTools = [
   ["terminal", "terminal"],
@@ -5286,20 +5437,21 @@ function prepareProfile(root, profile, effective, secrets, token, runId, options
   assertSandboxedComputer(profile.computer);
   const allowedTools = runToolGrants(profile);
   const baseUrl = effective.baseUrl ? containerBaseUrl(effective.baseUrl) : "";
-  const dir = join6(root, "agents", profile.id), home = join6(dir, "profile"), managed = join6(dir, "managed");
-  for (const path2 of [home, managed, join6(dir, "private")]) mkdirSync4(path2, { recursive: true });
+  const dir = join7(root, "agents", profile.id), home = join7(dir, "profile"), managed = join7(dir, "managed");
+  for (const path2 of [home, managed, join7(dir, "private")]) mkdirSync4(path2, { recursive: true });
   profileMemory(root, profile.id);
   const mcp = {};
-  const coordination = join6(managed, "coordination.mjs");
-  copyFileSync(join6(import.meta.dirname, "hermes", "coordination.mjs"), coordination);
+  const coordination = join7(managed, "coordination.mjs");
+  copyFileSync(join7(import.meta.dirname, "hermes", "coordination.mjs"), coordination);
   chmodSync(coordination, 384);
   for (const name of ["gateway-entry.mjs", "model-proxy.mjs"]) {
-    const target = join6(managed, name);
-    copyFileSync(join6(import.meta.dirname, "hermes", name), target);
+    const target = join7(managed, name);
+    copyFileSync(join7(import.meta.dirname, "hermes", name), target);
     chmodSync(target, 384);
   }
   const coordinationEnv = { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, OPEN_HARNESS_RUN_LEASE: "/run/open-harness/run-lease.json", ...options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}, ...options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {} };
-  if (allowedTools.some((id) => COORDINATION_TOOLS.some((t) => t.id === id))) mcp.open_harness = { command: "node", args: [options.coordinationCommand || "/run/open-harness/coordination.mjs"], env: coordinationEnv };
+  const schema = createHash4("sha256").update(readFileSync8(coordination)).digest("hex").slice(0, 12);
+  if (allowedTools.some((id) => COORDINATION_TOOLS.some((t) => t.id === id))) mcp.open_harness = { command: "node", args: [options.coordinationCommand || "/run/open-harness/coordination.mjs", `--schema=${schema}`], env: coordinationEnv };
   const env = {};
   const secretValues = Object.fromEntries(Object.entries(secrets.environment()).filter(([, value]) => !isCodexSession(value)));
   const codex = effective.provider === CODEX_PROVIDER;
@@ -5320,17 +5472,25 @@ function prepareProfile(root, profile, effective, secrets, token, runId, options
   for (const c of profile.connectors.filter((c2) => c2.enabled)) {
     const connectorEnv = c.secretRef && secretValues[c.secretRef] ? { [c.secretRef]: secretValues[c.secretRef] } : {};
     Object.assign(env, connectorEnv);
-    mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: "${" + c.secretRef + "}" } : {} };
+    const mapped = c.secretRef ? { [c.secretRef]: "${" + c.secretRef + "}" } : {};
+    for (const binding of c.credentialBindings || []) {
+      const name = bindingSecretName(binding);
+      if (secretValues[name] !== void 0) {
+        env[name] = secretValues[name];
+        mapped[binding.env] = "${" + name + "}";
+      }
+    }
+    mcp[c.name] = { command: c.command, args: c.args, env: mapped };
   }
-  const config = { model: { default: effective.model, provider: hermesProvider, ...codex ? { base_url: "http://127.0.0.1:1/v1", api_mode: "codex_responses" } : effective.baseUrl ? { base_url: baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "manual", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, tools: { tool_search: { enabled: "off" } }, plugins: { enabled: ["open_harness_policy"] }, ...providers ? { providers } : {}, mcp_servers: mcp };
-  atomicWorkspaceWrite(join6(home, "config.yaml"), JSON.stringify(config, null, 2));
-  atomicWorkspaceWrite(join6(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
-  atomicWorkspaceWrite(join6(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
-  atomicWorkspaceWrite(join6(managed, "policy.json"), JSON.stringify({ runId, revision: profile.revision, modelProvider: effective.provider, allowedTools, coordination: coordinationEnv, reviewUnclassified: options.reviewUnclassified ?? (process.env.OPEN_HARNESS_SCOPED_AUTONOMY !== "0" || process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY === "1") }));
+  const config = { model: { default: effective.model, provider: hermesProvider, ...codex ? { base_url: "http://127.0.0.1:1/v1", api_mode: "codex_responses" } : effective.baseUrl ? { base_url: baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || runCwd(profile.computer), home_mode: "profile" }, approvals: { mode: "manual", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, tools: { tool_search: { enabled: "off" } }, plugins: { enabled: ["open_harness_policy"] }, ...providers ? { providers } : {}, mcp_servers: mcp };
+  atomicWorkspaceWrite(join7(home, "config.yaml"), JSON.stringify(config, null, 2));
+  atomicWorkspaceWrite(join7(home, "SOUL.md"), [profile.prompt.enabled ? profile.prompt.text : "", folderNotice(profile.computer, profile.projectName), profile.allowedTools.includes(API_TOOL) && profile.credentialGrants?.length ? "## API access\nUse api_request with these credential references and permitted origins/methods:\n" + profile.credentialGrants.map((grant) => `${grant.credentialRef}: ${grant.allowedOrigins.join(", ")} (${grant.allowedMethods.join(", ")})`).join("\n") : ""].filter(Boolean).join("\n\n"));
+  atomicWorkspaceWrite(join7(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
+  atomicWorkspaceWrite(join7(managed, "policy.json"), JSON.stringify({ runId, revision: profile.revision, modelProvider: effective.provider, allowedTools, coordination: coordinationEnv, reviewUnclassified: options.reviewUnclassified ?? (process.env.OPEN_HARNESS_SCOPED_AUTONOMY !== "0" || process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY === "1") }));
   writeRunLease(root, profile.id, options.idle ? null : runId);
 }
 function writeRunLease(root, agentId, runId) {
-  atomicWorkspaceWrite(join6(root, "agents", agentId, "managed", "run-lease.json"), JSON.stringify({ runId, active: Boolean(runId), expiresAt: Date.now() + 864e5 }));
+  atomicWorkspaceWrite(join7(root, "agents", agentId, "managed", "run-lease.json"), JSON.stringify({ runId, active: Boolean(runId), expiresAt: Date.now() + 864e5 }));
 }
 async function discoverModels(gateway) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { models: [{ id: "mock-atlas", provider: "mock", label: "Mock Atlas" }, { id: "mock-scout", provider: "mock", label: "Mock Scout" }] };
@@ -5361,7 +5521,7 @@ function normalizeModels(result) {
 }
 
 // runtime/transfer-crypto.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 
 // lib/runner-crypto.ts
 function base64(bytes2) {
@@ -5399,7 +5559,7 @@ async function decryptRunnerSecret(privateKey, payload) {
 // runtime/transfer-crypto.ts
 var purpose = "open-harness-agent-transfer";
 var bindingKeys = ["transferId", "agentId", "sourceMachineId", "destinationMachineId"];
-var hash = (data) => createHash4("sha256").update(data).digest("hex");
+var hash = (data) => createHash5("sha256").update(data).digest("hex");
 var failure2 = () => new Error("The encrypted agent transfer is invalid or belongs to another move. Source data was preserved.");
 function record(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -5468,15 +5628,74 @@ async function openAgentTransfer(value, binding, privateKey) {
 }
 
 // runtime/secrets.ts
-import { chmodSync as chmodSync2, existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync7, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { chmodSync as chmodSync3, existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync10, unlinkSync as unlinkSync3, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname5 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
+
+// runtime/secret-encryption.ts
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { chmodSync as chmodSync2, existsSync as existsSync6, readFileSync as readFileSync9, renameSync as renameSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
+function isEncryptedSecrets(raw) {
+  try {
+    return JSON.parse(raw)?.format === "open-harness-secrets";
+  } catch {
+    throw new Error("Credential storage is not readable JSON.");
+  }
+}
+function encryptionKey(path2, create) {
+  const configured = process.env.OPEN_HARNESS_ENCRYPTION_KEY;
+  if (configured) {
+    if (!/^[A-Za-z0-9+/]{43}=$/.test(configured)) throw new Error("OPEN_HARNESS_ENCRYPTION_KEY must be a base64-encoded 32-byte key.");
+    return Buffer.from(configured, "base64");
+  }
+  const keyPath = `${path2}.key`;
+  if (!existsSync6(keyPath)) {
+    if (!create) throw new Error("The credential encryption key is missing. Restore the original key; the store has not been changed.");
+    writeFileSync5(keyPath, randomBytes(32), { mode: 384, flag: "wx" });
+  }
+  const key = readFileSync9(keyPath);
+  if (key.length !== 32) throw new Error("The credential encryption key is invalid. Restore the original key.");
+  chmodSync2(keyPath, 384);
+  return key;
+}
+function sealSecrets(plain, key) {
+  const nonce = randomBytes(12), cipher = createCipheriv("aes-256-gcm", key, nonce);
+  cipher.setAAD(Buffer.from("open-harness-secrets-v1"));
+  const ciphertext = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+  return JSON.stringify({ format: "open-harness-secrets", version: 1, nonce: nonce.toString("base64"), tag: cipher.getAuthTag().toString("base64"), ciphertext: ciphertext.toString("base64") });
+}
+function openSecrets(raw, key) {
+  const data = JSON.parse(raw);
+  if (data.format !== "open-harness-secrets" || data.version !== 1) throw new Error("Unsupported encrypted credential format.");
+  const nonce = Buffer.from(data.nonce, "base64"), tag = Buffer.from(data.tag, "base64");
+  if (nonce.length !== 12 || tag.length !== 16) throw new Error("Invalid encrypted credential data.");
+  const cipher = createDecipheriv("aes-256-gcm", key, nonce);
+  cipher.setAAD(Buffer.from("open-harness-secrets-v1"));
+  cipher.setAuthTag(tag);
+  return Buffer.concat([cipher.update(Buffer.from(data.ciphertext, "base64")), cipher.final()]).toString("utf8");
+}
+function writeEncryptedSecrets(path2, plain) {
+  const existing = existsSync6(path2) ? readFileSync9(path2, "utf8") : void 0, encrypted = existing === void 0 ? false : isEncryptedSecrets(existing);
+  const key = encryptionKey(path2, !encrypted);
+  if (encrypted) openSecrets(existing, key);
+  const sealed = sealSecrets(plain, key), temporary = `${path2}.${randomBytes(8).toString("hex")}.tmp`;
+  try {
+    writeFileSync5(temporary, sealed, { mode: 384, flag: "wx" });
+    if (openSecrets(readFileSync9(temporary, "utf8"), key) !== plain) throw new Error("Credential storage verification failed.");
+    renameSync3(temporary, path2);
+    chmodSync2(path2, 384);
+  } finally {
+    if (existsSync6(temporary)) unlinkSync2(temporary);
+  }
+}
+
+// runtime/secrets.ts
 var service = "dev.openharness.secrets";
 function command(name, args2, input) {
   return spawnSync2(name, args2, { input, encoding: "utf8", timeout: 8e3, windowsHide: true, maxBuffer: 2e6 });
 }
-var account = (path2) => `open-harness-${createHash5("sha256").update(path2).digest("hex").slice(0, 16)}`;
+var account = (path2) => `open-harness-${createHash6("sha256").update(path2).digest("hex").slice(0, 16)}`;
 var DISABLED = { state: "unavailable", backend: "OS vault", reason: "OPEN_HARNESS_DISABLE_OS_VAULT=1 is set." };
 function loadVault(path2) {
   if (process.env.OPEN_HARNESS_DISABLE_OS_VAULT === "1") return DISABLED;
@@ -5529,19 +5748,28 @@ var SecretsUnavailableError = class extends Error {
 var SecretStore = class {
   constructor(path2) {
     this.path = path2;
-    this.backend = "restricted local file";
+    this.backend = "encrypted local file";
     mkdirSync5(dirname5(path2), { recursive: true });
     this.markerPath = `${path2.replace(/\.json$/, "")}.backend`;
-    const recorded = existsSync6(this.markerPath) ? readFileSync7(this.markerPath, "utf8").trim() : "";
+    const recorded = existsSync7(this.markerPath) ? readFileSync10(this.markerPath, "utf8").trim() : "";
     const vaulted = loadVault(path2);
-    const onDisk = existsSync6(path2);
-    if (vaulted.state === "ok") {
+    const onDisk = existsSync7(path2);
+    if (vaulted.state === "ok" && !(onDisk && ["file", "encrypted-file"].includes(recorded))) {
       this.values = this.parse(vaulted.value, vaulted.backend);
       this.backend = vaulted.backend;
     } else if (onDisk) {
-      this.values = this.parse(readFileSync7(path2, "utf8"), path2);
-      this.backend = "restricted local file";
-    } else if (recorded.startsWith("vault")) {
+      const raw = readFileSync10(path2, "utf8");
+      try {
+        const encrypted = isEncryptedSecrets(raw);
+        this.values = this.parse(encrypted ? openSecrets(raw, encryptionKey(path2, false)) : raw, path2);
+        if (encrypted && !this.values.controlToken) throw new Error("The encrypted credential store is missing its control token.");
+        this.backend = "encrypted local file";
+        if (!encrypted) writeEncryptedSecrets(path2, JSON.stringify(this.values));
+      } catch (error) {
+        throw new SecretsUnavailableError(`Cannot read the credential store. ${error instanceof Error ? error.message : "Invalid data."} Nothing was changed.`);
+      }
+    } else if (recorded === "encrypted-file") throw new SecretsUnavailableError("The encrypted credential file is missing. Restore it and its original encryption key. Nothing was changed.");
+    else if (recorded.startsWith("vault")) {
       const detail = vaulted.state === "unavailable" ? vaulted.reason : "The vault reports no stored credentials.";
       throw new SecretsUnavailableError(
         `Open Harness stored its credentials in the ${recorded.slice(6) || vaulted.backend} and cannot read them now. ${detail}
@@ -5553,38 +5781,79 @@ Nothing was changed. Delete ${this.markerPath} to start over with an empty crede
       this.values.controlToken = crypto.randomUUID() + crypto.randomUUID();
       this.save();
     } else this.record();
-    if (existsSync6(path2)) chmodSync2(path2, 384);
+    if (existsSync7(path2)) chmodSync3(path2, 384);
   }
   get token() {
     return this.values.controlToken;
   }
   set(name, value) {
     if (!/^[A-Z][A-Z0-9_]{1,80}$/.test(name)) throw new Error("Invalid secret name.");
+    const old = this.values[name];
     this.values[name] = value;
-    this.save();
+    try {
+      this.save();
+    } catch (error) {
+      if (old === void 0) delete this.values[name];
+      else this.values[name] = old;
+      throw error;
+    }
   }
   has(name) {
     return Boolean(this.values[name]);
   }
   names() {
-    return Object.keys(this.values).filter((key) => key !== "controlToken");
+    return Object.keys(this.values).filter((key) => /^[A-Z][A-Z0-9_]{1,80}$/.test(key));
   }
   environment() {
-    return Object.fromEntries(Object.entries(this.values).filter(([key]) => key !== "controlToken"));
+    return Object.fromEntries(this.names().map((key) => [key, this.values[key]]));
+  }
+  credentialFields(ref) {
+    return JSON.parse(this.values[`credential:${ref}`] || "{}");
+  }
+  setCredentialFields(ref, fields) {
+    if (!/^[A-Z][A-Z0-9_]{1,80}$/.test(ref)) throw new Error("Invalid credential reference.");
+    const name = `credential:${ref}`, old = this.values[name];
+    this.values[name] = JSON.stringify(fields);
+    try {
+      this.save();
+    } catch (error) {
+      if (old === void 0) delete this.values[name];
+      else this.values[name] = old;
+      throw error;
+    }
+  }
+  deleteCredentialFields(ref) {
+    const name = `credential:${ref}`;
+    if (name in this.values) {
+      const old = this.values[name];
+      delete this.values[name];
+      try {
+        this.save();
+      } catch (error) {
+        this.values[name] = old;
+        throw error;
+      }
+    }
   }
   // save() reserializes the whole map, which still holds controlToken, so the vault blob
   // rewrites correctly and the dashboard token survives. The guard is defence in depth:
   // this is the one method that could otherwise brick it.
   delete(name) {
-    if (name === "controlToken" || !(name in this.values)) return false;
+    if (!/^[A-Z][A-Z0-9_]{1,80}$/.test(name) || !(name in this.values)) return false;
+    const old = this.values[name];
     delete this.values[name];
-    this.save();
+    try {
+      this.save();
+    } catch (error) {
+      this.values[name] = old;
+      throw error;
+    }
     return true;
   }
   // Unreadable stored credentials are not the same as none: replacing them with a fresh
   // map is the one thing that cannot be undone, so say so and change nothing.
   parse(raw, source) {
-    if (!raw.trim()) return {};
+    if (!raw.trim()) throw new SecretsUnavailableError("The credential store is empty or truncated. Nothing was changed.");
     let value;
     try {
       value = JSON.parse(raw);
@@ -5592,11 +5861,21 @@ Nothing was changed. Delete ${this.markerPath} to start over with an empty crede
       throw new SecretsUnavailableError(`The stored Open Harness credentials in ${source} are not readable JSON. Nothing was changed. Move that entry aside to start over with an empty credential store.`);
     }
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new SecretsUnavailableError(`The stored Open Harness credentials in ${source} are not in the expected format. Nothing was changed. Move that entry aside to start over with an empty credential store.`);
+    if (Object.keys(value).some((key) => key !== "controlToken" && !/^[A-Z][A-Z0-9_]{1,80}$/.test(key) && !/^credential:[A-Z][A-Z0-9_]{1,80}$/.test(key)) || Object.values(value).some((item) => typeof item !== "string")) throw new SecretsUnavailableError("Credential store values are invalid. Nothing was changed.");
+    for (const [key, serialized] of Object.entries(value)) if (key.startsWith("credential:")) {
+      let fields;
+      try {
+        fields = JSON.parse(serialized);
+      } catch {
+        throw new SecretsUnavailableError("Structured credential data is invalid. Nothing was changed.");
+      }
+      if (!fields || typeof fields !== "object" || Array.isArray(fields) || Object.values(fields).some((field) => typeof field !== "string")) throw new SecretsUnavailableError("Structured credential data is invalid. Nothing was changed.");
+    }
     return value;
   }
   record() {
     try {
-      writeFileSync5(this.markerPath, this.backend === "restricted local file" ? "file" : `vault:${this.backend}`, { mode: 384 });
+      writeFileSync6(this.markerPath, this.backend === "encrypted local file" ? "encrypted-file" : `vault:${this.backend}`, { mode: 384 });
     } catch {
     }
   }
@@ -5608,27 +5887,26 @@ Nothing was changed. Delete ${this.markerPath} to start over with an empty crede
       if (confirmed.state === "ok" && confirmed.value.trim() === serialized) {
         this.backend = backend;
         this.record();
-        if (existsSync6(this.path)) unlinkSync2(this.path);
+        if (existsSync7(this.path)) unlinkSync3(this.path);
         return;
       }
     }
-    this.backend = "restricted local file";
-    writeFileSync5(this.path, JSON.stringify(this.values, null, 2), { mode: 384 });
-    chmodSync2(this.path, 384);
+    writeEncryptedSecrets(this.path, serialized);
+    this.backend = "encrypted local file";
     this.record();
   }
 };
 
 // runtime/agent-context.ts
-import { existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync8, readdirSync as readdirSync3, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync11, readdirSync as readdirSync4, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname6 } from "node:path";
-import { createHash as createHash6, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash7, randomUUID as randomUUID6 } from "node:crypto";
 function write(path2, content) {
   mkdirSync6(dirname6(path2), { recursive: true });
   const temporary = `${path2}.${randomUUID6()}.tmp`;
   try {
-    writeFileSync6(temporary, content, { mode: 384, flag: "wx" });
-    renameSync3(temporary, path2);
+    writeFileSync7(temporary, content, { mode: 384, flag: "wx" });
+    renameSync4(temporary, path2);
   } finally {
     rmSync4(temporary, { force: true });
   }
@@ -5638,8 +5916,8 @@ function agentContext(root, agentId, input) {
   const skills = safeWorkspacePath(root, `${profile}/skills`);
   if (input.operation === "get" || input.operation === "set-memory") {
     const paths2 = profileMemory(root, agentId);
-    const memory = existsSync7(paths2.memory) ? readFileSync8(paths2.memory, "utf8") : "", user = existsSync7(paths2.user) ? readFileSync8(paths2.user, "utf8") : "";
-    const revision = createHash6("sha256").update(JSON.stringify({ memory, user })).digest("hex");
+    const memory = existsSync8(paths2.memory) ? readFileSync11(paths2.memory, "utf8") : "", user = existsSync8(paths2.user) ? readFileSync11(paths2.user, "utf8") : "";
+    const revision = createHash7("sha256").update(JSON.stringify({ memory, user })).digest("hex");
     if (input.operation === "set-memory") {
       if (input.revision !== void 0 && input.revision !== revision) throw new ProfileError(`These notes changed elsewhere (revision ${revision.slice(0, 12)}). Your draft is preserved; reload the saved notes before saving again.`, 409);
       if (input.user !== void 0 && input.revision === void 0) throw new ProfileError("Reload these notes before changing personal preferences.", 409);
@@ -5647,13 +5925,13 @@ function agentContext(root, agentId, input) {
       if (nextMemory.length > 5e4 || nextUser.length > 5e4) throw new ProfileError("Each memory field is limited to 50 KB.", 413);
       if (input.memory !== void 0) write(paths2.memory, nextMemory);
       if (input.user !== void 0) write(paths2.user, nextUser);
-      return { status: 200, value: { ok: true, revision: createHash6("sha256").update(JSON.stringify({ memory: nextMemory, user: nextUser })).digest("hex") } };
+      return { status: 200, value: { ok: true, revision: createHash7("sha256").update(JSON.stringify({ memory: nextMemory, user: nextUser })).digest("hex") } };
     }
     return { status: 200, value: {
       memory,
       user,
       revision,
-      skills: existsSync7(skills) ? readdirSync3(skills, { withFileTypes: true }).filter((item) => item.isDirectory()).map((item) => item.name).slice(0, 200) : []
+      skills: existsSync8(skills) ? readdirSync4(skills, { withFileTypes: true }).filter((item) => item.isDirectory()).map((item) => item.name).slice(0, 200) : []
     } };
   }
   if (!["get-skill", "put-skill", "delete-skill"].includes(input.operation)) throw new ProfileError("Invalid context operation.");
@@ -5661,9 +5939,9 @@ function agentContext(root, agentId, input) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(name)) throw new ProfileError("Invalid skill name.");
   const directory = safeWorkspacePath(root, `${profile}/skills/${name}`);
   const file = safeWorkspacePath(root, `${profile}/skills/${name}/SKILL.md`);
-  if (input.operation === "get-skill") return existsSync7(file) ? { status: 200, value: { name, content: readFileSync8(file, "utf8") } } : { status: 404, value: { error: "Skill not found." } };
+  if (input.operation === "get-skill") return existsSync8(file) ? { status: 200, value: { name, content: readFileSync11(file, "utf8") } } : { status: 404, value: { error: "Skill not found." } };
   if (input.operation === "put-skill") write(file, String(input.content || ""));
-  else if (existsSync7(directory)) rmSync4(directory, { recursive: true });
+  else if (existsSync8(directory)) rmSync4(directory, { recursive: true });
   return { status: 200, value: { ok: true } };
 }
 
@@ -5671,8 +5949,8 @@ function agentContext(root, agentId, input) {
 import { spawn as spawn4 } from "node:child_process";
 
 // runtime/computer-ownership.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync9 } from "node:fs";
-import { join as join7 } from "node:path";
+import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync12 } from "node:fs";
+import { join as join8 } from "node:path";
 function validComputerOwnership(value) {
   if (!value || typeof value !== "object") return false;
   const item = value;
@@ -5681,14 +5959,14 @@ function validComputerOwnership(value) {
 function ownershipPath(root, profile) {
   const directory = safeWorkspacePath(root, "computer-ownership");
   mkdirSync7(directory, { recursive: true, mode: 448 });
-  return join7(directory, `${desktopResourceKey(profile.id, root, profile.computer)}.json`);
+  return join8(directory, `${desktopResourceKey(profile.id, root, profile.computer)}.json`);
 }
 function readComputerOwnership(root, profile) {
   const path2 = ownershipPath(root, profile);
-  if (!existsSync8(path2)) return null;
+  if (!existsSync9(path2)) return null;
   let value;
   try {
-    value = JSON.parse(readFileSync9(path2, "utf8"));
+    value = JSON.parse(readFileSync12(path2, "utf8"));
   } catch {
     throw new ProfileError("Computer ownership could not be read. Control remains blocked.", 409);
   }
@@ -5889,9 +6167,9 @@ except Exception:
 `;
 
 // runtime/computer-files.ts
-import { createHash as createHash7 } from "node:crypto";
-import { closeSync as closeSync3, constants as constants6, existsSync as existsSync9, fstatSync as fstatSync3, lstatSync as lstatSync6, mkdirSync as mkdirSync8, openSync as openSync3, readdirSync as readdirSync4, readSync, unlinkSync as unlinkSync3, writeFileSync as writeFileSync7 } from "node:fs";
-import { join as join8 } from "node:path";
+import { createHash as createHash8 } from "node:crypto";
+import { closeSync as closeSync3, constants as constants6, existsSync as existsSync10, fstatSync as fstatSync3, lstatSync as lstatSync6, mkdirSync as mkdirSync8, openSync as openSync3, readdirSync as readdirSync5, readSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync8 } from "node:fs";
+import { join as join9 } from "node:path";
 var DESKTOP_FILE_LIMITS = { fileBytes: 25 * 1024 * 1024, batchBytes: 100 * 1024 * 1024, entries: 100 };
 var claiming = /* @__PURE__ */ new Set();
 var same = (first, second) => first.ownerId === second.ownerId && first.epoch === second.epoch && first.runId === second.runId;
@@ -5903,7 +6181,7 @@ function paths(agentId, root, computer) {
   return { ...desktop, record: safeWorkspacePath(root, `${prefix}/exchange.json`), downloads: safeWorkspacePath(root, `${prefix}/staging/downloads`), uploads: safeWorkspacePath(root, `${prefix}/staging/uploads`), receipts: safeWorkspacePath(root, `${prefix}/receipts`) };
 }
 function readRecord(file, key) {
-  if (!existsSync9(file)) return null;
+  if (!existsSync10(file)) return null;
   let value;
   try {
     value = JSON.parse(readWorkspaceFile(file).toString("utf8"));
@@ -5930,7 +6208,7 @@ function validateDesktopUploadName(value) {
   return value;
 }
 function entries(path2) {
-  const names = readdirSync4(path2);
+  const names = readdirSync5(path2);
   if (names.length > DESKTOP_FILE_LIMITS.entries) throw new Error("Desktop exchange has too many files. Remove files before continuing.");
   return names.sort();
 }
@@ -5940,7 +6218,7 @@ function identity(stat) {
 function observe(path2, record2) {
   const current = {};
   for (const name of entries(path2)) {
-    const stat = lstatSync6(join8(path2, name));
+    const stat = lstatSync6(join9(path2, name));
     if (!stat.isFile() || stat.nlink !== 1) continue;
     const id = identity(stat);
     current[id] = record2.observed[id] || record2.lease;
@@ -5970,7 +6248,7 @@ function readBounded(file) {
 }
 function saveNew(file, data) {
   try {
-    writeFileSync7(file, data, { flag: "wx", mode: 384 });
+    writeFileSync8(file, data, { flag: "wx", mode: 384 });
   } catch (error) {
     if (error.code !== "EEXIST" || !readBounded(file).data.equals(data)) throw error;
   }
@@ -5981,7 +6259,7 @@ function publish(agentId, root, computer, record2) {
   let bytes2 = 0;
   for (const name of entries(p.downloads)) {
     if (!allowedName(name) || partial(name)) continue;
-    const source = join8(p.downloads, name);
+    const source = join9(p.downloads, name);
     let value;
     try {
       value = readBounded(source);
@@ -5991,16 +6269,16 @@ function publish(agentId, root, computer, record2) {
     if (bytes2 + value.data.length > DESKTOP_FILE_LIMITS.batchBytes) break;
     const origin = record2.observed[identity(value.stat)];
     if (!origin || origin.ownerId !== agentId) throw new Error("Desktop download owner changed.");
-    const sha256 = createHash7("sha256").update(value.data).digest("hex"), id = createHash7("sha256").update(JSON.stringify([p.key, origin, identity(value.stat), sha256])).digest("hex").slice(0, 32);
+    const sha256 = createHash8("sha256").update(value.data).digest("hex"), id = createHash8("sha256").update(JSON.stringify([p.key, origin, identity(value.stat), sha256])).digest("hex").slice(0, 32);
     const nameOnDisk = `${id}-${name}`, privateDirectory = safeWorkspacePath(root, `agents/${agentId}/private/downloads`);
     mkdirSync8(privateDirectory, { recursive: true, mode: 448 });
     mkdirSync8(p.receipts, { recursive: true, mode: 448 });
     const target = safeWorkspacePath(root, `agents/${agentId}/private/downloads/${nameOnDisk}`), receiptPath = safeWorkspacePath(root, `computers/${p.key}/receipts/${id}.json`);
     saveNew(target, value.data);
     const receipt = { ...origin, id, name, path: `downloads/${nameOnDisk}`, bytes: value.data.length, sha256, savedAt: (/* @__PURE__ */ new Date()).toISOString() };
-    if (!existsSync9(receiptPath)) atomicWorkspaceWrite(receiptPath, JSON.stringify(receipt));
+    if (!existsSync10(receiptPath)) atomicWorkspaceWrite(receiptPath, JSON.stringify(receipt));
     const now = lstatSync6(source);
-    if (identity(now) === identity(value.stat) && now.size === value.stat.size && now.mtimeMs === value.stat.mtimeMs) unlinkSync3(source);
+    if (identity(now) === identity(value.stat) && now.size === value.stat.size && now.mtimeMs === value.stat.mtimeMs) unlinkSync4(source);
     result.push(receipt);
     bytes2 += value.data.length;
   }
@@ -6012,18 +6290,18 @@ function clearStaging(staging) {
   const files = [], directories = [];
   const walk = (path2, depth) => {
     if (depth > 3) throw new Error("Desktop staging contains unsupported directories.");
-    for (const name of readdirSync4(path2)) {
+    for (const name of readdirSync5(path2)) {
       if (files.length + directories.length >= DESKTOP_FILE_LIMITS.entries * 3) throw new Error("Desktop staging needs cleanup before it can change owners.");
-      const file = join8(path2, name), stat = lstatSync6(file);
+      const file = join9(path2, name), stat = lstatSync6(file);
       if (stat.isDirectory()) {
-        if (file !== join8(staging, "downloads") && file !== join8(staging, "uploads")) throw new Error("Desktop staging contains unsupported directories.");
+        if (file !== join9(staging, "downloads") && file !== join9(staging, "uploads")) throw new Error("Desktop staging contains unsupported directories.");
         directories.push(file);
         walk(file, depth + 1);
       } else files.push(file);
     }
   };
   walk(staging, 0);
-  for (const file of files) unlinkSync3(file);
+  for (const file of files) unlinkSync4(file);
 }
 async function claimDesktopExchange(agentId, root, computer, lease, stopBrowser) {
   validateLease(agentId, lease);
@@ -6035,7 +6313,7 @@ async function claimDesktopExchange(agentId, root, computer, lease, stopBrowser)
     mkdirSync8(p.uploads, { recursive: true, mode: 448 });
     const previous = readRecord(p.record, p.key), original = JSON.stringify(previous);
     if (previous && lease.epoch < previous.lease.epoch) throw new Error("Desktop file ownership is stale.");
-    const reset = previous ? previous.lease.ownerId !== agentId : readdirSync4(p.staging).some((name) => !["downloads", "uploads"].includes(name)) || entries(p.downloads).length > 0 || entries(p.uploads).length > 0;
+    const reset = previous ? previous.lease.ownerId !== agentId : readdirSync5(p.staging).some((name) => !["downloads", "uploads"].includes(name)) || entries(p.downloads).length > 0 || entries(p.uploads).length > 0;
     if (reset) {
       await stopBrowser();
       if (JSON.stringify(readRecord(p.record, p.key)) !== original) throw new Error("Desktop file ownership changed during browser shutdown.");
@@ -6064,11 +6342,11 @@ function stageDesktopUpload(agentId, root, computer, lease, name) {
   let total = 0;
   const existing = entries(p.uploads);
   for (const item of existing) {
-    const stat = lstatSync6(join8(p.uploads, item));
+    const stat = lstatSync6(join9(p.uploads, item));
     if (!stat.isFile() || stat.nlink !== 1) throw new Error("Upload staging contains an unsupported file.");
     total += stat.size;
   }
-  const destination = `${createHash7("sha256").update(value.data).digest("hex").slice(0, 16)}-${name}`;
+  const destination = `${createHash8("sha256").update(value.data).digest("hex").slice(0, 16)}-${name}`;
   if (!existing.includes(destination) && (existing.length >= DESKTOP_FILE_LIMITS.entries || total + value.data.length > DESKTOP_FILE_LIMITS.batchBytes)) throw new Error("Desktop upload staging is full.");
   saveNew(safeWorkspacePath(root, `computers/${p.key}/staging/uploads/${destination}`), value.data);
   return { name, bytes: value.data.length, path: `/workspace/exchange/uploads/${destination}` };
@@ -6557,28 +6835,29 @@ async function executeRunnerDuplex(root, credentials2, command2, admission = {})
 // runtime/runner.ts
 var args = /* @__PURE__ */ new Map();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith("--")) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith("--") ? "" : process.argv[++i] || "");
-var stateRoot = resolve6(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join9(homedir2(), ".open-harness-runner"));
-var credentialPath = join9(stateRoot, "connection.json");
-var spool = join9(stateRoot, "spool");
+var stateRoot = resolve6(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join10(homedir3(), ".open-harness-runner"));
+var credentialPath = join10(stateRoot, "connection.json");
+var spool = join10(stateRoot, "spool");
 mkdirSync9(spool, { recursive: true });
 var runnerSecrets;
 try {
-  runnerSecrets = new SecretStore(join9(stateRoot, "secrets.json"));
+  runnerSecrets = new SecretStore(join10(stateRoot, "secrets.json"));
 } catch (error) {
   console.error(error instanceof Error ? error.message : "The runner could not open its credential store.");
   process.exit(1);
 }
 function output(command2, args2, timeout) {
   return new Promise((resolve7) => {
-    let done = false, stdout = "";
+    let done = false, stdout = "", stderr = "";
     const settle = (status) => {
       if (!done) {
         done = true;
-        resolve7({ status, stdout });
+        resolve7({ status, stdout, stderr });
       }
     };
-    const child = spawn6(command2, args2, { stdio: ["ignore", "pipe", "ignore"], timeout, killSignal: "SIGKILL" });
+    const child = spawn6(command2, args2, { stdio: ["ignore", "pipe", "pipe"], timeout, killSignal: "SIGKILL" });
     child.stdout.on("data", (chunk) => stdout += chunk);
+    child.stderr.on("data", (chunk) => stderr += chunk);
     child.on("error", () => settle(null));
     child.on("exit", (code) => settle(code));
   });
@@ -6604,16 +6883,16 @@ async function pair() {
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || "Pairing failed.");
   const saved = { coordinator, machineId: value.machineId, token: value.token, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey };
-  writeFileSync8(credentialPath, JSON.stringify(saved, null, 2), { mode: 384 });
-  chmodSync3(credentialPath, 384);
+  writeFileSync9(credentialPath, JSON.stringify(saved, null, 2), { mode: 384 });
+  chmodSync4(credentialPath, 384);
   return saved;
 }
-var credentials = args.has("pairing-code") ? await pair() : existsSync10(credentialPath) ? JSON.parse(readFileSync10(credentialPath, "utf8")) : await pair();
+var credentials = args.has("pairing-code") ? await pair() : existsSync11(credentialPath) ? JSON.parse(readFileSync13(credentialPath, "utf8")) : await pair();
 if (!credentials.encryptionPrivateKey || !credentials.encryptionPublicKey) {
   const encryption = await generateRunnerKeyPair();
   credentials = { ...credentials, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey };
-  writeFileSync8(credentialPath, JSON.stringify(credentials, null, 2), { mode: 384 });
-  chmodSync3(credentialPath, 384);
+  writeFileSync9(credentialPath, JSON.stringify(credentials, null, 2), { mode: 384 });
+  chmodSync4(credentialPath, 384);
 }
 var savedTarget = new URL(credentials.coordinator);
 var savedLoopback = ["localhost", "127.0.0.1", "::1"].includes(savedTarget.hostname);
@@ -6679,15 +6958,15 @@ async function shutdown(signal) {
 }
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => void shutdown(signal));
 async function deliver(record2) {
-  const file = join9(spool, `${record2.id}.json`);
-  if (!existsSync10(file)) writeFileSync8(file, JSON.stringify(record2), { mode: 384 });
+  const file = join10(spool, `${record2.id}.json`);
+  if (!existsSync11(file)) writeFileSync9(file, JSON.stringify(record2), { mode: 384 });
   await request(record2.path, { method: "POST", body: JSON.stringify(record2.body) }, true);
-  if (existsSync10(file)) unlinkSync4(file);
+  if (existsSync11(file)) unlinkSync5(file);
 }
 async function flushSpool() {
-  for (const name of readdirSync5(spool).filter((name2) => name2.endsWith(".json"))) {
+  for (const name of readdirSync6(spool).filter((name2) => name2.endsWith(".json"))) {
     try {
-      await deliver(JSON.parse(readFileSync10(join9(spool, name), "utf8")));
+      await deliver(JSON.parse(readFileSync13(join10(spool, name), "utf8")));
     } catch {
     }
   }
@@ -6718,7 +6997,7 @@ async function run(command2) {
       }
     };
     assertOwnership();
-    const shared = join9(stateRoot, "shared");
+    const shared = join10(stateRoot, "shared");
     mkdirSync9(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean);
     const availableSecrets = { ...runnerSecrets.environment(), ...process.env };
@@ -6739,7 +7018,7 @@ async function run(command2) {
     await gateway.start();
     await phase("gateway-ready");
     if (live.stopping) throw new Error("Run stopped before its session started.");
-    const session = await gateway.request("session.create", { cwd: "/workspace/shared", profile: "default", messages: payload.history || [] });
+    const session = await gateway.request("session.create", { cwd: runCwd(profile.computer), profile: "default", messages: payload.history || [] });
     const sessionId = String(session?.session_id || session?.id || "");
     if (!sessionId) throw new Error("Hermes did not return a session ID.");
     live.sessionId = sessionId;
@@ -6789,7 +7068,7 @@ async function control(command2) {
       if (profile) assertSandboxedComputer(profile.computer);
       const binding = transferBinding(command2);
       if (!profile || profile.id !== command2.agentId || profile.computer.machineId !== credentials.machineId || binding.destinationMachineId !== credentials.machineId) throw new Error("The destination computer profile does not match this runner.");
-      if (profile) validateComputerTarget(profile, await capabilities(), Array.isArray(command2.payload.requiredSecrets) ? command2.payload.requiredSecrets.map(String) : [], (name) => runnerSecrets.has(name) || Boolean(process.env[name]));
+      if (profile) validateComputerTarget(profile, await capabilities(), stateRoot, Array.isArray(command2.payload.requiredSecrets) ? command2.payload.requiredSecrets.map(String) : [], (name) => runnerSecrets.has(name) || Boolean(process.env[name]));
       const bundle = await openAgentTransfer(command2.payload.sealedTransfer, binding, credentials.encryptionPrivateKey);
       const imported = await importAgentTransfer(stateRoot, command2.agentId, bundle, profile.computer);
       if (profile?.computer.desktop !== "none" && profile) {
@@ -6801,7 +7080,7 @@ async function control(command2) {
       return;
     }
     if (command2.kind.startsWith("probe-")) {
-      const profile = command2.payload.profile, shared = join9(stateRoot, "shared");
+      const profile = command2.payload.profile, shared = join10(stateRoot, "shared");
       assertSandboxedComputer(profile.computer);
       mkdirSync9(shared, { recursive: true });
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env }, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]])), dispatched = await openDispatchedSecrets(command2.payload.encryptedSecrets), secretSource = { environment: () => ({ ...localSecrets, ...dispatched }) };

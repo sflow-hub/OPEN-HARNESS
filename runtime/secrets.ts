@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSy
 import { dirname } from "node:path";
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { encryptionKey, isEncryptedSecrets, openSecrets, writeEncryptedSecrets } from './secret-encryption';
 
 const service = 'dev.openharness.secrets';
 
@@ -77,7 +78,7 @@ export class SecretsUnavailableError extends Error {}
 export class SecretStore {
   private values: Record<string, string>;
   private markerPath: string;
-  backend = 'restricted local file';
+  backend = 'encrypted local file';
   constructor(private path: string) {
     mkdirSync(dirname(path), { recursive: true });
     this.markerPath = `${path.replace(/\.json$/, '')}.backend`;
@@ -85,8 +86,18 @@ export class SecretStore {
     const vaulted = loadVault(path);
     const onDisk = existsSync(path);
 
-    if (vaulted.state === 'ok') { this.values = this.parse(vaulted.value, vaulted.backend); this.backend = vaulted.backend; }
-    else if (onDisk) { this.values = this.parse(readFileSync(path, 'utf8'), path); this.backend = 'restricted local file'; }
+    if (vaulted.state === 'ok' && !(onDisk && ['file', 'encrypted-file'].includes(recorded))) { this.values = this.parse(vaulted.value, vaulted.backend); this.backend = vaulted.backend; }
+    else if (onDisk) {
+      const raw = readFileSync(path, 'utf8');
+      try {
+        const encrypted = isEncryptedSecrets(raw);
+        this.values = this.parse(encrypted ? openSecrets(raw, encryptionKey(path, false)) : raw, path);
+        if (encrypted && !this.values.controlToken) throw new Error('The encrypted credential store is missing its control token.');
+        this.backend = 'encrypted local file';
+        if (!encrypted) writeEncryptedSecrets(path, JSON.stringify(this.values));
+      } catch (error) { throw new SecretsUnavailableError(`Cannot read the credential store. ${error instanceof Error ? error.message : 'Invalid data.'} Nothing was changed.`); }
+    }
+    else if (recorded === 'encrypted-file') throw new SecretsUnavailableError('The encrypted credential file is missing. Restore it and its original encryption key. Nothing was changed.');
     else if (recorded.startsWith('vault')) {
       // Secrets exist in a vault this process cannot read. Starting fresh would mint a new
       // control token, invalidate every paired runner and agent token, and overwrite the
@@ -105,24 +116,40 @@ export class SecretStore {
     if (existsSync(path)) chmodSync(path, 0o600);
   }
   get token() { return this.values.controlToken; }
-  set(name: string, value: string) { if (!/^[A-Z][A-Z0-9_]{1,80}$/.test(name)) throw new Error("Invalid secret name."); this.values[name] = value; this.save(); }
+  set(name: string, value: string) {
+    if (!/^[A-Z][A-Z0-9_]{1,80}$/.test(name)) throw new Error("Invalid secret name.");
+    const old = this.values[name]; this.values[name] = value;
+    try { this.save(); } catch (error) { if (old === undefined) delete this.values[name]; else this.values[name] = old; throw error; }
+  }
   has(name: string) { return Boolean(this.values[name]); }
-  names() { return Object.keys(this.values).filter(key => key !== "controlToken"); }
-  environment() { return Object.fromEntries(Object.entries(this.values).filter(([key]) => key !== "controlToken")); }
+  names() { return Object.keys(this.values).filter(key => /^[A-Z][A-Z0-9_]{1,80}$/.test(key)); }
+  environment() { return Object.fromEntries(this.names().map(key => [key, this.values[key]])); }
+  credentialFields(ref: string): Record<string, string> { return JSON.parse(this.values[`credential:${ref}`] || '{}'); }
+  setCredentialFields(ref: string, fields: Record<string, string>) {
+    if (!/^[A-Z][A-Z0-9_]{1,80}$/.test(ref)) throw new Error('Invalid credential reference.');
+    const name = `credential:${ref}`, old = this.values[name]; this.values[name] = JSON.stringify(fields);
+    try { this.save(); } catch (error) { if (old === undefined) delete this.values[name]; else this.values[name] = old; throw error; }
+  }
+  deleteCredentialFields(ref: string) { const name = `credential:${ref}`; if (name in this.values) { const old = this.values[name]; delete this.values[name]; try { this.save(); } catch (error) { this.values[name] = old; throw error; } } }
   // save() reserializes the whole map, which still holds controlToken, so the vault blob
   // rewrites correctly and the dashboard token survives. The guard is defence in depth:
   // this is the one method that could otherwise brick it.
-  delete(name: string) { if (name === "controlToken" || !(name in this.values)) return false; delete this.values[name]; this.save(); return true; }
+  delete(name: string) { if (!/^[A-Z][A-Z0-9_]{1,80}$/.test(name) || !(name in this.values)) return false; const old = this.values[name]; delete this.values[name]; try { this.save(); } catch (error) { this.values[name] = old; throw error; } return true; }
   // Unreadable stored credentials are not the same as none: replacing them with a fresh
   // map is the one thing that cannot be undone, so say so and change nothing.
   private parse(raw: string, source: string): Record<string, string> {
-    if (!raw.trim()) return {};
+    if (!raw.trim()) throw new SecretsUnavailableError('The credential store is empty or truncated. Nothing was changed.');
     let value: unknown;
     try { value = JSON.parse(raw); } catch { throw new SecretsUnavailableError(`The stored Open Harness credentials in ${source} are not readable JSON. Nothing was changed. Move that entry aside to start over with an empty credential store.`); }
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new SecretsUnavailableError(`The stored Open Harness credentials in ${source} are not in the expected format. Nothing was changed. Move that entry aside to start over with an empty credential store.`);
+    if (Object.keys(value).some(key => key !== 'controlToken' && !/^[A-Z][A-Z0-9_]{1,80}$/.test(key) && !/^credential:[A-Z][A-Z0-9_]{1,80}$/.test(key)) || Object.values(value).some(item => typeof item !== 'string')) throw new SecretsUnavailableError('Credential store values are invalid. Nothing was changed.');
+    for (const [key, serialized] of Object.entries(value)) if (key.startsWith('credential:')) {
+      let fields; try { fields = JSON.parse(serialized as string); } catch { throw new SecretsUnavailableError('Structured credential data is invalid. Nothing was changed.'); }
+      if (!fields || typeof fields !== 'object' || Array.isArray(fields) || Object.values(fields).some(field => typeof field !== 'string')) throw new SecretsUnavailableError('Structured credential data is invalid. Nothing was changed.');
+    }
     return value as Record<string, string>;
   }
-  private record() { try { writeFileSync(this.markerPath, this.backend === 'restricted local file' ? 'file' : `vault:${this.backend}`, { mode: 0o600 }); } catch {} }
+  private record() { try { writeFileSync(this.markerPath, this.backend === 'encrypted local file' ? 'encrypted-file' : `vault:${this.backend}`, { mode: 0o600 }); } catch {} }
   private save() {
     const serialized = JSON.stringify(this.values);
     const backend = saveVault(this.path, serialized);
@@ -136,9 +163,8 @@ export class SecretStore {
         return;
       }
     }
-    this.backend = 'restricted local file';
-    writeFileSync(this.path, JSON.stringify(this.values, null, 2), { mode: 0o600 });
-    chmodSync(this.path, 0o600);
+    writeEncryptedSecrets(this.path, serialized);
+    this.backend = 'encrypted local file';
     this.record();
   }
 }

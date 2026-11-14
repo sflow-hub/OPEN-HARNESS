@@ -1,3 +1,6 @@
+import { encryptionKey, openSecrets } from '../runtime/secret-encryption';
+import { coordinationToken } from '../runtime/coordination-auth';
+import { API_TOOL } from '../lib/agent-profile';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -35,7 +38,7 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
 const list = () => request<CredentialList>('/v1/credentials');
 const profile = async (id: string) => (await request<ProfileResponse>(`/v1/agents/${id}/profile`)).profile;
 const save = (p: AgentProfile) => request<ProfileResponse>(`/v1/agents/${p.id}/profile`, 'PUT', p);
-const secretsFile = () => readFileSync(join(state, 'secrets.json'), 'utf8');
+const secretsFile = () => openSecrets(readFileSync(join(state, 'secrets.json'), 'utf8'), encryptionKey(join(state, 'secrets.json'), false));
 const agentEnv = (id: string) => readFileSync(join(state, 'agents', id, 'profile', '.env'), 'utf8');
 async function waitRun(id: string) {
   const deadline = Date.now() + POLL_BUDGET_MS;
@@ -279,4 +282,34 @@ test('running work keeps its model and key; queued work snapshots the new pair',
   assert.ok(agentEnv('atlas').includes('router-test-secret'));
   const config = readFileSync(join(state, 'agents', 'atlas', 'profile', 'config.yaml'), 'utf8');
   assert.ok(config.includes('after-model'));
+});
+
+test('typed API grants are checked against the active run snapshot and cannot be used as model keys', async () => {
+  const credential = await request<CredentialRecord>('/v1/credentials', 'POST', { label: 'Scoped API bearer', type: 'bearer', fields: { token: 'scoped-private-token' } });
+  assert.equal(credential.type, 'bearer'); assert.deepEqual(credential.fieldPresence, { token: true });
+  assert.ok(!JSON.stringify(credential).includes('scoped-private-token'));
+  assert.ok(!readFileSync(join(state, 'secrets.json'), 'utf8').includes('scoped-private-token'));
+  assert.ok(!readFileSync(join(state, 'state.db'), 'utf8').includes('scoped-private-token'));
+  const defaults = await request<{ model: unknown; revision: number }>('/v1/workspace/model');
+  assert.equal((await raw('/v1/workspace/model', 'PUT', { model: { provider: 'mock', model: 'mock', credentialRef: credential.ref, baseUrl: '' }, revision: defaults.revision })).status, 400);
+  const before = await profile('atlas');
+  const granted = await save({ ...before, allowedTools: [...before.allowedTools, API_TOOL], credentialGrants: [{ credentialRef: credential.ref, allowedOrigins: ['https://127.0.0.1'], allowedMethods: ['GET'] }] });
+  const run = await request<PersistentRun>('/v1/runs', 'POST', { agentId: 'atlas', prompt: 'MOCK_APPROVAL' });
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while ((await request<PersistentRun>(`/v1/runs/${run.id}`)).state !== 'waiting_approval') { if (Date.now() > deadline) throw new Error('Run did not reach its approval.'); await new Promise(resolve => setTimeout(resolve, 20)); }
+  const call = (url: string, agent = 'atlas') => fetch(base + '/internal/api-request', { method: 'POST', headers: { Authorization: `Bearer ${coordinationToken(token, agent, 'local')}`, 'X-Open-Harness-Agent': agent, 'X-Open-Harness-Run': run.id, 'Content-Type': 'application/json' }, body: JSON.stringify({ credentialRef: credential.ref, url }) });
+  try {
+    assert.equal((await call('https://ungranted.example.test/')).status, 403);
+    assert.equal((await call('https://127.0.0.1/')).status, 502, 'granted origin still cannot bypass network restrictions');
+    // Another agent's run, and a stopped run, get the refusal every agent tool gives an inactive run.
+    assert.equal((await call('https://127.0.0.1/', 'scout')).status, 401);
+    await save({ ...granted.profile, allowedTools: granted.profile.allowedTools.filter(tool => tool !== API_TOOL), credentialGrants: [{ credentialRef: credential.ref, allowedOrigins: ['https://changed.example.test'], allowedMethods: ['GET'] }] });
+    assert.equal((await call('https://changed.example.test/')).status, 403);
+    assert.equal((await call('https://127.0.0.1/')).status, 502, 'the current task retains its original grant');
+  } finally {
+    await request(`/v1/runs/${run.id}/stop`, 'POST', {});
+    const current = await profile('atlas'); await save({ ...before, revision: current.revision });
+  }
+  assert.equal((await call('https://127.0.0.1/')).status, 401);
+  assert.equal((await raw('/v1/credentials/SCOPED_API_BEARER/oauth/callback?state=invalid&code=invalid')).status, 400);
 });

@@ -15,6 +15,7 @@ import {
   FileText,
   FolderOpen,
   Monitor,
+  HardDrive,
   KeyRound,
   ListTodo,
   Menu,
@@ -62,6 +63,8 @@ import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import TeamManager, { TeamBadge } from "../components/team-manager";
 import CredentialManager, { CredentialSwitcher, CredentialsPage } from "../components/credential-manager";
+import FolderManager from "../components/folder-manager";
+import DecisionSettings from "../components/decision-settings";
 import ModelPicker from "../components/model-picker";
 import { CODEX_PROVIDER } from "../lib/codex";
 import ConversationTranscript from "../components/conversation-transcript";
@@ -75,10 +78,14 @@ import NetworkSettings from "../components/network-settings";
 import RunReview, { PerformanceSummary } from "../components/run-review";
 import AssistantWorkspace from '../components/assistant-workspace';
 import { DesktopPanel } from "../components/desktop-panel";
+import { CredentialSelector } from "../components/credential-editor";
+import { modelCredential } from "../lib/credential-types";
 import { CREDENTIAL_PROVIDERS, modelForCredential, providerLabel, type CredentialRecord } from "../lib/credentials";
 import { isSandboxedComputer, profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
 import type { Team } from "../lib/team";
+import type { TaskBoard } from "../lib/task-types";
 import { APP_VERSION } from "../lib/version";
+import { clarifyQuestions, isClarifyBatch, type ClarifyQuestion } from "../lib/clarify";
 
 const STORAGE_KEY = "open-harness.workspace.v2";
 const LEGACY_STORAGE_KEY = "open-harness.workspace.v1";
@@ -102,7 +109,7 @@ const MIGRATED_KEY = "open-harness.migrated.v1";
 // Kept apart from SETTINGS_KEY on purpose: the onboarding save rewrites that whole
 // blob, which would silently drop anything else stored alongside it.
 const NOTIFY_KEY = "open-harness.notify.v1";
-type View = "assistant" | "home" | "teams" | "groups" | "chat" | "files" | "routines" | "tasks" | "credentials";
+type View = "assistant" | "home" | "teams" | "groups" | "chat" | "files" | "folders" | "routines" | "tasks" | "credentials";
 type ModelSettings = { provider: string; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
 const defaultSettings: ModelSettings = {
   provider: "xai",
@@ -175,6 +182,7 @@ export default function Home() {
   const [settings, setSettings] = useState<ModelSettings>(defaultSettings);
   const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
   const [credentialsOpen, setCredentialsOpen] = useState(false);
+  const [decisionsOpen, setDecisionsOpen] = useState(false);
   const [workspaceModelRevision, setWorkspaceModelRevision] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [advancedFeatures, setAdvancedFeatures] = useState(false);
@@ -194,12 +202,15 @@ export default function Home() {
   const [agentTeamFilter, setAgentTeamFilter] = useState("all");
   const [liveRuns, setLiveRuns] = useState<Record<string, PersistentRun>>({});
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
+  const [connectionReady, setConnectionReady] = useState(false);
   const [answered, setAnswered] = useState<Array<{ id: string; runId: string; at: number }>>([]);
   const ANSWER_GRACE_MS = 20_000;
   const [answering, setAnswering] = useState("");
-  const [inputDraft, setInputDraft] = useState<{ inputId: string; text: string; choices: string[] }>({ inputId: "", text: "", choices: [] });
+  const [inputDraft, setInputDraft] = useState<{ inputId: string; answers: Record<string, { text: string; choices: string[] }> }>({ inputId: "", answers: {} });
   const [inputMode, setInputMode] = useState<"steer" | "followup">("steer");
   const [routines, setRoutines] = useState<Array<Record<string, unknown>>>([]);
+  const [projects, setProjects] = useState<TaskBoard[]>([]);
+  const [draftProjectId, setDraftProjectId] = useState("");
   const [routineDraft, setRoutineDraft] = useState<{ id?: string; name: string; prompt: string; agentId: string; intervalMinutes: number } | null>(null);
   const [routineBusy, setRoutineBusy] = useState(false);
   const [reviewRun, setReviewRun] = useState<PersistentRun | null>(null);
@@ -237,6 +248,8 @@ export default function Home() {
   const pendingPairCode = useRef("");
   const runtimeRefresh = useRef(0);
   const runtimeFilesRequest = useRef(0);
+  const runtimeCheckId = useRef(0);
+  const runtimeChecksPending = useRef(0);
   // What the first-run guide last reported the runtime to be, kept until a bootstrap answer
   // agrees: a re-read requested for another reason (closing the guide) carries it on.
   const runtimeExpectation = useRef<boolean | null>(null);
@@ -271,6 +284,9 @@ export default function Home() {
   // connected runtime let a source preview display canned prose as an agent reply.
   const testMode = runtime?.mode === "test";
   const connected = Boolean(runtime?.runtime.available && !testMode);
+  // Only projects that share folders change what a chat can reach, so only those are offered.
+  const chatProjects = projects.filter((project) => !project.archived && project.folders?.length);
+  const chatProject = chatProjects.find((project) => project.id === (conversation ? conversation.projectId || "" : draftProjectId));
 
   // Read by code that runs after an await and needs the workspace as last rendered, not as
   // it was when the closure was created.
@@ -496,6 +512,7 @@ export default function Home() {
     let retryTimer = 0;
     let connectionEpoch = 0;
     const connect = async () => {
+      setConnectionReady(false);
       const client = controlRef.current;
       const epoch = ++connectionEpoch;
       const isCurrent = () => !cancelled && epoch === connectionEpoch;
@@ -518,10 +535,11 @@ export default function Home() {
       }
       if (!isCurrent()) return;
       try {
+        const checkId = ++runtimeCheckId.current;
         const status = await client.bootstrap();
         if (!isCurrent()) return;
         setPairing({ state: "none", message: "" });
-        setRuntime(status);
+        if (checkId === runtimeCheckId.current) setRuntime(status);
         if(client.managed){const requestedDesktop=new URL(window.location.href).searchParams.get('desktop');if(requestedDesktop&&/^[A-Za-z0-9_-]+$/.test(requestedDesktop))setDesktopAgentId(requestedDesktop);}
         const synced = client.managed ? await client.request<{agents:Agent[]}>('/v1/client-agents') : await client.request<{ agents: Agent[] }>("/v1/agents/sync", {
           method: "POST",
@@ -560,6 +578,8 @@ export default function Home() {
           }),
           client.request<{ credentials: CredentialRecord[] }>("/v1/credentials")
             .then(saved => { if (isCurrent()) setCredentials(saved.credentials); }).catch(() => {}),
+          client.request<{ boards: TaskBoard[] }>("/v1/boards")
+            .then(saved => { if (isCurrent()) setProjects(saved.boards); }).catch(() => {}),
           client.request<{ routines: Array<Record<string, unknown>> }>("/v1/routines")
             .then(saved => { if (isCurrent()) setRoutines(saved.routines); }),
           client.managed ? refreshRuntimeFiles().catch(() => {}) : Promise.resolve(),
@@ -587,7 +607,7 @@ export default function Home() {
             setLoadingHistory(false);
           }),
         ]);
-        if (isCurrent()) { setOffline(""); connectAttempt.current = 0; }
+        if (isCurrent()) { setOffline(""); connectAttempt.current = 0; setConnectionReady(true); }
       } catch (error) {
         if (!isCurrent()) return;
         // Promise.all rejects before its other requests finish. Late answers from this
@@ -600,7 +620,9 @@ export default function Home() {
           setPairing({ state: linkFailure ? "invalid" : "required", message: linkFailure || error.message });
           return;
         }
-        setOffline(error instanceof Error ? error.message : "The local agent runtime is unavailable.");
+        // A dropped connection while refreshing is ordinary reconnection, not setup.
+        // Keep the draft usable while the first automatic retries restore the workspace.
+        if (connectAttempt.current >= 2) setOffline(error instanceof Error ? error.message : "The local agent runtime is unavailable.");
         // First run needs the guide most when nothing is reachable yet, and the gate for it
         // used to sit inside the success path.
         if (!client.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
@@ -613,6 +635,7 @@ export default function Home() {
     void connect();
     return () => {
       cancelled = true;
+      runtimeCheckId.current += 1;
       if (retryTimer) window.clearTimeout(retryTimer);
     };
     // The one-time migration intentionally snapshots the hydrated browser workspace.
@@ -628,13 +651,23 @@ export default function Home() {
     window.clearTimeout(runtimeRefresh.current);
     if (expectAvailable !== undefined) runtimeExpectation.current = expectAvailable;
     const expected = runtimeExpectation.current;
+    const checkId = ++runtimeCheckId.current;
+    runtimeChecksPending.current++;
     controlRef.current.bootstrap().then(status => {
+      // Slow Docker checks may arrive after a newer successful setup or reconnect.
+      if (checkId !== runtimeCheckId.current) return;
       setRuntime(status);
       if (expected === null || status.runtime.available === expected || attempt >= 3) { runtimeExpectation.current = null; return; }
       runtimeRefresh.current = window.setTimeout(() => refreshRuntime(undefined, attempt + 1), 2_500);
-    }).catch(error => { if (error instanceof PairingRequiredError) setPairing({ state: "required", message: error.message }); });
+    }).catch(error => { if (checkId === runtimeCheckId.current && error instanceof PairingRequiredError) setPairing({ state: "required", message: error.message }); }).finally(() => { runtimeChecksPending.current--; });
   }, []);
   useEffect(() => () => window.clearTimeout(runtimeRefresh.current), []);
+  // A failed probe at connection time must not strand chat after Docker recovers.
+  useEffect(() => {
+    if (!connectionReady || !runtime || connected || testMode || offline || pairing.state !== "none") return;
+    const timer = window.setInterval(() => { if (!runtimeChecksPending.current) refreshRuntime(); }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [connectionReady, runtime, connected, testMode, offline, pairing.state, refreshRuntime]);
   // A link pasted into the address bar of a dashboard that is already open is a
   // same-document navigation: nothing reloads, so the read at the top of connect() never
   // sees it. The code is taken out of the address bar at once and the connection is
@@ -1022,7 +1055,8 @@ export default function Home() {
           // someone looking elsewhere, because an unanswered approval holds the agent's slot.
           notifyDone(`${agentNameFor(agentId)} needs your approval`, describe(payload.command ?? payload.description, "Hermes requests approval."));
         } else if (item.type === "clarify.request" || item.type === "secret.request" || item.type === "sudo.request") {
-          notifyDone(`${agentNameFor(agentId)} has a question`, describe(payload.question ?? payload.prompt ?? payload.message, "Your agent needs an answer to continue."));
+          const asked = item.type === "clarify.request" ? clarifyQuestions(payload) : [];
+          notifyDone(`${agentNameFor(agentId)} has a question`, describe(asked.length ? asked[0].question : payload.question ?? payload.prompt ?? payload.message, "Your agent needs an answer to continue.") + (asked.length > 1 ? ` (+${asked.length - 1} more)` : ""));
         } else if (item.type === "run.failed" || item.type === "run.interrupted") {
           const message = String(payload.error || "Run interrupted.");
           updates.push({ type: "error", message });
@@ -1077,7 +1111,7 @@ export default function Home() {
   }
   async function send(text = input) {
     const prompt = text.trim();
-    if (!prompt || !ready) return;
+    if (!prompt || !ready || !connectionReady) return;
     if (testMode) {
       setNotice("Agent chat is disabled in automated test mode. Start Open Harness without mock mode to run a real agent.");
       return;
@@ -1111,7 +1145,7 @@ export default function Home() {
           });
           setNotice("Guidance queued for the next tool boundary.");
         } else {
-          const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt, ...(replyOnlyMode ? { replyOnly: true } : {}) });
+          const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt, projectId: chatProject?.id, ...(replyOnlyMode ? { replyOnly: true } : {}) });
           updateConversation(cid, (c) => c.messages.some(message => message.runId === run.id) ? c : ({
             ...c,
             messages: [...c.messages, { id: promptId(run), role: "user", content: prompt }, { id: replyId(run), runId: run.id, role: "assistant", content: "", activities: [] }],
@@ -1144,17 +1178,17 @@ export default function Home() {
       setWorkspace((w) => ({
         ...w,
         conversations: [
-          { id: cid, agentId, title: prompt.slice(0, 52), messages: [userMessage], updatedAt: now() },
+          { id: cid, agentId, title: prompt.slice(0, 52), messages: [userMessage], updatedAt: now(), projectId: chatProject?.id || null },
           ...w.conversations,
         ],
       }));
-      setConversationId(cid);
+      setConversationId(cid); setDraftProjectId("");
     } else {
       updateConversation(cid, (c) => ({ ...c, messages: [...c.messages, userMessage], updatedAt: now() }));
     }
     {
       try {
-        const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt, ...(replyOnlyMode ? { replyOnly: true } : {}) });
+        const run = await controlRef.current.createRun({ agentId, conversationId: cid, prompt, projectId: chatProject?.id, ...(replyOnlyMode ? { replyOnly: true } : {}) });
         // The reply appears once the coordinator has accepted the run, so its id can be
         // derived from the run's and a reload finds the same message.
         updateConversation(cid, (c) => ({ ...c, messages: [
@@ -1187,31 +1221,39 @@ export default function Home() {
       setAnswering("");
     }
   };
-  // What the agent asked, and any choices it offered. The real gateway's payloads vary by
-  // request kind, so this reads the likely fields and falls back to something sayable.
-  const inputQuestion = (item: (typeof inputs)[number]) => {
+  // What the agent asked, and any choices it offered. Secret and sudo payloads vary, so those
+  // read the likely fields; clarify can carry several questions (see lib/clarify.ts).
+  const inputQuestions = (item: (typeof inputs)[number]): ClarifyQuestion[] => {
     const payload = item.payload || {};
-    if (item.type === "secret") return describe(payload.prompt ?? payload.description ?? payload.name, "The agent needs a credential to continue. It is sent to the run, not shown in the transcript.");
-    if (item.type === "sudo") return describe(payload.prompt ?? payload.reason ?? payload.command, "The agent needs your password to run a privileged command.");
-    return describe(payload.question ?? payload.prompt ?? payload.message, "Your agent needs an answer to continue.");
+    if (item.type === "secret") return [{ qid: "", question: describe(payload.prompt ?? payload.description ?? payload.name, "The agent needs a credential to continue. It is sent to the run, not shown in the transcript."), choices: [], multiSelect: false }];
+    if (item.type === "sudo") return [{ qid: "", question: describe(payload.prompt ?? payload.reason ?? payload.command, "The agent needs your password to run a privileged command."), choices: [], multiSelect: false }];
+    return clarifyQuestions(payload).map((question) => ({ ...question, question: describe(question.question, "Your agent needs an answer to continue.") }));
   };
-  const inputChoices = (item: (typeof inputs)[number]): string[] => {
-    const raw = item.type === "clarify" ? item.payload?.options ?? item.payload?.choices : undefined;
-    return Array.isArray(raw) ? raw.map((choice) => typeof choice === "string" ? choice : describe((choice as Record<string, unknown>)?.label ?? (choice as Record<string, unknown>)?.value ?? choice, "")).filter(Boolean) : [];
-  };
-  const inputAllowsMany = (item: (typeof inputs)[number]) => Boolean(item.payload?.multiple ?? item.payload?.allow_multiple ?? item.payload?.multi_select);
-  const answerPendingInput = async (item: (typeof inputs)[number]) => {
-    const draft = inputDraft.inputId === item.inputId ? inputDraft : { inputId: item.inputId, text: "", choices: [] };
+  const inputDraftFor = (item: (typeof inputs)[number]) => inputDraft.inputId === item.inputId ? inputDraft.answers : {};
+  const editInputDraft = (item: (typeof inputs)[number], qid: string, change: (draft: { text: string; choices: string[] }) => { text: string; choices: string[] }) =>
+    setInputDraft((current) => {
+      const answers = current.inputId === item.inputId ? current.answers : {};
+      return { inputId: item.inputId, answers: { ...answers, [qid]: change(answers[qid] || { text: "", choices: [] }) } };
+    });
+  // Typed text wins over picked choices; several choices only go together as a list
+  // when the agent said more than one is fine.
+  const inputAnswer = (item: (typeof inputs)[number], question: ClarifyQuestion): string | string[] => {
+    const draft = inputDraftFor(item)[question.qid];
+    if (!draft) return "";
     const text = draft.text.trim();
-    // Typed text wins over picked choices; several choices only go together as a list
-    // when the agent said more than one is fine.
-    const value: string | string[] = item.type !== "clarify" ? draft.text : text ? text : inputAllowsMany(item) ? draft.choices : draft.choices[0] || "";
-    if (!value.length) return;
+    return item.type !== "clarify" ? draft.text : text ? text : question.multiSelect ? draft.choices : draft.choices[0] || "";
+  };
+  const hasInputAnswer = (answer: string | string[]) => typeof answer === "string" ? Boolean(answer.trim()) : answer.length > 0;
+  const answerPendingInput = async (item: (typeof inputs)[number]) => {
+    const answered = inputQuestions(item).map((question) => [question.qid, inputAnswer(item, question)] as const).filter(([, answer]) => hasInputAnswer(answer));
+    if (!answered.length) return;
+    // A batch goes back keyed by question; unanswered ones are left out, which the agent sees as skipped.
+    const value = item.type === "clarify" && isClarifyBatch(item.payload) ? { answers: Object.fromEntries(answered) } : answered[0][1];
     setAnswering(item.inputId);
     try {
       await controlRef.current.answerInput(item.runId, item.inputId, value);
       setAnswered((current) => [...current, { id: item.inputId, runId: item.runId, at: Date.now() }]);
-      setInputDraft({ inputId: "", text: "", choices: [] });
+      setInputDraft({ inputId: "", answers: {} });
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not send that answer.");
     } finally {
@@ -1382,6 +1424,7 @@ export default function Home() {
         >
           <Bot size={16} /> Agents <span>{workspace.agents.length}</span>
         </button>
+        <button className={`nav-item ${view === "credentials" ? "active" : ""}`} aria-current={view === "credentials" ? "page" : undefined} onClick={() => { setView("credentials"); setMobileOpen(false); }}><KeyRound size={16} /> Credentials</button>
         {advancedFeatures && <button
           className={`nav-item ${view === "teams" ? "active" : ""}`}
           onClick={() => {
@@ -1402,6 +1445,15 @@ export default function Home() {
           <span>{workspace.files.length || ""}</span>
         </button>
         <button
+          className={`nav-item ${view === "folders" ? "active" : ""}`}
+          onClick={() => {
+            setView("folders");
+            setMobileOpen(false);
+          }}
+        >
+          <HardDrive size={16} /> Folders
+        </button>
+        <button
           className={`nav-item ${view === "routines" ? "active" : ""}`}
           onClick={() => {
             setView("routines");
@@ -1411,7 +1463,6 @@ export default function Home() {
           <CalendarClock size={16} /> Routines <span>{routines.length || ""}</span>
         </button>
         {advancedFeatures && <button className={`nav-item ${view === "groups" ? "active" : ""}`} onClick={() => { setView("groups"); setMobileOpen(false); }}><MessageSquare size={16} /> Group conversations</button>}
-        <button className={`nav-item ${view === "credentials" ? "active" : ""}`} aria-current={view === "credentials" ? "page" : undefined} onClick={() => { setView("credentials"); setMobileOpen(false); }}><KeyRound size={16} /> Credentials</button>
         <div className="nav-label">YOUR AGENTS</div>
         <div className="sidebar-scroll">
           {workspace.agents
@@ -1465,7 +1516,7 @@ export default function Home() {
         </div>
         <div className="sidebar-bottom">
           <span className={`status-dot ${offline || pairing.state !== "none" ? "offline" : connected || testMode ? "" : "pending"}`} />
-          {testMode ? "Automated test mode" : pairing.state !== "none" ? "Browser not paired" : offline ? "Not connected" : !runtime ? "Connecting…" : connected ? "Agent runtime ready" : "Agent runtime needs setup"}
+          {pairing.state !== "none" ? "Browser not paired" : offline ? "Not connected" : !connectionReady ? "Reconnecting to workspace…" : testMode ? "Automated test mode" : !runtime ? "Connecting…" : connected ? "Agent runtime ready" : "Agent runtime needs setup"}
           <button onClick={() => openSettings()}>
             <Settings size={15} /> Settings <span>↗</span>
           </button>
@@ -1493,12 +1544,14 @@ export default function Home() {
                   ? "Group conversations"
                 : view === "files"
                   ? "Files"
+                : view === "credentials"
+                  ? "Credentials"
+                : view === "folders"
+                  ? "Folders"
                   : view === "routines"
                     ? "Routines"
                     : view === "tasks"
                       ? "Tasks"
-                    : view === "credentials"
-                      ? "Credentials"
                       : agent.name}
             </span>
           </span>
@@ -1509,6 +1562,7 @@ export default function Home() {
         {advancedFeatures && view === "teams" && <TeamManager agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onChanged={teams => { setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) })); setRetiredTeams(teams.filter(team => Boolean(team.retiredAt))); }} />}
         {advancedFeatures && view === "groups" && <GroupConversations agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onOpenRun={openTaskRun} />}
         {view === "credentials" && <CredentialsPage client={controlRef.current} onChanged={setCredentials} />}
+        {view === "folders" && <FolderManager agents={workspace.agents} client={controlRef.current} />}
         {view === "home" && (
           <section className="home-content">
             <div className="eyebrow">YOUR PERSONAL AGENT WORKSPACE</div>
@@ -1794,13 +1848,35 @@ export default function Home() {
                       onClick={() => openSettings()}
                     >
                       <span className="status-dot" />
-                      {testMode
+                      {!connectionReady
+                        ? "Reconnecting…"
+                        : testMode
                         ? "Automated test mode"
                         : connected
                         ? `Hermes ${runtime?.hermes.release}`
                         : "Start local runtime"}
                       <ChevronRight size={12} />
                     </button>
+                    {chatProjects.length > 0 && (
+                      <label className="chat-project" title={chatProject && !chatProject.folders.some((folder) => folder.agents[agent.id]) ? `${agent.name} has no folders in ${chatProject.name}` : "Folders this chat can use"}>
+                        <FolderOpen size={14} aria-hidden="true" />
+                        <select
+                          aria-label="Project folders"
+                          value={chatProject?.id || ""}
+                          disabled={running}
+                          onFocus={() => void controlRef.current.request<{ boards: TaskBoard[] }>("/v1/boards").then((saved) => setProjects(saved.boards)).catch(() => {})}
+                          onChange={(e) => {
+                            const projectId = e.target.value;
+                            if (conversation) updateConversation(conversation.id, (c) => ({ ...c, projectId: projectId || null }));
+                            else setDraftProjectId(projectId);
+                          }}
+                        >
+                          <option value="">Agent folders only</option>
+                          {chatProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+                        </select>
+                        {chatProject && !chatProject.folders.some((folder) => folder.agents[agent.id]) && <small>No access</small>}
+                      </label>
+                    )}
                     {running ? (
                       <>
                         <button
@@ -1820,7 +1896,7 @@ export default function Home() {
                         <button
                           className="send-button"
                           type="submit"
-                          disabled={!input.trim() || Boolean(submitting)}
+                          disabled={!input.trim() || Boolean(submitting) || !connectionReady}
                           aria-label={`Send ${inputMode}`}
                         >
                           <ArrowUp size={18} />
@@ -1857,7 +1933,7 @@ export default function Home() {
                       <button
                         className="send-button"
                         type="submit"
-                        disabled={!input.trim() || !ready || Boolean(submitting)}
+                        disabled={!input.trim() || !ready || Boolean(submitting) || !connectionReady || (!connected && !testMode)}
                         aria-label="Send message"
                       >
                         <ArrowUp size={18} />
@@ -1866,7 +1942,11 @@ export default function Home() {
                   </div>
                 </form>
                 <div className="composer-note">
-                  {submitting || (running
+                  {submitting || (!connectionReady
+                    ? "Reconnecting to your workspace. You can type while your conversations and active tasks are restored."
+                    : !connected && !testMode && !running
+                    ? <>{runtime?.runtime.message || "Checking the agent runtime…"}{runtime && <> <button type="button" className="composer-note-action" onClick={() => setOnboardingOpen(true)}>Open setup</button></>}</>
+                    : running
                     ? "This task continues if you close the browser. Send guidance or queue a follow-up."
                     : "Enter to send · Shift + Enter for a new line · Files are shared with all your agents")}
                 </div>
@@ -1906,43 +1986,46 @@ export default function Home() {
                         {pendingInput.type === "secret" ? `${pendingInput.agentName} needs a secret` : pendingInput.type === "sudo" ? `${pendingInput.agentName} needs your password` : `${pendingInput.agentName} has a question`}
                         {inputs.length > 1 && <span className="approval-count"> · {inputs.length - 1} more waiting</span>}
                       </strong>
-                      <p>{inputQuestion(pendingInput)}</p>
-                      {inputChoices(pendingInput).length > 0 && (
-                        <div className="input-choices" role="group" aria-label="Choices">
-                          {inputChoices(pendingInput).map((choice) => {
-                            const picked = inputDraft.inputId === pendingInput.inputId && inputDraft.choices.includes(choice);
-                            return (
-                              <button
-                                type="button"
-                                key={choice}
-                                className={`run-mode ${picked ? "active" : ""}`}
-                                aria-pressed={picked}
-                                onClick={() => setInputDraft((current) => {
-                                  const base = current.inputId === pendingInput.inputId ? current : { inputId: pendingInput.inputId, text: "", choices: [] };
-                                  const chosen = base.choices.includes(choice) ? base.choices.filter((item) => item !== choice) : inputAllowsMany(pendingInput) ? [...base.choices, choice] : [choice];
-                                  return { ...base, choices: chosen };
-                                })}
-                              >
-                                {choice}
-                              </button>
-                            );
-                          })}
+                      {inputQuestions(pendingInput).map((question, index, questions) => (
+                        <div className="input-question-block" key={question.qid || index}>
+                          <p className="input-question">{question.question}</p>
+                          {question.choices.length > 0 && (
+                            <div className="input-choices" role="group" aria-label={questions.length > 1 ? `Choices for question ${index + 1}` : "Choices"}>
+                              {question.choices.map((choice) => {
+                                const picked = Boolean(inputDraftFor(pendingInput)[question.qid]?.choices.includes(choice));
+                                return (
+                                  <button
+                                    type="button"
+                                    key={choice}
+                                    className={`run-mode ${picked ? "active" : ""}`}
+                                    aria-pressed={picked}
+                                    onClick={() => editInputDraft(pendingInput, question.qid, (draft) => ({
+                                      ...draft,
+                                      choices: draft.choices.includes(choice) ? draft.choices.filter((item) => item !== choice) : question.multiSelect ? [...draft.choices, choice] : [choice],
+                                    }))}
+                                  >
+                                    {choice}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                          <input
+                            type={pendingInput.type === "clarify" ? "text" : "password"}
+                            autoComplete={pendingInput.type === "clarify" ? "off" : "new-password"}
+                            aria-label={pendingInput.type === "secret" ? "Secret value" : pendingInput.type === "sudo" ? "Password" : questions.length > 1 ? `Answer to question ${index + 1}` : "Your answer"}
+                            placeholder={pendingInput.type === "clarify" ? (question.choices.length ? "Or type your own answer" : "Type your answer") : "Not shown to the agent's transcript"}
+                            value={inputDraftFor(pendingInput)[question.qid]?.text ?? ""}
+                            onChange={(e) => { const text = e.target.value; editInputDraft(pendingInput, question.qid, (draft) => ({ ...draft, text })); }}
+                            maxLength={10000}
+                          />
                         </div>
-                      )}
-                      <input
-                        type={pendingInput.type === "clarify" ? "text" : "password"}
-                        autoComplete={pendingInput.type === "clarify" ? "off" : "new-password"}
-                        aria-label={pendingInput.type === "secret" ? "Secret value" : pendingInput.type === "sudo" ? "Password" : "Your answer"}
-                        placeholder={pendingInput.type === "clarify" ? (inputChoices(pendingInput).length ? "Or type your own answer" : "Type your answer") : "Not shown to the agent's transcript"}
-                        value={inputDraft.inputId === pendingInput.inputId ? inputDraft.text : ""}
-                        onChange={(e) => setInputDraft({ inputId: pendingInput.inputId, text: e.target.value, choices: inputDraft.inputId === pendingInput.inputId ? inputDraft.choices : [] })}
-                        maxLength={10000}
-                      />
+                      ))}
                     </div>
                     <button
                       className="light-button"
                       type="submit"
-                      disabled={answering === pendingInput.inputId || !(inputDraft.inputId === pendingInput.inputId && (inputDraft.text.trim() || inputDraft.choices.length))}
+                      disabled={answering === pendingInput.inputId || !inputQuestions(pendingInput).some((question) => hasInputAnswer(inputAnswer(pendingInput, question)))}
                     >
                       {answering === pendingInput.inputId ? "Sending…" : "Send answer"}
                     </button>
@@ -2076,7 +2159,9 @@ export default function Home() {
                 <p className="panel-help">{agent.profile?.allowedTools.length ? `${agent.profile.allowedTools.length} tools selected. Open Agent settings to check availability or change access.` : "No tools selected. Choose the capabilities this agent needs."}</p>
                 <button className="subtle-button" onClick={() => setEditingAgent({ ...agent })}><SlidersHorizontal size={13} /> Agent settings</button>
                 <div className="scope-note">
-                  {testMode
+                  {!connectionReady
+                    ? "Reconnecting to your workspace…"
+                    : testMode
                     ? "Automated test mode does not run agents. Open the installed desktop app for live work."
                     : runtime?.runtime.available
                     ? "Hermes is ready in this agent’s isolated workspace. External actions still follow the approval policy."
@@ -2524,7 +2609,7 @@ export default function Home() {
                   value={settings.provider}
                   onChange={(e) => {
                     const provider = e.target.value;
-                    const credential = credentials.find(item => item.provider === provider);
+                    const credential = credentials.find(item => modelCredential(item) && item.provider === provider);
                     setSettings(current => ({ ...current, provider, model: credential?.model || PROVIDERS[provider as Provider]?.model || '', baseUrl: credential?.baseUrl || '', credentialRef: credential?.ref || '' }));
                   }}
                 >
@@ -2532,23 +2617,10 @@ export default function Home() {
                 </select>
               </label>
               <ModelPicker client={controlRef.current} provider={settings.provider} credentialRef={settings.credentialRef} baseUrl={settings.baseUrl} value={settings.model} label="Workspace model" onCredentialChange={ref => { setSettings(current => ({ ...current, credentialRef: ref })); void controlRef.current.request<{ credentials: CredentialRecord[] }>("/v1/credentials").then(value => setCredentials(value.credentials)).catch(() => {}); }} onChange={model => setSettings(current => ({ ...current, model }))} />
-              {settings.provider !== CODEX_PROVIDER && <label>
-                Credential
-                <select
-                  value={settings.credentialRef || ""}
-                  onChange={(e) => { if (e.target.value === "__manage") { setCredentialsOpen(true); return; } const ref = e.target.value; const credential = credentials.find(item => item.ref === ref); setSettings(current => ({ ...current, ...(credential ? modelForCredential({ ...current, baseUrl: current.baseUrl || '', credentialRef: current.credentialRef || '' }, credential) : { credentialRef: ref }) })); }}
-                >
-                  <option value="">No credential</option>
-                  {credentials.map((item) => (
-                    <option value={item.ref} key={item.ref}>{item.label}{item.present ? "" : " — missing"}</option>
-                  ))}
-                  {settings.credentialRef && !credentials.some((item) => item.ref === settings.credentialRef) && (
-                    <option value={settings.credentialRef}>{settings.credentialRef} — missing</option>
-                  )}
-                  <option value="__manage">＋ Manage credentials…</option>
-                </select>
+              {settings.provider !== CODEX_PROVIDER && <>
+                <CredentialSelector client={controlRef.current} credentials={credentials} value={settings.credentialRef || ''} provider={settings.provider} modelOnly label="Credential" onManage={() => setCredentialsOpen(true)} onCreated={item => setCredentials(current => [...current, item])} onSelect={credential => setSettings(current => ({ ...current, ...(credential ? modelForCredential({ ...current, baseUrl: current.baseUrl || '', credentialRef: current.credentialRef || '' }, credential) : { credentialRef: '' }) }))} />
                 <small>Agents using “Use workspace default” run on this credential.</small>
-              </label>}
+              </>}
               {settings.provider === "local" && <label>Model API base URL<input value={settings.baseUrl || ""} onChange={e => setSettings(current => ({ ...current, baseUrl: e.target.value }))} placeholder="https://models.example.com/v1" /><small>Use an address reachable from the agent container.</small></label>}
               <p className="muted small">Only agents using “Use workspace default” follow these changes. Agents with their own model keep it.</p>
             </fieldset>
@@ -2587,6 +2659,9 @@ export default function Home() {
                 onClick={() => setCredentialsOpen(true)}
               >
                 <KeyRound size={14} /> Saved credentials
+              </button>
+              <button className="subtle-button" onClick={() => setDecisionsOpen(true)}>
+                <SlidersHorizontal size={14} /> Decisions
               </button>
               <button
                 className="subtle-button"
@@ -2662,6 +2737,7 @@ export default function Home() {
           </section>
         </div>
       )}
+      {decisionsOpen && <DecisionSettings client={controlRef.current} credentials={credentials} onClose={() => setDecisionsOpen(false)} onManageCredentials={() => setCredentialsOpen(true)} />}
       {credentialsOpen && <CredentialManager client={controlRef.current} provider={settings.provider} onClose={() => setCredentialsOpen(false)} onChanged={setCredentials} />}
       {onboardingOpen && runtime && <Onboarding client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: settings.credentialRef || "" }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
         const chosen = { provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl, credentialRef: model.credentialRef };
@@ -2687,7 +2763,7 @@ export default function Home() {
       }} onRuntimeChecked={status => refreshRuntime(status.executionReady)} />}
       {reviewRun && <RunReview client={controlRef.current} run={reviewRun} onClose={() => setReviewRun(null)} onRepair={run => { setReviewRun(null); openTaskRun(run, 'Repair task result'); }} />}
       {desktopAgentId && <DesktopPanel agentId={desktopAgentId} agentName={workspace.agents.find(item => item.id === desktopAgentId)?.name} client={controlRef.current} onClose={() => setDesktopAgentId(null)} onWorkflowCreated={id => { setDesktopAgentId(null); setSelectedWorkflowId(id); setWorkflowSourceRunId(undefined); setView("routines"); }} />}
-      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} credentialCatalog={credentials} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
+      {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} credentialCatalog={credentials} client={controlRef.current} onManageFolders={() => { setEditingAgent(null); setEditingAgentTab('profile'); setView("folders"); }} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
       {file && (
         <div className="modal-backdrop" onClick={() => setSelectedFile(null)}>
           <section

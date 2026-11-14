@@ -151,7 +151,7 @@ COPY runtime/hermes/apply-npm-security-overrides.py runtime/hermes/npm-security-
 COPY runtime/hermes/vendor/ /opt/open-harness/vendor/
 RUN python3 /opt/open-harness/apply-npm-security-overrides.py /usr/local/lib/node_modules/npm /opt/open-harness/node/security-overrides.json \
  && npm --version \
- && node -e "const r=require;const p='/usr/local/lib/node_modules/npm/node_modules/'; if(r(p+'brace-expansion/package.json').version!=='5.0.11'||r(p+'undici/package.json').version!=='6.28.1')process.exit(1)"
+ && node -e "const r=require;const p='/usr/local/lib/node_modules/npm/node_modules/'; if(r(p+'brace-expansion/package.json').version!=='5.0.11'||r(p+'undici/package.json').version!=='6.28.1'||r(p+'http-cache-semantics/package.json').version!=='4.3.0'||r('node:crypto').createHash('sha256').update(r('node:fs').readFileSync(p+'http-cache-semantics/index.js')).digest('hex')!=='1b58bd00ff75aeed1383109508b4a3a44a07370d6eca54abb931af0fb2ebbd21')process.exit(1)"
 RUN ln -s "$(dpkg-query -L libnss-wrapper | grep '/libnss_wrapper.so$')" /usr/local/lib/open-harness-nss-wrapper.so
 ARG HERMES_COMMIT=939e45c91d751fadd94dcd1b873ac3cb44846213
 COPY runtime/hermes/security-constraints.txt runtime/hermes/apply-security-overrides.py /opt/open-harness/
@@ -194,7 +194,7 @@ ENV HERMES_HOME=/home/hermes/.hermes HERMES_TUI=1 PYTHONUNBUFFERED=1 \
 WORKDIR /workspace/shared
 # Read by Open Harness to tell whether this image predates a fix; must equal
 # RUNTIME_CONTRACT in runtime/readiness.ts. Last so bumping it invalidates nothing heavier.
-ARG OPEN_HARNESS_RUNTIME=11
+ARG OPEN_HARNESS_RUNTIME=12
 USER root
 RUN printf '%s\n' "$OPEN_HARNESS_RUNTIME" > /opt/open-harness/runtime-contract
 USER hermes

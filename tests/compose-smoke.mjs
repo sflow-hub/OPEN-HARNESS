@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { createReadStream, createWriteStream, mkdirSync, mkdtempSync, readFileSync, statfsSync, writeFileSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, statfsSync, writeFileSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { request as httpRequest } from 'node:http';
 import { createServer, isIP } from 'node:net';
@@ -233,12 +233,21 @@ const prepareRuntime = () => new Promise((resolve, reject) => {
 const operatorToken = async () => (await nodeIn('open-harness', `const r = await fetch('http://127.0.0.1:4317/v1/bootstrap',{headers:${JSON.stringify({ Authorization: 'Bearer ' + token })}}); if (!r.ok) throw new Error('Operator bootstrap failed: '+r.status); console.log(JSON.stringify({token:(await r.json()).token}));`)).token;
 const mintBrowserCode = async (ttl = 300) => JSON.parse(await dc(['exec', '-T', 'open-harness', 'node', '/opt/open-harness/runtime/browser-pair.mjs', '--ttl-seconds', String(ttl)]));
 const pairBrowser = code => fetch(endpoint + '/api/local/v1/browser/pair', { method: 'POST', signal: AbortSignal.timeout(15_000), headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
-async function waitRun(run, { waitForInput = false, answerInputs = true } = {}) {
+async function waitRun(run, { waitForInput = false, answerInputs = true, approvalDecision } = {}) {
   const deadline = Date.now() + timing.runMs, answered = new Set();
   let lastSnapshot;
   while (Date.now() < deadline) {
     const snapshot = await api(`/v1/runs/${run.id}/events?after=0`);
     lastSnapshot = snapshot;
+    for (const approval of snapshot.events.filter(event => event.type === 'approval.request')) {
+      const id = approval.payload.approvalId;
+      if (!answered.has(id)) {
+        assert.ok(approvalDecision, 'Unexpected approval request.');
+        assert.equal(snapshot.run.state, 'waiting_approval');
+        assert.equal(await nodeIn('open-harness', "import fs from 'node:fs'; console.log(JSON.stringify(fs.statSync('/data/shared/compose-verified.txt').mode & 0o777));"), 0o600, 'The flagged command must not execute before approval.');
+        answered.add(id); await api(`/v1/runs/${run.id}/approval`, 'POST', { approvalId: id, decision: approvalDecision });
+      }
+    }
     if (waitForInput && snapshot.run.pendingInputs?.length) return snapshot;
     for (const pending of answerInputs ? snapshot.run.pendingInputs || [] : []) {
       if (!answered.has(pending.inputId)) { answered.add(pending.inputId); await api(`/v1/runs/${run.id}/input`, 'POST', { inputId: pending.inputId, value: 'compose-answer' }); }
@@ -365,14 +374,17 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
   assert.equal(credential.ref, 'COMPOSE_FIXTURE_KEY');
   assert.equal(credential.present, true);
   assert.doesNotMatch(JSON.stringify(credential), /local-scripted-provider-only/);
+  const apiCredential = await api('/v1/credentials', 'POST', { ref: 'COMPOSE_API_KEY', label: 'Compose API fixture', type: 'bearer', fields: { token: 'api-credential-fixture-only' } });
+  assert.equal(apiCredential.present, true);
+  assert.doesNotMatch(JSON.stringify(apiCredential), /api-credential-fixture-only/);
   await api('/v1/agents/sync', 'POST', { agents: [agentId, otherId].map(id => ({ id, name: id, role: 'Integration verification', instructions: 'Work only on this isolated acceptance task.', memory: [] })) });
   const { profile } = await api(`/v1/agents/${agentId}/profile`);
-  const folders = [{ id: 'fixture-ro', path: '/host-folders/fixture-ro', mode: 'read' }, { id: 'fixture-rw', path: '/host-folders/fixture-rw', mode: 'write' }];
+  const folders = [{ id: 'fixture-ro', name: 'fixture-ro', path: '/host-folders/fixture-ro', mode: 'read' }, { id: 'fixture-rw', name: 'fixture-rw', path: '/host-folders/fixture-rw', mode: 'write' }];
   for (const grant of [{ ...folders[0], mode: 'write' }, { id: 'unexported', path: '/data', mode: 'read' }, { id: 'descendant', path: '/host-folders/fixture-rw/nested', mode: 'read' }]) {
     const refused = await fetch(endpoint + `/api/local/v1/agents/${agentId}/profile`, { method: 'PUT', signal: AbortSignal.timeout(15_000), headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...profile, computer: { ...profile.computer, access: 'folders', folders: [grant] } }) });
     assert.equal(refused.status, 400, 'An agent cannot widen a read-only export or grant an unexported host path/descendant.');
   }
-  const saved = await api(`/v1/agents/${agentId}/profile`, 'PUT', { ...profile, model: { inherit: false, provider: 'local', model: 'compose-fixture', baseUrl, credentialRef: 'COMPOSE_FIXTURE_KEY' }, allowedTools: ['write_file', 'clarify', 'mcp__open_harness__task', 'mcp__open_harness__computer'], computer: { ...profile.computer, access: 'folders', folders, desktop: 'virtual' } });
+  let saved = await api(`/v1/agents/${agentId}/profile`, 'PUT', { ...profile, model: { inherit: false, provider: 'local', model: 'compose-fixture', baseUrl, credentialRef: 'COMPOSE_FIXTURE_KEY' }, allowedTools: ['write_file', 'clarify', 'mcp__open_harness__task', 'mcp__open_harness__api_request', 'mcp__open_harness__computer'], credentialGrants: [{ credentialRef: apiCredential.ref, allowedOrigins: ['https://api.example.test'], allowedMethods: ['GET'] }], computer: { ...profile.computer, access: 'folders', folders, desktop: 'virtual' } });
   const { profile: peerProfile } = await api(`/v1/agents/${otherId}/profile`);
   const peerSaved = await api(`/v1/agents/${otherId}/profile`, 'PUT', { ...peerProfile, model: saved.profile.model, allowedTools: saved.profile.allowedTools, computer: { ...peerProfile.computer, desktop: 'virtual' } });
   const contextPath = `/v1/agents/${agentId}/context`, skillPath = `${contextPath}/skills/compose-restore`;
@@ -393,6 +405,11 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
   assert.ok(coordination, 'The actual Hermes MCP child must reach the coordinator through its mounted socket.');
   assert.match(JSON.stringify(coordination.payload.result), /Compose acceptance board/);
   assert.doesNotMatch(JSON.stringify(coordination.payload.result), /disabled|authentication|ECONNREFUSED/);
+  const apiCalls = firstSnapshot.events.filter(event => event.type === 'tool.complete' && event.payload.name === 'mcp__open_harness__api_request');
+  assert.equal(apiCalls.length, 3, 'The real API MCP tool must dispatch all three scoped denial checks.');
+  for (const call of apiCalls.slice(0, 2)) assert.match(JSON.stringify(call.payload.result), /API origin or method is not granted/);
+  assert.match(JSON.stringify(apiCalls[2].payload.result), /credential is not granted/);
+  assert.doesNotMatch(JSON.stringify(firstSnapshot), /api-credential-fixture-only/);
   const artifact = await api('/v1/files?scope=shared&name=compose-verified.txt');
   assert.equal(artifact.content, 'Written through the real Compose Hermes tool loop.\n');
   const disk = await nodeIn('open-harness', `import fs from 'node:fs'; console.log(JSON.stringify({content:fs.readFileSync('/data/shared/compose-verified.txt','utf8'),denied:fs.existsSync('/data/shared/compose-forbidden.txt'),baseUrl:JSON.parse(fs.readFileSync('/data/agents/compose-smoke/profile/config.yaml','utf8')).model.base_url}));`);
@@ -414,8 +431,61 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
   assert.ok(requests.every(request => request.fixtureCredential !== 'invalid'), 'Every real provider request must resolve the saved credential.');
   const mainRequests = requests.filter(body => body.tools?.some(tool => tool.function?.name === 'write_file') && body.messages?.some(message => String(message.content).includes('COMPOSE_SMOKE')));
   assert.ok(mainRequests.length >= 5);
-  for (const body of mainRequests) assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), ['clarify', 'mcp__open_harness__computer', 'mcp__open_harness__task', 'write_file'], 'Only the four explicitly granted tools may be model-visible.');
+  for (const body of mainRequests) assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), ['clarify', 'mcp__open_harness__api_request', 'mcp__open_harness__computer', 'mcp__open_harness__task', 'write_file'], 'Only the five explicitly granted tools may be model-visible.');
+  assert.doesNotMatch(JSON.stringify(requests), /api-credential-fixture-only/);
   assert.ok(mainRequests.some(body => body.messages.some(message => message.role === 'tool' && message.tool_call_id === 'compose-terminal' && /tool_disabled|does not exist/.test(String(message.content)))), 'Ungrantable fixture tool calls must be rejected by the real dispatch policy.');
+  console.log('Verifying manual approval denial and approval against actual terminal effects.');
+  const { profile: approvalProfile } = await api(`/v1/agents/${agentId}/profile`);
+  await api(`/v1/agents/${agentId}/profile`, 'PUT', { ...approvalProfile, allowedTools: ['terminal', 'mcp__open_harness__task'], credentialGrants: [] });
+  const approvalRuns = [];
+  for (const decision of ['deny', 'approve']) {
+    await nodeIn('open-harness', "import fs from 'node:fs'; fs.chmodSync('/data/shared/compose-verified.txt',0o600); console.log('{}');");
+    const approved = await waitRun(await api('/v1/runs', 'POST', { agentId, prompt: 'COMPOSE_APPROVAL: Request the fixture permission change once and finish.' }), { approvalDecision: decision });
+    assert.match(approved.run.result, /COMPOSE_APPROVAL_COMPLETE/);
+    assert.ok(approved.events.some(event => event.type === 'approval.resolved' && event.payload.decision === decision));
+    const mode = await nodeIn('open-harness', "import fs from 'node:fs'; console.log(JSON.stringify(fs.statSync('/data/shared/compose-verified.txt').mode & 0o777));");
+    assert.equal(mode, decision === 'approve' ? 0o666 : 0o600, `Actual terminal effect must match ${decision}.`);
+    approvalRuns.push({ runId: approved.run.id, decision, resultingMode: mode.toString(8) });
+    assert.equal(await nestedRunning(), false);
+  }
+  await nodeIn('open-harness', "import fs from 'node:fs'; fs.chmodSync('/data/shared/compose-verified.txt',0o600); console.log('{}');");
+  const { profile: afterApproval } = await api(`/v1/agents/${agentId}/profile`);
+  saved = await api(`/v1/agents/${agentId}/profile`, 'PUT', { ...approvalProfile, revision: afterApproval.revision });
+  console.log('Checking workspace and project folder access through real Compose mounts.');
+  const operatorHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const mountedFolders = snapshot => snapshot.events.find(event => event.type === 'profile.applied').payload.computer.folders.map(folder => `${folder.scope || 'workspace'}:${folder.name}:${folder.mode}`);
+  // Folders saved on the agent above were moved into the workspace Folders list with the same access.
+  assert.deepEqual(saved.profile.computer.folders, []);
+  const listed = await api('/v1/folders');
+  assert.deepEqual(listed.folders.map(({ name, path, mode, agents, machineId }) => ({ name, path, mode, agents, machineId })), [
+    { name: 'fixture-ro', path: '/host-folders/fixture-ro', mode: 'read', agents: { [agentId]: 'read' }, machineId: 'local' },
+    { name: 'fixture-rw', path: '/host-folders/fixture-rw', mode: 'write', agents: { [agentId]: 'write' }, machineId: 'local' },
+  ]);
+  for (const folder of [{ name: 'widened', path: '/host-folders/fixture-ro', mode: 'write' }, { name: 'unexported', path: '/data', mode: 'read' }, { name: 'descendant', path: '/host-folders/fixture-rw/nested', mode: 'read' }]) {
+    const refused = await fetch(endpoint + '/api/local/v1/folders', { method: 'PUT', signal: AbortSignal.timeout(15_000), headers: operatorHeaders, body: JSON.stringify({ revision: listed.revision, folders: [...listed.folders, { ...folder, machineId: 'local', agents: { [agentId]: 'read' } }] }) });
+    assert.equal(refused.status, 400, `${folder.path} (${folder.mode}) must be refused on the Folders list.`);
+  }
+  const folderProject = await api('/v1/boards', 'POST', { name: 'Compose folder project', folders: [{ name: 'exchange', path: '/host-folders/fixture-rw', mode: 'write', agents: { [otherId]: 'write' } }] });
+  const projectRun = await waitRun(await api('/v1/runs', 'POST', { agentId: otherId, projectId: folderProject.id, prompt: 'COMPOSE_FOLDERS:/workspace/project/exchange/project-proof.txt' }));
+  assert.match(projectRun.run.result, /COMPOSE_FOLDERS_COMPLETE/);
+  assert.deepEqual(mountedFolders(projectRun), ['project:exchange:write'], 'The peer gets only the project folder it was given, not the agent\'s own folders.');
+  assert.equal(readFileSync(join(writeFolder, 'project-proof.txt'), 'utf8'), 'COMPOSE_FOLDERS_729\n');
+  const peerSoul = await nodeIn('open-harness', `import fs from 'node:fs'; console.log(JSON.stringify(fs.readFileSync('/data/agents/${otherId}/profile/SOUL.md','utf8')));`);
+  assert.match(peerSoul, /\/workspace\/project\/exchange \(read and write\): project folder "exchange" of Compose folder project/);
+  assert.doesNotMatch(peerSoul, /fixture-r[ow]/);
+  // Lowered to read only on the Folders list, the next run's mount refuses the write.
+  const lowered = await api('/v1/folders', 'PUT', { revision: listed.revision, folders: listed.folders.map(folder => folder.name === 'fixture-rw' ? { ...folder, agents: { [agentId]: 'read' } } : folder) });
+  const readOnlyRun = await waitRun(await api('/v1/runs', 'POST', { agentId, prompt: 'COMPOSE_FOLDERS:/workspace/folders/fixture-rw/lowered.txt' }));
+  assert.deepEqual(mountedFolders(readOnlyRun), ['workspace:fixture-ro:read', 'workspace:fixture-rw:read']);
+  assert.equal(existsSync(join(writeFolder, 'lowered.txt')), false, 'A folder lowered to read only must refuse writes from the next run.');
+  // Revoked entirely, the folder is not mounted at all.
+  const revoked = await api('/v1/folders', 'PUT', { revision: lowered.revision, folders: listed.folders.map(folder => folder.name === 'fixture-rw' ? { ...folder, agents: {} } : folder) });
+  const revokedRun = await waitRun(await api('/v1/runs', 'POST', { agentId, prompt: 'COMPOSE_FOLDERS:/workspace/folders/fixture-rw/revoked.txt' }));
+  assert.deepEqual(mountedFolders(revokedRun), ['workspace:fixture-ro:read']);
+  assert.equal(existsSync(join(writeFolder, 'revoked.txt')), false, 'A revoked folder must not be reachable from the next run.');
+  // The original grants are restored for the shutdown, isolation and restore checks below.
+  const savedFolders = (await api('/v1/folders', 'PUT', { revision: revoked.revision, folders: listed.folders })).folders;
+  save('folder-access.json', { listed: listed.folders, project: folderProject.folders, runs: { project: mountedFolders(projectRun), readOnly: mountedFolders(readOnlyRun), revoked: mountedFolders(revokedRun) } });
   console.log('Restarting the coordinator and checking durable state.');
   await dc(['restart', 'open-harness'], 45_000);
   // Docker may allocate a different ephemeral host port when the container restarts.
@@ -425,6 +495,7 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
   assert.ok(ready, `Coordinator must recover after restart: ${readinessError}`);
   assert.equal(await operatorToken(), token, 'Control token must survive restart.');
   assert.deepEqual((await api(`/v1/agents/${agentId}/profile`)).profile, saved.profile);
+  assert.deepEqual((await api('/v1/folders')).folders, savedFolders, 'The Folders list must survive a restart.');
   assert.equal((await api(`/v1/tasks/${task.id}`)).title, task.title);
   assert.equal((await api(`/v1/tasks/${task.id}`)).teamId, team.id);
   assert.deepEqual(await api(`/v1/teams/${team.id}`), team);
@@ -467,9 +538,9 @@ for name in ['/workspace/private', '/workspace/shared']:
     assert.ok(desktopInfo.Mounts.every(mount => mount.Source.startsWith(`/data/computers/${desktopPaths(id).key}/`)));
     await nestedDesktop(id, ['python', '-c', desktopIsolationProbe]);
   }
-  await nested(agentId, ['python', '-c', "from pathlib import Path\nassert Path('/workspace/mounts/folder-1/host-proof.txt').read_text()=='COMPOSE_HOST_729'\ntry: Path('/workspace/mounts/folder-1/denied.txt').write_text('denied')\nexcept OSError: pass\nelse: raise AssertionError('Read-only export was writable')\nPath('/workspace/mounts/folder-2/agent-proof.txt').write_text('COMPOSE_GRANTED_WRITE_729')"]);
+  await nested(agentId, ['python', '-c', "from pathlib import Path\nassert Path('/workspace/folders/fixture-ro/host-proof.txt').read_text()=='COMPOSE_HOST_729'\ntry: Path('/workspace/folders/fixture-ro/denied.txt').write_text('denied')\nexcept OSError: pass\nelse: raise AssertionError('Read-only export was writable')\nPath('/workspace/folders/fixture-rw/agent-proof.txt').write_text('COMPOSE_GRANTED_WRITE_729')"]);
   assert.equal(readFileSync(join(writeFolder, 'agent-proof.txt'), 'utf8'), 'COMPOSE_GRANTED_WRITE_729');
-  await nested(otherId, ['python', '-c', "from pathlib import Path\nassert not Path('/workspace/mounts/folder-1').exists()\nassert not Path('/workspace/mounts/folder-2').exists()\nassert not Path('/host-folders').exists()"]);
+  await nested(otherId, ['python', '-c', "from pathlib import Path\nassert not Path('/workspace/folders/fixture-ro').exists()\nassert not Path('/workspace/folders/fixture-rw').exists()\nassert not Path('/host-folders').exists()"]);
   const desktopScript = readFileSync(join(repository, 'tests/helpers/compose-desktop.py'), 'utf8').replaceAll('/workspace/shared/', '/workspace/exchange/');
   await nodeIn('open-harness', `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(join(desktopPaths(agentId).staging, 'compose-desktop.py'))},${JSON.stringify(desktopScript)});console.log('true');`);
   console.log('Checking real private desktop input, shared files, and isolation between two agents.');
@@ -490,8 +561,8 @@ for name in ['/workspace/private', '/workspace/shared']:
     { source: '/data/agents/compose-smoke/managed', destination: '/run/open-harness', type: 'bind', writable: false },
     { source: '/data/agents/compose-smoke/private', destination: '/workspace/private', type: 'bind', writable: true },
     { source: '/data/shared', destination: '/workspace/shared', type: 'bind', writable: true },
-    { source: '/host-folders/fixture-ro', destination: '/workspace/mounts/folder-1', type: 'bind', writable: false },
-    { source: '/host-folders/fixture-rw', destination: '/workspace/mounts/folder-2', type: 'bind', writable: true },
+    { source: '/host-folders/fixture-ro', destination: '/workspace/folders/fixture-ro', type: 'bind', writable: false },
+    { source: '/host-folders/fixture-rw', destination: '/workspace/folders/fixture-rw', type: 'bind', writable: true },
   ].sort((a, b) => a.destination.localeCompare(b.destination)));
   const coordinatorId = await dc(['ps', '-q', 'open-harness']);
   const coordinatorInfo = JSON.parse(await command(docker, ['inspect', coordinatorId]))[0];
@@ -535,6 +606,7 @@ for name in ['/workspace/private', '/workspace/shared']:
   assert.equal(await operatorToken(), token, 'The restored operator session must be retained.');
   assert.deepEqual((await api(`/v1/agents/${agentId}/profile`)).profile, saved.profile);
   assert.deepEqual((await api(`/v1/agents/${otherId}/profile`)).profile, peerSaved.profile);
+  assert.deepEqual((await api('/v1/folders')).folders, savedFolders, 'The Folders list must survive backup and restore.');
   assert.equal((await api(`/v1/tasks/${task.id}`)).title, task.title);
   assert.deepEqual(await api(`/v1/teams/${team.id}`), team);
   assert.equal((await api(`/v1/credentials/${credential.ref}`)).fingerprint, rotated.fingerprint);
@@ -603,6 +675,8 @@ for name in ['/workspace/private', '/workspace/shared']:
     });
   }
   evidence = { ok: true, mode: 'real Compose stack and pinned Hermes with scripted completion fixture; not model reasoning', project, restoreProject, root, deployment, packaged, coordinatorImage, image: HERMES_IMAGE, providerIp, dashboardCsp: true, authenticatedApi: true, browserPairing: { required: true, invalidDenied: true, expiredDenied: true, replayDenied: true }, hostFolderPermissions, explicitHostFolders: { physicalPathsContainSpaces: true, readOnlyCeiling: true, selectedAgentWrite: true, otherAgentDenied: true, unexportedPathsDenied: true }, savedCredentialRotation: true, teamTaskPersistence: true, localBootstrap: true, forgedHostDenied: true, nestedBootstrapDenied: nestedBootstrap, privateDockerTcp: tcp, identity, agentMounts, fileTool: true, clarification: true, taskMcp: true, deniedTerminal: true, freshSessionContext: true, replayStable: true, restartPersistence: true, gracefulAgentCleanup: true, privateDesktop: desktop, twoAgentDesktopIsolation: true, sharedFilesPreserved: true, backupRestore: { destinationWasEmpty: true, stoppedFileOwnerModeHashesEqual: true, entries: restoredManifest.length, profiles: true, credentialsUsedByRealRun: true, privateFiles: true, sharedFiles: true, memory: true, skills: true, tasks: true, history: true, interruptedRunsNotReplayed: true, freshEngineCache: true }, firstRun: first.id, followupRun: second.id, restoredRun: restoredRun.run.id };
+  evidence.realApprovalRoundTrips = approvalRuns;
+  evidence.typedApiAccess = { realSocketDispatch: true, ungrantedOriginDenied: true, forbiddenMethodDenied: true, ungrantedCredentialDenied: true, secretsHiddenFromModel: true };
   if (soakResult) evidence.soak = soakResult;
   if (browserOverrides) {
     evidence.mode = `emulated AMD64 with timing allowances and canonical managed browser: ${evidence.mode}`;

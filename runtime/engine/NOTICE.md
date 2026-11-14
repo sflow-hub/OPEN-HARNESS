@@ -8,6 +8,7 @@ Everything not listed below is unchanged from the official image and remains cov
 image's own notices.
 
 - **libexpat.** The Alpine package is updated to `2.8.5-r0`, installed from Alpine's signed package.
+- **PCRE2.** The Alpine package is updated to `10.49-r0`, installed from Alpine's signed package. PCRE2 is licensed under BSD-3-Clause.
 - **containerd.** `containerd`, `containerd-shim-runc-v2` and `ctr` in `/usr/local/bin` are replaced
   by containerd 2.3.6, rebuilt with dependency updates.
   - Complete source, vendored dependencies with their licenses, and build provenance:

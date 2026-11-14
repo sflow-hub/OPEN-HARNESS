@@ -49,6 +49,11 @@ guide: Desktop startup/file-sharing prompts, Gatekeeper, SmartScreen and Windows
 PowerShell 5.1. Container tests do not establish those host-specific behaviours.
 Signed Tauri installers and host-native computer access are outside this MVP.
 
+The current candidate requires runtime contract 9. Earlier contract-7 rehearsal
+records below are historical; they do not qualify this candidate. Track final
+contract-9 checks in `runtime/VERIFICATION.md`, including the coordinator and
+engine's separate security gates and credential-key backup/restore.
+
 ## Upgrade, restore, and soak
 
 - [ ] Back up a representative `0.3.0` installation, upgrade it to the release candidate, and compare agents, profiles, revisions, histories, files, credentials, and health.

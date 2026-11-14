@@ -38,7 +38,7 @@ OpenSSL and language dependencies; it is not an accepted release image. See
 The portable ARM64 candidate built on September 29, 2026 and verified all 329
 packages and 90 native files. The curl distribution's `test-nonflaky` policy
 ignored test 1510 in both flavours, with 149 OpenSSL and 152 GnuTLS tests skipped.
-That build is not proof of final contract-8 image security or functional acceptance.
+That build is not proof of final runtime image security or functional acceptance.
 Whole-image and supplemental Debian-origin scans, actual tools and desktop checks,
 platform acceptance and the final soak remain release requirements.
 
@@ -47,6 +47,13 @@ The contract-8 security refresh pins Chromium 154.0.8037.92 and OpenSSL
 build passed package, linkage and provenance checks; refreshed image scans and
 functional acceptance remain required. Historical evidence-reader fixtures retain
 the original September 29 lock instead of treating those receipts as new-image evidence.
+
+The October 3 contract-9 native AMD64 candidate additionally installs authenticated
+http-cache-semantics 4.3.0 with a hash-pinned security backport. The unchanged strict
+whole-image and Debian component/SBOM gates pass with zero HIGH/CRITICAL findings
+and secrets; the vulnerable negative control and receipt validator also pass.
+No scan exception remains active. Exact identities and scope are in
+`runtime/VERIFICATION.md`; other architecture and release acceptance remain separate.
 
 ## Supplemental Debian-origin release gate
 

@@ -103,6 +103,19 @@ Switch an agent’s model and credential from the chip on its card or in its con
 
 Use the settings icon on any agent card, or **Agent settings** in a conversation header. The tabs cover identity, computer assignment, model selection, custom instructions, and expandable tool/connection switches. The panel fills the screen on phones and supports keyboard navigation.
 
+**Tools & connections → Workspace access** sets what an agent may do in Open Harness itself, through its tools. Every agent can work its own and unassigned task cards. Each of these is off until you turn it on, and takes effect from the agent's next run:
+
+- **Projects**: create projects and change their name, details, stages and archive state.
+- **Routines**: see, edit, pause, resume, run now and delete its own routines.
+- **Teams and agents**: see its teams and its teammates' names, roles and status.
+- **Runs and conversations**: see its own runs and the work it delegated, read results, and stop them.
+
+Deleting projects, sharing folders, and choosing when tasks start automatically stay with a person. **Change other agents' cards** and **Start other agents' tasks** sit in the same section.
+
+## Folders
+
+By default an agent sees only its private files and Shared files. Open **Folders** to list host folders and choose, for each agent, No access, Read only, or Read and write; those folders are mounted at `/workspace/folders/<name>` in every task and chat, and the agent is told where they are. A project can share its own folders too, for that project's tasks only. The whole disk, your home folder, the Open Harness data folder, and the Docker socket's folder can never be shared.
+
 ### Chat responsiveness
 
 Choose **Reply only** in the chat composer for questions that can be answered from
@@ -266,3 +279,11 @@ Open Harness is MIT licensed; see [LICENSE](LICENSE). Hermes Agent is also MIT l
 The working implementation adds a primary assistant inbox, durable setup verification, responsibilities, scoped Google Workspace/GitHub actions, workflow drafts and repairs, latency measurements, controlled desktop streaming, authenticated shared workspaces, model usage/billing contracts, encrypted migration and native mobile clients. Existing local-owner installations and advanced agent views remain supported. No production cloud provider has been selected or provisioned.
 
 Implementation and remaining work: [product status](docs/PRODUCT_IMPLEMENTATION_STATUS.md). Deployment configuration: [control-plane guide](deploy/control-plane/README.md) and [operations/recovery](deploy/control-plane/OPERATIONS.md). Native source: [mobile client](apps/mobile/README.md). Live quality, performance and release gates: [experience acceptance](docs/EXPERIENCE_ACCEPTANCE.md). Automated fixture results do not establish model quality or deployment/device acceptance.
+
+### Named credentials and API access
+
+Use **Credentials** in workspace navigation to save named model keys, API accounts,
+and generic OAuth2 connections. Model settings include searchable dropdowns and
+inline credential creation. Agent settings can map fields to MCP servers or grant
+selected API origins to the authenticated API tool. See [Credentials and API access](docs/CREDENTIALS.md)
+for OAuth setup, encrypted storage, and encryption-key backup requirements.

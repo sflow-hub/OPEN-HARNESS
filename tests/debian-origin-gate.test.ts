@@ -174,9 +174,9 @@ test('manifests join only candidates published with a passing Debian-origin gate
 // Publication with a fake docker CLI that logs every call and answers only `image inspect` for the local candidates.
 function publisher(t: { after: (fn: () => void) => void }) {
   const root = workspace(t);
-  const lock = { schemaVersion: 2, base: { ref: `docker.io/library/docker:28.1.1-dind@${digest('base')}` }, expat: { package: 'libexpat', version: '2.7.1-r0', file: 'apk/libexpat-2.7.1-r0.apk' }, architectures: {} as Record<string, unknown> };
+  const lock = { schemaVersion: 2, base: { ref: `docker.io/library/docker:28.1.1-dind@${digest('base')}` }, expat: { package: 'libexpat', version: '2.7.1-r0', file: 'apk/libexpat-2.7.1-r0.apk' }, pcre2: { package: 'pcre2', version: '10.49-r0', file: 'apk/pcre2-10.49-r0.apk' }, architectures: {} as Record<string, unknown> };
   for (const [index, platform] of PLATFORMS.entries()) {
-    const paths = [lock.expat.file, ...ENGINE_BINARIES, ...Object.values(ENGINE_MANIFESTS)];
+    const paths = [lock.expat.file, lock.pcre2.file, ...ENGINE_BINARIES, ...Object.values(ENGINE_MANIFESTS)];
     lock.architectures[platform] = { status: 'complete', inputs: `ghcr.io/sflow-hub/open-harness-engine-inputs@${digest(String(index))}`, files: Object.fromEntries(paths.map(path => [path, hash(`${platform} ${path}`)])), components: Object.fromEntries(Object.entries(ENGINE_MANIFESTS).map(([name, path]) => [name, { version: `v1.2.3+fixture.${platform.split('/')[1]}`, sourceManifest: hash(`${platform} ${path}`) }])) };
   }
   const lockText = `${JSON.stringify(lock, null, 2)}\n`, lockSha256 = hash(lockText);

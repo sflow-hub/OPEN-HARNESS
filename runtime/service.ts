@@ -4,19 +4,25 @@ import { appendFileSync, mkdirSync, writeFileSync, readdirSync, readFileSync, re
 import { resolve, join, relative } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Profiles, ProfileError, validateModel, validateProfile, validId } from "./profiles";
+import { WorkspaceFolders } from "./workspace-folders";
 import { discoverTools, discoverModels, prepareProfile, runtimeProbe, writeRunLease } from "./profile-runtime";
-import { DEFAULT_COMPUTER, DEFAULT_MODEL, DEFAULT_BOARD, HANDOFF_TOOL, draftProfile, mcpToolId, mcpServerOf, profileAgent, ROUTINE_TOOL, TASK_TOOL, type AgentProfile, type ComputerConfig, type ToolCatalog } from "../lib/agent-profile";
+import { API_TOOL, bindingSecretName, DECIDE_TOOL, DEFAULT_COMPUTER, DEFAULT_MODEL, DEFAULT_BOARD, DIRECTORY_TOOL, HANDOFF_TOOL, draftProfile, isSandboxedComputer, mcpToolId, mcpServerOf, PROJECT_TOOL, profileAgent, ROUTINE_TOOL, ROUTINES_TOOL, RUNS_TOOL, runComputer, runCwd, TASK_TOOL, workspacePermissionLabel, type AgentProfile, type ComputerConfig, type CredentialBinding, type FolderGrant, type ToolCatalog } from "../lib/agent-profile";
 import { SchemaTooNewError, Store, type RunRow } from "./db";
 import { SecretStore, SecretsUnavailableError } from "./secrets";
 import { PROVIDER_ENDPOINTS, providerModelList } from "./provider-models";
 import { Credentials, CredentialError } from "./credentials";
 import { CodexOAuth } from './codex-oauth';
 import { CODEX_PROVIDER, isCodexSession } from '../lib/codex';
+import { CREDENTIAL_TYPES, credentialType, modelCredential } from '../lib/credential-types';
+import { CredentialOAuth } from './credential-oauth';
+import { credentialApi } from './credential-api';
+import { Decisions, DecisionError } from './decisions';
 import { modelForCredential, type CredentialRecord, type CredentialUsage, type CredentialUse } from "../lib/credentials";
-import { assertSandboxedComputer, sharedFolderSource, validateComputerTarget } from './computer-validation';
+import { assertGrantAllowed, assertSandboxedComputer, sharedFolderSource, validateComputerTarget } from './computer-validation';
 import { hermesApprovalDecision, HermesGateway, dockerStatusCached, ensureContainerAsync, runtimeImageIdentity, stopAgentContainers, stopManagedContainers } from "./hermes";
 import { closeContainerAdmissions } from './container-admission';
 import { coordinationSocket } from "./coordination-socket";
+import { coordinationToken } from './coordination-auth';
 import { TaskError, TaskStore } from "./tasks";
 import { TeamError, TeamStore } from "./teams";
 import { MachineError, Machines } from "./machines";
@@ -25,6 +31,7 @@ import { exportAgentTransfer, importAgentTransfer, AGENT_TRANSFER_WIRE_LIMIT } f
 import { sealAgentTransfer, openAgentTransfer, validateSealedTransfer, type TransferBinding } from './transfer-crypto';
 import { onboardingAction, onboardingStatusAsync } from './readiness';
 import { APP_VERSION } from '../lib/version';
+import { clarifyReply } from '../lib/clarify';
 import { HERMES_COMMIT, HERMES_RELEASE } from '../lib/hermes-pin';
 import { recoverNativeProcess } from './process-identity';
 import { acquireCoordinatorLock } from './coordinator-lock';
@@ -91,6 +98,9 @@ function openSecrets(file: string) {
 }
 const credentials = new Credentials(store.db, secrets);
 const codex = new CodexOAuth(root, credentials, secrets);
+const credentialOAuth = new CredentialOAuth(credentials);
+// Every stored secret, so none can leave in decision text: the operator token, legacy keys and typed credential fields.
+const decisions = new Decisions(store.db, credentials, credentialOAuth, { mock: process.env.OPEN_HARNESS_MOCK === '1', secretValues: () => [secrets.token, ...Object.values(secrets.environment()), ...credentials.rows().flatMap(row => Object.values(credentials.fields(row.ref)))] });
 const profiles = new Profiles(store.db);
 const workspaceIdentity = new Workspaces(store.db, root);
 store.db.exec('CREATE TABLE IF NOT EXISTS schedule_actors(schedule_id TEXT PRIMARY KEY,actor_id TEXT NOT NULL)');
@@ -101,8 +111,11 @@ store.db.exec('CREATE TABLE IF NOT EXISTS run_reply_modes(run_id TEXT PRIMARY KE
 store.db.exec('CREATE TABLE IF NOT EXISTS model_lease_releases(run_id TEXT PRIMARY KEY,created_at TEXT NOT NULL)');
 store.db.exec('CREATE TABLE IF NOT EXISTS assistant_messages(actor_id TEXT NOT NULL,request_id TEXT NOT NULL,prompt_hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(actor_id,request_id))');
 store.db.exec('CREATE TABLE IF NOT EXISTS handoff_summaries(parent_run_id TEXT PRIMARY KEY,summary_run_id TEXT NOT NULL)');
+// Remote folders are checked by their runner when mounted: only it can see that computer's disk.
+const workspaceFolders = new WorkspaceFolders(store.db, folder => { if ((folder.machineId || 'local') === 'local') sharedFolderSource(folder.path, folder.mode, root); else machines.get(folder.machineId!); });
+profiles.absorbFolders = (agentId, machineId, folders) => workspaceFolders.absorb(agentId, machineId, folders);
 const teams = new TeamStore(store.db);
-const tasks = new TaskStore(store.db);
+const tasks = new TaskStore(store.db, folder => { sharedFolderSource(folder.path, folder.mode, root); });
 const machines = new Machines(store.db);
 const delivery = new DeliverySignals();
 machines.onCommand = machineId => delivery.notify(`runner:${machineId}`);
@@ -224,6 +237,10 @@ function submitAssistant(promptValue: unknown, requestValue?: unknown): RunRow {
 const importedWorkspace = store.db.prepare("SELECT payload_json FROM migrations WHERE key='browser-v1'").get() as { payload_json: string } | undefined;
 const importedAgents = importedWorkspace ? JSON.parse(importedWorkspace.payload_json).agents || [] : [];
 for (const row of store.db.prepare("SELECT * FROM agents").all() as any[]) profiles.import({ ...row, description: "", tone: 0, memory: [], ...importedAgents.find((a: any) => a.id === row.id), config: JSON.parse(row.config_json) });
+// Folders saved on agents before the workspace folder list existed move into it once, each agent keeping
+// exactly the access it had. A profile that cannot be saved (a legacy unsandboxed one) keeps its
+// folders until it is converted, when the same move happens on that save.
+for (const profile of profiles.list()) if (profile.computer.folders.length && isSandboxedComputer(profile.computer)) { try { profiles.save(profile); } catch (error) { console.error(`Could not move ${profile.id}'s folders into the workspace folder list: ${error instanceof Error ? error.message : error}`); } }
 const port = Number(process.env.OPEN_HARNESS_PORT || 4317);
 const gateways = new Map<string, HermesGateway>();
 const active = new Map<string, { gateway: HermesGateway; sessionId: string }>();
@@ -323,10 +340,16 @@ function runnerIdentity(req: IncomingMessage) {
   const machineId = String(req.headers['x-open-harness-machine'] || ''), token = String(req.headers.authorization || '').replace(/^Bearer /, '');
   return machineId && machines.authenticate(machineId, token) ? machineId : null;
 }
-function agentToken(agentId: string) { return createHmac("sha256", secrets.token).update(`agent:${agentId}`).digest("hex"); }
+function agentToken(agentId: string, machineId = 'local') { return coordinationToken(secrets.token, agentId, machineId); }
 function authenticatedAgent(req: IncomingMessage) {
-  const id = String(req.headers["x-open-harness-agent"] || ""), supplied = String(req.headers.authorization || "").replace(/^Bearer /, ""), expected = agentToken(id);
-  return Boolean(id && supplied.length === expected.length && timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) ? id : null;
+  const id = String(req.headers['x-open-harness-agent'] || ''), runId = String(req.headers['x-open-harness-run'] || ''), run = runId ? store.getRun(runId) : undefined;
+  const snapshot = run ? profiles.runSnapshot(runId) : null;
+  if (!id || !run || run.agent_id !== id || !activeStates.has(run.state) || !snapshot) return null;
+  const machineId = snapshot.computer.machineId;
+  if (profiles.get(id)?.computer.machineId !== machineId) return null;
+  try { if (machines.get(machineId).status === 'revoked') return null; } catch { return null; }
+  const supplied = Buffer.from(String(req.headers.authorization || '').replace(/^Bearer /, '')), expected = Buffer.from(agentToken(id, machineId));
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected) ? id : null;
 }
 function event(runId: string, type: string, payload: unknown) {
   if(['run.completed','run.failed','run.interrupted','run.cancelled'].includes(type)||type==='run.acknowledged'&&terminalStates.has(store.getRun(runId)?.state||''))queueMicrotask(()=>{if(shuttingDown)return;try{recordRunMetrics(store.db,runId);}catch{console.error('Run measurement could not be saved. Task results remain available.');}});
@@ -367,16 +390,19 @@ function credentialUses(ref: string): CredentialUsage {
   for (const profile of profiles.list()) {
     if (profiles.effective(profile).credentialRef === ref || profile.connectors.some(connector => connector.secretRef === ref)) agentIds.add(profile.id);
     if (!profile.model.inherit && profile.model.credentialRef === ref) uses.push({ kind: "agent-model", agentId: profile.id, agentName: profile.name });
-    for (const connector of profile.connectors) if (connector.secretRef === ref) uses.push({ kind: "agent-connector", agentId: profile.id, agentName: profile.name, connectorName: connector.name, enabled: connector.enabled });
+    if (profile.credentialGrants?.some(grant => grant.credentialRef === ref)) uses.push({ kind: 'agent-api', agentId: profile.id, agentName: profile.name });
+    for (const connector of profile.connectors) if (connector.secretRef === ref || connector.credentialBindings?.some(binding => binding.credentialRef === ref)) uses.push({ kind: "agent-connector", agentId: profile.id, agentName: profile.name, connectorName: connector.name, enabled: connector.enabled });
   }
   const activeRuns = store.liveRuns().filter(run => {
     const snapshot = profiles.runSnapshot(run.id);
-    return Boolean(snapshot && (snapshot.effectiveModel.credentialRef === ref || snapshot.connectors.some(c => c.enabled && c.secretRef === ref)));
+    return Boolean(snapshot && (snapshot.effectiveModel.credentialRef === ref || snapshot.credentialGrants?.some(grant => grant.credentialRef === ref) || snapshot.connectors.some(c => c.enabled && (c.secretRef === ref || c.credentialBindings?.some(binding => binding.credentialRef === ref)))));
   }).length;
   return { uses, agentCount: agentIds.size, activeRuns };
 }
 function credentialRecord(row: ReturnType<Credentials["row"]>): CredentialRecord {
-  return { ref: row.ref, label: row.label, provider: row.provider, model: row.model, baseUrl: row.base_url, fingerprint: row.fingerprint, length: row.length, present: credentials.present(row.ref), createdAt: row.created_at, updatedAt: row.updated_at, lastUsedAt: row.last_used_at, usage: credentialUses(row.ref) };
+  let callbackUrl: string | undefined;
+  if (row.type === 'oauth2' && JSON.parse(row.config).grantType === 'authorization_code') { try { callbackUrl = oauthCallbackUrl(row.ref); } catch { /* Hosted callback configuration is required before connecting. */ } }
+  return { ...(callbackUrl ? { callbackUrl } : {}), ...credentials.metadata(row), ref: row.ref, label: row.label, provider: row.provider, model: row.model, baseUrl: row.base_url, fingerprint: row.fingerprint, length: row.length, present: credentials.present(row.ref), createdAt: row.created_at, updatedAt: row.updated_at, lastUsedAt: row.last_used_at, usage: credentialUses(row.ref) };
 }
 function credentialRecords() { return credentials.rows().map(credentialRecord); }
 // Points every reference at a different credential so one can be deleted without
@@ -385,32 +411,89 @@ function credentialRecords() { return credentials.rows().map(credentialRecord); 
 function reassignCredential(from: string, to: string) {
   const updated: string[] = [];
   const defaults = profiles.defaults(), target = credentialRecord(credentials.row(to));
+  if (!modelCredential(target) && credentialUses(from).uses.some(use => ['workspace-default', 'agent-model'].includes(use.kind))) throw new CredentialError('Choose a model API credential for these model selections.');
   const nextDefault = defaults.model.credentialRef === from ? validateModel(modelForCredential(defaults.model, target)) : null;
   // Validate every model before moving any references, including cross-provider moves.
   const changes = profiles.list().flatMap(profile => {
     const model = !profile.model.inherit && profile.model.credentialRef === from ? { ...validateModel(modelForCredential(profile.model, target)), inherit: false } : profile.model;
-    const connectors = profile.connectors.map(c => c.secretRef === from ? { ...c, secretRef: to } : c);
-    return model === profile.model && connectors.every((c, i) => c === profile.connectors[i]) ? [] : [{ ...profile, model, connectors }];
+    const connectors = profile.connectors.map(c => {
+      if (c.secretRef === from && !modelCredential(target)) throw new CredentialError('Legacy single-key connections need a single-key replacement.');
+      const bindings = c.credentialBindings?.map(binding => {
+        if (binding.credentialRef !== from) return binding;
+        if (!bindingFields(to).includes(binding.field)) throw new CredentialError('The replacement credential does not support the fields this connection uses.');
+        return { ...binding, credentialRef: to };
+      });
+      return c.secretRef === from || c.credentialBindings?.some(binding => binding.credentialRef === from) ? { ...c, secretRef: c.secretRef === from ? to : c.secretRef, credentialBindings: bindings } : c;
+    });
+    const credentialGrants = profile.credentialGrants?.map(grant => grant.credentialRef === from ? { ...grant, credentialRef: to } : grant);
+    return model === profile.model && connectors.every((c, i) => c === profile.connectors[i]) && !profile.credentialGrants?.some(grant => grant.credentialRef === from) ? [] : [validateProfile({ ...profile, model, connectors, credentialGrants })];
   });
   if (nextDefault) { profiles.setDefaults(nextDefault, defaults.revision); updated.push("workspace"); }
   for (const profile of changes) { profiles.save(profile); updated.push(profile.id); }
   return updated;
 }
+function bindingFields(ref: string) {
+  const row = credentials.row(ref);
+  return row.type === 'oauth2' ? ['accessToken'] : credentialType(row.type).fields.filter(field => field.secret).map(field => field.key);
+}
+function checkModelCredential(model: { credentialRef: string; provider?: string; baseUrl?: string }) {
+  if (model.credentialRef && credentials.has(model.credentialRef) && !modelCredential(credentials.row(model.credentialRef))) throw new CredentialError('Select a model API credential.');
+}
+function checkCredentialSelections(profile: AgentProfile) {
+  if (!profile.model.inherit) checkModelCredential(profile.model);
+  for (const connector of profile.connectors) if (connector.secretRef && credentials.has(connector.secretRef) && credentials.row(connector.secretRef).provider === CODEX_PROVIDER) throw new CredentialError('ChatGPT sign-ins are only for model requests.');
+  for (const connector of profile.connectors) for (const binding of connector.credentialBindings || []) if (credentials.row(binding.credentialRef).provider === CODEX_PROVIDER || !bindingFields(binding.credentialRef).includes(binding.field)) throw new CredentialError('Select a supported credential field for this connection.');
+  for (const grant of profile.credentialGrants || []) if (credentials.row(grant.credentialRef).provider === CODEX_PROVIDER) throw new CredentialError('ChatGPT sign-in credentials are only for model requests.');
+}
+async function readyCredentials(profile: AgentProfile, includeApiGrants = false) {
+  const model = (profile as AgentProfile & { effectiveModel?: ReturnType<Profiles['effective']> }).effectiveModel || profiles.effective(profile);
+  checkModelCredential(model);
+  const refs = profile.connectors.filter(connector => connector.enabled).flatMap(connector => (connector.credentialBindings || []).map(binding => binding.credentialRef));
+  if (includeApiGrants && profile.allowedTools.includes(API_TOOL)) refs.push(...(profile.credentialGrants || []).map(grant => grant.credentialRef));
+  await Promise.all([...new Set(refs)].map(ref => credentialOAuth.ready(ref)));
+}
+function bindingValue(binding: CredentialBinding) {
+  if (!bindingFields(binding.credentialRef).includes(binding.field)) throw new CredentialError('Unsupported credential field.');
+  const value = credentials.fields(binding.credentialRef)[binding.field];
+  if (!value) throw new CredentialError('A connection credential is missing a required field.', 409);
+  return value;
+}
+function connectorEnvironment(connector: AgentProfile['connectors'][number]) {
+  const env: Record<string, string> = connector.secretRef && secrets.has(connector.secretRef) ? { [connector.secretRef]: secrets.environment()[connector.secretRef] } : {};
+  for (const binding of connector.credentialBindings || []) env[binding.env] = bindingValue(binding);
+  return env;
+}
+function oauthCallbackUrl(ref: string) {
+  const base = process.env.OPEN_HARNESS_OAUTH_CALLBACK_BASE_URL || (process.env.OPEN_HARNESS_DEPLOYMENT === 'compose' ? '' : `http://127.0.0.1:${port}`);
+  if (!base) throw new CredentialError('Configure OPEN_HARNESS_OAUTH_CALLBACK_BASE_URL with the external dashboard URL ending in /api/local.');
+  const url = new URL(base);
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(url.hostname)) || url.username || url.password || url.search || url.hash) throw new CredentialError('OAuth callback base must be HTTPS or local loopback HTTP.');
+  return `${base.replace(/\/$/, '')}/v1/credentials/${encodeURIComponent(ref)}/oauth/callback`;
+}
 function selectedSecrets(profile: AgentProfile, effective: ReturnType<Profiles['effective']>) {
   const names = new Set([effective.credentialRef, ...profile.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(Boolean));
-  const available = secrets.environment(); return Object.fromEntries([...names].filter(name => available[name] && !isCodexSession(available[name])).map(name => [name, available[name]]));
+  const available = secrets.environment(), selected = Object.fromEntries([...names].filter(name => available[name] && !isCodexSession(available[name])).map(name => [name, available[name]]));
+  for (const connector of profile.connectors.filter(item => item.enabled)) for (const binding of connector.credentialBindings || []) selected[bindingSecretName(binding)] = bindingValue(binding);
+  return selected;
 }
 // A dispatched command is a durable row, so a provider key must never travel through it in
 // the clear: it would outlive the run in state.db with no way to notice. Each value is
 // sealed to the runner's own public key, which only that machine can open.
 async function dispatchSecrets(machineId: string, profile: AgentProfile, effective: ReturnType<Profiles['effective']>) {
+  await readyCredentials(profile);
   const plain = selectedSecrets(profile, effective);
   if (!Object.keys(plain).length) return {};
   const key = machines.encryptionKey(machineId);
   if (!key) throw new MachineError('This computer has not published its encryption key yet. It is sent on every heartbeat, so wait a few seconds for it to check in, or pair it again.', 409);
   return Object.fromEntries(await Promise.all(Object.entries(plain).map(async ([name, value]) => [name, await encryptRunnerSecret(key, value)])));
 }
-async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) {
+// What the agent's container mounts: its lasting workspace folders on the computer it works on, plus
+// any a project grants for one run. Checks and probes use the same set so they never force a rebuild.
+function withFolders<T extends AgentProfile>(profile: T, grants: FolderGrant[] = []): T {
+  return { ...profile, computer: runComputer(profile.computer, [...workspaceFolders.grants(profile.id, profile.computer.machineId), ...grants]) };
+}
+async function runnerProbe(source: AgentProfile, kind: 'probe-tools' | 'probe-runtime' | 'probe-models', input?: unknown) {
+  const profile = withFolders(source);
   assertSandboxedComputer(profile.computer);
   const machine = machines.canAssign(profile.computer.machineId, profile.id);
   if (machine.status !== 'online') throw new MachineError(`${machine.name} is offline. Reconnect it before checking this setting.`, 409);
@@ -425,7 +508,7 @@ async function runnerProbe(profile: AgentProfile, kind: 'probe-tools' | 'probe-r
   }
   delete probe.apiKey;
   if (probe.env) probe.env = Object.fromEntries(Object.keys(probe.env).map(name => [name, '']));
-  return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input: probe, encryptedSecrets, ...(encryptedApiKey ? { encryptedApiKey } : {}), coordinationToken: agentToken(profile.id) }).id);
+  return waitRunnerCommand(machines.enqueue(machine.id, profile.id, kind, { profile: { ...profile, effectiveModel }, input: probe, encryptedSecrets, ...(encryptedApiKey ? { encryptedApiKey } : {}) }).id);
 }
 
 function priorHistory(run: RunRow) {
@@ -474,7 +557,7 @@ async function executeRemote(run: RunRow, snapshot: AgentProfile & { effectiveMo
   if (machine.status !== 'online') throw new Error(`${machine.name} is offline. This task will remain queued until its runner reconnects.`);
   const encryptedSecrets = await dispatchSecrets(machine.id, snapshot, snapshot.effectiveModel);
   if (cancelledRuns.has(run.id) || terminalStates.has(store.getRun(run.id)?.state || '')) return;
-  const command = machines.enqueue(machine.id, run.agent_id, 'run', { runId: run.id, prompt: run.prompt, history: priorHistory(run), snapshot, encryptedSecrets, coordinationToken: agentToken(run.agent_id),ownership:desktop.ownership(run.agent_id),reviewUnclassified });
+  const command = machines.enqueue(machine.id, run.agent_id, 'run', { runId: run.id, prompt: run.prompt, history: priorHistory(run), snapshot, encryptedSecrets, coordinationToken: agentToken(run.agent_id, machine.id),ownership:desktop.ownership(run.agent_id),reviewUnclassified });
   event(run.id, 'runner.dispatched', { commandId: command.id, machineId: machine.id, machineName: machine.name });
   await watchRemote(run, command);
 }
@@ -573,14 +656,14 @@ async function performTransfer(transfer: { id: string; agentId: string; sourceMa
     const requiredSecrets = pending ? [effective?.credentialRef || '', ...pending.connectors.filter(item => item.enabled).map(item => item.secretRef)].filter(name => Boolean(name) && !secrets.has(name) && !process.env[name]) : [];
     let result: { checksum: string; validated?: boolean };
     if (transfer.destinationMachineId === 'local') {
-      if (pending) validateComputerTarget(pending, machines.get('local').capabilities, requiredSecrets, name => secrets.has(name) || Boolean(process.env[name]));
+      if (pending) validateComputerTarget(withFolders(pending), machines.get('local').capabilities, root, requiredSecrets, name => secrets.has(name) || Boolean(process.env[name]));
       result = { ...await importAgentTransfer(root, transfer.agentId, await openAgentTransfer(sealedTransfer,binding,localKey!.privateKey),transfer.pendingProfile.computer), validated: true };
       if (pending?.computer.desktop !== 'none' && pending && process.env.OPEN_HARNESS_MOCK !== '1') {
         const check = { action: 'computer', desktop: pending.computer.desktop };
-        const tested = await runtimeProbe(await ensureDesktopContainerAsync(pending.id, root, pending.computer), check);
+        const tested = await runtimeProbe(await ensureDesktopContainerAsync(pending.id, root, withFolders(pending).computer), check);
         if (!tested.ok) throw new Error(String(tested.message || 'Desktop control is not ready on this computer.'));
       }
-    } else { machines.canAssign(transfer.destinationMachineId,transfer.agentId);result = await waitRunnerCommand(machines.enqueue(transfer.destinationMachineId, transfer.agentId, 'import-agent', { ...binding, sealedTransfer, profile: pending, requiredSecrets }).id) as { checksum: string; validated?: boolean }; }
+    } else { machines.canAssign(transfer.destinationMachineId,transfer.agentId);result = await waitRunnerCommand(machines.enqueue(transfer.destinationMachineId, transfer.agentId, 'import-agent', { ...binding, sealedTransfer, profile: pending && withFolders(pending), requiredSecrets }).id) as { checksum: string; validated?: boolean }; }
     machines.setTransfer(transfer.id, 'verifying', 'Verifying transferred files.'); if (result.checksum !== sealedTransfer.checksum) throw new Error('Destination checksum does not match the source.');
     if (transfer.pendingProfile) { profiles.applyTransferredProfile(transfer.pendingProfile); machines.reserve(transfer.sourceMachineId, transfer.agentId, false); machines.reserve(transfer.destinationMachineId, transfer.agentId, transfer.pendingProfile.computer.reserveMachine); }
     machines.setTransfer(transfer.id, 'completed', `Transfer verified (${sealedTransfer.files} files). Source data was preserved.`);
@@ -597,7 +680,10 @@ async function gatewayFor(agentId: string, allowedTools: string[] | null = null,
   assertSandboxedComputer(computer);
   let gateway = gateways.get(agentId);
   if (gateway) return gateway;
-  gateway = new HermesGateway(await ensureContainerAsync(agentId, root, computer), allowedTools);
+  const container = await ensureContainerAsync(agentId, root, computer);
+  // Another caller may have started this agent's gateway while the container was admitted.
+  gateway = gateways.get(agentId); if (gateway) return gateway;
+  gateway = new HermesGateway(container, allowedTools);
   gateway.on('log', (entry: { level?: string; message?: string }) => appendAgentLog(agentId, entry));
   gateways.set(agentId, gateway);
   try { await gateway.start(); return gateway; }
@@ -685,7 +771,9 @@ async function execute(run: RunRow) {
     const profile = profiles.get(run.agent_id);
     if (!profile) throw new Error("Agent profile not found. Open Agent settings and save this agent.");
     assertSandboxedComputer(profile.computer);
-    const snapshot = profiles.snapshot(run.id, profile);
+    const project = run.project_id ? (() => { try { return tasks.getBoard(run.project_id!); } catch { return null; } })() : null;
+    const grants = project ? tasks.projectGrants(project.id, run.agent_id) : [];
+    const snapshot = profiles.snapshot(run.id, withFolders(profile, grants), project && { id: project.id, name: project.name });
     const intent = store.db.prepare('SELECT purpose FROM run_contexts WHERE run_id=?').get(run.id) as { purpose: string } | undefined;
     if (['responsibility','workflow-synthesis','handoff-report','setup'].includes(intent?.purpose || '')) {
       const allowed = new Set(intent?.purpose === 'setup' ? ['read_file','write_file'] : ['workflow-synthesis','handoff-report'].includes(intent?.purpose||'') ? [] : ['read_file','search_files','session_search','skills_list','skill_view','web_search','web_extract','clarify', WORKSPACE_TOOL]);
@@ -695,8 +783,11 @@ async function execute(run: RunRow) {
     if(replyOnly){snapshot.allowedTools=[];snapshot.connectors=[];store.db.prepare('UPDATE run_profiles SET json=? WHERE run_id=?').run(JSON.stringify(snapshot),run.id);}
     profiles.validateBrowserSharing(snapshot);
     await desktop.prepareRun(snapshot,run.id);
-    credentials.touch([snapshot.effectiveModel.credentialRef, ...snapshot.connectors.filter(c => c.enabled).map(c => c.secretRef)]);
+    await readyCredentials(snapshot, true);
+    credentials.touch([snapshot.effectiveModel.credentialRef, ...snapshot.connectors.filter(c => c.enabled).flatMap(c => [c.secretRef, ...(c.credentialBindings || []).map(binding => binding.credentialRef)])]);
     const assigned = machines.canAssign(snapshot.computer.machineId, run.agent_id);
+    // Project folders are paths on the coordinator's computer; another machine would resolve them to something else.
+    if (grants.length && assigned.id !== 'local') throw new Error(`${project!.name} shares folders on this computer, but ${profile.name} runs on ${assigned.name}. Move ${profile.name} to this computer, or remove its access in the project's folder settings.`);
     event(run.id, "run.started", { runId: run.id, agentId: run.agent_id, machineId: assigned.id, machineName: assigned.name });
     event(run.id, "profile.applied", { revision: snapshot.revision, model: snapshot.effectiveModel, allowedTools: snapshot.allowedTools, computer: snapshot.computer,replyOnly });
     if (assigned.id !== 'local') {
@@ -714,7 +805,10 @@ async function execute(run: RunRow) {
       await coordinationSockets.get(run.agent_id)!;
     }
     if (cancelledRuns.has(run.id) || store.getRun(run.id)?.state === 'cancelled') return;
-    let preparedModel = snapshot.effectiveModel, preparedSecrets: { environment(): Record<string,string> } = secrets;
+    // A Linux host can use Docker Desktop too: its VM cannot connect to a host Unix socket.
+    // Keep the socket first, with the existing authenticated URL as a loopback-only fallback.
+    // Only what this run selected reaches its profile: the model key, connector secrets and mapped credential fields.
+    let preparedModel = snapshot.effectiveModel, preparedSecrets: { environment(): Record<string,string> } = { environment: () => selectedSecrets(snapshot, snapshot.effectiveModel) };
     if (preparedModel.provider === 'platform') {
       const actor = workspaceIdentity.runActor(run.id), address = new URL(process.env.OPEN_HARNESS_PLATFORM_GATEWAY_URL || '');
       if (address.protocol !== 'https:' || !process.env.OPEN_HARNESS_RELAY_TOKEN) throw new ProductError('Included usage requires the authenticated managed model relay.', 503);
@@ -722,15 +816,15 @@ async function execute(run: RunRow) {
       const response = await fetch(new URL('/relay/model-lease', address), { method:'POST',headers:{Authorization:`Bearer ${process.env.OPEN_HARNESS_RELAY_TOKEN}`,'Content-Type':'application/json'},body:JSON.stringify({actorId:actor.id,runId:run.id}),redirect:'error',signal:AbortSignal.timeout(10000) });
       const lease = await response.json() as { token?:string; baseUrl?:string; error?:string }; if(!response.ok||!lease.token||!lease.baseUrl)throw new ProductError(lease.error||'Included model usage is unavailable.',response.status||503);
       if(new URL(lease.baseUrl).origin!==address.origin)throw new ProductError('The model relay returned an unexpected destination.',503);
-      preparedModel={...preparedModel,provider:'local',baseUrl:lease.baseUrl,credentialRef:'OPEN_HARNESS_PLATFORM_LEASE'};preparedSecrets={environment:()=>({...secrets.environment(),OPEN_HARNESS_PLATFORM_LEASE:lease.token!})};
+      preparedModel={...preparedModel,provider:'local',baseUrl:lease.baseUrl,credentialRef:'OPEN_HARNESS_PLATFORM_LEASE'};preparedSecrets={environment:()=>({...selectedSecrets(snapshot, snapshot.effectiveModel),OPEN_HARNESS_PLATFORM_LEASE:lease.token!})};
     }
-    if(usePrepared)writeRunLease(root,run.agent_id,run.id);else prepareProfile(root, snapshot, preparedModel, preparedSecrets, agentToken(run.agent_id), run.id, useSocket ? {} : { controlUrl: `http://host.docker.internal:${port}` });
+    if(usePrepared)writeRunLease(root,run.agent_id,run.id);else prepareProfile(root, snapshot, preparedModel, preparedSecrets, agentToken(run.agent_id, snapshot.computer.machineId), run.id, { controlUrl: `http://host.docker.internal:${port}` });
     event(run.id, 'run.phase', { phase: 'profile-ready',prewarmed:usePrepared });
     const gateway = await gatewayFor(run.agent_id, runToolGrants(snapshot), snapshot.computer);
     event(run.id, 'run.phase', { phase: 'gateway-ready' });
     const listener = (value: any) => mapHermesEvent(run, value); gateway.on("event", listener); subscribed = { gateway, listener };
     const history=priorHistory(run);event(run.id,'run.context',{turns:history.length,characters:history.reduce((sum,turn)=>sum+turn.content.length,0)});
-    const session = run.session_id ? { session_id: run.session_id } : await gateway.request("session.create", { cwd: "/workspace/shared", profile: "default", messages: history });
+    const session = run.session_id ? { session_id: run.session_id } : await gateway.request("session.create", { cwd: runCwd(snapshot.computer), profile: "default", messages: history });
     if (cancelledRuns.has(run.id) || store.getRun(run.id)?.state === "cancelled") return;
     const sessionId = String(session?.session_id || session?.id || run.session_id || "");
     if (!sessionId) throw new Error("Hermes did not return a session ID.");
@@ -854,20 +948,24 @@ async function stopRunTree(runId: string) {
   } finally { stoppingSweeps--; void pump(); }
 }
 
-async function waitForRun(id: string, timeoutMs = 30 * 60 * 1000) {
+// Hermes gives an MCP tool call 300 seconds by default. A handoff that held the call open longer
+// failed for the delegating agent while the work went on, so the agent retried and the job ran
+// twice; and two agents waiting on each other's queued handoffs held their slots until timeout.
+// A handoff waits at most this long, then returns its run ID to wait on again.
+const HANDOFF_WAIT_MS = Number(process.env.OPEN_HARNESS_HANDOFF_WAIT_MS) || 240_000;
+async function settleWithin(id: string, timeoutMs: number) {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  for (;;) {
     const run = store.getRun(id); if (!run) throw new Error("Delegated run disappeared.");
-    if (["completed", "failed", "interrupted", "cancelled"].includes(run.state)) return run;
+    if (terminalStates.has(run.state) || Date.now() >= deadline) return run;
     await new Promise(resolve => setTimeout(resolve, 500));
   }
-  throw new Error("Delegated run is still active after 30 minutes. Its run ID remains available in Open Harness.");
 }
 
 const PROVIDER_STATUS: Record<number, string> = { 401: 'The API key was rejected.', 403: 'The provider denied access.', 404: 'The model server address was not found.', 429: 'The provider rate limit was reached. Try again shortly.' };
 
 function runReplyOnly(id:string){return Boolean((store.db.prepare('SELECT reply_only FROM run_reply_modes WHERE run_id=?').get(id) as {reply_only:number}|undefined)?.reply_only);}
-function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number; deferStart?: boolean; purpose?: string; sourceRunId?: string;replyOnly?:boolean }) {
+function createRun(input: { agentId: string; conversationId?: string; prompt: string; parentRunId?: string; depth?: number; deferStart?: boolean; purpose?: string; sourceRunId?: string;replyOnly?:boolean; projectId?: string | null }) {
   if (!input.agentId || !input.prompt?.trim()) throw new Error("agentId and prompt are required.");
   if(input.sourceRunId&&['repair','continuation'].includes(input.purpose||''))assertRecoveryReviewed(input.sourceRunId);
   const profile = profiles.get(input.agentId);
@@ -881,9 +979,14 @@ function createRun(input: { agentId: string; conversationId?: string; prompt: st
     while (cursor.parent_run_id) { const previous = store.getRun(cursor.parent_run_id); if (!previous) break; ancestors.add(previous.agent_id); cursor = previous; }
     if (ancestors.has(input.agentId)) throw new Error("Cyclic agent handoffs are not allowed.");
   }
+  // A handoff stays inside its parent's project; the child still gets only what that project grants it.
+  let projectId = input.projectId ? String(input.projectId) : null;
+  if (!projectId && parent?.project_id) { try { tasks.getBoard(parent.project_id); projectId = parent.project_id; } catch { projectId = null; } }
+  // Inherited context must pass the same archive check as a project chosen explicitly.
+  if (projectId) { let archived: boolean; try { archived = tasks.getBoard(projectId).archived; } catch { throw new TaskError("That project no longer exists. Choose another project or none.", 404); } if (archived) throw new TaskError("That project is archived. Choose another project or none."); }
   if (store.queued(maxTaskQueue + 1).length >= maxTaskQueue) throw new TaskError(`The task queue is full (${maxTaskQueue}). Try again when work completes.`, 429);
   const stamp = new Date().toISOString();
-  const run: RunRow = { id: crypto.randomUUID(), agent_id: input.agentId, conversation_id: input.conversationId || crypto.randomUUID(), prompt: input.prompt.trim(), state: "queued", session_id: null, parent_run_id: input.parentRunId || null, depth, created_at: stamp, updated_at: stamp, result: null, error: null };
+  const run: RunRow = { id: crypto.randomUUID(), agent_id: input.agentId, conversation_id: input.conversationId || crypto.randomUUID(), prompt: input.prompt.trim(), state: "queued", session_id: null, parent_run_id: input.parentRunId || null, depth, created_at: stamp, updated_at: stamp, result: null, error: null, project_id: projectId };
   store.createRun(run);if(input.replyOnly||(input.sourceRunId&&runReplyOnly(input.sourceRunId)))store.db.prepare('INSERT INTO run_reply_modes VALUES(?,1)').run(run.id); workspaceIdentity.ownRun(run.id); store.db.prepare('INSERT INTO run_contexts VALUES(?,?,?)').run(run.id, (parent && (store.db.prepare('SELECT purpose FROM run_contexts WHERE run_id=?').get(parent.id) as { purpose: string } | undefined)?.purpose === 'responsibility') ? 'responsibility' : input.purpose || (input.agentId === PRIMARY_ASSISTANT_ID ? 'interactive' : 'work'), input.sourceRunId || null); event(run.id, "run.queued", { position: store.listRuns().filter(item => item.state === "queued").length }); if (!input.deferStart) void pump(); return run;
 }
 function runResponse(run: RunRow) { const profile = profiles.runSnapshot(run.id) || profiles.get(run.agent_id); const machineId = profile?.computer.machineId || null; let machineConnection: string | null = null; if (machineId) { try { machineConnection = machines.get(machineId).status; } catch { machineConnection = 'revoked'; } } return { ...run, reply_only:runReplyOnly(run.id), machine_id: machineId, machine_connection: machineConnection, pendingApprovals: store.pendingApprovals(run.id), pendingInputs: store.pendingInputs(run.id) }; }
@@ -924,10 +1027,66 @@ function validTaskMutation(input: Record<string, unknown>, current?: ReturnType<
   return { ...input, ...teams.validateAssignment(teamId, ownerAgentId, collaboratorAgentIds, allowLegacy) };
 }
 
+// Agents learn their mounted folders from their instructions; host paths and other agents' access stay with the operator.
+function agentBoard(board: ReturnType<TaskStore["getBoard"]>) { return { ...board, folders: undefined }; }
+
 function agentMayTouchTask(agentId: string, assignOthers: boolean, task: ReturnType<TaskStore["getTask"]>) {
   if (task.teamId && !teams.isMember(task.teamId, agentId)) return false;
   return task.ownerAgentId === null || task.ownerAgentId === agentId || task.collaboratorAgentIds.includes(agentId) || assignOthers;
 }
+
+// Agent tool helpers. A refusal tells the model exactly what to send or whom to ask: models
+// retry blindly on a bare "invalid request", and every retry costs the user a model call.
+const permissionNeeded = (label: string) => `This needs the "${label}" permission. Ask the user to turn it on in this agent's settings under Tools → Workspace access; it applies from the agent's next run.`;
+function internalRefusal(agentId: string | null, tool: string, runId: string) {
+  const run = runId ? store.getRun(runId) : undefined;
+  if (!run || run.agent_id !== agentId || !activeStates.has(run.state)) return { status: 409, error: 'This run is no longer active, so it cannot use Open Harness tools.' };
+  const snapshot = profiles.runSnapshot(run.id);
+  if (snapshot && runToolGrants(snapshot).includes(tool) && !terminalPermissions.pending(run.agent_id)) return null;
+  const label = workspacePermissionLabel(tool);
+  return { status: 403, error: agentId && profiles.get(agentId)?.allowedTools.includes(tool) ? `"${label}" was turned on after this run started. It takes effect from this agent's next run.` : permissionNeeded(label) };
+}
+const missingFields = (input: Record<string, unknown>, fields: string[]) => fields.filter(field => input[field] === undefined || input[field] === null || String(input[field]).trim() === '');
+function refuseMissing(res: ServerResponse, fields: string[], extra: Record<string, unknown> = {}) {
+  return json(res, 400, { error: `Missing ${fields.join(', ')}. Send ${fields.length > 1 ? 'them' : 'it'} at the top level, next to action.`, missing: fields, ...extra });
+}
+const clip = (value: string | null, limit: number) => value && value.length > limit ? `${value.slice(0, limit)}… [truncated]` : value;
+// Prompts and results only: events carry raw tool input and output, approvals and secrets.
+function agentRun(run: RunRow, limit = 20_000) {
+  return { id: run.id, agentId: run.agent_id, state: run.state, prompt: clip(run.prompt, 2_000), result: clip(run.result, limit), error: run.error, parentRunId: run.parent_run_id, depth: run.depth, conversationId: run.conversation_id, projectId: run.project_id || null, waitingFor: run.state === 'waiting_approval' ? 'approval' : run.state === 'waiting_input' ? 'input' : null, createdAt: run.created_at, updatedAt: run.updated_at };
+}
+const agentRoutine = (row: any) => ({ id: row.id, name: row.name, prompt: row.prompt, intervalMinutes: Number(row.interval_minutes), timezone: row.timezone, enabled: Boolean(row.enabled), nextRunAt: row.next_run_at, lastRunAt: row.last_run_at || null });
+
+// One implementation behind the dashboard's routine routes and an agent's routines tool.
+const routineRow = (id: string) => store.db.prepare("SELECT * FROM schedules WHERE id=?").get(id) as any;
+function routineUpdate(routine: any, input: Record<string, any>): [number, unknown] {
+  const stamp = new Date().toISOString();
+  const name = input.name === undefined ? routine.name : String(input.name).trim().slice(0, 200);
+  const prompt = input.prompt === undefined ? routine.prompt : String(input.prompt).trim().slice(0, 20_000);
+  if (!name || !prompt) return [400, { error: "A routine needs a name and a task." }];
+  const agentId = input.agentId === undefined ? routine.agent_id : String(input.agentId);
+  if (!profiles.list().some(profile => profile.id === agentId)) return [400, { error: "That agent no longer exists." }];
+  // Clamped like the hosted route: an interval of 0 or a negative number would
+  // otherwise land as "every minute, forever".
+  const minutes = input.intervalMinutes === undefined
+    ? Number(routine.interval_minutes)
+    : Math.max(1, Math.min(525_600, Math.round(Number(input.intervalMinutes))));
+  if (!Number.isFinite(minutes)) return [400, { error: "Enter how often this should run, in minutes." }];
+  // Re-base the next run so a changed interval takes effect now rather than waiting out the old
+  // one. A rename or prompt edit keeps the schedule, or it would skip the run that is due.
+  const next = minutes === Number(routine.interval_minutes) ? routine.next_run_at : new Date(Date.now() + minutes * 60_000).toISOString();
+  store.db.prepare("UPDATE schedules SET agent_id=?,name=?,prompt=?,interval_minutes=?,next_run_at=?,updated_at=? WHERE id=?")
+    .run(agentId, name, prompt, minutes, next, stamp, routine.id);
+  return [200, { ...routine, agent_id: agentId, name, prompt, interval_minutes: minutes, next_run_at: next, updated_at: stamp }];
+}
+function routineDelete(routine: any): [number, unknown] {
+  store.db.prepare("DELETE FROM schedule_runs WHERE schedule_id=?").run(routine.id);
+  store.db.prepare("DELETE FROM schedules WHERE id=?").run(routine.id);
+  return [200, { ok: true }];
+}
+function routineRun(routine: any): [number, unknown] { const stamp = new Date().toISOString(), run = createRun({ agentId: routine.agent_id, prompt: routine.prompt }); store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, stamp); store.db.prepare("UPDATE schedules SET last_run_at=?,updated_at=? WHERE id=?").run(stamp, stamp, routine.id); return [202, run]; }
+function routineSetEnabled(routine: any, enabled: boolean): [number, unknown] { if (enabled) store.db.prepare('INSERT INTO schedule_actors VALUES(?,?) ON CONFLICT(schedule_id) DO UPDATE SET actor_id=excluded.actor_id').run(routine.id, workspaceIdentity.actor().id); store.db.prepare("UPDATE schedules SET enabled=?,updated_at=? WHERE id=?").run(enabled ? 1 : 0, new Date().toISOString(), routine.id); return [200, { enabled }]; }
+const routineHistory = (routine: any): [number, unknown] => [200, { history: store.db.prepare("SELECT schedule_runs.*,runs.state,runs.result,runs.error,runs.updated_at FROM schedule_runs JOIN runs ON runs.id=schedule_runs.run_id WHERE schedule_id=? ORDER BY scheduled_for DESC LIMIT 100").all(routine.id) }];
 
 async function bootstrapStatus() {
   return { token: secrets.token, mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: APP_VERSION,features:['reply-only','runtime-preparation'], hermes: { release: HERMES_RELEASE, commit: HERMES_COMMIT } };
@@ -948,6 +1107,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     probingAgents.add(id);takePreparedRuntime(id); probingAgent = id;
   }
   try {
+    const callbackMatch = url.pathname.match(/^\/v1\/credentials\/([^/]+)\/oauth\/callback$/);
+    if (req.method === 'GET' && callbackMatch) {
+      const ref = decodeURIComponent(callbackMatch[1]);
+      try { await credentialOAuth.callback(ref, url.searchParams, oauthCallbackUrl(ref)); }
+      catch (error) { res.setHeader('Referrer-Policy', 'no-referrer'); return raw(res, 400, 'text/plain; charset=utf-8', error instanceof CredentialError ? error.message : 'Sign-in failed. Connect again.'); }
+      res.setHeader('Referrer-Policy', 'no-referrer'); res.setHeader('Content-Security-Policy', "default-src 'none'");
+      return raw(res, 200, 'text/plain; charset=utf-8', 'Credential connected. You can close this window and return to Open Harness.');
+    }
     if (req.method === 'GET' && url.pathname === '/v1/ready') return json(res, 200, { ok: true });
     if (req.method === 'GET' && url.pathname === '/auth/callback') {
       await codex.complete(url);
@@ -963,7 +1130,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       return raw(res, 200, 'text/html; charset=utf-8', Buffer.from('<!doctype html><meta name="referrer" content="no-referrer"><title>Account connected</title><p>Your account is connected. Return to Open Harness and refresh Connections.</p>'));
     }
     if (req.method === 'GET' && url.pathname === '/v1/bootstrap') {
-      if (process.env.OPEN_HARNESS_REQUIRE_BROWSER_PAIRING === '1') {
+      // A proxy's upstream connection is loopback even when its client is remote. Its marker
+      // only tightens authentication; callers cannot use a forged marker to gain authority.
+      if (process.env.OPEN_HARNESS_REQUIRE_BROWSER_PAIRING === '1' || req.headers['x-open-harness-proxy'] === '1') {
         if (!authenticated(req)) return json(res, 401, { error: BROWSER_PAIRING_MESSAGE, pairingRequired: true });
       } else {
         const address = req.socket.remoteAddress || '';
@@ -973,7 +1142,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       return json(res, 200, await bootstrapStatus());
     }
     if (req.method === 'POST' && url.pathname === '/v1/browser/pair') {
-      if (process.env.OPEN_HARNESS_REQUIRE_BROWSER_PAIRING !== '1') return json(res, 404, { error: 'Browser pairing is not enabled.' });
+      if (process.env.OPEN_HARNESS_REQUIRE_BROWSER_PAIRING !== '1' && req.headers['x-open-harness-proxy'] !== '1') return json(res, 404, { error: 'Browser pairing is not enabled.' });
       const input = await body(req);
       if (!consumeBrowserPairing(root, input?.code)) return json(res, 401, { error: BROWSER_PAIRING_INVALID, pairingRequired: true });
       return json(res, 200, await bootstrapStatus());
@@ -1286,10 +1455,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     if (req.method === 'GET' && ['/v1/onboarding/status', '/v1/readiness'].includes(url.pathname)) return json(res, 200, { ...await onboardingStatusAsync(secrets.names(), root), taskVerified: setupJobs.verified(), setupJobs: setupJobs.list() });
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action, secrets.names())); }
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/model-test') {
-      const input = await body(req), model = validateModel(input.model);
-      if (input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > 10_000)) throw new ProfileError('Invalid API key.');
+      const input = await body(req), model = validateModel(input.model); checkModelCredential(model);
       const revision = Number(input.revision ?? profiles.defaults().revision);
       if (input.save && revision !== profiles.defaults().revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409);
+      if (input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > 10_000)) throw new ProfileError('Invalid API key.');
       const key = input.apiKey === undefined || input.apiKey === '' ? secrets.environment()[model.credentialRef] || '' : input.apiKey;
       const machineId = String(input.machineId || 'local');
       let tested: Awaited<ReturnType<typeof testModelConnection>>;
@@ -1322,6 +1491,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       const input = req.method === 'POST' ? await body(req) : { provider: url.searchParams.get('provider'), credentialRef: url.searchParams.get('credentialRef'), baseUrl: url.searchParams.get('baseUrl'), value: undefined };
       const choice = validateModel({ provider: input.provider || 'custom', model: 'catalog', credentialRef: input.credentialRef || '', baseUrl: input.baseUrl || '' });
       const provider = choice.provider, ref = choice.credentialRef;
+      checkModelCredential(choice);
       if (provider === CODEX_PROVIDER) return json(res,200,ref ? await codex.models(ref,workspaceIdentity.actor().id) : {models:[],error:'Sign in with ChatGPT to load models for your account.'});
       if (input.value !== undefined && (typeof input.value !== 'string' || input.value.length > 10000)) throw new CredentialError('Invalid credential value.');
       const baseUrl = (choice.baseUrl || PROVIDER_ENDPOINTS[provider] || '').replace(/\/$/, '');
@@ -1356,7 +1526,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
           reserveProbe(profile.id);
           ensureProfileDirs(profile.id);
           const check = { action: 'computer', desktop: profile.computer.desktop };
-          const result = machineId === 'local' ? await runtimeProbe(await (profile.computer.desktop==='virtual'?ensureDesktopContainerAsync(profile.id,root,profile.computer):ensureContainerAsync(profile.id,root,profile.computer)), check) : await runnerProbe(profile, 'probe-runtime', check);
+          const result = machineId === 'local' ? await runtimeProbe(await (profile.computer.desktop==='virtual'?ensureDesktopContainerAsync(profile.id,root,withFolders(profile).computer):ensureContainerAsync(profile.id,root,withFolders(profile).computer)), check) : await runnerProbe(profile, 'probe-runtime', check);
           return json(res, 200, { ...checked, ok: Boolean(result.ok), message: String(result.message || checked.message), machine: checked.machine });
         } catch (error) { return json(res, 200, { ...checked, ok: false, message: error instanceof Error ? error.message : 'Computer access check failed.' }); }
       }
@@ -1380,6 +1550,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       return json(res, 200, { synced: input.agents?.length || 0, agents: profiles.list().map(p => profileAgent(p)) });
     }
     if (req.method === "GET" && url.pathname === "/v1/agents") return json(res, 200, { agents: profiles.list().map(p => profileAgent(p)) });
+    if (url.pathname === "/v1/folders") {
+      if (req.method === "GET") return json(res, 200, workspaceFolders.get());
+      if (req.method === "PUT") return json(res, 200, workspaceFolders.save(await body(req)));
+    }
     if (url.pathname === "/v1/teams") {
       if (req.method === "GET") return json(res, 200, { teams: teams.list(url.searchParams.get("includeRetired") === "1") });
       if (req.method === "POST") return json(res, 201, teams.create(await body(req)));
@@ -1398,11 +1572,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     }
     if (req.method === "POST" && url.pathname === "/v1/workspace/model/import") {
       const input = await body(req);
-      return json(res, 200, profiles.defaults().revision ? profiles.defaults() : profiles.setDefaults(input.model, 0));
+      checkModelCredential(validateModel(input.model)); return json(res, 200, profiles.defaults().revision ? profiles.defaults() : profiles.setDefaults(input.model, 0));
     }
     if (url.pathname === "/v1/workspace/model") {
       if (req.method === "GET") return json(res, 200, profiles.defaults());
-      if (req.method === "PUT") { const input = await body(req); return json(res, 200, profiles.setDefaults(input.model, input.revision)); }
+      if (req.method === "PUT") { const input = await body(req); checkModelCredential(validateModel(input.model)); return json(res, 200, profiles.setDefaults(input.model, input.revision)); }
     }
     const profileMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(profile|credential|tools|models|connection-check|connector-check)$/);
     if (profileMatch) {
@@ -1411,10 +1585,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       if (action === 'profile' && req.method === 'PUT') {
         const input = await body(req); if (input.id !== id) throw new ProfileError('Profile ID does not match the selected agent.');
         if (probingAgents.has(id)) throw new ProfileError('This agent is checking its settings or context. Wait for it to finish before saving.', 409);
-        const current = profiles.get(id), desired = validateProfile(input);terminalPermissions.requireConsent(current,desired,input.terminalConsent);if(terminalPermissions.pending(id))throw new ProfileError('Terminal revocation is still waiting for computer cleanup. Your draft is preserved.',409); if (machines.transferring(id)) throw new MachineError('This agent is already transferring. Wait for it to finish before editing its computer.', 409); machines.canAssign(desired.computer.machineId, id);
+        const current = profiles.get(id), desired = validateProfile(input); checkCredentialSelections(desired);terminalPermissions.requireConsent(current,desired,input.terminalConsent);if(terminalPermissions.pending(id))throw new ProfileError('Terminal revocation is still waiting for computer cleanup. Your draft is preserved.',409); if (machines.transferring(id)) throw new MachineError('This agent is already transferring. Wait for it to finish before editing its computer.', 409); machines.canAssign(desired.computer.machineId, id);
         if (desktop.blocksAgent(id)) throw new ProfileError('Release human desktop control before saving this agent profile. Your draft is still here.', 409);
         if (current?.computer.browserSessionTeamId !== desired.computer.browserSessionTeamId && (store.agentBusy(id) || executingAgents.has(id) || (current && !desktop.canRun(current)) || !desktop.canRun(desired))) throw new ProfileError('Finish active work before changing shared browser access. Your draft is still here.', 409);
-        if (process.env.OPEN_HARNESS_DEPLOYMENT === 'compose' && desired.computer.machineId === 'local' && desired.computer.access === 'folders') for (const folder of desired.computer.folders) sharedFolderSource(folder.path, folder.mode);
+        if (desired.computer.machineId === 'local' && desired.computer.access === 'folders') for (const folder of desired.computer.folders) { if (process.env.OPEN_HARNESS_DEPLOYMENT === 'compose') sharedFolderSource(folder.path, folder.mode, root); else assertGrantAllowed(folder.path, root); }
         const structure=(computer:ComputerConfig)=>JSON.stringify([computer.access,computer.desktop,computer.browserSessionTeamId||'',computer.folders]);
         if(current&&current.computer.machineId===desired.computer.machineId&&structure(current.computer)!==structure(desired.computer)){
           if(!desktop.canRun(desired))throw new ProfileError('Finish shared browser work before changing this computer. Your draft is preserved.',409);
@@ -1445,6 +1619,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         const ref = String(input.ref || '');
         if (ref && !credentials.has(ref)) throw new CredentialError('That credential no longer exists.', 404);
         const current = profiles.effective(profile);
+        if (ref && !modelCredential(credentials.row(ref))) throw new CredentialError('Select a model API credential.');
         const selected = ref ? modelForCredential(current, credentialRecord(credentials.row(ref))) : { ...current, credentialRef: '' };
         const model = validateModel({ ...selected, ...(input.provider !== undefined ? { provider: input.provider } : {}), ...(input.model !== undefined ? { model: input.model } : {}), ...(input.baseUrl !== undefined ? { baseUrl: input.baseUrl } : {}) });
         return json(res, 200, profileResponse(profiles.save({ ...profile, model: { ...model, inherit: false } })));
@@ -1453,7 +1628,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       if (!['profile', 'credential'].includes(action)) reserveProbe(id);
       if (action === 'tools' && req.method === 'GET') {
         ensureProfileDirs(id);
-        const catalog = profile.computer.machineId === 'local' ? await discoverTools(id, root, profile) : await runnerProbe(profile, 'probe-tools') as ToolCatalog;
+        const catalog = profile.computer.machineId === 'local' ? await discoverTools(id, root, withFolders(profile)) : await runnerProbe(profile, 'probe-tools') as ToolCatalog;
         if (catalog.source === 'unavailable') {
           const cached = store.db.prepare('SELECT json FROM tool_catalogs WHERE agent_id=?').get(id) as { json: string } | undefined;
           if (cached) { catalog.tools = (JSON.parse(cached.json) as ToolCatalog).tools.map(t => ({ ...t, available: false, reason: catalog.error })); catalog.source = 'cached'; }
@@ -1471,12 +1646,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       if (action === 'models' && req.method === 'GET') {
         try {
           if (profile.computer.machineId !== 'local') return json(res, 200, await runnerProbe(profile, 'probe-models'));
-          if (!gateways.has(id)) { ensureProfileDirs(id); prepareProfile(root, profile, profiles.effective(profile), secrets, agentToken(id), 'catalog'); }
-          return json(res, 200, await discoverModels(await gatewayFor(id, [], profile.computer)));
+          if (!gateways.has(id)) { ensureProfileDirs(id); await readyCredentials(profile); prepareProfile(root, profile, profiles.effective(profile), { environment: () => selectedSecrets(profile, profiles.effective(profile)) }, '', 'catalog'); }
+          return json(res, 200, await discoverModels(await gatewayFor(id, [], withFolders(profile).computer)));
         } catch { return json(res, 200, { models: [], error: 'Model catalog unavailable. Start the Hermes runtime or enter a custom model ID.' }); }
       }
       if (action === 'connection-check' && req.method === 'POST') {
-        const input = await body(req), model = validateModel(input.model);
+        const input = await body(req), model = validateModel(input.model); checkModelCredential(model);
         const key = secrets.environment()[model.credentialRef] || '';
         if (model.credentialRef && !key && profile.computer.machineId === 'local') return json(res, 200, { ok: false, message: `Add the ${model.credentialRef} credential first.` });
         const tested = model.provider === CODEX_PROVIDER ? await codex.test(model.credentialRef,workspaceIdentity.actor().id,model.model) : profile.computer.machineId === 'local' ? await testModelConnection(model, key)
@@ -1490,8 +1665,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         const tested = validateProfile({ ...profile, connectors: [candidate] }).connectors[0];
         if (tested.secretRef && !secrets.has(tested.secretRef)) return json(res, 200, { status: 'missing_credentials', error: `Add secret ${tested.secretRef}.`, tools: [] });
         try {
+          await readyCredentials({ ...profile, connectors: [{ ...tested, enabled: true }] });
+          const connectorEnv = connectorEnvironment(tested);
           ensureProfileDirs(id);
-          const result = process.env.OPEN_HARNESS_MOCK === '1' ? { status: 'connected', tools: [{ name: 'lookup', description: 'Mock connected tool' }] } : profile.computer.machineId === 'local' ? await runtimeProbe(await ensureContainerAsync(id, root, profile.computer), { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} }) : await runnerProbe(profile, 'probe-runtime', { action: 'mcp', command: tested.command, args: tested.args, env: tested.secretRef ? { [tested.secretRef]: secrets.environment()[tested.secretRef] } : {} });
+          const result = process.env.OPEN_HARNESS_MOCK === '1' ? { status: 'connected', tools: [{ name: 'lookup', description: 'Mock connected tool' }] } : profile.computer.machineId === 'local' ? await runtimeProbe(await ensureContainerAsync(id, root, withFolders(profile).computer), { action: 'mcp', command: tested.command, args: tested.args, env: connectorEnv }) : await runnerProbe(profile, 'probe-runtime', { action: 'mcp', command: tested.command, args: tested.args, env: connectorEnv });
           const tools = (result.tools as Array<{ name: string; description: string }>).map(t => ({ id: mcpToolId(tested.name, t.name), name: t.name, description: t.description, group: 'mcp', available: true }));
           const prior = store.db.prepare('SELECT json FROM tool_catalogs WHERE agent_id=?').get(id) as { json: string } | undefined;
           const catalog: ToolCatalog = prior ? JSON.parse(prior.json) : { source: 'runtime', tools: [] };
@@ -1580,7 +1757,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       if (action === "approve" && req.method === "POST") { const input = await body(req); return json(res, 200, tasks.approve(taskId, input.revision === undefined ? undefined : Number(input.revision))); }
       if (action === "runs" && req.method === "GET") return json(res, 200, { runs: tasks.getTask(taskId).runs });
     }
-    if (req.method === "POST" && url.pathname === "/v1/runs") {const input=object(await body(req));if(input.replyOnly!==undefined&&typeof input.replyOnly!=='boolean')throw new ProductError('Choose whether this message can use tools.');if(input.parentRunId)throw new ProductError('Delegate through the named-agent handoff so team, depth and concurrency rules can be checked.',409);const requestId=input.requestId?text(input.requestId,'Run request identity',200):crypto.randomUUID(),actorId=workspaceIdentity.actor().id,request={agentId:text(input.agentId,'Agent',100),prompt:text(input.prompt,'Task',120000),...(input.conversationId?{conversationId:text(input.conversationId,'Conversation',200)}:{}),...(input.replyOnly===true?{replyOnly:true}:{})},hash=createHmac('sha256',secrets.token).update(JSON.stringify(request)).digest('hex'),prior=store.db.prepare('SELECT prompt_hash,run_id FROM run_submissions WHERE actor_id=? AND request_id=?').get(actorId,requestId) as {prompt_hash:string;run_id:string}|undefined;if(prior){if(prior.prompt_hash!==hash)throw new ProductError('This run request identity belongs to a different task. Inspect the original task before submitting another.',409);return json(res,202,runResponse(store.getRun(prior.run_id)!));}store.db.exec('SAVEPOINT run_submission');let run:RunRow;try{run=createRun({...request,deferStart:true});store.db.prepare('INSERT INTO run_submissions VALUES(?,?,?,?)').run(actorId,requestId,hash,run.id);store.db.exec('RELEASE run_submission');}catch(error){store.db.exec('ROLLBACK TO run_submission; RELEASE run_submission');throw error;}res.once('finish',()=>event(run.id,'run.acknowledged',{latencyMs:Math.round(performance.now()-requestStarted)}));queueMicrotask(()=>void pump());return json(res,202,runResponse(run)); }
+    if (req.method === "POST" && url.pathname === "/v1/runs") {const input=object(await body(req));if(input.replyOnly!==undefined&&typeof input.replyOnly!=='boolean')throw new ProductError('Choose whether this message can use tools.');if(input.parentRunId)throw new ProductError('Delegate through the named-agent handoff so team, depth and concurrency rules can be checked.',409);const requestId=input.requestId?text(input.requestId,'Run request identity',200):crypto.randomUUID(),actorId=workspaceIdentity.actor().id,request={agentId:text(input.agentId,'Agent',100),prompt:text(input.prompt,'Task',120000),...(input.conversationId?{conversationId:text(input.conversationId,'Conversation',200)}:{}),...(input.replyOnly===true?{replyOnly:true}:{}),...(input.projectId?{projectId:text(input.projectId,'Project',100)}:{})},hash=createHmac('sha256',secrets.token).update(JSON.stringify(request)).digest('hex'),prior=store.db.prepare('SELECT prompt_hash,run_id FROM run_submissions WHERE actor_id=? AND request_id=?').get(actorId,requestId) as {prompt_hash:string;run_id:string}|undefined;if(prior){if(prior.prompt_hash!==hash)throw new ProductError('This run request identity belongs to a different task. Inspect the original task before submitting another.',409);return json(res,202,runResponse(store.getRun(prior.run_id)!));}store.db.exec('SAVEPOINT run_submission');let run:RunRow;try{run=createRun({...request,deferStart:true});store.db.prepare('INSERT INTO run_submissions VALUES(?,?,?,?)').run(actorId,requestId,hash,run.id);store.db.exec('RELEASE run_submission');}catch(error){store.db.exec('ROLLBACK TO run_submission; RELEASE run_submission');throw error;}res.once('finish',()=>event(run.id,'run.acknowledged',{latencyMs:Math.round(performance.now()-requestStarted)}));queueMicrotask(()=>void pump());return json(res,202,runResponse(run)); }
     if (req.method === "GET" && url.pathname === "/v1/runs") return json(res, 200, { runs: store.listRuns().map(runResponse) });
     if (req.method === 'GET' && url.pathname === '/v1/conversations') {
       const agentId = url.searchParams.get('agentId');
@@ -1607,6 +1784,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       if (action === "steer" && req.method === "POST") { const input = await body(req), live = active.get(run.id), remote = remoteActive.get(run.id); if (!live && !remote) return json(res, 409, { error: "Run is not active." }); if (live) await live.gateway.request("session.steer", { session_id: live.sessionId, text: String(input.text || "") }); else machines.enqueue(remote!.machineId, run.agent_id, 'steer', { runId: run.id, commandId: remote!.commandId, text: String(input.text || '') }); event(run.id, "run.steered", { text: input.text }); return json(res, 200, { ok: true }); }
       if (action === "stop" && req.method === "POST") { const result = await stopRunTree(run.id); return json(res, 200, { ok: true, stopped: result.stopped, ...(result.failures.length ? { failures: result.failures } : {}) }); }
       if (action === 'approval' && req.method === 'POST') {
+        // Only a person answers approvals. A model deciding them approved `chmod 777` on a host mount
+        // (81a41a8), so decision-model output stays advisory and is never consulted here.
         const input = await body(req), approval = store.approval(String(input.approvalId));
         if (!approval || approval.run_id !== run.id) return json(res, 404, { error: 'Approval not found.' });
         if (approval.state !== 'pending' || !activeStates.has(run.state)) return json(res, 409, { error: 'This approval is no longer pending.' });
@@ -1638,11 +1817,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         return json(res, 200, { ok: true, pending: Boolean(remote) });
       }
       if (action === 'input' && req.method === 'POST') {
-        const input = await body(req), pending = store.db.prepare('SELECT * FROM run_inputs WHERE id=? AND run_id=?').get(String(input.inputId), run.id) as { id: string; gateway_request_id: string; type: string; state: string } | undefined;
+        const input = await body(req), pending = store.db.prepare('SELECT * FROM run_inputs WHERE id=? AND run_id=?').get(String(input.inputId), run.id) as { id: string; gateway_request_id: string; type: string; state: string; payload_json: string } | undefined;
         if (!pending) return json(res, 404, { error: 'Input request not found.' });
         if (pending.state !== 'pending' || !activeStates.has(run.state)) return json(res, 409, { error: 'This input is no longer pending.' });
-        const value = input.value;
-        if ((typeof value !== 'string' && !(pending.type === 'clarify' && Array.isArray(value) && value.every(item => typeof item === 'string'))) || JSON.stringify(value).length > 20_000) throw new ProfileError('Enter a valid response.');
+        let asked: Record<string, unknown> | null = null;
+        try { asked = JSON.parse(pending.payload_json); } catch { /* An unreadable payload is answered as a single question. */ }
+        const value = pending.type === 'clarify' ? clarifyReply(asked, input.value) : typeof input.value === 'string' ? input.value : null;
+        if (value === null || JSON.stringify(value).length > 20_000) throw new ProfileError('Enter a valid response.');
         const live = active.get(run.id), remote = remoteActive.get(run.id);
         if (!live && !remote) return json(res, 409, { error: 'Run is not active.' });
         const claimed = store.db.prepare("UPDATE run_inputs SET state='submitting' WHERE id=? AND run_id=? AND state='pending'").run(pending.id, run.id);
@@ -1677,6 +1858,33 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         return json(res, 200, { ok: true, pending: Boolean(remote) });
       }
     }
+    if (url.pathname === '/v1/credential-types' && req.method === 'GET') return json(res, 200, { types: CREDENTIAL_TYPES });
+    const credentialAction = url.pathname.match(/^\/v1\/credentials\/([^/]+)\/(test|connect|disconnect)$/);
+    if (credentialAction && req.method === 'POST') {
+      const ref = decodeURIComponent(credentialAction[1]), action = credentialAction[2], row = credentials.row(ref);
+      if (action === 'disconnect') { credentialOAuth.disconnect(ref); return json(res, 200, credentialRecord(credentials.row(ref))); }
+      if (action === 'connect') return json(res, 200, await credentialOAuth.connect(ref, createHmac('sha256', secrets.token).update(String(req.headers.authorization || '')).digest('hex'), JSON.parse(row.config).grantType === 'client_credentials' ? '' : oauthCallbackUrl(ref)));
+      const config = JSON.parse(row.config);
+      try {
+        if (row.type === 'model-api-key') {
+          const endpoint = row.base_url || PROVIDER_ENDPOINTS[row.provider];
+          if (!endpoint) throw new CredentialError('Choose a provider or model endpoint to test.');
+          const checked = process.env.OPEN_HARNESS_MOCK === '1' ? { ok: true } : await providerModelList(endpoint, credentials.fields(ref).value, row.provider);
+          if (!checked.ok) throw new CredentialError('The model provider refused this credential.');
+        } else {
+          if (!config.testUrl) throw new CredentialError('Set a connection test URL before testing this credential.');
+          const result = await credentialApi(credentials, credentialOAuth, { credentialRef: ref, allowedOrigins: [new URL(config.testUrl).origin], allowedMethods: ['GET'], allowPrivateNetwork: config.allowPrivateNetwork === 'true' }, { credentialRef: ref, url: config.testUrl });
+          if (result.status >= 400) throw new CredentialError(`Connection test returned HTTP ${result.status}.`);
+        }
+        credentials.setStatus(ref, 'connected'); return json(res, 200, { ok: true, message: 'Connection succeeded.' });
+      } catch (error) { if (credentials.row(ref).connection_status !== 'needs-reconnection') credentials.setStatus(ref, 'failed'); return json(res, 200, { ok: false, message: error instanceof CredentialError ? error.message : 'Could not test the connection.' }); }
+    }
+    if (url.pathname === '/v1/decisions/settings') {
+      if (req.method === 'GET') return json(res, 200, decisions.status());
+      if (req.method === 'PUT') { const input = await body(req); return json(res, 200, decisions.saveSettings(input.settings, Number(input.revision))); }
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/decisions') return json(res, 200, { decisions: decisions.list(Number(url.searchParams.get('limit') || 50)) });
+    if (req.method === 'POST' && url.pathname === '/v1/decide') return json(res, 200, await decisions.decide({ kind: 'operator' }, await body(req)));
     if (url.pathname === "/v1/credentials") {
       if (req.method === "GET") return json(res, 200, { credentials: credentialRecords(), backend: credentials.backend });
       if (req.method === "POST") { const input = await body(req); return json(res, 201, credentialRecord(credentials.create(input))); }
@@ -1711,47 +1919,55 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     // be paused, never corrected or removed — so every mistake was permanent.
     const routineItem = url.pathname.match(/^\/v1\/routines\/([^/]+)$/);
     if (routineItem) {
-      const routine = store.db.prepare("SELECT * FROM schedules WHERE id=?").get(routineItem[1]) as any;
+      const routine = routineRow(routineItem[1]);
       if (!routine) return json(res, 404, { error: "Routine not found." });
-      if (req.method === "DELETE") {
-        store.db.prepare("DELETE FROM schedule_runs WHERE schedule_id=?").run(routine.id);
-        store.db.prepare("DELETE FROM schedules WHERE id=?").run(routine.id);
-        return json(res, 200, { ok: true });
-      }
-      if (req.method === "PUT") {
-        const input = await body(req), stamp = new Date().toISOString();
-        const name = input.name === undefined ? routine.name : String(input.name).trim().slice(0, 200);
-        const prompt = input.prompt === undefined ? routine.prompt : String(input.prompt).trim().slice(0, 20_000);
-        if (!name || !prompt) return json(res, 400, { error: "A routine needs a name and a task." });
-        const agentId = input.agentId === undefined ? routine.agent_id : String(input.agentId);
-        if (!profiles.list().some(profile => profile.id === agentId)) return json(res, 400, { error: "That agent no longer exists." });
-        // Clamped like the hosted route: an interval of 0 or a negative number would
-        // otherwise land as "every minute, forever".
-        const minutes = input.intervalMinutes === undefined
-          ? Number(routine.interval_minutes)
-          : Math.max(1, Math.min(525_600, Math.round(Number(input.intervalMinutes))));
-        if (!Number.isFinite(minutes)) return json(res, 400, { error: "Enter how often this should run, in minutes." });
-        // Re-base the next run so a shortened interval takes effect now rather than
-        // waiting out the old one.
-        const next = new Date(Date.now() + minutes * 60_000).toISOString();
-        store.db.prepare("UPDATE schedules SET agent_id=?,name=?,prompt=?,interval_minutes=?,next_run_at=?,updated_at=? WHERE id=?")
-          .run(agentId, name, prompt, minutes, next, stamp, routine.id);
-        return json(res, 200, { ...routine, agent_id: agentId, name, prompt, interval_minutes: minutes, next_run_at: next, updated_at: stamp });
-      }
+      if (req.method === "DELETE") return json(res, ...routineDelete(routine));
+      if (req.method === "PUT") return json(res, ...routineUpdate(routine, await body(req)));
     }
     const routineMatch = url.pathname.match(/^\/v1\/routines\/([^/]+)\/(run|toggle|history)$/);
     if (routineMatch) {
-      const routine = store.db.prepare("SELECT * FROM schedules WHERE id=?").get(routineMatch[1]) as any;
+      const routine = routineRow(routineMatch[1]);
       if (!routine) return json(res, 404, { error: "Routine not found." });
-      if (routineMatch[2] === "history" && req.method === "GET") return json(res, 200, { history: store.db.prepare("SELECT schedule_runs.*,runs.state,runs.result,runs.error,runs.updated_at FROM schedule_runs JOIN runs ON runs.id=schedule_runs.run_id WHERE schedule_id=? ORDER BY scheduled_for DESC LIMIT 100").all(routine.id) });
-      if (req.method === "POST" && routineMatch[2] === "run") { const stamp = new Date().toISOString(), run = createRun({ agentId: routine.agent_id, prompt: routine.prompt }); store.db.prepare("INSERT INTO schedule_runs(schedule_id,run_id,scheduled_for) VALUES(?,?,?)").run(routine.id, run.id, stamp); store.db.prepare("UPDATE schedules SET last_run_at=?,updated_at=? WHERE id=?").run(stamp, stamp, routine.id); return json(res, 202, run); }
-      if (req.method === "POST" && routineMatch[2] === "toggle") {if(!routine.enabled)store.db.prepare('INSERT INTO schedule_actors VALUES(?,?) ON CONFLICT(schedule_id) DO UPDATE SET actor_id=excluded.actor_id').run(routine.id,workspaceIdentity.actor().id);store.db.prepare("UPDATE schedules SET enabled=?,updated_at=? WHERE id=?").run(routine.enabled ? 0 : 1, new Date().toISOString(), routine.id); return json(res, 200, { enabled: !routine.enabled }); }
+      if (routineMatch[2] === "history" && req.method === "GET") return json(res, ...routineHistory(routine));
+      if (req.method === "POST" && routineMatch[2] === "run") return json(res, ...routineRun(routine));
+      if (req.method === "POST" && routineMatch[2] === "toggle") return json(res, ...routineSetEnabled(routine, !routine.enabled));
     }
-    if (req.method === "POST" && url.pathname === "/internal/handoff") { const input = await body(req); const parent = store.listRuns().find(run => run.agent_id === internalAgent && ["running","waiting_approval","waiting_input"].includes(run.state)); if (!parent) return json(res, 409, { error: "The delegating agent has no active run." }); if (!internalAllowed(internalAgent, HANDOFF_TOOL, String(req.headers["x-open-harness-run"] || parent.id))) return json(res, 403, { error: "Delegation is disabled for this run." }); const targetId = String(input.agentId || ""); if (!internalAgent || !teams.sharesActiveTeam(internalAgent, targetId)) return json(res, 403, { error: "Named handoffs require both agents to share an active team." }); const child = createRun({ agentId: targetId, prompt: input.prompt, parentRunId: parent.id }); event(parent.id, "handoff.created", { childRunId: child.id, targetAgentId: targetId, prompt: input.prompt }); if(input.detached===true||internalAgent===PRIMARY_ASSISTANT_ID){void waitForRun(child.id).then(result=>event(parent.id,"handoff.completed",{childRunId:child.id,targetAgentId:targetId,state:result.state})).catch(()=>{});return json(res,202,{runId:child.id,state:child.state,detached:true});}const result = await waitForRun(child.id); event(parent.id, "handoff.completed", { childRunId: child.id, targetAgentId: targetId, state: result.state }); return json(res, 200, { runId: result.id, state: result.state, result: result.result, error: result.error }); }
+    if (req.method === 'POST' && url.pathname === '/internal/api-request') {
+      const runId = String(req.headers['x-open-harness-run'] || '');
+      const denied = internalRefusal(internalAgent, API_TOOL, runId); if (denied) return json(res, denied.status, { error: denied.error });
+      const snapshot = profiles.runSnapshot(runId), input = await body(req);
+      const grant = snapshot?.credentialGrants?.find(item => item.credentialRef === input.credentialRef);
+      if (!grant) return json(res, 403, { error: 'This credential is not granted to this run.' });
+      return json(res, 200, await credentialApi(credentials, credentialOAuth, grant, input));
+    }
+    if (req.method === "POST" && url.pathname === "/internal/handoff") {
+      const input = await body(req), header = String(req.headers["x-open-harness-run"] || "");
+      const parent = header ? store.getRun(header) : undefined;
+      if (!parent || parent.agent_id !== internalAgent || !activeStates.has(parent.state)) return json(res, 409, { error: "The delegating agent has no active run." });
+      const denied = internalRefusal(internalAgent, HANDOFF_TOOL, parent.id); if (denied) return json(res, denied.status, { error: denied.error });
+      let child: RunRow | undefined;
+      if (input.runId) {
+        // Keep waiting on an earlier handoff instead of starting the same work twice.
+        child = store.getRun(String(input.runId));
+        if (!child || !child.parent_run_id || !store.inScope(internalAgent!, child.parent_run_id)) return json(res, 404, { error: "No handoff with that run ID was started by this agent." });
+      } else {
+        const lack = missingFields(input, ['agentId', 'prompt']); if (lack.length) return refuseMissing(res, lack, { hint: 'To keep waiting on an earlier handoff, send only its runId.' });
+        const targetId = String(input.agentId);
+        if (!teams.sharesActiveTeam(internalAgent!, targetId)) return json(res, 403, { error: "Named handoffs require both agents to share an active team. A person can add them to one on the Teams screen." });
+        child = createRun({ agentId: targetId, prompt: String(input.prompt), parentRunId: parent.id });
+        event(parent.id, "handoff.created", { childRunId: child.id, targetAgentId: targetId, prompt: input.prompt });
+        // The primary assistant delegates without waiting; its reply stays responsive while teammates work.
+        if (input.detached === true || internalAgent === PRIMARY_ASSISTANT_ID) { const started = child; void settleWithin(started.id, 30 * 60 * 1000).then(result => event(parent.id, "handoff.completed", { childRunId: started.id, targetAgentId: targetId, state: result.state })).catch(() => {}); return json(res, 202, { runId: started.id, state: started.state, detached: true }); }
+      }
+      const result = await settleWithin(child.id, HANDOFF_WAIT_MS);
+      if (!terminalStates.has(result.state)) return json(res, 200, { runId: result.id, agentId: result.agent_id, state: result.state, done: false, message: `${profiles.get(result.agent_id)?.name || result.agent_id} is still working. Call delegate_named_agent again with only this runId to keep waiting; the work continues either way.` });
+      event(parent.id, "handoff.completed", { childRunId: result.id, targetAgentId: result.agent_id, state: result.state });
+      return json(res, 200, { runId: result.id, agentId: result.agent_id, state: result.state, done: true, result: result.result, error: result.error });
+    }
     if (req.method === "POST" && url.pathname === "/internal/task") {
       const input = await body(req), runId = String(req.headers['x-open-harness-run'] || '');
-      if (!internalAllowed(internalAgent, TASK_TOOL, runId)) return json(res, 403, { error: 'Task board access is disabled for this run.' });
-      const activeRun = runId ? store.getRun(runId) : store.liveRuns().find(run => run.agent_id === internalAgent);
+      const denied = internalRefusal(internalAgent, TASK_TOOL, runId); if (denied) return json(res, denied.status, { error: denied.error });
+      const activeRun = runId ? store.getRun(runId) : undefined;
       const profile = activeRun ? profiles.runSnapshot(activeRun.id) : null; if (!profile) return json(res, 403, { error: 'Agent profile not found.' });
       // The schema nests an action's fields under `input`, and nothing else says so, so a model
       // that puts stageId or text alongside `action` is guessing reasonably -- and used to get
@@ -1762,41 +1978,161 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       // character and loses every field, so parse it rather than quietly producing nonsense.
       const nested = typeof input.input === 'string' ? (() => { try { const value = JSON.parse(input.input); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch { return {}; } })() : (input.input && typeof input.input === 'object' && !Array.isArray(input.input) ? input.input : {});
       const patch = { ...Object.fromEntries(Object.entries(input).filter(([key]) => !['action', 'taskId', 'input'].includes(key))), ...nested } as Record<string, unknown>;
+      if (patch.ownerAgentId === '') patch.ownerAgentId = null;
+      const assignOthers = permissionNeeded("Change other agents' cards");
       const mayTouch = (task: ReturnType<typeof tasks.getTask>) => agentMayTouchTask(internalAgent!, profile.board.assignOthers, task);
-      if (action === 'list') return json(res, 200, { boards: tasks.listBoards(), tasks: tasks.listTasks().filter(mayTouch) });
-      if (action === 'columns') return json(res, 200, { boards: tasks.listBoards() });
+      // Summaries: a full card carries its comments, activity and run output, and a board several
+      // agents share would otherwise overflow the model's context on a single list.
+      if (action === 'list') return json(res, 200, { you: internalAgent, boards: tasks.listBoards().map(agentBoard), tasks: tasks.listTasks().filter(task => mayTouch(task) && (!patch.boardId || task.boardId === patch.boardId)).map(task => ({ id: task.id, boardId: task.boardId, stageId: task.stageId, title: task.title, ownerAgentId: task.ownerAgentId, collaboratorAgentIds: task.collaboratorAgentIds, teamId: task.teamId, priority: task.priority, labels: task.labels, dueAt: task.dueAt, runState: task.runState, checklist: `${task.checklist.filter(item => item.done).length}/${task.checklist.length}`, comments: task.comments.length, revision: task.revision, updatedAt: task.updatedAt })) });
+      if (action === 'columns') return json(res, 200, { boards: tasks.listBoards().map(agentBoard) });
       if (action === 'create') {
         const candidate = { ...patch, boardId: patch.boardId || input.boardId, ownerAgentId: patch.ownerAgentId === undefined ? internalAgent : patch.ownerAgentId };
-        if (candidate.ownerAgentId !== internalAgent && !profile.board.assignOthers) return json(res, 403, { error: 'Assigning another agent requires Board: assign others.' });
+        // With a single project there is nothing to choose, so a model need not look it up first.
+        const projects = tasks.listBoards();
+        if (!candidate.boardId && projects.length === 1) candidate.boardId = projects[0].id;
+        const lack = missingFields(candidate, ['title', 'boardId']);
+        if (lack.length) return refuseMissing(res, lack, lack.includes('boardId') ? { projects: projects.slice(0, 20).map(board => ({ id: board.id, name: board.name })) } : {});
+        // A new unassigned card is one any agent may already work; assigning it to someone else is not.
+        if (candidate.ownerAgentId !== internalAgent && candidate.ownerAgentId !== null && !profile.board.assignOthers) return json(res, 403, { error: assignOthers });
         return json(res, 201, tasks.createTask(validTaskMutation(candidate)));
       }
+      // Earlier schemas offered these here; they now belong to the project tool and its permission.
       if (action === 'board_create' || action === 'board_update') {
-        if (!profile.board.manageProjects) return json(res, 403, { error: 'Creating or changing projects requires Board: manage projects.' });
+        if (!profile.allowedTools.includes(PROJECT_TOOL)) return json(res, 403, { error: permissionNeeded(workspacePermissionLabel(PROJECT_TOOL)) });
         // An allowlist, not a denylist: an agent may shape a project's identity and nothing
         // else, so it can never re-enable dispatch or unarchive a project a person closed.
         const safe = Object.fromEntries(['name', 'description', 'color', 'defaultOwnerAgentId'].filter(key => key in patch).map(key => [key, patch[key]]));
-        if (action === 'board_create') return json(res, 201, tasks.createBoard(safe));
+        if (action === 'board_create') return json(res, 201, agentBoard(tasks.createBoard(safe)));
         const boardId = String(patch.boardId || input.boardId || '');
-        return json(res, 200, tasks.updateBoard(boardId, { ...safe, revision: tasks.getBoard(boardId).revision }));
+        return json(res, 200, agentBoard(tasks.updateBoard(boardId, { ...safe, revision: tasks.getBoard(boardId).revision })));
       }
-      const task = tasks.getTask(taskId); if (!mayTouch(task)) return json(res, 403, { error: 'Changing another agent’s card requires Board: assign others.' });
+      if (!['get', 'update', 'move', 'comment', 'check', 'additem', 'claim', 'release', 'run'].includes(action)) return json(res, 400, { error: `Unknown task action "${action}". Use one of: list, get, create, update, move, comment, check, additem, claim, release, run. Projects are changed with the project tool.` });
+      if (!taskId) return refuseMissing(res, ['taskId'], { hint: 'Use action "list" to find card IDs.' });
+      const task = tasks.getTask(taskId); if (!mayTouch(task)) return json(res, 403, { error: assignOthers });
       if (action === 'get') return json(res, 200, task);
+      // Moving a card can also change its owner, so both mutations use the same permission.
+      if (['update', 'move'].includes(action) && patch.ownerAgentId !== undefined && patch.ownerAgentId !== internalAgent && patch.ownerAgentId !== task.ownerAgentId && !profile.board.assignOthers) return json(res, 403, { error: assignOthers });
       if (action === 'update') {
-        if (patch.ownerAgentId !== undefined && patch.ownerAgentId !== internalAgent && patch.ownerAgentId !== task.ownerAgentId && !profile.board.assignOthers) return json(res, 403, { error: 'Assigning another agent requires Board: assign others.' });
         return json(res, 200, tasks.updateTask(taskId, validTaskMutation({ ...patch, revision: task.revision }, task)));
       }
-      if (action === 'move') { validTaskMutation(patch, task); return json(res, 200, tasks.move(taskId, patch)); }
-      if (action === 'comment') return json(res, 201, tasks.comment(taskId, { body: patch.text || patch.body, author: profile.name }));
-      if (action === 'check') return json(res, 200, tasks.check(taskId, String(patch.item || ''), patch.done === undefined ? undefined : Boolean(patch.done)));
-      if (action === 'additem') return json(res, 201, tasks.addItem(taskId, String(patch.text || '')));
+      if (action === 'move') { if (!patch.stageId) return refuseMissing(res, ['stageId'], { stages: tasks.getBoard(task.boardId).stages.map(stage => ({ id: stage.id, name: stage.name })) }); validTaskMutation(patch, task); return json(res, 200, tasks.move(taskId, patch)); }
+      if (action === 'comment') { if (!patch.text && !patch.body) return refuseMissing(res, ['text']); return json(res, 201, tasks.comment(taskId, { body: patch.text || patch.body, author: profile.name })); }
+      if (action === 'check') { if (!patch.item) return refuseMissing(res, ['item'], { hint: 'Checklist item IDs come from action "get".' }); return json(res, 200, tasks.check(taskId, String(patch.item), patch.done === undefined ? undefined : Boolean(patch.done))); }
+      if (action === 'additem') { if (!patch.text) return refuseMissing(res, ['text']); return json(res, 201, tasks.addItem(taskId, String(patch.text))); }
       if (action === 'claim') return json(res, 200, tasks.updateTask(taskId, validTaskMutation({ revision: task.revision, ownerAgentId: internalAgent }, task)));
       if (action === 'release') { tasks.updateTask(taskId, validTaskMutation({ revision: task.revision, ownerAgentId: null }, task)); return json(res, 200, tasks.comment(taskId, { body: String(patch.reason || 'Released as blocked.'), author: profile.name })); }
-      if (action === 'run') { if (task.ownerAgentId && task.ownerAgentId !== internalAgent && !profile.board.dispatch) return json(res, 403, { error: 'Starting another agent’s task requires Board: dispatch.' }); const board = tasks.getBoard(task.boardId); if (!board.settings.allowAgentDispatch) return json(res, 403, { error: 'Agent task dispatch is disabled for this board.' }); const started = tasks.start(taskId, { revision: task.revision, idempotencyKey: crypto.randomUUID() }, value => createRun({ ...value, deferStart: true })); void pump(); return json(res, 202, started); }
-      return json(res, 400, { error: 'Unknown task action.' });
+      if (action === 'run') { if (task.ownerAgentId && task.ownerAgentId !== internalAgent && !profile.board.dispatch) return json(res, 403, { error: permissionNeeded("Start other agents' tasks") }); const board = tasks.getBoard(task.boardId); if (!board.settings.allowAgentDispatch) return json(res, 403, { error: 'This project does not let agents start tasks. A person can allow it in the project settings.' }); const started = tasks.start(taskId, { revision: task.revision, idempotencyKey: crypto.randomUUID() }, value => createRun({ ...value, deferStart: true })); void pump(); return json(res, 202, started); }
     }
-    if (req.method === "POST" && url.pathname === "/internal/schedule") { if (!internalAllowed(internalAgent, ROUTINE_TOOL, String(req.headers["x-open-harness-run"] || ""))) return json(res, 403, { error: "Scheduling is disabled for this run." }); const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)), next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, internalAgent, input.name, input.prompt, minutes, input.timezone || "UTC", 1, next, stamp.toISOString(), stamp.toISOString());store.db.prepare('INSERT INTO schedule_actors VALUES(?,?)').run(id,workspaceIdentity.actor().id);return json(res, 201, { id, nextRunAt: next }); }
+    if (req.method === "POST" && url.pathname === "/internal/schedule") {
+      const denied = internalRefusal(internalAgent, ROUTINE_TOOL, String(req.headers["x-open-harness-run"] || "")); if (denied) return json(res, denied.status, { error: denied.error });
+      const input = await body(req), lack = missingFields(input, ['name', 'prompt', 'intervalMinutes']); if (lack.length) return refuseMissing(res, lack);
+      const stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Math.min(525_600, Math.round(Number(input.intervalMinutes) || 60))), next = new Date(stamp.getTime() + minutes * 60000).toISOString();
+      store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, internalAgent, String(input.name).trim().slice(0, 200), String(input.prompt).trim().slice(0, 20_000), minutes, input.timezone || "UTC", 1, next, stamp.toISOString(), stamp.toISOString());
+      store.db.prepare('INSERT INTO schedule_actors VALUES(?,?)').run(id, workspaceIdentity.actor().id);
+      return json(res, 201, { id, nextRunAt: next });
+    }
+    if (req.method === "POST" && url.pathname === "/internal/project") {
+      const input = await body(req), denied = internalRefusal(internalAgent, PROJECT_TOOL, String(req.headers["x-open-harness-run"] || "")); if (denied) return json(res, denied.status, { error: denied.error });
+      const action = String(input.action || ''), boardId = String(input.boardId || ''), stageId = String(input.stageId || '');
+      const need = (fields: string[]) => missingFields(input, fields);
+      // Only these reach the store. Folders, automatic starts and agent dispatch decide what an
+      // agent may touch and when paid runs begin, so they stay with a person.
+      const identity = () => Object.fromEntries(['name', 'description', 'color', 'defaultOwnerAgentId'].filter(key => input[key] !== undefined).map(key => [key, key === 'defaultOwnerAgentId' && input[key] === '' ? null : input[key]]));
+      if (action === 'list') return json(res, 200, { projects: tasks.listBoards(Boolean(input.includeArchived)).map(agentBoard) });
+      if (action === 'create') { if (need(['name']).length) return refuseMissing(res, ['name']); return json(res, 201, agentBoard(tasks.createBoard(identity()))); }
+      if (['get', 'update', 'archive', 'restore', 'add_stage'].includes(action)) {
+        if (!boardId) return refuseMissing(res, ['boardId'], { hint: 'Use action "list" to find project IDs.' });
+        const board = tasks.getBoard(boardId);
+        if (action === 'get') return json(res, 200, agentBoard(board));
+        if (action === 'archive' || action === 'restore') return json(res, 200, agentBoard(tasks.updateBoard(boardId, { archived: action === 'archive', revision: board.revision })));
+        if (action === 'add_stage') { if (need(['name']).length) return refuseMissing(res, ['name']); return json(res, 201, agentBoard(tasks.preserveRunStage(boardId, () => { tasks.addStage(boardId, { name: input.name, category: input.category }); }))); }
+        const settings = input.doneStageId ? { doneStageId: String(input.doneStageId) } : {};
+        return json(res, 200, agentBoard(tasks.updateBoard(boardId, { ...identity(), ...(Object.keys(settings).length ? { settings } : {}), revision: board.revision })));
+      }
+      if (['update_stage', 'remove_stage'].includes(action)) {
+        if (!stageId) return refuseMissing(res, ['stageId'], { hint: 'Stage IDs are listed with each project.' });
+        const owner = tasks.listBoards(true).find(board => board.stages.some(stage => stage.id === stageId)); if (!owner) return json(res, 404, { error: 'Stage not found.' });
+        if (action === 'remove_stage') {
+          // Deleting the trigger would make the store choose a different automatic-start stage.
+          if (stageId === owner.settings.runStageId) return json(res, 403, { error: 'This stage controls when tasks start automatically. Ask the user to choose another run stage in the project settings before removing it.' });
+          if (store.db.prepare("SELECT 1 FROM tasks WHERE stage_id=? AND active_run_id IS NOT NULL LIMIT 1").get(stageId)) return json(res, 409, { error: 'A task in this stage is running. Wait for it to finish, or ask the user to stop it.' });
+          return json(res, 200, agentBoard(tasks.removeStage(stageId, input.moveToStageId ? String(input.moveToStageId) : undefined)));
+        }
+        return json(res, 200, agentBoard(tasks.preserveRunStage(owner.id, () => {
+          if (input.name !== undefined || input.category !== undefined) tasks.updateStage(stageId, { name: input.name, category: input.category }, true);
+          if (input.position !== undefined) tasks.moveStage(stageId, Number(input.position));
+        })));
+      }
+      return json(res, 400, { error: `Unknown project action "${action}". Use one of: list, get, create, update, archive, restore, add_stage, update_stage, remove_stage. Deleting a project is left to a person.` });
+    }
+    if (req.method === "POST" && url.pathname === "/internal/routines") {
+      const input = await body(req), denied = internalRefusal(internalAgent, ROUTINES_TOOL, String(req.headers["x-open-harness-run"] || "")); if (denied) return json(res, denied.status, { error: denied.error });
+      const action = String(input.action || '');
+      if (action === 'list') return json(res, 200, { routines: (store.db.prepare("SELECT * FROM schedules WHERE agent_id=? ORDER BY created_at DESC").all(internalAgent) as any[]).map(agentRoutine) });
+      if (!['get', 'history', 'update', 'pause', 'resume', 'run', 'delete'].includes(action)) return json(res, 400, { error: `Unknown routines action "${action}". Use one of: list, get, history, update, pause, resume, run, delete. Create routines with create_open_harness_routine.` });
+      if (!input.routineId) return refuseMissing(res, ['routineId'], { hint: 'Use action "list" to find routine IDs.' });
+      // Another agent's routine is reported as missing, not forbidden, so its existence stays private.
+      const routine = routineRow(String(input.routineId)); if (!routine || routine.agent_id !== internalAgent) return json(res, 404, { error: 'Routine not found. Use action "list" to see this agent\'s routines.' });
+      if (action === 'get') return json(res, 200, agentRoutine(routine));
+      if (action === 'history') return json(res, ...routineHistory(routine));
+      if (action === 'update') { const [status, value] = routineUpdate(routine, { name: input.name, prompt: input.prompt, intervalMinutes: input.intervalMinutes }); return json(res, status, status === 200 ? agentRoutine(value) : value); }
+      if (action === 'pause' || action === 'resume') return json(res, ...routineSetEnabled(routine, action === 'resume'));
+      if (action === 'delete') return json(res, ...routineDelete(routine));
+      // A routine that starts itself again, or is started twice, would loop through paid model calls.
+      if (store.db.prepare("SELECT 1 FROM schedule_runs JOIN runs ON runs.id=schedule_runs.run_id WHERE schedule_id=? AND runs.state IN ('queued','running','waiting_approval','waiting_input') LIMIT 1").get(routine.id)) return json(res, 409, { error: 'This routine is already queued or running.' });
+      const [status, run] = routineRun(routine); return json(res, status, agentRun(run as RunRow));
+    }
+    if (req.method === 'POST' && url.pathname === '/internal/decide') {
+      const runId = String(req.headers['x-open-harness-run'] || ''), denied = internalRefusal(internalAgent, DECIDE_TOOL, runId); if (denied) return json(res, denied.status, { error: denied.error });
+      const { pool, boardId, ...input } = await body(req);
+      if (pool !== undefined && input.options !== undefined) return json(res, 400, { error: 'Send options or pool, not both.' });
+      if (boardId !== undefined && pool !== 'stages') return json(res, 400, { error: 'boardId is only used with pool "stages".' });
+      if (pool === 'agents') {
+        // The directory tool's circle and its switch, so a decision never reveals a teammate the directory would not.
+        if (!profiles.runSnapshot(runId)?.allowedTools.includes(DIRECTORY_TOOL)) return json(res, 403, { error: permissionNeeded(workspacePermissionLabel(DIRECTORY_TOOL)) });
+        const mine = teams.list(false).filter(team => team.memberAgentIds.includes(internalAgent!)), queued = new Set(store.queued().map(run => run.agent_id));
+        input.options = [...new Set([internalAgent!, ...mine.flatMap(team => team.memberAgentIds)])].flatMap(id => {
+          const profile = profiles.get(id); if (!profile) return [];
+          return [{ id, text: [`${profile.name}${id === internalAgent ? ' (you)' : ''}: ${profile.role}.`, profile.description, `Status: ${store.agentBusy(id) ? 'working' : queued.has(id) ? 'queued' : 'idle'}.`].filter(Boolean).join(' ') }];
+        });
+        if (input.options.length < 2) return json(res, 409, { error: 'No teammates share an active team with this agent, so there is nothing to choose between. A person can add teammates on the Teams screen.' });
+      } else if (pool === 'stages') {
+        if (!boardId) return refuseMissing(res, ['boardId'], { hint: "Use the task tool's list action to find project IDs." });
+        input.options = tasks.getBoard(String(boardId)).stages.map(stage => ({ id: stage.id, text: `${stage.name} (${stage.category})` }));
+      } else if (pool !== undefined) return json(res, 400, { error: 'pool must be "agents" or "stages".' });
+      // The answer holds only IDs, labels and numbers, so the run log can keep all of it.
+      const decision = await decisions.decide({ kind: 'agent', agentId: internalAgent!, runId }, input);
+      event(runId, 'decision.made', decision);
+      return json(res, 200, decision);
+    }
+    if (req.method === "POST" && url.pathname === "/internal/directory") {
+      const input = await body(req), denied = internalRefusal(internalAgent, DIRECTORY_TOOL, String(req.headers["x-open-harness-run"] || "")); if (denied) return json(res, denied.status, { error: denied.error });
+      // The same circle delegation works in: the agent's active teams and their members.
+      const mine = teams.list(false).filter(team => team.memberAgentIds.includes(internalAgent!));
+      const visible = [...new Set([internalAgent!, ...mine.flatMap(team => team.memberAgentIds)])];
+      const queued = new Set(store.queued().map(run => run.agent_id));
+      const describe = (id: string) => { const profile = profiles.get(id); return profile && { id, name: profile.name, role: profile.role, description: profile.description, you: id === internalAgent, teamIds: mine.filter(team => team.memberAgentIds.includes(id)).map(team => team.id), status: store.agentBusy(id) ? 'working' : queued.has(id) ? 'queued' : 'idle' }; };
+      const action = String(input.action || '');
+      if (action === 'teams') return json(res, 200, { teams: mine.map(team => ({ id: team.id, name: team.name, description: team.description, color: team.color, icon: team.icon, memberAgentIds: team.memberAgentIds })) });
+      if (action === 'agents') return json(res, 200, { agents: visible.map(describe).filter(Boolean) });
+      if (action === 'agent') { if (!input.agentId) return refuseMissing(res, ['agentId']); const found = visible.includes(String(input.agentId)) && describe(String(input.agentId)); return found ? json(res, 200, found) : json(res, 404, { error: 'No teammate with that ID. Use action "agents" to see who shares a team with this agent.' }); }
+      return json(res, 400, { error: `Unknown directory action "${action}". Use one of: teams, agents, agent.` });
+    }
+    if (req.method === "POST" && url.pathname === "/internal/runs") {
+      const input = await body(req), callingRun = String(req.headers["x-open-harness-run"] || ""), denied = internalRefusal(internalAgent, RUNS_TOOL, callingRun); if (denied) return json(res, denied.status, { error: denied.error });
+      const action = String(input.action || '');
+      if (action === 'list') return json(res, 200, { runs: store.agentScope(internalAgent!, Math.max(1, Math.min(50, Math.round(Number(input.limit) || 20))), input.state ? String(input.state) : undefined).map(run => agentRun(run, 4_000)) });
+      if (!['get', 'conversation', 'stop'].includes(action)) return json(res, 400, { error: `Unknown runs action "${action}". Use one of: list, get, conversation, stop.` });
+      if (!input.runId) return refuseMissing(res, ['runId'], { hint: 'Use action "list" to find run IDs.' });
+      const run = store.getRun(String(input.runId)); if (!run || !store.inScope(internalAgent!, run.id)) return json(res, 404, { error: 'Run not found among this agent\'s runs and the work it delegated.' });
+      if (action === 'get') return json(res, 200, { ...agentRun(run), children: (store.db.prepare("SELECT * FROM runs WHERE parent_run_id=? ORDER BY created_at").all(run.id) as unknown as RunRow[]).map(child => agentRun(child, 4_000)) });
+      if (action === 'conversation') return json(res, 200, { runs: store.agentConversation(internalAgent!, run).map(item => agentRun(item, 4_000)) });
+      if (terminalStates.has(run.state)) return json(res, 409, { error: `This run has already ${run.state === 'completed' ? 'finished' : run.state}.` });
+      if ([run.id, ...store.descendants(run.id).map(item => item.id)].includes(callingRun)) return json(res, 409, { error: 'A run cannot stop itself or the run that started it. Finish your reply instead.' });
+      const result = await stopRunTree(run.id); return json(res, 200, { ok: true, stopped: result.stopped, ...(result.failures.length ? { failures: result.failures } : {}) });
+    }
     return json(res, 404, { error: "Not found." });
-  } catch (error) { if (res.destroyed) return; return json(res, error instanceof ProfileError || error instanceof TaskError || error instanceof TeamError || error instanceof MachineError || error instanceof CredentialError || error instanceof GroupChatError || error instanceof OutcomeError || error instanceof DeliveryError || error instanceof ProductError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
+  } catch (error) { if (res.destroyed) return; return json(res, error instanceof ProfileError || error instanceof TaskError || error instanceof TeamError || error instanceof MachineError || error instanceof CredentialError || error instanceof DecisionError || error instanceof GroupChatError || error instanceof OutcomeError || error instanceof DeliveryError || error instanceof ProductError ? error.status : 400, { error: error instanceof Error ? error.message : "Request failed." }); }
   finally {
     if (probingAgent) {
       const gateway = gateways.get(probingAgent);

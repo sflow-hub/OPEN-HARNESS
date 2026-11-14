@@ -25,6 +25,8 @@ export type RunRow = {
   updated_at: string;
   result: string | null;
   error: string | null;
+  // The project whose folders this run may use; null for plain chat and routines.
+  project_id?: string | null;
 };
 
 // Bump when a release changes the schema in a way an older build would mishandle. It is
@@ -126,6 +128,8 @@ export class Store {
         UNIQUE(agent_id,name)
       );
     `);
+    // Additive and ignored by older builds, so it needs no schema version bump.
+    addColumn(this.db, 'runs', 'project_id', 'TEXT');
     for (const migration of MIGRATIONS) if (migration.to > found) migration.apply(this.db);
     if (found !== SCHEMA_VERSION) this.db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
     const stamp = new Date().toISOString();
@@ -141,9 +145,9 @@ export class Store {
   }
 
   createRun(run: RunRow) {
-    this.db.prepare(`INSERT INTO runs(id,agent_id,conversation_id,prompt,state,session_id,parent_run_id,depth,created_at,updated_at,result,error)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(run.id, run.agent_id, run.conversation_id, run.prompt, run.state,
-      run.session_id, run.parent_run_id, run.depth, run.created_at, run.updated_at, run.result, run.error);
+    this.db.prepare(`INSERT INTO runs(id,agent_id,conversation_id,prompt,state,session_id,parent_run_id,depth,created_at,updated_at,result,error,project_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(run.id, run.agent_id, run.conversation_id, run.prompt, run.state,
+      run.session_id, run.parent_run_id, run.depth, run.created_at, run.updated_at, run.result, run.error, run.project_id || null);
   }
 
   getRun(id: string) { return this.db.prepare("SELECT * FROM runs WHERE id=?").get(id) as RunRow | undefined; }
@@ -155,6 +159,26 @@ export class Store {
       SELECT id FROM runs WHERE parent_run_id=?
       UNION ALL SELECT runs.id FROM runs JOIN children ON runs.parent_run_id=children.id
     ) SELECT id FROM children`).all(id) as unknown as Array<{ id: string }>;
+  }
+  // An agent's own runs and everything they delegated, newest first: what its runs tool may see.
+  agentScope(agentId: string, limit = 20, state?: string) {
+    return this.db.prepare(`WITH RECURSIVE scope(id) AS (
+      SELECT id FROM runs WHERE agent_id=?
+      UNION SELECT runs.id FROM runs JOIN scope ON runs.parent_run_id=scope.id
+    ) SELECT runs.* FROM runs JOIN scope ON scope.id=runs.id WHERE ? IS NULL OR runs.state=? ORDER BY runs.created_at DESC LIMIT ?`).all(agentId, state ?? null, state ?? null, limit) as unknown as RunRow[];
+  }
+  agentConversation(agentId: string, run: Pick<RunRow, 'agent_id' | 'conversation_id'>) {
+    // Sharing one delegated turn does not share later private turns in that conversation.
+    // Filter before LIMIT so private follow-ups cannot push authorized work out of the result.
+    return this.db.prepare(`WITH RECURSIVE scope(id) AS (
+      SELECT id FROM runs WHERE agent_id=?
+      UNION SELECT runs.id FROM runs JOIN scope ON runs.parent_run_id=scope.id
+    ) SELECT runs.* FROM runs JOIN scope ON scope.id=runs.id WHERE runs.agent_id=? AND runs.conversation_id=? ORDER BY runs.created_at DESC LIMIT 20`).all(agentId, run.agent_id, run.conversation_id) as unknown as RunRow[];
+  }
+  inScope(agentId: string, runId: string) {
+    // Delegation is at most two levels deep, so this walk is short.
+    for (let run = this.getRun(runId), hops = 0; run && hops < 10; run = run.parent_run_id ? this.getRun(run.parent_run_id) : undefined, hops++) if (run.agent_id === agentId) return true;
+    return false;
   }
   agentBusy(agentId: string) { return Boolean(this.db.prepare("SELECT 1 FROM runs WHERE agent_id=? AND state IN ('running','waiting_approval','waiting_input') LIMIT 1").get(agentId)); }
   activeCount() { return Number((this.db.prepare("SELECT COUNT(*) n FROM runs WHERE state IN ('running','waiting_approval','waiting_input')").get() as { n: number }).n); }

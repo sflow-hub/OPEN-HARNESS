@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { coordinationToken } from '../runtime/coordination-auth';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createHmac } from 'node:crypto';
 import { once } from 'node:events';
 import { request as httpRequest } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -56,7 +56,7 @@ test('assistant starters, result evidence, personal notes, and attention setting
   });
 
   await t.test('explicit result references survive completion without becoming verified or fabricated artifacts', async () => {
-    const agentHeaders = { Authorization: `Bearer ${createHmac('sha256', token).update(`agent:${PRIMARY_ASSISTANT_ID}`).digest('hex')}`, 'x-open-harness-agent': PRIMARY_ASSISTANT_ID, 'x-open-harness-run': sourceId };
+    const agentHeaders = { Authorization: `Bearer ${coordinationToken(token, PRIMARY_ASSISTANT_ID, 'local')}`, 'x-open-harness-agent': PRIMARY_ASSISTANT_ID, 'x-open-harness-run': sourceId };
     const report = { title: 'Fixture brief', summary: 'A reported draft awaiting independent review.', artifacts: [{ label: 'Reported draft', kind: 'file', path: 'fixture-brief.md' }], sources: [{ label: 'Fixture source', url: 'https://example.test/source' }] };
     assert.equal((await request('/internal/workspace', 'POST', { action: 'report_result', input: report })).status, 403);
     assert.equal((await request('/internal/workspace', 'POST', { action: 'report_result', input: { ...report, artifacts: [{ label: 'Unsafe', kind: 'file', path: '../secrets.json' }] } }, agentHeaders)).status, 400);
@@ -79,7 +79,7 @@ test('assistant starters, result evidence, personal notes, and attention setting
     const overview = (await data('/v1/assistant')).overview, outcome = overview.outcomes.find((item: AssistantOutcome) => item.runId === sourceId) as AssistantOutcome;
     assert.equal(typeof overview.generatedAt, 'string'); assert.match(overview.availability.detail, /coordinator.*execution computer.*powered/);
     assert.equal(outcome.title, report.title); assert.deepEqual(outcome.artifacts, report.artifacts); assert.deepEqual(outcome.sources, report.sources); assert.equal(outcome.verification.state, 'unreviewed'); assert.equal(outcome.verification.checkedAt, null); assert.equal(outcome.verification.evidence, ''); assert.deepEqual(outcome.delegation, []);
-    assert.equal((await request('/internal/workspace', 'POST', { action: 'report_result', input: { ...report, summary: 'Late rewrite' } }, agentHeaders)).status, 403);
+    assert.equal((await request('/internal/workspace', 'POST', { action: 'report_result', input: { ...report, summary: 'Late rewrite' } }, agentHeaders)).status, 401, 'A finished run no longer authenticates its agent.');
     await data(`/v1/runs/${sourceId}/outcome`, 'POST', { accepted: false, evidence: 'Fixture: the reported artifact has not been created; report metadata is not proof.' });
     const rejected = (await data('/v1/assistant')).overview.outcomes.find((item: AssistantOutcome) => item.runId === sourceId); assert.equal(rejected.verification.state, 'needs_changes'); assert.match(rejected.verification.evidence, /metadata is not proof/);
   });

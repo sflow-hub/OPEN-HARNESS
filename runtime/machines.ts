@@ -179,7 +179,7 @@ export class Machines {
     const row = this.db.prepare('SELECT payload_json FROM runner_commands WHERE id=?').get(commandId) as { payload_json: string } | undefined;
     try {
       const payload = JSON.parse(row?.payload_json || '{}') as Record<string, unknown>;
-      delete payload.secrets; delete payload.encryptedSecrets; delete payload.bundle; delete payload.sealedTransfer; delete payload.encrypted;
+      delete payload.secrets; delete payload.encryptedSecrets; delete payload.bundle; delete payload.sealedTransfer; delete payload.encrypted; delete payload.coordinationToken;
       return JSON.stringify(payload);
     } catch { return '{}'; }
   }

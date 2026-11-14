@@ -4,7 +4,7 @@ import { draftProfile } from '../../lib/agent-profile';
 import type { CredentialRecord } from '../../lib/credentials';
 
 const control=`http://127.0.0.1:${process.env.OPEN_HARNESS_TEST_PORT || 4317}`;
-const account:CredentialRecord={ref:'CODEX_BROWSER_FIXTURE',label:'ChatGPT browser fixture',provider:'openai-codex',model:'',baseUrl:'',present:true,fingerprint:'fixture',length:100,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),lastUsedAt:null,usage:{uses:[],agentCount:0,activeRuns:0}};
+const account:CredentialRecord={ref:'CODEX_BROWSER_FIXTURE',label:'ChatGPT browser fixture',provider:'openai-codex',type:'model-api-key',config:{},connectionStatus:'connected',fieldPresence:{value:true},model:'',baseUrl:'',present:true,fingerprint:'fixture',length:100,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),lastUsedAt:null,usage:{uses:[],agentCount:0,activeRuns:0}};
 async function navigate(page:Page,isMobile:boolean,name:string){if(isMobile)await page.getByRole('button',{name:'Open navigation'}).click();await page.locator('aside.sidebar').getByRole('button',{name,exact:true}).click();}
 
 test.beforeEach(async({page,request})=>{

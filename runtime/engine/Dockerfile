@@ -1,5 +1,5 @@
 # Open Harness engine: the official Docker 29.8.1 DinD image, with reviewed replacements for
-# containerd, runc and Buildx and the Alpine libexpat security update. See README.md.
+# containerd, runc and Buildx and the Alpine libexpat and PCRE2 security updates. See README.md.
 #
 # The release workflow builds this for each target architecture with `network: none`. Only two
 # images are pulled: the official base below, and ENGINE_INPUTS, which is the reviewed inputs
@@ -37,8 +37,9 @@ ARG RUNC_SOURCE_MANIFEST
 ARG BUILDX_VERSION
 ARG BUILDX_SOURCE_MANIFEST
 RUN --mount=type=bind,from=verified,source=/inputs/apk,target=/tmp/open-harness-apk set -eu; \
-    apk add --no-network --no-cache /tmp/open-harness-apk/libexpat-2.8.5-r0.apk; \
-    apk info -e 'libexpat=2.8.5-r0' > /dev/null
+    apk add --no-network --no-cache /tmp/open-harness-apk/libexpat-2.8.5-r0.apk /tmp/open-harness-apk/pcre2-10.49-r0.apk; \
+    apk info -e 'libexpat=2.8.5-r0' > /dev/null; \
+    apk info -e 'pcre2=10.49-r0' > /dev/null
 COPY --from=verified --chown=0:0 --chmod=0755 /inputs/containerd/bin/ /usr/local/bin/
 COPY --from=verified --chown=0:0 /inputs/containerd/provenance/ /usr/local/share/open-harness/containerd-remediation/
 COPY --from=verified --chown=0:0 --chmod=0755 /inputs/runc/bin/runc /usr/local/bin/runc
@@ -52,6 +53,7 @@ LABEL org.opencontainers.image.title="Open Harness engine" \
       org.opencontainers.image.base.name="${ENGINE_BASE}" \
       dev.openharness.engine.notice="Unofficial derived engine; sources, licenses and build provenance are in /usr/local/share/open-harness/" \
       dev.openharness.engine.expat="2.8.5-r0" \
+      dev.openharness.engine.pcre2="10.49-r0" \
       dev.openharness.containerd.version="${CONTAINERD_VERSION}" \
       dev.openharness.containerd.source-manifest="${CONTAINERD_SOURCE_MANIFEST}" \
       dev.openharness.runc.version="${RUNC_VERSION}" \

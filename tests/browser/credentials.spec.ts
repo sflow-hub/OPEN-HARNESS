@@ -263,7 +263,7 @@ test('selects models when adding a key and switches providers independently per 
   await dialog.getByLabel('Name').fill('Router key');
   await dialog.getByLabel('Value', { exact: true }).fill('router-browser-secret');
   await dialog.getByLabel('Available models').selectOption('mock-scout');
-  await expect(dialog.getByLabel('Default model')).toHaveValue('mock-scout');
+  await expect(dialog.getByLabel('Available models')).toHaveValue('mock-scout');
   await dialog.getByRole('button', { name: 'Save credential' }).click();
   await expect(dialog.getByText('Router key', { exact: true })).toBeVisible();
   await expect(dialog.getByText('mock-scout', { exact: true })).toBeVisible();
@@ -273,7 +273,7 @@ test('selects models when adding a key and switches providers independently per 
   const picker = page.getByRole('dialog', { name: 'Model and credential for Atlas' });
   await picker.getByLabel('Saved credential').selectOption({ label: 'Router key' });
   await expect(picker.getByLabel('Provider', { exact: true })).toHaveValue('openrouter');
-  await expect(picker.getByLabel('Model', { exact: true })).toHaveValue('mock-scout');
+  await expect(picker.getByLabel('Available models')).toHaveValue('mock-scout');
   await picker.getByLabel('Available models').selectOption('mock-atlas');
   await picker.getByRole('button', { name: 'Apply model and credential' }).click();
   await expect(picker).not.toBeVisible();
@@ -321,11 +321,113 @@ test('first-run setup discovers models with a pasted key before saving it', asyn
   const discovery = page.waitForRequest(request => request.url().endsWith('/v1/models') && request.method() === 'POST');
   await setup.getByLabel('API key').fill('setup-discovery-key');
   expect((await discovery).postDataJSON()).toMatchObject({ value: 'setup-discovery-key' });
-  await expect(setup.locator('datalist option[value="mock-scout"]')).toHaveCount(1);
-  await setup.getByRole('combobox', { name: /^Model/ }).fill('mock-scout');
+  await expect(setup.getByLabel('Available models').locator('option[value="mock-scout"]')).toHaveCount(1);
+  await setup.getByLabel('Available models').selectOption('mock-scout');
   await setup.getByRole('button', { name: 'Save and test' }).click();
   await expect(page.getByRole('dialog',{name:'Verify a task'})).toBeVisible();
   await expect(page.getByRole('button',{name:'Start using Open Harness'})).toBeDisabled();
   await page.getByRole('button',{name:'Run verification task'}).click();
   await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeVisible();
+});
+
+test('onboarding inline creation seeds the provider, endpoint, and default model', async ({ page }, testInfo) => {
+  let saved: Record<string, unknown> | undefined;
+  await page.route('**/v1/onboarding/model-test', route => { const input = route.request().postDataJSON(); saved = input.model; return route.fulfill({ json: { ok: true, message: 'Fixture accepted.', model: input.model, revision: input.revision + 1 } }); });
+  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await page.getByRole('button', { name: 'Run setup again' }).click();
+  await page.getByRole('button', { name: /Use this computer/ }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  const setup = page.getByRole('dialog', { name: 'Connect your model' });
+  await setup.getByLabel('Saved credential').selectOption('__create');
+  const editor = setup.getByRole('dialog', { name: 'Create credential' });
+  await editor.getByLabel('Name', { exact: true }).fill('Registered model endpoint');
+  await editor.getByLabel('Provider', { exact: true }).selectOption('anthropic');
+  await editor.getByLabel('Value', { exact: true }).fill('onboarding-private-key');
+  await editor.getByLabel('Model API base URL').fill('https://gateway.example.test/v1');
+  await editor.getByLabel('Available models').selectOption('__custom');
+  await editor.getByRole('textbox', { name: 'Default model', exact: true }).fill('operator-custom-model');
+  await editor.getByRole('button', { name: 'Save credential' }).click();
+  await expect(editor).not.toBeVisible();
+  await expect(setup.getByRole('combobox', { name: 'Provider', exact: true })).toHaveValue('anthropic');
+  await expect(setup.getByLabel('Model API base URL')).toHaveValue('https://gateway.example.test/v1');
+  await expect(setup.getByRole('textbox', { name: 'Model', exact: true })).toHaveValue('operator-custom-model');
+  await setup.getByRole('button', { name: 'Save and test' }).click();
+  await expect(page.getByRole('dialog', { name: 'You’re ready' })).toBeVisible();
+  expect(saved).toMatchObject({ provider: 'anthropic', baseUrl: 'https://gateway.example.test/v1', model: 'operator-custom-model', credentialRef: 'REGISTERED_MODEL_ENDPOINT' });
+});
+
+test('credential library creates typed accounts and filters without exposing saved fields', async ({ page }, testInfo) => {
+  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: 'Credentials', exact: true }).click();
+  const library = page.getByRole('region', { name: 'Saved credentials' });
+  await library.getByRole('button', { name: 'Add credential' }).click();
+  await library.getByLabel('Name', { exact: true }).fill('Vendor account');
+  await library.getByLabel('Credential type').selectOption('basic');
+  await library.getByLabel('Username', { exact: true }).fill('private-username');
+  await library.getByLabel('Password', { exact: true }).fill('private-password');
+  await library.getByRole('button', { name: 'Save credential' }).click();
+  await expect(library.getByText('Vendor account', { exact: true })).toBeVisible();
+  expect(await page.content()).not.toContain('private-password');
+  expect(await page.content()).not.toContain('private-username');
+  await library.getByLabel('Filter type').selectOption('oauth2');
+  await expect(library.getByText('No credentials match these filters.')).toBeVisible();
+  await library.getByLabel('Filter type').selectOption('basic');
+  await library.getByLabel('Search credentials').fill('Vendor');
+  await expect(library.getByText('Vendor account', { exact: true })).toBeVisible();
+  await library.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(library.getByLabel('Password', { exact: true })).toHaveValue('');
+  await library.getByLabel('Name', { exact: true }).fill('Vendor production');
+  await library.getByRole('button', { name: 'Save changes' }).click();
+  await expect(library.getByText('Vendor production', { exact: true })).toBeVisible();
+  await page.screenshot({ path: `/tmp/credential-library-${testInfo.project.name}.png`, fullPage: true });
+});
+
+test('inline model credential creation selects the saved account and preserves an agent draft', async ({ page }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const editor = page.getByRole('dialog', { name: 'Agent settings', exact: true });
+  await expect(editor.getByText('Loading saved profile…')).toBeHidden();
+  await editor.getByLabel('Name', { exact: true }).fill('Atlas unsaved name');
+  await editor.getByRole('tab', { name: 'Model', exact: true }).click();
+  await editor.getByRole('switch', { name: 'Use workspace default' }).uncheck();
+  await editor.getByLabel('Saved credential').selectOption('__create');
+  const create = editor.getByRole('dialog', { name: 'Create credential', exact: true });
+  await create.getByLabel('Name', { exact: true }).fill('Inline account');
+  await create.getByLabel('Value', { exact: true }).fill('inline-private-value');
+  await create.getByLabel('Available models').selectOption('mock-scout');
+  await create.getByRole('button', { name: 'Save credential' }).click();
+  await expect(create).toBeHidden();
+  await expect(editor.getByLabel('Saved credential')).toHaveValue('INLINE_ACCOUNT');
+  await expect(editor.getByLabel('Available models')).toHaveValue('mock-scout');
+  await editor.getByLabel('Available models').selectOption('__custom');
+  await editor.getByRole('textbox', { name: 'Model', exact: true }).fill('vendor/custom-id');
+  await editor.getByRole('tab', { name: 'Profile', exact: true }).click();
+  await expect(editor.getByLabel('Name', { exact: true })).toHaveValue('Atlas unsaved name');
+  await editor.getByRole('button', { name: 'Save changes' }).click();
+  await expect(editor.getByText(/^Saved[.—]/)).toBeVisible();
+  expect(await page.content()).not.toContain('inline-private-value');
+});
+
+test('model discovery ignores a late response from the previously selected provider', async ({ page }) => {
+  let older: import('@playwright/test').Route | undefined;
+  let started!: () => void;
+  const oldStarted = new Promise<void>(resolve => { started = resolve; });
+  await page.route('**/v1/models?*', async route => {
+    const provider = new URL(route.request().url()).searchParams.get('provider');
+    if (provider === 'xai') { older = route; started(); }
+    else await route.fulfill({ json: { models: ['openai-current-model'] } });
+  });
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const editor = page.getByRole('dialog', { name: 'Agent settings', exact: true });
+  await editor.getByRole('tab', { name: 'Model', exact: true }).click();
+  await editor.getByRole('switch', { name: 'Use workspace default' }).uncheck();
+  await oldStarted;
+  await editor.getByLabel('Provider', { exact: true }).selectOption('openai');
+  await expect(editor.getByLabel('Available models').locator('option[value="openai-current-model"]')).toHaveCount(1);
+  const completed = page.waitForResponse(response => response.url().includes('/v1/models?') && new URL(response.url()).searchParams.get('provider') === 'xai');
+  await older!.fulfill({ json: { models: ['xai-stale-model'] } });
+  await completed;
+  await expect(editor.getByLabel('Available models').locator('option[value="xai-stale-model"]')).toHaveCount(0);
+  await editor.getByLabel('Available models').selectOption('openai-current-model');
+  await expect(editor.getByLabel('Available models')).toHaveValue('openai-current-model');
 });

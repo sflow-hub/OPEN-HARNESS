@@ -7,7 +7,7 @@ import { HERMES_COMMIT, HERMES_IMAGE_TAG, HERMES_RELEASE } from '../lib/hermes-p
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { RUNTIME_CONTRACT, RUNTIME_LABEL, classifyContract, imageContract } from '../runtime/readiness';
+import { RUNTIME_CONTRACT, RUNTIME_LABEL, classifyContract, imageContract, imageContractWith, runtimeImageMessage } from '../runtime/readiness';
 import { containerSignature } from '../runtime/hermes';
 import { chooseStateDir, withEnvValue } from '../runtime/state-dir';
 import { DEFAULT_COMPUTER } from '../lib/agent-profile';
@@ -33,11 +33,37 @@ test('the full Dockerfile installs managed policy files after the upstream layer
 });
 
 test('classifyContract: no image, unlabeled image, older label, current label', () => {
-  assert.equal(classifyContract({ status: 1, stdout: '' }), 'missing');
-  assert.equal(classifyContract({ status: null, stdout: '' }), 'missing');
+  assert.equal(classifyContract({ status: 1, stdout: '', stderr: 'Error response from daemon: No such image: hermes:test' }), 'missing');
+  assert.equal(classifyContract({ status: 1, stdout: '', stderr: 'Error response from daemon: {"message":"No such image: hermes:test"}' }), 'missing');
+  assert.equal(classifyContract({ status: 1, stdout: '', stderr: 'permission denied' }), 'unknown');
+  assert.equal(classifyContract({ status: null, stdout: '' }), 'unknown');
   assert.equal(classifyContract({ status: 0, stdout: '\n' }), 'stale');
   assert.equal(classifyContract({ status: 0, stdout: String(RUNTIME_CONTRACT - 1) }), 'stale');
   assert.equal(classifyContract({ status: 0, stdout: `${RUNTIME_CONTRACT}\n` }), 'current');
+});
+
+test('image checks retry transient lookup failures but never accept an unverified or stale image', async () => {
+  for (const check of [imageContract, (run: Parameters<typeof imageContract>[0]) => imageContractWith(async (name, args) => run!(name, args))]) {
+    for (const failure of [
+      { status: 1, stdout: '', stderr: 'No such image: hermes:test' },
+      { status: null, stdout: '', stderr: '' },
+      { status: 1, stdout: '', stderr: 'daemon unavailable' },
+    ]) {
+      let calls = 0;
+      assert.equal(await check(() => ++calls === 1 ? failure : { status: 0, stdout: String(RUNTIME_CONTRACT) }), 'current');
+      assert.equal(calls, 2);
+      calls = 0;
+      assert.equal(await check(() => { calls++; return failure; }), classifyContract(failure));
+      assert.equal(calls, 2, 'persistent failures must remain bounded');
+    }
+    let calls = 0;
+    assert.equal(await check(() => { calls++; return { status: 0, stdout: String(RUNTIME_CONTRACT - 1) }; }), 'stale');
+    assert.equal(calls, 1, 'a confirmed old contract must require an update');
+  }
+  assert.doesNotMatch(runtimeImageMessage('unknown'), /first-time|set up|built before/);
+  assert.match(runtimeImageMessage('missing'), /current context/);
+  // Every instruction must name a screen that exists in the dashboard.
+  for (const contract of ['missing', 'stale'] as const) assert.match(runtimeImageMessage(contract), /Workspace settings → Run setup again/);
 });
 
 test('imageContract reads the runtime label from the pinned image', () => {
@@ -62,12 +88,12 @@ test('a container signature changes with the image and with nothing else', () =>
     'the same directory spelled differently must not');
 });
 
-test('chooseStateDir: explicit, then existing state, then a readable project folder, then home', () => {
+test('chooseStateDir: explicit, then existing state, then a readable project folder, then home', async () => {
   const base = { projectDefault: '/proj/.open-harness', homeDefault: '/home/u/.open-harness/proj' };
-  assert.deepEqual(chooseStateDir({ ...base, explicit: '/elsewhere', hasState: () => true, dockerCanRead: () => false }), { path: resolve('/elsewhere'), reason: 'explicit' });
-  assert.deepEqual(chooseStateDir({ ...base, hasState: () => true, dockerCanRead: () => false }), { path: resolve('/proj/.open-harness'), reason: 'existing' });
-  assert.deepEqual(chooseStateDir({ ...base, hasState: () => false, dockerCanRead: () => true }), { path: resolve('/proj/.open-harness'), reason: 'project' });
-  assert.deepEqual(chooseStateDir({ ...base, hasState: () => false, dockerCanRead: () => false }), { path: resolve('/home/u/.open-harness/proj'), reason: 'home' });
+  assert.deepEqual(await chooseStateDir({ ...base, explicit: '/elsewhere', hasState: () => true, dockerCanRead: async () => false }), { path: resolve('/elsewhere'), reason: 'explicit' });
+  assert.deepEqual(await chooseStateDir({ ...base, hasState: () => true, dockerCanRead: async () => false }), { path: resolve('/proj/.open-harness'), reason: 'existing' });
+  assert.deepEqual(await chooseStateDir({ ...base, hasState: () => false, dockerCanRead: async () => true }), { path: resolve('/proj/.open-harness'), reason: 'project' });
+  assert.deepEqual(await chooseStateDir({ ...base, hasState: () => false, dockerCanRead: async () => false }), { path: resolve('/home/u/.open-harness/proj'), reason: 'home' });
 });
 
 test('withEnvValue appends, fills an empty assignment, and never overrides a set one', () => {

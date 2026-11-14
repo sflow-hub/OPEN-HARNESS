@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
-import { copyFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { copyFileSync, mkdirSync, chmodSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { COMPUTER_TOOL, HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, runToolGrants, type AgentProfile, type ModelChoice, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
+import { API_TOOL, bindingSecretName, COMPUTER_TOOL, folderNotice, HANDOFF_TOOL, ROUTINE_TOOL, runCwd, TASK_TOOL, WORKSPACE_PERMISSIONS, runToolGrants, type AgentProfile, type ModelChoice, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
 import { dockerStatusCached, ensureContainerAsync, HermesGateway } from './hermes';
 import { WORKSPACE_TOOL } from '../lib/product';
 import { profileMemory } from './profile-memory';
@@ -16,9 +17,12 @@ export const COORDINATION_TOOLS: ToolInfo[] = [
   { id: COMPUTER_TOOL, name: 'Managed computer', group: 'desktop', description: 'See and control the private managed browser. Human takeover keeps its current page. Existing headless browser permissions do not enable this tool; select it explicitly.', available: true },
   { id: WORKSPACE_TOOL, name: 'Workspace coordination', group: 'delegation', description: 'Track delegated work, record checkpoints, and propose bounded responsibilities.', available: true },
   { id: GROUP_CHAT_TOOL, name: 'Group conversations', group: 'delegation', description: 'Read and message teammates in shared group conversations.', available: true },
+  { id: API_TOOL, name: 'Authenticated API request', group: 'other', description: 'Call explicitly granted API origins with saved credentials.', available: true },
   { id: TASK_TOOL, name: 'Task board', group: 'other', description: 'Read and update assigned board tasks.', available: true },
   { id: HANDOFF_TOOL, name: 'Hand off to another agent', group: 'delegation', description: 'Assign explicit task context to a named agent on a shared team.', available: true },
   { id: ROUTINE_TOOL, name: 'Create a routine', group: 'scheduling', description: 'Schedule work through Open Harness.', available: true },
+  // Workspace access: Agent settings lists these apart from the runtime's own tools.
+  ...WORKSPACE_PERMISSIONS.map(([id, name, description]) => ({ id, name, group: 'workspace', description, available: true })),
 ];
 const mockTools: ToolInfo[] = [
   ['terminal', 'terminal'], ['process_manage', 'terminal'], ['execute_code', 'code'], ['read_file', 'files'], ['write_file', 'files'], ['search_files', 'files'],
@@ -61,7 +65,7 @@ export async function discoverTools(agentId: string, root: string, profile?: Age
   catch (error) { return { source: 'unavailable', tools: [], error: error instanceof Error ? error.message : 'Tool inventory is unavailable.' }; }
 }
 export type PrepareProfileOptions = { cwd?: string; coordinationCommand?: string; controlUrl?: string; controlSocket?: string; idle?: boolean;reviewUnclassified?:boolean };
-export function prepareProfile(root: string, profile: AgentProfile, effective: ModelChoice, secrets: { environment(): Record<string,string> }, token: string, runId: string, options: PrepareProfileOptions = {}) {
+export function prepareProfile(root: string, profile: AgentProfile & { projectName?: string }, effective: ModelChoice, secrets: { environment(): Record<string,string> }, token: string, runId: string, options: PrepareProfileOptions = {}) {
   assertSandboxedComputer(profile.computer);
   const allowedTools = runToolGrants(profile);
   const baseUrl = effective.baseUrl ? containerBaseUrl(effective.baseUrl) : '';
@@ -79,7 +83,10 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
   chmodSync(coordination, 0o600);
   for (const name of ['gateway-entry.mjs','model-proxy.mjs']) { const target = join(managed,name); copyFileSync(join(import.meta.dirname,'hermes',name),target); chmodSync(target,0o600); }
   const coordinationEnv = { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, OPEN_HARNESS_RUN_LEASE: '/run/open-harness/run-lease.json', ...(options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}), ...(options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {}) };
-  if (allowedTools.some(id => COORDINATION_TOOLS.some(t => t.id === id))) mcp.open_harness = { command: 'node', args: [options.coordinationCommand || '/run/open-harness/coordination.mjs'], env: coordinationEnv };
+  // Hermes caches each MCP server's tool schemas under a fingerprint of its command and args only,
+  // never its environment, so a schema change would otherwise never reach an existing agent.
+  const schema = createHash('sha256').update(readFileSync(coordination)).digest('hex').slice(0, 12);
+  if (allowedTools.some(id => COORDINATION_TOOLS.some(t => t.id === id))) mcp.open_harness = { command: 'node', args: [options.coordinationCommand || '/run/open-harness/coordination.mjs', `--schema=${schema}`], env: coordinationEnv };
   const env: Record<string, string> = {};
   const secretValues = Object.fromEntries(Object.entries(secrets.environment()).filter(([,value]) => !isCodexSession(value)));
   const codex = effective.provider === CODEX_PROVIDER;
@@ -115,9 +122,14 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
   for (const c of profile.connectors.filter(c => c.enabled)) {
     const connectorEnv = c.secretRef && secretValues[c.secretRef] ? { [c.secretRef]: secretValues[c.secretRef] } : {};
     Object.assign(env, connectorEnv);
-    mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: '${' + c.secretRef + '}' } : {} };
+    const mapped: Record<string, string> = c.secretRef ? { [c.secretRef]: '${' + c.secretRef + '}' } : {};
+    for (const binding of c.credentialBindings || []) {
+      const name = bindingSecretName(binding);
+      if (secretValues[name] !== undefined) { env[name] = secretValues[name]; mapped[binding.env] = '${' + name + '}'; }
+    }
+    mcp[c.name] = { command: c.command, args: c.args, env: mapped };
   }
-  const config = { model: { default: effective.model, provider: hermesProvider, ...(codex ? { base_url:'http://127.0.0.1:1/v1',api_mode:'codex_responses' } : effective.baseUrl ? { base_url: baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || '/workspace/shared', home_mode: 'profile' }, approvals: { mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, tools: { tool_search: { enabled: 'off' } }, plugins: { enabled: ['open_harness_policy'] }, ...(providers ? { providers } : {}), mcp_servers: mcp };
+  const config = { model: { default: effective.model, provider: hermesProvider, ...(codex ? { base_url:'http://127.0.0.1:1/v1',api_mode:'codex_responses' } : effective.baseUrl ? { base_url: baseUrl } : {}) }, terminal: { backend: 'local', cwd: options.cwd || runCwd(profile.computer), home_mode: 'profile' }, approvals: { mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' }, computer_use: { permission_mode: 'standard', no_overlay: profile.computer.desktop === 'virtual' }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, tools: { tool_search: { enabled: 'off' } }, plugins: { enabled: ['open_harness_policy'] }, ...(providers ? { providers } : {}), mcp_servers: mcp };
   // Hermes's Tool Search defers every MCP tool out of the model-facing array and offers
   // tool_search/tool_describe/tool_call bridges instead. Those bridges are not tools an Open
   // Harness profile grants, so the policy extension strips them, and the deferred tools are
@@ -129,7 +141,9 @@ export function prepareProfile(root: string, profile: AgentProfile, effective: M
   // policy extension off, managed_entry.py then aborts, and every run dies at startup.
   // JSON is a YAML subset; serialization prevents YAML injection from prompts, names, and endpoints.
   atomic(join(home, 'config.yaml'), JSON.stringify(config, null, 2));
-  atomic(join(home, 'SOUL.md'), profile.prompt.enabled ? profile.prompt.text : '');
+  // The folder notice is runtime context, not the operator's instructions, so it is written even
+  // when those are switched off: otherwise an agent cannot know where its granted folders are.
+  atomic(join(home, 'SOUL.md'), [profile.prompt.enabled ? profile.prompt.text : '', folderNotice(profile.computer, profile.projectName), profile.allowedTools.includes(API_TOOL) && profile.credentialGrants?.length ? '## API access\nUse api_request with these credential references and permitted origins/methods:\n' + profile.credentialGrants.map(grant => `${grant.credentialRef}: ${grant.allowedOrigins.join(', ')} (${grant.allowedMethods.join(', ')})`).join('\n') : ''].filter(Boolean).join('\n\n'));
   atomic(join(home, '.env'), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join('\n') + '\n');
   atomic(join(managed, 'policy.json'), JSON.stringify({ runId, revision: profile.revision, modelProvider:effective.provider, allowedTools, coordination: coordinationEnv,reviewUnclassified:options.reviewUnclassified??(process.env.OPEN_HARNESS_SCOPED_AUTONOMY!=='0'||process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY==='1') }));
   writeRunLease(root,profile.id,options.idle?null:runId);

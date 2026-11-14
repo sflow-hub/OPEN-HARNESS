@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
-import { draftProfile, type AgentProfile, type MachineInfo } from '../../lib/agent-profile';
+import { draftProfile, type AgentProfile, type MachineInfo, type SharedFolder } from '../../lib/agent-profile';
 
 // Where an agent works is an ordinary setting now: every agent runs in its own container,
 // and the only desktop it can be given is a private one. Profiles saved before direct
@@ -18,6 +18,9 @@ async function seed(request: APIRequestContext) {
   await request.post(control + '/v1/agents/sync', { headers, data: { agents: initialWorkspace.agents } });
   const { profile } = await (await request.get(control + '/v1/agents/atlas/profile', { headers })).json();
   await request.put(control + '/v1/agents/atlas/profile', { headers, data: { ...draftProfile(initialWorkspace.agents[0]), revision: profile.revision } });
+  // Lasting folders are workspace-wide and the desktop and mobile runs share one coordinator, so each case starts with none.
+  const { revision } = await (await request.get(control + '/v1/folders', { headers })).json();
+  await request.put(control + '/v1/folders', { headers, data: { revision, folders: [] } });
 }
 async function localMachine(request: APIRequestContext) {
   const { machines } = await (await request.get(control + '/v1/machines', { headers: await operator(request) })).json();
@@ -43,6 +46,13 @@ const legacy = (computer: Partial<AgentProfile['computer']>) => async (page: Pag
     await route.fulfill({ response, json: { ...body, profile: { ...body.profile, computer: { ...body.profile.computer, ...computer } } } });
   });
 };
+async function openFolders(page: Page, project: string) {
+  if (project === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: 'Folders', exact: true }).click();
+  const screen = page.locator('.folders-content');
+  await expect(screen.getByRole('heading', { name: 'Folders', exact: true })).toBeVisible();
+  return screen;
+}
 async function openComputerTab(page: Page, name = 'Atlas') {
   await page.getByRole('button', { name: `Edit ${name} profile` }).click();
   const panel = page.getByRole('dialog', { name: 'Agent settings' });
@@ -61,7 +71,7 @@ test('an agent can be given a private agent desktop from Computer settings, with
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
   const panel = await openComputerTab(page);
-  await expect(panel.getByRole('radio', { name: 'Private workspace' })).toBeChecked();
+  await expect(panel.getByText('No host folders. It can use its private files and Shared files.')).toBeVisible();
   // The withdrawn modes are not on offer at all, not merely disabled.
   await expect(panel.getByText('Direct computer access', { exact: true })).toHaveCount(0);
   await expect(panel.getByText(/signed-in desktop is not available|signed in to is not available/)).toBeVisible();
@@ -121,7 +131,7 @@ test('the private desktop switch explains why a computer cannot provide one', as
 
 test('a legacy direct-access profile is blocked until it is moved into a container, deliberately', async ({ page, request }) => {
   const local = await localMachine(request);
-  await legacy({ access: 'direct', desktop: 'existing', folders: [{ id: 'kept', path: '/tmp/open-harness-kept', mode: 'read' }] })(page);
+  await legacy({ access: 'direct', desktop: 'existing', folders: [{ id: 'kept', name: 'kept', path: '/tmp/open-harness-kept', mode: 'read' }] })(page);
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
   const panel = await openComputerTab(page);
@@ -129,8 +139,6 @@ test('a legacy direct-access profile is blocked until it is moved into a contain
   await expect(notice).toContainText('Control of this computer’s signed-in desktop is no longer available.');
   await expect(notice).toContainText('will not start this agent or save its settings');
   // Nothing is chosen for it, and nothing can be saved or probed, until the operator decides.
-  await expect(panel.getByRole('radio', { name: 'Private workspace' })).not.toBeChecked();
-  await expect(panel.getByRole('radio', { name: 'Selected folders' })).not.toBeChecked();
   await expect(panel.getByRole('button', { name: 'Save changes' })).toBeDisabled();
   await expect(panel.getByRole('button', { name: 'Test access' })).toBeDisabled();
   await expect(panel.getByText('Computer settings must change before this agent can be saved.')).toBeVisible();
@@ -144,16 +152,15 @@ test('a legacy direct-access profile is blocked until it is moved into a contain
     await expect(panel.getByRole('switch', { name: 'Private agent desktop' })).not.toBeChecked();
   }
   await expect(notice).toHaveCount(0);
-  // The folder it already listed stays a granted folder; access narrows, it never widens.
-  await expect(panel.getByRole('radio', { name: 'Selected folders' })).toBeChecked();
-  await panel.getByText('Advanced resources and shared folders').click();
-  await expect(panel.getByLabel('Shared folder 1 path')).toHaveValue('/tmp/open-harness-kept');
-  await expect(panel.getByLabel('Shared folder 1 access')).toHaveValue('read');
+  // The folder it already listed is kept with the same access: saving moves it to the Folders list.
+  await expect(panel.getByRole('status').filter({ hasText: 'moved to the Folders screen' })).toContainText('/tmp/open-harness-kept (read only)');
   await panel.getByRole('button', { name: 'Save changes' }).click();
   await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
   const headers = await operator(request);
   const saved = await (await request.get(control + '/v1/agents/atlas/profile', { headers })).json();
-  expect(saved.profile.computer).toMatchObject({ access: 'folders', desktop: local.capabilities.virtualDesktop ? 'virtual' : 'none', folders: [{ path: '/tmp/open-harness-kept', mode: 'read' }] });
+  expect(saved.profile.computer).toMatchObject({ desktop: local.capabilities.virtualDesktop ? 'virtual' : 'none', folders: [] });
+  const { folders } = await (await request.get(control + '/v1/folders', { headers })).json();
+  expect(folders.find((folder: { path: string }) => folder.path === '/tmp/open-harness-kept')).toMatchObject({ mode: 'read', agents: { atlas: 'read' } });
 });
 
 test('a conversation with a legacy agent says so and opens its Computer settings', async ({ page }, testInfo) => {
@@ -194,100 +201,91 @@ const exporting = (folderExports: MachineInfo['folderExports']) => async (page: 
   });
 };
 
-test('a Docker Desktop install offers only the folders exported to it, at their container paths', async ({ page, request }) => {
+test('a Docker Desktop install offers only the folders exported to it, at their container paths', async ({ page }, testInfo) => {
   await exporting([{ path: '/host-folders/project', mode: 'read' }, { path: '/host-folders/notes', mode: 'write' }])(page);
+  // The mock coordinator runs natively, where /host-folders does not exist; the save is checked as the dashboard sends it.
+  let sent: { revision: number; folders: SharedFolder[] } | null = null;
+  await page.route(`${control}/v1/folders`, async route => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    sent = route.request().postDataJSON();
+    await route.fulfill({ json: { revision: sent!.revision + 1, folders: sent!.folders } });
+  });
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  const panel = await openComputerTab(page);
-  await panel.getByRole('radio', { name: 'Selected folders' }).check();
-  await panel.getByText('Advanced resources and shared folders').click();
+  const screen = await openFolders(page, testInfo.project.name);
   // A path on the computer is named only to say it cannot be used here.
-  const note = panel.getByText('Open Harness is running in Docker Desktop.');
-  await expect(note).toContainText('C:\\Projects\\website');
-  await expect(note).toContainText('cannot be selected here directly');
-  await expect(note).toContainText('Exported now: /host-folders/project (read-only), /host-folders/notes (read/write)');
-  await panel.getByRole('button', { name: 'Add folder' }).click();
-  const path = panel.getByLabel('Shared folder 1 path');
+  const note = screen.getByText('Open Harness is running in Docker Desktop');
+  await expect(note).toContainText('/host-folders/');
+  await screen.getByRole('button', { name: 'Add folder' }).click();
+  const path = screen.getByLabel('Folder 1 path');
   await expect(path).toHaveRole('combobox');
-  await expect(panel.getByRole('textbox', { name: 'Shared folder 1 path' })).toHaveCount(0);
+  await expect(screen.getByRole('textbox', { name: 'Folder 1 path' })).toHaveCount(0);
   await expect(path.getByRole('option')).toHaveText(['/host-folders/project · read-only', '/host-folders/notes · read/write']);
   await expect(path).toHaveValue('/host-folders/project');
   // A read-only export cannot be granted read/write: the choice is not offered.
-  const access = panel.getByLabel('Shared folder 1 access');
+  const access = screen.getByLabel('Folder 1 access');
   await expect(access).toHaveValue('read');
   await expect(access).toBeDisabled();
   await expect(access.getByRole('option')).toHaveText(['Read only']);
-  await expect(panel.getByText('Shared read-only with Open Harness.')).toBeVisible();
+  await expect(screen.getByText('Shared read-only with Open Harness.')).toBeVisible();
+  // The name is the mount point, and it follows the folder until someone types their own.
+  await expect(screen.getByLabel('Folder 1 name')).toHaveValue('project');
   await path.selectOption('/host-folders/notes');
+  await expect(screen.getByLabel('Folder 1 name')).toHaveValue('notes');
+  await expect(screen.getByText('/workspace/folders/notes', { exact: true })).toBeVisible();
   await expect(access).toBeEnabled();
   await access.selectOption('write');
-  await panel.getByRole('button', { name: 'Save changes' }).click();
-  await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
-  const headers = await operator(request);
-  const saved = await (await request.get(control + '/v1/agents/atlas/profile', { headers })).json();
-  expect(saved.profile.computer.access).toBe('folders');
-  expect(saved.profile.computer.folders.map(({ path, mode }: { path: string; mode: string }) => ({ path, mode }))).toEqual([{ path: '/host-folders/notes', mode: 'write' }]);
+  await screen.getByLabel('Atlas access to notes').selectOption('write');
+  await screen.getByLabel('Scout access to notes').selectOption('read');
+  await screen.getByRole('button', { name: 'Save folders' }).click();
+  await expect(screen.getByText('Saved. Agents use these folders from their next task.')).toBeVisible();
+  expect(sent!.folders.map(({ name, path, mode, agents, machineId }) => ({ name, path, mode, agents, machineId }))).toEqual([{ name: 'notes', path: '/host-folders/notes', mode: 'write', agents: { atlas: 'write', scout: 'read' }, machineId: 'local' }]);
   // The same installation refuses model servers on this computer's loopback or Docker's host
   // aliases, so the endpoint hint on the Model tab does not suggest them.
+  await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
   await panel.getByRole('tab', { name: 'Model' }).click();
   await panel.getByText('Advanced endpoint').click();
   await expect(panel.getByLabel('Model API base URL')).toHaveAttribute('placeholder', 'https://models.example.com/v1');
   await expect(panel.getByText(/host\.docker\.internal on this computer are refused here/)).toBeVisible();
   await expect(panel.getByText(/use host\.docker\.internal/)).toHaveCount(0);
-  // Back on a computer that reports no exports, the same grant is an ordinary typed path, and
-  // the endpoint hint is the native one again.
-  await page.unroute(`${control}/v1/machines`);
-  await panel.getByRole('button', { name: 'Close agent settings' }).click();
-  await expect(panel).toBeHidden();
-  const again = await openComputerTab(page);
-  await again.getByText('Advanced resources and shared folders').click();
-  await expect(again.getByRole('textbox', { name: 'Shared folder 1 path' })).toHaveValue('/host-folders/notes');
-  await expect(again.getByText('Open Harness is running in Docker Desktop.')).toHaveCount(0);
-  await again.getByRole('tab', { name: 'Model' }).click();
-  await again.getByText('Advanced endpoint').click();
-  await expect(again.getByLabel('Model API base URL')).toHaveAttribute('placeholder', 'http://host.docker.internal:11434/v1');
-  await expect(again.getByText(/for a model server on the computer running the agent, use host\.docker\.internal/)).toBeVisible();
 });
 
-test('with nothing exported, the editor says how to export a folder instead of offering a path box', async ({ page }) => {
+test('with nothing exported, the Folders screen says how to export a folder instead of offering a path box', async ({ page }, testInfo) => {
   await exporting([])(page);
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  const panel = await openComputerTab(page);
-  await panel.getByRole('radio', { name: 'Selected folders' }).check();
-  await panel.getByText('Advanced resources and shared folders').click();
-  await expect(panel.getByRole('button', { name: 'Add folder' })).toBeDisabled();
-  const note = panel.getByText('Open Harness is running in Docker Desktop.');
-  await expect(note).toContainText('No folders are exported yet.');
-  await expect(note).toContainText('compose.host-folders.example.yaml');
-  await expect(note).toContainText('--override');
+  const screen = await openFolders(page, testInfo.project.name);
+  await expect(screen.getByRole('button', { name: 'Add folder' })).toBeDisabled();
+  const note = screen.getByText('Open Harness is running in Docker Desktop');
+  await expect(note).toContainText('None are exported yet');
   await expect(note).toContainText('Exports change only at a relaunch.');
-  await expect(panel.getByLabel('Shared folder 1 path')).toHaveCount(0);
-  await panel.getByRole('button', { name: 'Close agent settings' }).click();
-  await page.getByRole('button', { name: 'Discard changes' }).click();
-  await expect(panel).toBeHidden();
+  await expect(screen.getByLabel('Folder 1 path')).toHaveCount(0);
 });
 
-test('a saved grant the exports no longer cover is shown as such, and a read-only export asks for read-only access', async ({ page }) => {
+test('a saved folder the exports no longer cover is shown as such, and a read-only export asks for read-only access', async ({ page }, testInfo) => {
   await exporting([{ path: '/host-folders/project', mode: 'read' }])(page);
-  await legacy({ access: 'folders', folders: [{ id: 'gone', path: '/host-folders/old', mode: 'read' }, { id: 'narrowed', path: '/host-folders/project', mode: 'write' }] })(page);
+  await page.route(`${control}/v1/folders`, route => route.request().method() === 'GET'
+    ? route.fulfill({ json: { revision: 7, folders: [{ id: 'gone', name: 'gone', path: '/host-folders/old', mode: 'read', machineId: 'local', agents: { atlas: 'read' } }, { id: 'narrowed', name: 'narrowed', path: '/host-folders/project', mode: 'write', machineId: 'local', agents: { atlas: 'write' } }] } })
+    : route.fallback());
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  const panel = await openComputerTab(page);
-  await panel.getByText('Advanced resources and shared folders').click();
-  const gone = panel.getByLabel('Shared folder 1 path');
+  const screen = await openFolders(page, testInfo.project.name);
+  const gone = screen.getByLabel('Folder 1 path');
   await expect(gone).toHaveValue('/host-folders/old');
   await expect(gone.getByRole('option').first()).toHaveText('/host-folders/old · no longer exported');
-  // The export was narrowed to read-only after this grant was saved: the stored choice stays
+  // The export was narrowed to read-only after this folder was saved: the stored choice stays
   // visible, and the way to make it saveable is spelled out rather than changed silently.
-  const narrowed = panel.getByLabel('Shared folder 2 access');
+  const narrowed = screen.getByLabel('Folder 2 access');
   await expect(narrowed).toHaveValue('write');
   await expect(narrowed).toBeEnabled();
-  await expect(panel.getByText('This folder is now shared read-only with Open Harness. Choose Read only to save.')).toBeVisible();
+  await expect(screen.getByText('This folder is now shared read-only with Open Harness. Choose Read only to save.')).toBeVisible();
   await narrowed.selectOption('read');
   await expect(narrowed).toBeDisabled();
-  await expect(panel.getByText('Shared read-only with Open Harness.')).toBeVisible();
-  await panel.getByRole('button', { name: 'Close agent settings' }).click();
-  await page.getByRole('button', { name: 'Discard changes' }).click();
-  await expect(panel).toBeHidden();
+  // Every agent's access drops with the folder's.
+  await expect(screen.getByLabel('Atlas access to narrowed')).toHaveValue('read');
+  await expect(screen.getByText('Shared read-only with Open Harness.')).toBeVisible();
+  await screen.getByRole('button', { name: 'Discard' }).click();
+  await expect(narrowed).toHaveValue('write');
 });

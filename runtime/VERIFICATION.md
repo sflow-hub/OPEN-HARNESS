@@ -1,5 +1,39 @@
 # Runtime verification
 
+## Workspace and project folder access in Compose — October 3, 2026
+
+Two disposable Compose stacks built from the current working tree (coordinator image
+built locally, Hermes `open-harness-hermes:security-fix-20261003`, runtime contract 8)
+passed the complete `tests/compose-smoke.mjs` on Docker Desktop for Linux with two
+exported fixture folders and the scripted provider (`ok: true`, projects
+`oh-compose-smoke-fea4c3f2` and `oh-compose-smoke-fa2f5a10`; all their containers,
+volumes and images removed afterwards). The folder block ran against real Hermes runs and
+real nested mounts:
+
+- grants sent on an agent profile moved into the workspace Folders list with the
+  same access, and the profile kept no folders;
+- the Folders list refused write access to a read-only export, the unexported
+  `/data`, and a subfolder of an export;
+- a peer given only a project folder mounted exactly `project:exchange:write`,
+  wrote `project-proof.txt` to the host through `write_file`, and its generated
+  `SOUL.md` named `/workspace/project/exchange` and none of the owner's folders;
+- lowering the owner to read only mounted the folder read-only on the next run
+  and the host file was not created; revoking it removed the mount and the host
+  file was not created;
+- the Folders list was unchanged after the coordinator restart and after the
+  stopped-volume backup was restored into an empty project.
+
+The same runs also passed the existing restart, encrypted-credential, private
+desktop and restore checks. Two earlier attempts on this host had exposed separate
+faults, both fixed before these runs: the dashboard proxy returned `fetch failed`
+when the coordinator closed idle keep-alive sockets after blocking in synchronous
+Docker calls (since fixed by making those calls asynchronous; that fix has not
+been re-run on this host), and a
+snapshot of the in-progress encrypted credential store could not reopen its own
+file after restart (fixed in the current `runtime/secrets.ts`). Native Linux
+selected-folder verification and remote runners were not exercised;
+`tests/real-folders-smoke.mjs` covers the native path and refuses Docker Desktop.
+
 ## September 29: Docker-and-browser scope and actual emulation prerequisite
 
 The user removed physical Mac/Windows hardware and native AMD64 hardware as MVP
@@ -3459,6 +3493,518 @@ September 30 final soak receipts, journal and cleanup remain locally unavailable
 and unverified; recover and independently verify them or run a replacement
 qualifying final-image soak. Rescan immediately before release; newer Chromium
 advisories may require another authenticated pin refresh.
+
+
+## October 3 contract-9 native AMD64 security fix — 2026-10-03 21:32 MDT
+
+This was contract 9 on this branch before it was merged with upstream; these fixes now
+ship as contract 12. It is unrelated to the upstream contract-9 image of November 8.
+
+The operator directly approved the reviewed exception, but its mandatory upstream
+check immediately retired it: http-cache-semantics 4.3.0 now exists. Unmodified
+4.3.0 still reproduced the restricted shared-cookie max-stale leak. The runtime
+therefore pins the integrity-verified 4.3.0 archive and ports the independently
+reviewed guard to it. Installer source/installed-byte checks and the Dockerfile
+require patched SHA256
+`1b58bd00ff75aeed1383109508b4a3a44a07370d6eca54abb931af0fb2ebbd21`.
+A tampered-backport test confirms rejection before npm is modified. The
+conservative immutable/shared-cookie behavior is documented in
+security/CVE-2026-93748.md; private cache behavior is preserved.
+
+No exception is active. Gate, release receipt validator and release workflow
+are byte-identical to the strict HEAD versions. The superseded proposal remains
+only in the private work review folder. Contract 9 also requires rebuilding the
+image with the current embedded api_request MCP tool; the runner was regenerated.
+
+Native AMD64 image: `sha256:8fafe23a0823c1af97b3d71037516d1f40c277db6cc3f200c9c25a3abe505b87`.
+Local candidate tag: `open-harness-hermes:security-fixed-20261003`.
+The build passed package, ELF/linkage, lazy provider dependency, pip and Debian
+provenance checks. All 263 frozen source files are preserved in fixed-source.tar.gz
+with the per-file manifest in the private security-refresh evidence folder.
+
+The unchanged exact-image Debian-origin gate passed all 13 steps. Debian component
+and SBOM scans and the whole-image scan returned zero HIGH/CRITICAL vulnerabilities
+and zero secrets. The vulnerable Chromium negative control produced 564 severe
+package findings across 282 CVE IDs and exited 1 as required. Trivy 0.74.0 used
+database SHA256 `f6ec609f9d4220d61692d0ab640b06e461485b636f9b407f3784cc0fbbf2711b`,
+updated `2026-10-04T01:47:20Z`. The publication receipt validator passed; receipt
+SHA256 `21d3b349725316eff97aea4d202b06a89bf9c5a0f04a3d88bf8dd1df41a2c8cb`.
+This is a local receipt, not a registry publication or acceptance of another build.
+Both named probes were independently confirmed absent; all 48 evidence files
+were copied and hash verified before the owned source-only home fixture was removed.
+
+A separate no-network, read-only, non-root container verified installed package
+versions, receipt and patch hash, all six leak/public/private-cache regressions,
+contract 9 and api_request advertisement by the actual bundled MCP process.
+This checks tool advertisement, not authenticated real-provider API execution.
+
+Final source checks: Node 292 pass/3 skip/0 fail; Python 168 run/31 retained-evidence
+skips/OK on host Python 3.14.4; typecheck and production frontend build pass;
+lint zero errors/five existing warnings; production npm audit zero vulnerabilities.
+Python 3.12 remains the image/CI target. No UI was changed in this pass; Claude's
+latest 146/146 browser and full Compose checks twice cover its earlier contract-8
+feature image, and are not relabelled as contract-9 acceptance.
+
+Evidence: work/release-review-20261003/security-refresh/strict-final-gate,
+fixed-build.log, fixed-image-check.json, fixed-cleanup.json, fixed-*-check/test logs,
+fixed-source.tar.gz, and FIXED-SHA256SUMS. The live Compose stack was not upgraded.
+ARM64 final-image checks, engine input registry digests, final packaged/runtime
+acceptance and qualifying final-image soak remain release requirements.
+
+
+## October 3 final collaboration gates — 2026-10-03 23:34 MDT (Codex)
+
+The native AMD64 contract-9 Hermes image
+`sha256:8fafe23a0823c1af97b3d71037516d1f40c277db6cc3f200c9c25a3abe505b87`
+now passes actual file/input/task MCP, context/replay, terminal policy, manual
+approval denial/approval, durable memory/skills, named delegation, scheduler
+restart and private Chromium/CUA desktop/isolation/revocation fixtures. These
+use a scripted local provider; they establish tools and transport, not reasoning.
+The previous strict security receipt remains valid on current gate sources,
+SHA256 `21d3b349725316eff97aea4d202b06a89bf9c5a0f04a3d88bf8dd1df41a2c8cb`.
+
+The checks found and fixed agent-scoped socket dispatch for `/internal/api-request`,
+Linux Docker Desktop coordination across its VM boundary using the existing
+socket-first authenticated HTTP fallback, and pinned HTTPS DNS lookup handling
+of Node 22's `{all:true}` callback format. The coordinator still binds loopback;
+existing agent/run authorization remains. The HTTPS regression uses a real local
+TLS server and a pinned hostname, in addition to the mocked policy tests.
+
+The integrated coordinator is
+`sha256:c04717260aa99fd2f21a8f25577f29b620673283f499a43f5a682b529c94aa9b`.
+Its 263-file frozen source, including Claude's delivered named-folder collision
+fix, is preserved and verified in coordinator-source.tar.gz and its manifest.
+Production import analysis permitted removing seven unused standalone build
+plugin packages; unused final-image npm was also removed. These eliminate five
+npm findings. The coordinator still fails its strict scan with three HIGH
+findings in official Buildx. The official source engine
+`sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0`
+fails with 29 HIGH package occurrences. Both have zero secrets, using the
+same database as the Hermes scan. PCRE2 10.48-r0 requires 10.49-r0 in addition
+to the previously reviewed component/Expat replacements. No scan exception,
+ignore or severity relaxation was introduced.
+
+Isolated final-source Compose acceptance passes manual approvals, API
+origin/method/reference denials with hidden fixture secrets, selected named
+folder write/read-only ceilings and other-agent/unexported-path rejection,
+credential rotation, restart persistence and empty-volume encrypted restore.
+Restore verifies 200 stopped file owner/mode/hash entries, preserved profiles,
+credentials, private/shared files, memory/skills/tasks/history, continued real
+work and desktop input without replaying interrupted runs. The five-minute
+soak diagnostic passes 11 cycles, 32 samples and one coordinator restart in
+315.742 seconds. Its receipt explicitly says `durationQualified:false`;
+source-mode engine/Buildx inputs and this diagnostic do not qualify a release
+or its 24-hour gate.
+
+Final source checks: Node 293 pass/3 skip/0 fail; typecheck; lint zero errors/five
+existing warnings; production build; browser 146/146; packaging 22/22; upgrade
+fixtures 57/57; typed credential tests 10/10 including real TLS. The browser
+archive includes docs/CREDENTIALS.md. Key backup, complete pre-upgrade rollback,
+actual OAuth callback/state behavior and best-effort response masking limits
+are documented. Actual final-version upgrade/rollback is still pending.
+
+Evidence is private under work/release-review-20261003/final-gates, including
+completed-checks.json, evidence/*.json, source manifests, scan reports and logs.
+The 413-file fixture archive was reopened and every payload hash verified;
+SHA256 `b6ee5bc3439abf4a34c5e832b9352add6b5880de5bdcc46aee1859d8b49fe8b7`.
+Independent cleanup found no resources for the six owned Compose identities
+and no remaining container mount/label referencing the owned fixture;
+unrelated containers were left untouched. Earlier failed attempts remain
+separately labelled; node-complete.log supersedes the packaging-fixture failure
+in node-final.log. SHA256SUMS binds the final evidence packet.
+
+Reviewed engine-input artifacts/published registry digests, PCRE2 refresh,
+strict final coordinator/engine scans, ARM64 acceptance, anonymous published
+package installation, final upgrade/rollback and qualifying final-image soak
+remain release gates. No 24-hour run was launched on scan-failing source inputs.
+The September 30 final receipt/journal/cleanup remain unverified locally,
+not declared lost; this host has no runner private SSH key. Remote folder
+acceptance is deferred by the user. Claude's announced additional folder-policy
+changes and final integrated commit must receive their own source binding and
+verification. No publication or live installation replacement occurred here.
+
+
+## October 3 PCRE2 engine-input follow-up — 23:54 MDT (Codex)
+
+The source-engine scan's PCRE2 finding is now addressed in release assembly:
+Alpine pcre2 10.49-r0 archives and signed indexes authenticated for both
+architectures, package identities/control checksums/data hashes verified,
+and exact archive SHA256 added to the still-incomplete engine input lock.
+AMD64 hash: `2919897914820f42a17a8d7d37df310d2dfad1c82ebe5f539cc5c765f916752a`.
+ARM64 hash: `03efd0b29f7f38deb10a9ccb54f56e19683eb7ac27eb1f347e6dbd2e59ea000d`.
+ARM64 trusted keys came from its explicit pinned official image member's
+filesystem; no ARM64 runtime execution is claimed.
+
+Release validation now requires the package metadata/path/pinned file in both
+complete architecture records and binds the installed-version image label.
+The engine Dockerfile installs/checks the exact local package offline. Notice,
+input-layout docs and publication fixtures are consistent. The actual strict
+security gate, receipt validator and release workflow are unchanged.
+
+PCRE2-only native AMD64 diagnostic image
+`sha256:23ecaf13be5be48e123e9d41e4229bb435357a9121c05e4e97ab40bcab59fd7c`
+passes offline installation and read-only/no-network version/executable probes.
+Its strict scan exits 1 with 28 HIGH occurrences/zero secrets, removing exactly
+CVE-2026-103111 from the previous 29-HIGH report against the same database.
+It is not the final derived engine. Reviewed component artifacts/registry
+digests remain unavailable; final engine and coordinator scans, ARM64 runtime,
+published-package installation, final upgrade/rollback and 24-hour soak stay
+pending. Original final-gates evidence remains immutable.
+
+Current checks pass: Node 294/3 skips/0 failures; packaging 23/23; typecheck;
+lint zero errors/five existing warnings; production build. No UI change/browser
+rerun. Release preflight still refuses incomplete refreshed inputs, which must
+include PCRE2 before publication. All four dedicated fetch/key containers and
+the diagnostic runtime container are absent; owned temporary context removed.
+No publication, live upgrade, ignore or waiver. Evidence is private under
+work/release-review-20261003/engine-pcre2-refresh with a 263-file verified source
+archive, raw signed packages/indexes, scan comparison, cleanup and SHA256SUMS.
+Claude's narrow independent review is requested in COORDINATION.md.
+
+## Runtime readiness recovery — October 4, 2026
+
+Read-only diagnosis on Linux with Docker Desktop 29.5.3 observed the pinned
+`open-harness-hermes:2026.9.11` tag return `No such image` while image listing
+and inspection by immutable ID found it with runtime contract 9. Subsequent
+tag inspection succeeded without a build, pull, retag, or container restart.
+This reproduces a misleading missing-runtime report, but does not establish
+the cause of Docker's transient lookup failure or the user's earlier incident.
+
+Runtime inspection now retries a failed lookup once, distinguishes an
+inconclusive check from a missing image, and still rejects old contracts.
+Expired negative status waits for its refresh; the dashboard rechecks an
+unavailable runtime every five seconds while preserving the draft. The updated
+read-only probe against real Docker returned `available: true`. No model call
+or real agent execution was performed for this change.
+
+Validation: 22 targeted Node tests passed (runtime contract/readiness,
+container ownership, runner credentials); all eight targeted desktop/mobile
+runtime browser cases passed, with the mobile draft case rerun after fixing
+its test navigation. Typecheck, production build, and diff whitespace checks
+passed. Lint reported zero errors and five existing warnings. The standalone
+runner was regenerated.
+
+## Browser refresh and qualified runtime lookup — October 4, 2026
+
+Follow-up diagnosis read the running local coordinator's bootstrap response:
+the Docker server was available, but its runtime image was reported missing.
+Docker inspection of `open-harness-hermes:2026.9.11` failed again; repeated
+inspection of `docker.io/library/open-harness-hermes:2026.9.11` succeeded with
+the same installed image ID and runtime contract 9. Runtime code now uses the
+qualified local Hermes reference consistently for inspection, build, sharing
+probes, and agent container creation. Explicit registry/digest overrides stay
+unchanged. This does not explain Docker Desktop's underlying lookup behavior.
+
+A temporary container using the qualified reference successfully executed
+`/bin/true` with `--rm --pull never --network none --read-only`. No image was
+downloaded or rebuilt, and no model request was made. The running coordinator
+subsequently returned HTTP 200, live mode, and `runtime.available: true`.
+
+The browser now distinguishes reconnecting from setup and enables chat only
+after connection, history, and active-run restoration complete. Drafts remain
+editable; the first two connection failures retry before showing the offline
+panel. Targeted desktop/mobile browser checks passed 16/16, including delayed
+bootstrap and history, a dropped bootstrap, saved pairing on reload, runtime
+recovery, and approval reattachment. Targeted runtime/container/control-client
+checks passed 34/34. Typecheck, production build, and lint on changed source
+and tests passed; the standalone runner was regenerated.
+
+## Refresh recovery audit — October 4, 2026
+
+Fault injection reproduced two additional backend failures before their fixes:
+a failed sharing probe stayed cached after Docker recovered, and an unsuccessful
+image-ID inspection produced an empty container signature and allowed replacement
+of a healthy owned container. Failed sharing probes are now retried on the next
+check; unsuccessful or empty image-ID responses stop admission before any
+container mutation and are not cached as a usable ID. Both regressions now pass,
+including reuse of the original container after recovery. The runner bundle was
+regenerated from source.
+
+Browser fault injection also reproduced an older unavailable response overwriting
+a newer ready response. Checks now carry an ordering counter; superseded answers
+cannot change readiness. A separate test held a Docker response past the polling
+interval and reproduced overlapping polls against the prior build. Background
+polling now waits while a readiness request is pending, allowing slow checks to
+complete. Both desktop and mobile retain the draft and enable sending on recovery.
+An active approval was refreshed three times on each viewport; the same run ID
+survived without duplicate submission and its approval remained answerable.
+
+Final verification:
+
+- Full Node suite: 301 tests, 298 passed, 3 skipped, 0 failed.
+- Final full Playwright suite: 156 passed on desktop and mobile. The first full
+  pass identified an old immediate-outage expectation and a mobile test navigation
+  mistake; the updated cases verify two automatic retries before a sustained
+  outage banner and avoid reopening an already open navigation panel.
+- Typecheck, production build, changed-file lint, and diff whitespace checks passed.
+- Three real Docker/coordinator checks, spaced six seconds apart across the
+  readiness-cache lifetime, all succeeded: qualified image lookup, disposable
+  `--rm --pull never --network none --read-only` container running `/bin/true`,
+  and live coordinator bootstrap reporting `runtime.available: true`.
+
+No image rebuild, paid model call, or real user-agent task was performed. These
+checks establish recovery behavior for the reproduced failures, not immunity to
+Docker outages or removal of the installed runtime. Test logs for this session
+are `/tmp/open-harness-refresh-audit-node.log` and
+`/tmp/open-harness-refresh-audit-browser-final.log`.
+
+## Agent workspace permission gaps — October 8, 2026
+
+The two review findings were reproduced with isolated mock-coordinator regressions:
+conversation access returned private follow-ups to a delegated run, and the Projects
+tool could change the automatic-start destination. Both regressions failed before
+the fixes. Conversation results now select only the caller's own runs and delegated
+descendants before applying the 20-turn limit; 21 private follow-ups neither appear
+nor hide the original authorized turn.
+
+The Projects tool no longer advertises or accepts changes to `runStageId`, including
+through the old task-tool alias or nested settings. Removing the configured trigger
+is refused even with automatic starts disabled. Stage creation, recategorization and
+reordering preserve the current trigger transactionally, including boards whose
+unsaved defaults derive that destination from their workflow. The additional default
+recategorization regression failed before this protection. A stage edit that would
+introduce a trigger where none existed is refused and rolled back. Human project
+settings can still select a different trigger; ordinary stage edits and completion
+destination changes remain available to agents.
+
+Final validation: full Node suite 308 tests, 305 passed, 3 skipped, 0 failed;
+typecheck, changed-file ESLint, production build and diff whitespace checks passed.
+The standalone runner was regenerated. The first full pass caught a stale revision
+in the new test after a successful stage edit; the fixture now fetches the current
+revision before its human settings update. No live user state, real container or
+paid model call was used for these checks. Logs are
+`/tmp/open-harness-permission-full-tests.log`,
+`/tmp/open-harness-permission-typecheck.log`,
+`/tmp/open-harness-permission-lint.log`, and
+`/tmp/open-harness-permission-build.log`.
+
+## Task-move ownership and archived handoffs — October 8, 2026
+
+Both follow-up review findings failed their new regressions before the fixes:
+an ownership change refused by task update succeeded through task move, and a
+handoff inherited an archived project that direct run creation rejected.
+
+Task updates and moves now share the ownership permission check after flat,
+nested-object and nested-JSON arguments are normalized. Tests verify that denied
+moves leave the owner, stage and revision unchanged; ordinary moves, self-claims
+and assignments with the permission enabled still succeed. Project archive
+validation now follows inheritance resolution, covering both agent handoffs and
+operator-created child runs. Refused handoffs create no child run; restoring the
+project permits delegation again with the helper's expected read-only folder grant.
+
+Validation: 46 coordinator, project-folder and MCP tests passed; typecheck,
+changed-file ESLint and diff whitespace checks passed. These checks used temporary
+mock-coordinator state, with no paid model calls or changes to live user state.
+Logs: `/tmp/open-harness-move-handoff-before.log`,
+`/tmp/open-harness-move-handoff-after.log`,
+`/tmp/open-harness-move-handoff-typecheck.log`, and
+`/tmp/open-harness-move-handoff-lint.log`.
+
+## Four security boundary fixes — October 8, 2026
+
+All four independently reproduced review findings are now guarded in source:
+
+- Dashboard proxy requests set an upstream marker that requires authentication or
+  one-use pairing even on a native coordinator. A client-controlled Host or forwarded
+  address cannot bypass it. Direct loopback bootstrap remains available for development.
+  Native production and standalone defaults now bind to loopback; Compose keeps its
+  explicit listener. The rebuilt production server, deliberately bound to all interfaces
+  for the attack check, returned 401 without a token for the original forged-localhost
+  request over a non-loopback address. One-use pairing succeeded and three authenticated
+  refreshes returned 200. A separate default-listener check returned local health 200 and
+  refused the non-loopback connection.
+- Coordination tokens bind the agent, exact run ID and snapshotted computer. Authentication
+  requires the run header, a live run, unchanged placement and a nonrevoked machine. No
+  endpoint falls back to another active run. Probes receive no capability and completed
+  runner receipts remove it from command payloads. The fake-runner regression verifies
+  valid remote access, denial after completion, transfer back to local execution and
+  revocation, refusal when an old token claims a later run ID, valid local access through
+  the generated profile, and immediate refusal for an active run on a revoked machine.
+- Folder validation reads Docker configuration/context endpoints on every save or
+  admission, protects conventional, rootless and Desktop socket directories, and resolves
+  socket-file links as well as parent-directory links. Unknown active contexts and
+  malformed metadata fail closed. Valid inactive plugin contexts without an engine
+  endpoint remain usable alongside ordinary Docker contexts. The original synthetic
+  Docker context was recognized by Docker while its socket directory was refused by the
+  fixed validator. No real engine-control requests were sent.
+- Path containment compares actual parent components, so literal names such as
+  `state/..private-backup` remain protected children. Read and write grants are refused;
+  harmless similarly named sibling directories still work.
+
+Validation:
+
+- Full Node suite: 314 tests, 311 passed, 3 skipped, 0 failed.
+- Typecheck, production build and diff whitespace checks passed. Full lint had no errors
+  and five existing warnings; final changed-file lint passed. The runner was regenerated.
+- Browser full run: 160 passed; the two new cases reached a different coordinator because
+  the test proxy lacked its isolated upstream URL. After fixing that fixture, all 46
+  desktop/mobile bootstrap-security, pairing and refresh cases passed. Together these
+  runs verify all 162 browser cases, with no product-code change between the browser runs.
+- Real pinned Hermes container fixture passed with a local scripted provider: authenticated
+  MCP dispatch, four refusals without a breaker trip followed by project/task creation,
+  named delegation and collaboration, continuity, clarification and both approval outcomes.
+  The first attempt stopped at Docker Desktop's unshared `/tmp` canary before Hermes ran;
+  the accepted run used a unique shared-home temporary directory. Evidence is
+  `/home/jarom/open-harness-real-smoke-GWuZhm/evidence.json`. Its test containers were removed.
+
+No paid model calls, real user-agent work or vulnerability publication was performed.
+Existing work should be stopped and the updated coordinator/runner deployed before using
+the new authentication contract: legacy per-agent tokens intentionally cannot authenticate.
+No Hermes image rebuild or runtime-contract bump is required for these source changes.
+
+Logs: `/tmp/open-harness-four-security-fixes-full-node.log`,
+`/tmp/open-harness-four-security-fixes-browser.log`,
+`/tmp/open-harness-four-security-fixes-browser-final.log`,
+`/tmp/open-harness-four-security-fixes-production-bootstrap.log`,
+`/tmp/open-harness-four-security-fixes-default-listener.log`,
+`/tmp/open-harness-four-security-fixes-grants.log`,
+`/tmp/open-harness-four-security-fixes-real-hermes.log`,
+`/tmp/open-harness-four-security-fixes-typecheck.log`, and
+`/tmp/open-harness-four-security-fixes-lint.log`.
+
+## Four security boundary recheck — October 9, 2026
+
+Rechecked the four fixes against the current working tree: proxy bootstrap pairing,
+run/computer-scoped coordination authority, Docker context socket protection, and
+containment of literal dot-dot-prefixed data folders. All 18 targeted regressions
+passed. The full suite identified an outdated generated runner; it was regenerated
+with `npm run runner:bundle`, and the final full Node run passed 325 tests with
+3 skipped and no failures (328 total). Nine runner-bundle, credential-delivery and
+folder-validation checks also passed.
+
+The rebuilt app passed all eight selected desktop/mobile browser checks: forged
+localhost proxy bootstrap is refused, refresh waits for connection and history,
+dropped bootstrap retries without losing the draft, and an approval survives three
+reloads without duplicate work. Typecheck, changed-file lint, production build and
+diff whitespace checks passed. These checks used isolated temporary state and
+scripted/mock services; no paid model calls or live user work were performed.
+
+Logs: `/tmp/open-harness-security-recheck.log`,
+`/tmp/open-harness-security-recheck-full-node-final.log`,
+`/tmp/open-harness-security-recheck-runner.log`,
+`/tmp/open-harness-security-recheck-browser.log`,
+`/tmp/open-harness-security-recheck-typecheck.log`,
+`/tmp/open-harness-security-recheck-lint.log`, and
+`/tmp/open-harness-security-recheck-build.log`.
+
+## ChatGPT / Codex OAuth credentials — October 9, 2026
+
+Added a model credential using OpenAI's documented public OSS authorization-code
+flow: a persistent host identifier, issued per-account client registration, PKCE,
+state and nonce, signed ID-token validation, encrypted token storage, serialized
+refresh rotation, and local sign-out with attempted remote revocation. Accounts
+that decline plan usage remain signed in with inference disabled. No API key,
+client secret, imported Codex CLI credential or private ChatGPT backend is used.
+
+The coordinator lists account models and sends streaming public Responses requests
+with `store:false`. Agent containers and remote runner commands carry a live run
+capability instead of OAuth tokens. A freshly copied container adapter relays SDK
+requests over the private socket, with authenticated HTTP fallback for Docker
+Desktop and remote runners. It is installed by both runner installers and included
+in desktop runtime packaging; the runner bundle was regenerated. These adapter
+files use the existing pinned image without rebuilding it.
+
+Synthetic OAuth regressions verify signature/issuer/audience/nonce/expiry checks,
+account and client mismatches, callback replay/cancellation, restart persistence,
+identity-only consent, token rotation and refresh failures, encrypted storage and
+metadata masking, forced model/stream/store settings, terminal event handling,
+chunk-split token masking, callback relay and authenticated manual completion,
+remote-runner access without OAuth dispatch, and refusal after run completion.
+The private relay tests cover route/capability restrictions, streaming, preservation
+of upstream error status/code/request ID, and fallback only after a failed connection.
+
+Real pinned Hermes verification passed against the synthetic OpenAI transport:
+sign-in, Responses model requests, a `write_file` round trip producing the expected
+file, a final OK reply, and rejection of a terminal plan-limit stream as a failed run.
+The fixture asserted that generated profile/config files contained no OpenAI access
+or refresh token. Evidence is
+`/home/jarom/open-harness-real-chatgpt-rQekwY/evidence.json`; its disposable container
+was removed. An earlier fixture omitted the Responses output-item event sequence;
+Hermes correctly refused its empty assembled output. The complete fixture passed.
+
+Validation: 339 Node tests (336 passed, 3 skipped), 168 desktop/mobile browser tests
+passed, typecheck and production build passed, and lint had no errors and five
+existing warnings. The final 11 targeted OAuth/model/relay checks also passed.
+The first complete browser attempt was interrupted after a concurrent rebuild
+removed assets used by its running server; the final 168-case run used a stable
+build and passed. Real-container tests used synthetic tokens and a scripted provider;
+they verify protocol/tool behavior, not real-account eligibility or model reasoning.
+No paid inference or real-account sign-in was performed.
+
+Usage is documented in `docs/CREDENTIALS.md`. Logs:
+`/tmp/open-harness-chatgpt-full-node-final.log`,
+`/tmp/open-harness-chatgpt-final-targeted.log`,
+`/tmp/open-harness-chatgpt-browser-full-final.log`,
+`/tmp/open-harness-chatgpt-real-final.log`,
+`/tmp/open-harness-chatgpt-typecheck.log`,
+`/tmp/open-harness-chatgpt-lint.log`, and
+`/tmp/open-harness-chatgpt-build.log`.
+
+## Google Workspace OAuth and managed tools — October 9, 2026
+
+Added a Google Workspace credential for Gmail, Calendar, Drive, Docs and Sheets.
+The editor requires the operator's registered Google OAuth client, selects Desktop
+or Web flow and requests only checked service permissions. Google authorization,
+token, account-information and revocation endpoints are fixed. Authorization uses
+state, PKCE/S256, offline consent and the exact callback URI. Tokens stay in encrypted
+coordinator storage; metadata contains only account email and effective permissions.
+Reauthorization refuses another account, refresh preserves an omitted replacement
+refresh token, configuration changes require consent again, and disconnect/deletion
+ends pending authorization before attempting Google revocation.
+
+Five named MCP tools implement Gmail search/read/send, Calendar calendar/event reads
+and event writes, Drive metadata/text exports, Docs reads/create/batch updates, and
+Sheets reads/create/value updates/appends. Their model schemas have typed top-level
+fields and JSON-string write payloads. The tools require a live run capability,
+snapshotted service tool/account grants, allowed origins/methods, the credential's
+selected permission and actual granted scopes. Google credentials are excluded from
+model selection and MCP environment bindings. Generic API requests using them are
+also restricted to selected Google services and supported operations. Agent Google
+grants default to reads; sending/creating and editing require explicit permission.
+Google file writes use drive.file; sheet values use RAW input. No resource deletion
+tool is advertised.
+
+Verification:
+
+- Full Node suite: 346 tests, 343 passed, 3 skipped, no failures. Google regressions
+  cover PKCE and fixed endpoints, account checks, partial consent, refresh preservation
+  and serialization, disconnect races, encrypted storage, endpoint/scope/method guards,
+  all five service requests, MIME/header-injection protection, scope edits, app-file
+  access and actual MCP tool-list schemas. An extended Responses test fixture initially
+  assumed array input; correcting it to accept strings restored the existing ChatGPT
+  remote-runner regression.
+- Full browser suite: 178 passed across desktop and mobile. The Google scenario creates
+  and connects an account, selects all five service switches, configures a read-only
+  account grant, performs authenticated service calls, refuses sending and spent run
+  credentials, checks secret masking and restores the connection after refresh.
+  Initial new test selectors used incorrect dialog/tab/control roles; they were fixed
+  to match the existing accessible UI before the successful full run.
+- Real pinned Hermes fixture passed with synthetic Google and OpenAI transports:
+  four denied Gmail sends did not trip the MCP breaker, and subsequent Gmail, Calendar,
+  Drive, Docs and Sheets reads dispatched successfully. All five upstream Google calls
+  were GET requests. It also completed its file tool round trip and refused a failed
+  Responses stream. Generated profile/config files contained no Google client secret,
+  access token or refresh token. Evidence:
+  `/home/jarom/open-harness-real-google-9FMbXg/evidence.json`. Its container was removed
+  and an independent Docker listing confirmed no disposable fixture container remained.
+- Typecheck, production build and diff whitespace checks passed. Lint had no errors
+  and five existing warnings. The standalone runner was regenerated.
+
+Setup and client-registration requirements are documented in `docs/CREDENTIALS.md`.
+These checks verify OAuth/tool protocol behavior with synthetic accounts; they do not
+establish real-account Google consent, project verification or API eligibility. No real
+mail was sent, no real Google account was connected, and no paid inference was used.
+The updated MCP server is copied fresh per run and changes its schema fingerprint;
+these source changes require no Hermes image rebuild.
+
+Logs: `/tmp/open-harness-google-full-node-final.log`,
+`/tmp/open-harness-google-browser-full.log`,
+`/tmp/open-harness-google-browser-final.log`,
+`/tmp/open-harness-google-final-targeted.log`,
+`/tmp/open-harness-google-real.log`,
+`/tmp/open-harness-google-typecheck.log`,
+`/tmp/open-harness-google-lint.log`, and
+`/tmp/open-harness-google-build.log`.
 October 29 persistent teammate workflows and delivery
 ----------------------------------------------------
 

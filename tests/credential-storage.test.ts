@@ -22,7 +22,7 @@ test('upgrades the old credential table without changing keys, references, or me
     db.exec("CREATE TABLE credentials(ref TEXT PRIMARY KEY, label TEXT NOT NULL, provider TEXT NOT NULL DEFAULT '', fingerprint TEXT NOT NULL DEFAULT '', length INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT)");
     db.prepare('INSERT INTO credentials VALUES(?,?,?,?,?,?,?,?)').run('EXISTING_KEY', 'Existing key', 'openai', 'old-fingerprint', 15, 'created', 'updated', 'used');
     const migrated = new Credentials(db, secrets);
-    assert.deepEqual({ ...migrated.row('EXISTING_KEY') }, { ref: 'EXISTING_KEY', label: 'Existing key', provider: 'openai', fingerprint: 'old-fingerprint', length: 15, created_at: 'created', updated_at: 'updated', last_used_at: 'used', model: '', base_url: '' });
+    assert.deepEqual({ ...migrated.row('EXISTING_KEY') }, { ref: 'EXISTING_KEY', label: 'Existing key', provider: 'openai', fingerprint: 'old-fingerprint', length: 15, created_at: 'created', updated_at: 'updated', last_used_at: 'used', model: '', base_url: '', type: 'model-api-key', config: '{}', connection_status: 'untested' });
     assert.equal(secrets.environment().EXISTING_KEY, 'existing-secret');
     assert.equal(migrated.row('OPENAI_API_KEY').provider, 'openai');
     assert.equal(migrated.relabel(legacyRef, { label: 'Long legacy ref' }).label, 'Long legacy ref');

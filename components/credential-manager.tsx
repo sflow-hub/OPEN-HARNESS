@@ -9,6 +9,8 @@ import { CREDENTIAL_LABEL_MAX, CREDENTIAL_PROVIDERS, modelForCredential, describ
 import type { ModelChoice, ProfileResponse } from "../lib/agent-profile";
 import ModelPicker from "./model-picker";
 import CodexSignIn from "./codex-sign-in";
+import { CredentialEditor } from "./credential-editor";
+import { CREDENTIAL_TYPES } from "../lib/credential-types";
 import { CODEX_PROVIDER } from "../lib/codex";
 
 // The repository follows the familiar automation-tool flow: a searchable list, a service
@@ -153,6 +155,27 @@ export function CredentialRepository({ client, provider = "", embedded = false, 
     finally { setBusy(false); }
   };
 
+  const [connecting, setConnecting] = useState(false);
+  useEffect(() => {
+    if (!connecting) return;
+    const timer = setInterval(() => { void refresh().catch(() => {}); }, 2000);
+    const stop = setTimeout(() => setConnecting(false), 120000);
+    return () => { clearInterval(timer); clearTimeout(stop); };
+  }, [connecting, refresh]);
+  const action = async (item: CredentialRecord, name: "test" | "connect" | "disconnect") => {
+    // Open synchronously so browser popup protection does not swallow OAuth sign-in.
+    const popup = name === "connect" && item.config.grantType === "authorization_code" ? window.open("about:blank", "_blank") : null;
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const result = await client.request<{ authorizationUrl?: string; message?: string }>(`/v1/credentials/${encodeURIComponent(item.ref)}/${name}`, { method: "POST", body: "{}" });
+      if (result.authorizationUrl) {
+        if (popup) { popup.opener = null; popup.location.href = result.authorizationUrl; setConnecting(true); setNotice("Complete sign-in in the new window."); }
+        else setError("Allow popups for this page, then click Connect again.");
+      } else { popup?.close(); setNotice(result.message || (name === "disconnect" ? "Disconnected." : name === "test" ? "Connection test passed." : "Credential connected.")); }
+      await refresh();
+    } catch (cause) { popup?.close(); setError(cause instanceof Error ? cause.message : "Connection action failed."); }
+    finally { setBusy(false); }
+  };
   const remove = async (ref: string, suffix = "") => {
     setBusy(true); setError("");
     try { const result = await client.request<{ warning?: string }>(`/v1/credentials/${encodeURIComponent(ref)}${suffix}`, { method: "DELETE" }); await refresh(); setPending(null); setStep(null); setNotice(result.warning || ""); }
@@ -208,6 +231,18 @@ export function CredentialRepository({ client, provider = "", embedded = false, 
   const form = step?.kind === "form" && (() => {
     const { draft, original, tab } = step;
     const codex = draft.provider === CODEX_PROVIDER;
+    // A generic secret can be any credential type (bearer, basic, headers, OAuth2); one beyond a
+    // single key value is edited field by field in the typed editor.
+    if (!codex && (original ? !["model-api-key", "api-key"].includes(original.type) : !draft.provider)) return <Layer embedded={embedded} wide guard={busy} label={original ? `Edit ${original.label}` : "New credential"} onClose={close}>
+      <div className="credential-form-heading">
+        {embedded && <button className="profile-icon-button" aria-label="Back to saved credentials" disabled={busy} onClick={close}><ArrowLeft size={16} /></button>}
+        <ServiceIcon provider={draft.provider} size={38} />
+        <div className="credential-form-title"><strong>{original ? original.label : "New credential"}</strong><small>{original ? `${CREDENTIAL_TYPES.find(item => item.id === original.type)?.label || original.type} · ${original.ref}` : "Choose its type below"}</small></div>
+        {!embedded && <button className="profile-icon-button" aria-label="Close" disabled={busy} onClick={close}><X size={17} /></button>}
+      </div>
+      {error && <div className="task-error" role="alert">{error}</div>}
+      <CredentialEditor key={original?.ref || "new"} client={client} credential={original} onCancel={close} onSaved={() => { setStep(null); void refresh().catch(() => setError("Saved, but the list could not be refreshed.")); }} />
+    </Layer>;
     const changed = !original || Boolean(draft.value.trim()) || draft.label !== original.label || draft.provider !== original.provider || draft.model !== original.model || draft.baseUrl !== original.baseUrl;
     const dirty = original ? changed : Boolean(draft.value || draft.model || draft.baseUrl) || draft.label !== (step.seed ?? "");
     const valid = Boolean(draft.label.trim()) && changed && (original ? true : Boolean(draft.value.trim()));
@@ -321,6 +356,8 @@ export function CredentialRepository({ client, provider = "", embedded = false, 
             {!item.present && <span className="credential-usage missing"><CircleAlert size={11} /> Value missing</span>}
             <span className={`credential-usage ${item.usage.agentCount || item.usage.uses.length ? "" : "idle"}`}>{summarizeUsage(item.usage)}</span>
             {item.provider === CODEX_PROVIDER && <button className="subtle-button" disabled={busy} onClick={() => openEdit(item)}><RefreshCw size={13} /> Reconnect</button>}
+            {item.provider !== CODEX_PROVIDER && !["model-api-key", "api-key"].includes(item.type) && <button className="subtle-button" disabled={busy || !item.present} onClick={() => void action(item, "test")}>Test</button>}
+            {item.type === "oauth2" && <><button className="subtle-button" disabled={busy} onClick={() => void action(item, "connect")}>{item.connectionStatus === "connected" ? "Reconnect" : "Connect"}</button>{item.fieldPresence.accessToken && <button className="subtle-button" disabled={busy} onClick={() => void action(item, "disconnect")}>Disconnect</button>}</>}
             <button className="profile-icon-button danger-text" disabled={busy} aria-label={`Delete ${item.label}`} title={`Delete ${item.label}`} onClick={() => void remove(item.ref)}><Trash2 size={14} /></button>
           </div>
         </article>)}
@@ -338,7 +375,7 @@ function asUsage(value: unknown): CredentialUsage | undefined {
 }
 
 function describeUse(use: CredentialUsage["uses"][number]) {
-  return use.kind === "workspace-default" ? "The workspace default, which every inheriting agent uses" : use.kind === "agent-model" ? `${use.agentName} — model credential` : `${use.agentName} — ${use.connectorName} connection${use.enabled ? "" : " (off)"}`;
+  return use.kind === "workspace-default" ? "The workspace default, which every inheriting agent uses" : use.kind === "agent-model" ? `${use.agentName} — model credential` : use.kind === "agent-api" ? `${use.agentName} — authenticated API access` : `${use.agentName} — ${use.connectorName} connection${use.enabled ? "" : " (off)"}`;
 }
 
 // The Credentials tab in the sidebar.

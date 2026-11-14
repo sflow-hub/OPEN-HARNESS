@@ -107,6 +107,9 @@ export function validateEngineInputsLock(lock, required = []) {
   assert.equal(lock.expat?.package, 'libexpat', 'The engine lock must name the reviewed Expat package.');
   assert.match(lock.expat.version || '', /^\d+\.\d+\.\d+-r\d+$/, 'Expat needs an exact Alpine package version.');
   assert.equal(lock.expat.file, `apk/${lock.expat.package}-${lock.expat.version}.apk`, 'Expat package path differs from its version.');
+  assert.equal(lock.pcre2?.package, 'pcre2', 'The engine lock must name the reviewed PCRE2 package.');
+  assert.match(lock.pcre2.version || '', /^\d+\.\d+-r\d+$/, 'PCRE2 needs an exact Alpine package version.');
+  assert.equal(lock.pcre2.file, `apk/${lock.pcre2.package}-${lock.pcre2.version}.apk`, 'PCRE2 package path differs from its version.');
   assert.equal(lock.components, undefined, 'Engine components must be recorded per architecture.');
   assert.deepEqual(Object.keys(lock.architectures || {}).sort(), PLATFORMS, 'Engine inputs must list both target architectures.');
   for (const [platform, entry] of Object.entries(lock.architectures)) {
@@ -129,7 +132,7 @@ export function validateEngineInputsLock(lock, required = []) {
       assert.equal(entry.missing, undefined, `${platform} is complete but still names missing inputs.`);
       assert.match(entry.inputs || '', engineInputsPattern, `${platform} inputs must be one reviewed image pinned by digest.`);
       const paths = new Set(files.map(([path]) => path));
-      for (const path of [lock.expat.file, ...ENGINE_BINARIES]) assert.ok(paths.has(path), `${platform} inputs lack ${path}.`);
+      for (const path of [lock.expat.file, lock.pcre2.file, ...ENGINE_BINARIES]) assert.ok(paths.has(path), `${platform} inputs lack ${path}.`);
       assert.ok(files.every(([, hash]) => hash !== null), `${platform} has unpinned inputs.`);
     } else {
       assert.equal(entry.status, 'incomplete', `${platform} has an unknown engine input status.`);
@@ -165,6 +168,7 @@ export function engineLabels(lock, architecture, lockSha256) {
     'dev.openharness.engine.inputs': lock.architectures[`linux/${architecture}`].inputs,
     'dev.openharness.engine.inputs-lock-sha256': lockSha256,
     'dev.openharness.engine.expat': lock.expat.version,
+    'dev.openharness.engine.pcre2': lock.pcre2.version,
   };
   for (const [name, component] of Object.entries(lock.architectures[`linux/${architecture}`].components)) {
     labels[`dev.openharness.${name}.version`] = component.version;

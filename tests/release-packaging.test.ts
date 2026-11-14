@@ -75,6 +75,8 @@ test('coordinator ships a Docker client and checks application health', () => {
   assert.match(runtime, /COPY --from=docker-cli \/usr\/local\/bin\/docker \/usr\/local\/bin\/docker/);
   assert.doesNotMatch(runtime, /docker\.io|dockerd|apt-get|COPY .*docker-compose/);
   assert.match(runtime, /^USER node$/m);
+  assert.match(runtime, /rm -rf \/usr\/local\/lib\/node_modules\/npm \/usr\/local\/bin\/npm \/usr\/local\/bin\/npx/);
+  assert.doesNotMatch(runtime, /COPY --from=node-base .*node_modules\/npm/);
   assert.match(compose, /127\.0\.0\.1:3000\/api\/health/);
   assert.doesNotMatch(compose, /healthcheck:\s*\n\s*test: \["CMD", "curl"/);
 });
@@ -173,14 +175,14 @@ test('browser ZIP and tar contain only relocatable launch assets and pinned imag
   const root = mkdtempSync(join(tmpdir(), 'open-harness-browser-release-test-'));
   try {
     const sourceRoot = join(root, 'source'), destination = join(root, 'artifacts');
-    for (const file of ['runtime/dind-entrypoint.sh', 'compose.host-folders.example.yaml', 'docs/LOCAL_BROWSER.md', 'docs/SELF_HOSTING.md', 'LICENSE', 'Start Open Harness.command', 'Start Open Harness.cmd', 'launchers/start.sh', 'launchers/start.ps1']) {
+    for (const file of ['runtime/dind-entrypoint.sh', 'compose.host-folders.example.yaml', 'docs/LOCAL_BROWSER.md', 'docs/SELF_HOSTING.md', 'docs/CREDENTIALS.md', 'LICENSE', 'Start Open Harness.command', 'Start Open Harness.cmd', 'launchers/start.sh', 'launchers/start.ps1']) {
       mkdirSync(join(sourceRoot, file, '..'), { recursive: true }); writeFileSync(join(sourceRoot, file), `fixture for ${file}\n`);
     }
     mkdirSync(join(sourceRoot, 'runtime/hermes')); writeFileSync(join(sourceRoot, 'runtime/hermes/private.txt'), 'not a browser asset');
     const names = packageBrowser({ sourceRoot, destination, version: APP_VERSION, lock: releaseLock(), compose: releaseCompose() });
     assert.equal(names.length, 2); for (const name of names) assert.ok(existsSync(join(destination, name)));
     const listing = spawnSync('tar', ['-tzf', join(destination, names[0])], { encoding: 'utf8' }); assert.equal(listing.status, 0, listing.stderr);
-    assert.match(listing.stdout, /docs\/SELF_HOSTING.md/); assert.match(listing.stdout, /image-lock.json/); assert.match(listing.stdout, /Start Open Harness.command/); assert.doesNotMatch(listing.stdout, /private.txt|Dockerfile|package.json/);
+    assert.match(listing.stdout, /docs\/SELF_HOSTING.md/); assert.match(listing.stdout, /docs\/CREDENTIALS.md/); assert.match(listing.stdout, /image-lock.json/); assert.match(listing.stdout, /Start Open Harness.command/); assert.doesNotMatch(listing.stdout, /private.txt|Dockerfile|package.json/);
     const zip = spawnSync('unzip', ['-t', join(destination, names[1])], { encoding: 'utf8' }); assert.equal(zip.status, 0, zip.stderr || zip.stdout);
     const extract = join(root, 'extracted'); mkdirSync(extract);
     const result = spawnSync('tar', ['-xzf', join(destination, names[0]), '-C', extract], { encoding: 'utf8' }); assert.equal(result.status, 0, result.stderr);
@@ -255,14 +257,14 @@ test('release scan binding distinguishes containerd index IDs from BuildKit conf
 
 type EngineComponent = { version: string | null; sourceManifest: string | null };
 type EngineLockEntry = { components: Record<string, EngineComponent>; status: string; inputs: string | null; missing?: string[]; files: Record<string, string | null> };
-type EngineLock = { schemaVersion: number; base: { ref: string }; expat: { package: string; version: string; file: string }; architectures: Record<string, EngineLockEntry> };
+type EngineLock = { schemaVersion: number; base: { ref: string }; expat: { package: string; version: string; file: string }; pcre2: { package: string; version: string; file: string }; architectures: Record<string, EngineLockEntry> };
 const repositoryRoot = join(import.meta.dirname, '..');
 const committedEngineLock = (): EngineLock => JSON.parse(readFileSync(join(repositoryRoot, 'runtime', 'engine', 'inputs.lock.json'), 'utf8'));
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
 const completeEngineLock = (): EngineLock => {
   const lock = committedEngineLock();
   for (const [index, platform] of PLATFORMS.entries()) {
-    const paths = [lock.expat.file, ...ENGINE_BINARIES, ...Object.keys(ENGINE_MANIFESTS).map(name => `${name}/provenance/LICENSE`), ...Object.values(ENGINE_MANIFESTS)];
+    const paths = [lock.expat.file, lock.pcre2.file, ...ENGINE_BINARIES, ...Object.keys(ENGINE_MANIFESTS).map(name => `${name}/provenance/LICENSE`), ...Object.values(ENGINE_MANIFESTS)];
     lock.architectures[platform] = { status: 'complete', inputs: `ghcr.io/sflow-hub/open-harness-engine-inputs@${digest(String(index + 6))}`, files: Object.fromEntries(paths.map(path => [path, hash(`${platform} ${path}`)])), components: Object.fromEntries(Object.entries(ENGINE_MANIFESTS).map(([name, path]) => [name, { version: `v1.2.3+fixture.${platform.split('/')[1]}`, sourceManifest: hash(`${platform} ${path}`) }])) };
   }
   return lock;
@@ -303,6 +305,24 @@ test('engine inputs stay fail-closed until both native architectures are reviewe
   assert.throws(() => validateEngineInputsLock(unpinned, PLATFORMS), /unpinned inputs/);
   const unnamed = incompleteEngineLock(); unnamed.architectures['linux/amd64'].missing = [];
   assert.throws(() => validateEngineInputsLock(unnamed), /name every missing input/);
+});
+
+test('engine release inputs require the authenticated PCRE2 update on both architectures', () => {
+  const missingMetadata = completeEngineLock();
+  delete (missingMetadata as Partial<EngineLock>).pcre2;
+  assert.throws(() => validateEngineInputsLock(missingMetadata), /reviewed PCRE2 package/);
+  const unsafeVersion = completeEngineLock(); unsafeVersion.pcre2.version = '10.49-r0;INJECTED';
+  assert.throws(() => validateEngineInputsLock(unsafeVersion), /exact Alpine package version/);
+  const wrongPath = completeEngineLock(); wrongPath.pcre2.file = 'apk/pcre2-10.48-r0.apk';
+  assert.throws(() => validateEngineInputsLock(wrongPath), /PCRE2 package path/);
+  for (const platform of PLATFORMS) {
+    const missing = completeEngineLock(); delete missing.architectures[platform].files[missing.pcre2.file];
+    assert.throws(() => validateEngineInputsLock(missing, PLATFORMS), /inputs lack apk\/pcre2/);
+    const unpinned = completeEngineLock(); unpinned.architectures[platform].files[unpinned.pcre2.file] = null;
+    assert.throws(() => validateEngineInputsLock(unpinned, PLATFORMS), /unpinned inputs/);
+    const committed = committedEngineLock();
+    assert.match(committed.architectures[platform].files[committed.pcre2.file]!, /^[a-f0-9]{64}$/);
+  }
 });
 
 test('engine metadata binds each architecture to its own shipped source manifests', () => {
@@ -360,6 +380,8 @@ test('engine Dockerfile pins the reviewed base, labels, install paths and exact 
   assert.match(dockerfile, /^FROM \$\{ENGINE_BASE\}\nARG ENGINE_BASE\nARG ENGINE_INPUTS\nARG ENGINE_INPUTS_LOCK_SHA256\n/m);
   assert.ok(dockerfile.includes(`/tmp/open-harness-apk/${lock.expat.file.slice('apk/'.length)}`));
   assert.ok(dockerfile.includes(`apk info -e '${lock.expat.package}=${lock.expat.version}' > /dev/null`), 'The exact Expat version is checked by exit status.');
+  assert.ok(dockerfile.includes(`/tmp/open-harness-apk/${lock.pcre2.file.slice('apk/'.length)}`));
+  assert.ok(dockerfile.includes(`apk info -e '${lock.pcre2.package}=${lock.pcre2.version}' > /dev/null`), 'The exact PCRE2 version is checked by exit status.');
   const directoryMode = dockerfile.indexOf('chmod 0755 /usr/local/share/open-harness/engine');
   assert.ok(directoryMode >= 0 && directoryMode < dockerfile.indexOf('COPY --chown=0:0 --chmod=0644 NOTICE.md'), 'Create a traversable notice directory before applying the file mode.');
   for (const target of ['/inputs/containerd/bin/ /usr/local/bin/', '/inputs/runc/bin/runc /usr/local/bin/runc', '/inputs/buildx/bin/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx', '/inputs/containerd/provenance/ /usr/local/share/open-harness/containerd-remediation/', '/inputs/runc/provenance/ /usr/local/share/open-harness/runc-remediation/', '/inputs/buildx/provenance/ /usr/local/share/open-harness/buildx-remediation/', 'NOTICE.md /usr/local/share/open-harness/engine/NOTICE.md']) assert.ok(dockerfile.includes(`${target}\n`), target);
@@ -381,7 +403,7 @@ test('engine and coordinator candidates must carry labels bound to the committed
   assert.equal(validateEngineCandidate(image, 'arm64', lock, lockSha256), digest('1'));
   assert.throws(() => validateEngineCandidate(image, 'amd64', lock, lockSha256));
   assert.throws(() => validateEngineCandidate(image, 'arm64', lock, 'd'.repeat(64)), /inputs-lock-sha256/);
-  for (const key of ['org.opencontainers.image.base.name', 'dev.openharness.engine.inputs', 'dev.openharness.engine.expat', 'dev.openharness.runc.source-manifest', 'dev.openharness.buildx.version']) {
+  for (const key of ['org.opencontainers.image.base.name', 'dev.openharness.engine.inputs', 'dev.openharness.engine.expat', 'dev.openharness.engine.pcre2', 'dev.openharness.runc.source-manifest', 'dev.openharness.buildx.version']) {
     const changed = { ...image, Config: { Labels: { ...labels, [key]: 'changed' } } };
     assert.throws(() => validateEngineCandidate(changed, 'arm64', lock, lockSha256), new RegExp(key.replace(/\./g, '\\.')));
   }

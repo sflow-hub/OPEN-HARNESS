@@ -2,13 +2,13 @@
 
 The release pipeline packages `ghcr.io/<owner>/open-harness-engine`. This unreleased integration remains blocked by the incomplete inputs lock and the application/platform acceptance gates.
 
-- **What it is.** The official `docker:29.8.1-dind` index, pinned by digest, plus the reviewed containerd, runc and Buildx rebuilds and Alpine `libexpat` 2.8.5-r0.
+- **What it is.** The official `docker:29.8.1-dind` index, pinned by digest, plus the reviewed containerd, runc and Buildx rebuilds and Alpine `libexpat` 2.8.5-r0 and `pcre2` 10.49-r0.
 - **How it is released.** Exactly like the coordinator and Hermes: built for each target architecture, scanned, exercised, published per architecture, joined into one index, recorded in `image-lock.json` and promoted as `v<version>`.
 - **Source builds.** `compose.yaml` still defaults to the official engine, and `Dockerfile.coordinator` still defaults to the official Buildx plugin.
 
 | File | Purpose |
 | --- | --- |
-| `inputs.lock.json` | Schema 2: base index and Expat version, then per architecture the component versions, source manifests, every input file's SHA256 and the inputs image digest. |
+| `inputs.lock.json` | Schema 2: base index and exact Expat/PCRE2 versions, then per architecture the component versions, source manifests, every input file's SHA256 and the inputs image digest. |
 | `Dockerfile` | Release assembly. It pulls only the base and the inputs image, verifies the inputs against `inputs.sha256`, and needs no network for `RUN`. |
 | `Dockerfile.inputs` | Packages one architecture's reviewed input directory as a data-only image. |
 | `NOTICE.md` | Attribution template; staging appends the architecture's exact versions and manifests. Shipped at `/usr/local/share/open-harness/engine/NOTICE.md`. |
@@ -17,6 +17,7 @@ The release pipeline packages `ghcr.io/<owner>/open-harness-engine`. This unrele
 
 ```text
 apk/libexpat-2.8.5-r0.apk                                  0644
+apk/pcre2-10.49-r0.apk                                     0644
 containerd/bin/{containerd,containerd-shim-runc-v2,ctr}   0755
 containerd/provenance/...                                  0644
 runc/bin/runc                                              0755
@@ -37,13 +38,24 @@ Release coordinators mount the same inputs image and take `buildx/bin/docker-bui
 
 ## Release gate
 
+The October 3 AMD64 source-mode scan reports three HIGH findings in the official
+Buildx plugin and 29 HIGH occurrences in the official engine, with no secrets.
+The reviewed component replacements and input registry digests are still needed.
+The October 3 PCRE2 follow-up authenticates both architecture packages and
+signed indexes for `10.49-r0`, binds their hashes in the lock and requires offline
+installation in release assembly. The Expat/component replacements alone do
+not cover this finding. Existing published input images must be rebuilt with
+the additional package; both architecture records remain incomplete.
+Final assembled images must be scanned again. Exact reports are retained in
+`work/release-review-20261003/final-gates/`; no exception is active.
+
 Each architecture's lock entry is either `complete` or `incomplete`.
 
 - **Incomplete** entries name every missing input. `verify-engine-inputs` fails the release before any image job runs.
 - **Complete** entries need all of the following:
   - an `inputs` image pinned by digest;
   - a SHA256 for every file;
-  - the Expat package and all five binaries;
+  - the Expat and PCRE2 packages and all five binaries;
   - a stamped version and source manifest for each component, with the manifest's SHA256 equal to its entry in `files`.
 
 Source manifests bind architecture-specific build inputs, and stamped Buildx versions include

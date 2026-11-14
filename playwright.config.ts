@@ -11,6 +11,6 @@ export default defineConfig({
   projects: [{ name: 'desktop', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 1000 } } }, { name: 'mobile', use: { ...devices['iPhone 13'], defaultBrowserType: 'chromium' } }],
   webServer: [
     { command: `"${process.execPath}" --import tsx runtime/service.ts`, url: `http://127.0.0.1:${controlPort}/v1/bootstrap`, reuseExistingServer: false, env: { OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_STATE_DIR: state, OPEN_HARNESS_PORT: String(controlPort) } },
-    { command: `"${process.execPath}" node_modules/vinext/dist/cli.js start -p ${appPort} -H 127.0.0.1`, url: `http://127.0.0.1:${appPort}`, reuseExistingServer: false, timeout: 60000 },
+    { command: `"${process.execPath}" node_modules/vinext/dist/cli.js start -p ${appPort} -H 127.0.0.1`, url: `http://127.0.0.1:${appPort}`, reuseExistingServer: false, timeout: 60000, env: { OPEN_HARNESS_INTERNAL_CONTROL_URL: `http://127.0.0.1:${controlPort}` } },
   ],
 });

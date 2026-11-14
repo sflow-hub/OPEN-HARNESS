@@ -10,7 +10,7 @@ type Context = { params: Promise<{ path: string[] }> };
 // The coordinator decides "is this caller on my machine?" from the socket's remote
 // address. Every request arriving through this proxy originates from the Next server,
 // which is always loopback, so that check cannot distinguish a local browser from the
-// public internet. The proxy therefore has to make that call itself.
+// public internet. Anonymous proxy bootstrap therefore requires browser pairing.
 const BOOTSTRAP_PATH = 'v1/bootstrap';
 const LOOPBACK_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 
@@ -24,10 +24,8 @@ function proxyable(path: string[]) {
   return path.length > 0 && PROXYABLE_ROOTS.has(path[0]) || path.length === 3 && path[0] === 'hooks' && path[1] === 'workflows';
 }
 
-// /v1/bootstrap returns the master control token, which authorizes arbitrary run
-// creation, host-path container mounts and direct OS-account execution. Serve it only
-// when the dashboard was reached over loopback, unless the operator has explicitly
-// accepted responsibility for authenticating remote access in front of this app.
+// Host controls routing policy only, never authentication: a remote caller can forge it.
+// The coordinator separately requires pairing for every proxy bootstrap.
 function bootstrapAllowed(request: Request) {
   if (process.env.OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD === '1') return true;
   const host = request.headers.get('host');
@@ -67,11 +65,12 @@ async function proxy(request: Request, context: Context) {
   }
   if(request.method==='POST'&&/^v1\/connections\/[^/]+\/authorize$/.test(path.join('/'))){const origin=request.headers.get('origin')||incoming.origin;try{headers.set('x-open-harness-connection-callback',new URL('/api/local/v1/connections/callback',origin).href);}catch{/* The coordinator validates the fallback callback. */}}
   const binding=(request.headers.get('cookie')||'').split(';').map(part=>part.trim()).filter(part=>/^oh_oauth_[a-f0-9]{20}=[A-Za-z0-9_-]{43}$/.test(part)).join('; ');if(binding)headers.set('cookie',binding);
+  headers.set('X-Open-Harness-Proxy', '1');
   try {
     if (request.method === 'POST' && path.join('/') === 'v1/onboarding/action') return await forwardSetup(request, target, headers);
     const timeout = request.method === 'POST' && /^v1\/agents\/[^/]+\/desktop\/(take-control|release)$/.test(path.join('/')) ? 95_000 : 35_000;
     const response = await fetch(target, { method: request.method, headers, body: ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer(), redirect: 'manual', cache: 'no-store', signal: AbortSignal.any([request.signal, AbortSignal.timeout(timeout)]) });
-    const outgoing = new Headers({ 'Content-Type': response.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    const outgoing = new Headers({ 'Content-Type': response.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
     for (const cookie of response.headers.getSetCookie()) if(/^oh_oauth_[a-f0-9]{20}=/.test(cookie))outgoing.append('Set-Cookie', cookie);
     return new Response(response.body, { status: response.status, headers: outgoing });
   } catch (error) {

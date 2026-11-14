@@ -42,6 +42,8 @@ export type Conversation = {
   title: string;
   messages: Message[];
   updatedAt: string;
+  // A project whose folders this conversation's runs may use; absent means the agent's own folders only.
+  projectId?: string | null;
 };
 export type Workspace = {
   version: 2;

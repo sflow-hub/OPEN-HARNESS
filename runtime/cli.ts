@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "n
 import { basename, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createConnection } from "node:net";
-import { dockerStatus, stateSharing } from "./hermes";
+import { dockerStatus, stateSharingAsync } from "./hermes";
 import { onboardingStatusAsync, imageContract, HERMES_IMAGE, prepareRuntime } from "./readiness";
 import { chooseStateDir, withEnvValue } from "./state-dir";
 
@@ -92,7 +92,7 @@ function report(data: Awaited<ReturnType<typeof diagnose>>) {
   for (const check of data.checks) {
     if (check.id === "coordinator") continue; // Already reported above, and measured rather than assumed.
     console.log(`${mark[check.state] || "?   "} ${check.label}: ${check.detail}`);
-    if (check.state === "action" && check.id === "agent-runtime") console.log(`       Run "npm run harness:setup" to ${check.actionLabel === "Update agent runtime" ? "update" : "build"} ${data.hermesImage}.`);
+    if (check.action === "prepare-runtime") console.log(`       Run "npm run harness:setup" to ${check.actionLabel === "Update agent runtime" ? "update" : "build"} ${data.hermesImage}.`);
     if (check.helpUrl) console.log(`       ${check.helpUrl}`);
   }
 }
@@ -124,10 +124,10 @@ if (command === "help") {
     try { await prepareRuntime(); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
     if (!process.exitCode) {
       // The sharing probe runs a container from the image, so it has to come after the build.
-      const choice = chooseStateDir({
+      const choice = await chooseStateDir({
         explicit: process.env.OPEN_HARNESS_STATE_DIR, projectDefault, homeDefault: join(homedir(), ".open-harness", basename(project)),
         hasState: dir => existsSync(join(dir, "state.db")) || existsSync(join(dir, "secrets.json")),
-        dockerCanRead: dir => stateSharing(dir).ok,
+        dockerCanRead: async dir => (await stateSharingAsync(dir, true)).ok,
       });
       mkdirSync(choice.path, { recursive: true });
       if (choice.reason === "home") {

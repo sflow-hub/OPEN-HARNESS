@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import support
 
@@ -50,3 +51,19 @@ class DependencyOverrides(unittest.TestCase):
         expected = 'sha512-' + base64.b64encode(hashlib.sha512(b'authenticated archive').digest()).decode()
         with self.assertRaisesRegex(SystemExit, 'integrity'):
             verify(b'altered archive', expected)
+
+    def test_tampered_cache_backport_fails_before_modifying_npm(self):
+        installer = module('apply-npm-security-overrides.py')
+        with tempfile.TemporaryDirectory() as directory:
+            here, root = Path(directory) / 'source', Path(directory) / 'npm'
+            (here / 'vendor/http-cache-semantics').mkdir(parents=True)
+            root.mkdir()
+            original = b'{"version":"11.20.0"}'
+            (root / 'package.json').write_bytes(original)
+            (here / 'npm-security-overrides.json').write_text('{}')
+            (here / 'vendor/http-cache-semantics/index.js').write_text('unpatched or changed source')
+            with mock.patch.object(installer, '__file__', str(here / 'apply-npm-security-overrides.py')):
+                with self.assertRaisesRegex(SystemExit, 'backport differs'):
+                    installer.apply(root)
+            self.assertEqual((root / 'package.json').read_bytes(), original)
+            self.assertEqual(list(root.iterdir()), [root / 'package.json'])

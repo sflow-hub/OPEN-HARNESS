@@ -69,6 +69,67 @@ test.beforeEach(async ({ request, page }) => {
 });
 test.afterEach(async ({ request }) => { await stopEverything(request); });
 
+test('refresh waits for both connection and history restoration before accepting chat', async ({ page, isMobile }) => {
+  await openAgent(page, 'Atlas', isMobile);
+  await expect(page.locator('.model-choice')).toContainText('Hermes');
+  let restoreBootstrap!: () => void, restoreHistory!: () => void;
+  const bootstrapGate = new Promise<void>(resolve => { restoreBootstrap = resolve; });
+  const historyGate = new Promise<void>(resolve => { restoreHistory = resolve; });
+  let historyRequested = false, submissions = 0;
+  page.on('request', request => { if (request.url() === `${control}/v1/runs` && request.method() === 'POST') submissions++; });
+  await page.route(`${control}/v1/bootstrap`, async route => {
+    await bootstrapGate;
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...await response.json(), mode: 'live' } });
+  });
+  await page.route(`${control}/v1/conversations`, async route => { historyRequested = true; await historyGate; await route.continue(); });
+  try {
+    await page.reload();
+    await openAgent(page, 'Atlas', isMobile);
+    const draft = page.getByRole('textbox', { name: 'Message Atlas' });
+    await draft.fill('Continue after refreshing');
+    await expect(page.locator('.model-choice')).toHaveText('Reconnecting…');
+    await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+    await draft.press('Enter');
+    await expect(draft).toHaveValue('Continue after refreshing');
+    expect(submissions).toBe(0);
+    restoreBootstrap();
+    await expect.poll(() => historyRequested).toBe(true);
+    await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+    await draft.press('Enter');
+    expect(submissions).toBe(0);
+    await expect(page.getByText('Start the local Hermes runtime before sending a task.')).toHaveCount(0);
+    restoreHistory();
+    await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
+    await expect(draft).toHaveValue('Continue after refreshing');
+    await page.getByRole('button', { name: 'Send message' }).click();
+    await expect(replies(page).last()).toContainText(MOCK_REPLY);
+    expect(submissions).toBe(1);
+  } finally { restoreBootstrap(); restoreHistory(); }
+});
+
+test('refresh automatically reconnects after a dropped bootstrap without setup or a lost draft', async ({ page, isMobile }) => {
+  await openAgent(page, 'Atlas', isMobile);
+  await expect(page.locator('.model-choice')).toContainText('Hermes');
+  let attempts = 0;
+  await page.route(`${control}/v1/bootstrap`, async route => {
+    if (++attempts === 1) return route.abort('connectionreset');
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...await response.json(), mode: 'live' } });
+  });
+  await page.reload();
+  await openAgent(page, 'Atlas', isMobile);
+  const draft = page.getByRole('textbox', { name: 'Message Atlas' });
+  await draft.fill('Keep this while reconnecting');
+  await expect(page.getByRole('dialog', { name: 'Welcome to Open Harness' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled({ timeout: 10_000 });
+  await expect(draft).toHaveValue('Keep this while reconnecting');
+  expect(attempts).toBe(2);
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(replies(page).last()).toContainText(MOCK_REPLY);
+});
+
 test('sends a task and shows the agent working, then its reply', async ({ page, isMobile }) => {
   await openAgent(page, 'Atlas', isMobile);
   await send(page, 'Atlas', 'Summarize my notes MOCK_SLOW');
@@ -136,16 +197,20 @@ test('a follow-up queued behind a running task is shown, then followed to its ow
   await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible();
 });
 
-test('an approval survives a reload and can still be answered', async ({ page, isMobile }) => {
+test('an approval survives three reloads without duplicating the run and can still be answered', async ({ page, request, isMobile }) => {
   await openAgent(page, 'Atlas', isMobile);
   await send(page, 'Atlas', 'Publish the report MOCK_APPROVAL');
   await expect(page.locator('.approval-banner')).toContainText('publish mock result', { timeout: 15_000 });
 
   // A reload resumes past the events already shown — including the request itself. The
   // banner has to come from what the coordinator says the run is waiting on.
-  await page.reload();
-  await expect(page.locator('.approval-banner')).toContainText('publish mock result', { timeout: 15_000 });
-  await expect(page.locator('.transcript .working')).toContainText('Waiting for your approval');
+  const original = (await liveRuns(request)).find(run => run.agent_id === 'atlas')!;
+  for (let refresh = 0; refresh < 3; refresh++) {
+    await page.reload();
+    await expect(page.locator('.approval-banner')).toContainText('publish mock result', { timeout: 15_000 });
+    await expect(page.locator('.transcript .working')).toContainText('Waiting for your approval');
+    expect((await liveRuns(request)).filter(run => run.agent_id === 'atlas').map(run => run.id)).toEqual([original.id]);
+  }
   await page.getByRole('button', { name: 'Approve once' }).click();
   await expect(page.locator('.approval-banner')).toBeHidden();
   await expect(replies(page).last()).toContainText(MOCK_REPLY, { timeout: 15_000 });
@@ -162,6 +227,22 @@ test('a question from the agent is answered from the conversation', async ({ pag
   await question.getByRole('button', { name: 'Send answer' }).click();
   await expect(question).toBeHidden();
   await expect(replies(page).last()).toContainText('Answer: the blue one', { timeout: 15_000 });
+});
+
+test('every question in a batch is shown and each answer reaches the agent', async ({ page, isMobile }) => {
+  await openAgent(page, 'Atlas', isMobile);
+  await send(page, 'Atlas', 'Pick the stack MOCK_CLARIFY_BATCH');
+  const question = page.getByRole('form', { name: 'Atlas has a question' });
+  await expect(question).toContainText('Which language?', { timeout: 15_000 });
+  await expect(question.getByText('Which language?')).toBeVisible();
+  await expect(question.getByText('Any extras?')).toBeVisible();
+  await expect(question).not.toContainText('Your agent needs an answer to continue.');
+  await expect(question.getByRole('button', { name: 'Send answer' })).toBeDisabled();
+  await question.getByRole('group', { name: 'Choices for question 1' }).getByRole('button', { name: 'Go' }).click();
+  await question.getByRole('textbox', { name: 'Answer to question 2' }).fill('add tests');
+  await question.getByRole('button', { name: 'Send answer' }).click();
+  await expect(question).toBeHidden();
+  await expect(replies(page).last()).toContainText('q0=Go, q1=add tests', { timeout: 15_000 });
 });
 
 test('a fresh client rebuilds earlier conversations from the coordinator', async ({ page, request, isMobile }) => {

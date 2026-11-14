@@ -1,3 +1,4 @@
+import { encryptionKey, openSecrets } from '../runtime/secret-encryption';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -50,7 +51,7 @@ test('paired runner decrypts a dashboard credential into its local vault', async
     assert.ok(completed, 'runner did not confirm credential storage');
     assert.equal((completed as { result?: { stored?: boolean } }).result?.stored, true);
     if (binDir) assert.ok(firstPollAt - pairedAt < 3_000, `runner blocked on host probes before polling (${firstPollAt - pairedAt}ms)`);
-    const vault = JSON.parse(readFileSync(join(state, 'secrets.json'), 'utf8'));
+    const vault = JSON.parse(openSecrets(readFileSync(join(state, 'secrets.json'), 'utf8'), encryptionKey(join(state, 'secrets.json'), false)));
     assert.equal(vault.OPENAI_API_KEY, cleartext);
     assert.equal(JSON.parse(readFileSync(join(state, 'connection.json'), 'utf8')).encryptionPrivateKey.includes(cleartext), false);
   } finally { child.kill('SIGTERM'); await new Promise<void>(resolve => server.close(() => resolve())); }

@@ -1,4 +1,4 @@
-"""Integrity-checked patch releases plus a hash-bound cache security backport for npm 11.20.0."""
+"""Integrity-checked security updates plus a hash-bound cache backport for npm 11.20.0."""
 import base64
 import hashlib
 import io
@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import urllib.request
 
+PATCHED_CACHE_SHA256 = '1b58bd00ff75aeed1383109508b4a3a44a07370d6eca54abb931af0fb2ebbd21'
 ORIGINAL_CACHE_SHA256 = '01b7d66c854b2fe53ac05c98feb6e0d64722ab8898a778e2d2426a8b468d178f'
 
 
@@ -25,6 +26,9 @@ def apply(root):
     records = json.loads((here / 'npm-security-overrides.json').read_text())
     if json.loads((root / 'package.json').read_text())['version'] != '11.20.0':
         raise SystemExit('npm version differs from reviewed 11.20.0; refusing overrides.')
+    patched = here / 'vendor/http-cache-semantics/index.js'
+    if hashlib.sha256(patched.read_bytes()).hexdigest() != PATCHED_CACHE_SHA256:
+        raise SystemExit('Cache backport differs from the reviewed source; refusing to install.')
     modules = root / 'node_modules'
     cache = modules / 'http-cache-semantics'
     if json.loads((cache / 'package.json').read_text())['version'] != '4.2.0' or hashlib.sha256((cache / 'index.js').read_bytes()).hexdigest() != ORIGINAL_CACHE_SHA256:
@@ -48,13 +52,18 @@ def apply(root):
             package = json.loads((destination / 'package/package.json').read_text())
             if (package['name'], package['version']) != (name, record['version']):
                 raise SystemExit(f'npm dependency {name} archive identity mismatch.')
+            if name == 'http-cache-semantics' and hashlib.sha256((destination / 'package/index.js').read_bytes()).hexdigest() != record['sourceSha256']:
+                raise SystemExit('Cache release source differs from the reviewed archive.')
         # Validate and stage all inputs before changing the npm installation.
         for name in records:
             shutil.rmtree(modules / name)
             shutil.copytree(staged / name / 'package', modules / name)
-        shutil.copyfile(here / 'vendor/http-cache-semantics/index.js', cache / 'index.js')
+        shutil.copyfile(patched, cache / 'index.js')
+        if hashlib.sha256((cache / 'index.js').read_bytes()).hexdigest() != PATCHED_CACHE_SHA256:
+            raise SystemExit('Installed cache backport differs from the reviewed source.')
     receipt = {'npmVersion': '11.20.0', 'dependencies': records, 'cacheBackport': {
-        'version': '4.2.0', 'cve': 'CVE-2026-93748', 'originalSha256': ORIGINAL_CACHE_SHA256,
+        'version': records['http-cache-semantics']['version'], 'cve': 'CVE-2026-93748',
+        'originalSha256': records['http-cache-semantics']['sourceSha256'], 'bundledOriginalSha256': ORIGINAL_CACHE_SHA256,
         'patchedSha256': hashlib.sha256((cache / 'index.js').read_bytes()).hexdigest()}}
     target = Path(sys.argv[2])
     target.parent.mkdir(parents=True, exist_ok=True)

@@ -173,10 +173,11 @@ on purpose: exporting makes a folder available, it does not give any agent acces
 
    Keep both `open-harness` and `docker` entries pointing at the same folder with the same
    `read_only` value: the coordinator validates grants against one, the agents' engine mounts
-   the other. The `target` is the exported path offered in Agent settings,
+   the other. The `target` is the exported path offered on the Folders screen,
    `/host-folders/project` in the example; give each exported folder its own
-   `/host-folders/<name>`. Inside the agent, grants appear in order at
-   `/workspace/mounts/folder-1`, `/workspace/mounts/folder-2`, and so on.
+   `/host-folders/<name>`. Inside the agent, each grant appears at
+   `/workspace/folders/<name>`, under the name you give it on the Folders screen (a project's
+   folders appear at `/workspace/project/<name>`), and the agent is told these paths.
    `read_only: true` is a ceiling: an
    agent can then be given read access to it and nothing more. On a Mac, Docker Desktop also
    has to be allowed to share the folder's location (**Settings → Resources → File sharing**);
@@ -186,13 +187,19 @@ on purpose: exporting makes a folder available, it does not give any agent acces
    command from then on — `--stop`, `--status`, `--logs` — so that every command sees the
    same stack. Changing the exported folders means stopping and starting again with the
    edited file; mounts are fixed while the containers run.
-4. In the dashboard, open **Agent settings → Computer**, choose **Selected folders**, open
-   *Advanced resources and shared folders* and add a folder. On a Docker Desktop installation
-   the path is chosen from the exported folders, at their `/host-folders/…` paths, and a folder
-   exported read-only can only be granted read-only; a path on your computer such as
-   `C:\Projects\website` or `/Users/name/Project` cannot be typed there, because the containers
-   cannot see it. When nothing is exported yet, the editor says so and points back to this
-   procedure. Save the profile; the grant applies to that agent's next task.
+4. In the dashboard, open **Folders** in the sidebar and add a folder. On a Docker Desktop
+   installation the path is chosen from the exported folders, at their `/host-folders/…`
+   paths, and a folder exported read-only can only be shared read-only; a path on your
+   computer such as `C:\Projects\website` or `/Users/name/Project` cannot be typed there,
+   because the containers cannot see it. When nothing is exported yet, the screen says so and
+   points back to this procedure. In the table below the folders, choose each agent's access
+   (No access, Read only, or Read and write), then **Save folders**; it applies from each
+   agent's next task. **Agent settings → Computer** lists the folders that agent has.
+
+   To share a folder with a project instead of a single agent, open the project's settings
+   from **Tasks → Projects**, add the folder under *Folders*, and choose each agent's access in
+   the table below it. Those folders are used for that project's tasks, and in a chat only when
+   you choose the project in the composer's *Project folders* menu.
 
 ## Terminal use and manual pairing
 
@@ -276,9 +283,9 @@ Common cases:
   the launcher again continues waiting without restarting anything.
 - **"This link has already been used or has expired"** — run the launcher again; each link is
   single-use. **"This browser isn't paired"** — same, or pair by hand as above.
-- **A shared folder is not offered in Agent settings** — the override was not passed at start,
+- **A shared folder is not offered on the Folders screen** — the override was not passed at start,
   the `source` path is wrong or not shared with Docker Desktop, or Open Harness was not
   restarted after editing the file. Check the resolved mount configuration with
   `docker compose -f compose.yaml -f my-folders.yaml config` (using your override's name),
-  then compare it with the exported-folder list in Agent settings. `--status` shows
+  then compare it with the exported folders the Folders screen offers. `--status` shows
   container state and health.

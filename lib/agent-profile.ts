@@ -2,13 +2,55 @@ import type { Agent } from './types';
 import type { CredentialRecord } from './credentials';
 
 export type ModelChoice = { provider: string; model: string; credentialRef: string; baseUrl: string };
-export type ConnectorConfig = { id: string; name: string; command: string; args: string[]; secretRef: string; enabled: boolean };
+export type CredentialGrant = { credentialRef: string; allowedOrigins: string[]; allowedMethods: string[]; allowPrivateNetwork?: boolean };
+export type CredentialBinding = { credentialRef: string; field: string; env: string };
+export function bindingSecretName(binding: CredentialBinding) { return `OH_CREDENTIAL_${binding.credentialRef}_${binding.field.toUpperCase()}`; }
+export type ConnectorConfig = { credentialBindings?: CredentialBinding[]; id: string; name: string; command: string; args: string[]; secretRef: string; enabled: boolean };
 export type ComputerAccess = 'private' | 'folders' | 'direct';
 export type DesktopMode = 'none' | 'virtual' | 'existing';
 // Legacy values stay readable so operators can repair saved profiles without losing drafts.
 export const UNSANDBOXED_COMPUTER_MESSAGE = 'Direct access to the signed-in computer is not sandboxed and is disabled. Open Agent settings → Computer and choose a private workspace or private agent desktop.';
 export function isSandboxedComputer(computer: ComputerConfig) { return ['private', 'folders'].includes(computer.access) && ['none', 'virtual'].includes(computer.desktop); }
-export type FolderGrant = { id: string; path: string; mode: 'read' | 'write' };
+// `scope: 'project'` marks a grant a project made for one run; it is never stored on a profile.
+export type FolderGrant = { id: string; name: string; path: string; mode: 'read' | 'write'; scope?: 'project' };
+// A folder shared from a list (a project's, or the workspace's), with each agent's access to it.
+// Anyone absent from `agents` has no access. `machineId` says which computer a workspace folder is on.
+export type SharedFolder = { id: string; name: string; path: string; mode: 'read' | 'write'; agents: Record<string, 'read' | 'write'>; machineId?: string };
+export const FOLDER_NAME = /^[a-z0-9][a-z0-9._-]{0,39}$/;
+export const PERSONAL_FOLDER_ROOT = '/workspace/folders', PROJECT_FOLDER_ROOT = '/workspace/project';
+export function folderName(path: string, taken: Iterable<string> = []) {
+  const used = new Set(taken), base = (path.split(/[\\/]/).filter(Boolean).pop() || 'folder').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z0-9]+/, '').slice(0, 32) || 'folder';
+  for (let n = 1; ; n++) { const name = n === 1 ? base : `${base}-${n}`; if (!used.has(name)) return name; }
+}
+// Grants saved before folders had names keep loading: each gets a name from its path. Names
+// need only be unique under their own mount root: a workspace "docs" and a project "docs" are
+// different paths, and renaming one here would mount it somewhere the agent was never told.
+export function namedFolders<T extends { path: string; name?: string; scope?: 'project' }>(folders: T[]): Array<T & { name: string }> {
+  const taken = { personal: new Set<string>(), project: new Set<string>() };
+  return folders.map(folder => {
+    const used = taken[folder.scope === 'project' ? 'project' : 'personal'];
+    const name = folder.name && FOLDER_NAME.test(folder.name) && !used.has(folder.name) ? folder.name : folderName(folder.path, used);
+    used.add(name); return { ...folder, name };
+  });
+}
+// Names are the mount point, so each grant is reachable at a path the agent is told about
+// and that survives reordering, unlike the positional folder-N it replaces.
+export function folderTarget(grant: Pick<FolderGrant, 'name' | 'scope'>) { return `${grant.scope === 'project' ? PROJECT_FOLDER_ROOT : PERSONAL_FOLDER_ROOT}/${grant.name}`; }
+// Personal folders apply to every run; a project adds only what it granted this agent.
+export function runComputer(computer: ComputerConfig, grants: FolderGrant[]): ComputerConfig {
+  // Named once here, so the notice, the working directory and the mounts all read the same names.
+  const folders = namedFolders([...(computer.access === 'folders' ? computer.folders : []), ...grants]);
+  return { ...computer, access: folders.length ? 'folders' : computer.access, folders };
+}
+export function runCwd(computer: ComputerConfig) {
+  const project = computer.access === 'folders' ? computer.folders.filter(folder => folder.scope === 'project') : [];
+  return project.length === 1 && project[0].mode === 'write' ? folderTarget(project[0]) : '/workspace/shared';
+}
+export function folderNotice(computer: ComputerConfig, projectName = '') {
+  if (computer.access !== 'folders' || !computer.folders.length) return '';
+  return ['## Folders you can use', 'These host folders are mounted in your workspace. Nothing else on the host computer is available to you.',
+    ...computer.folders.map(folder => `- ${folderTarget(folder)} (${folder.mode === 'write' ? 'read and write' : 'read only'}): ${folder.scope === 'project' ? `project folder "${folder.name}"${projectName ? ` of ${projectName}` : ''}` : `your folder "${folder.name}"`}`)].join('\n');
+}
 export type ComputerConfig = {
   machineId: string;
   access: ComputerAccess;
@@ -36,6 +78,7 @@ export type AgentProfile = {
   allowedTools: string[];
   board: BoardPermissions;
   connectors: ConnectorConfig[];
+  credentialGrants?: CredentialGrant[];
   computer: ComputerConfig;
 };
 export type ToolInfo = { id: string; name: string; group: string; description: string; available: boolean; reason?: string };
@@ -73,10 +116,30 @@ export function mcpServerOf(id: string) {
   const server = id.slice(MCP_PREFIX.length).split('__')[0];
   return server || null;
 }
+export const API_TOOL = mcpToolId(COORDINATION_SERVER, 'api_request');
 export const TASK_TOOL = mcpToolId(COORDINATION_SERVER, 'task');
 export const HANDOFF_TOOL = mcpToolId(COORDINATION_SERVER, 'delegate_named_agent');
 export const ROUTINE_TOOL = mcpToolId(COORDINATION_SERVER, 'create_open_harness_routine');
 export const COMPUTER_TOOL = mcpToolId(COORDINATION_SERVER, 'computer');
+export const PROJECT_TOOL = mcpToolId(COORDINATION_SERVER, 'project');
+export const ROUTINES_TOOL = mcpToolId(COORDINATION_SERVER, 'routines');
+export const DIRECTORY_TOOL = mcpToolId(COORDINATION_SERVER, 'directory');
+export const RUNS_TOOL = mcpToolId(COORDINATION_SERVER, 'runs');
+export const DECIDE_TOOL = mcpToolId(COORDINATION_SERVER, 'decide');
+// Workspace features an agent reaches through Open Harness itself. Each is one tool grant, off
+// until a person turns it on; the labels are shared with the coordinator's refusals so an agent
+// can tell the user exactly which switch to turn on.
+export const WORKSPACE_PERMISSIONS: ReadonlyArray<readonly [id: string, label: string, description: string]> = [
+  [PROJECT_TOOL, 'Projects', "Create projects and change their name, details, stages and archive state. It can't delete projects, share folders, or change when tasks start automatically."],
+  [ROUTINES_TOOL, 'Routines', "See, edit, pause, resume, run now and delete this agent's own routines."],
+  [DIRECTORY_TOOL, 'Teams and agents', "See its teams and teammates' names, roles and status — never their instructions or credentials."],
+  [RUNS_TOOL, 'Runs and conversations', 'See its own runs and work it delegated, read results, and stop them.'],
+  [DECIDE_TOOL, 'Decisions', 'Ask the workspace decision model to choose, rank, label, score or check, and get back IDs with confidence. Works only while decisions are on in the workspace; the question, context and option text are sent to the decision service.'],
+];
+export const workspacePermissionLabel = (id: string) => WORKSPACE_PERMISSIONS.find(([tool]) => tool === id)?.[1] || id;
+// The old "Create and change projects" switch granted less than the Projects permission does,
+// so it is retired rather than carried over: a person turns Projects on deliberately.
+export const boardPermissions = (stored?: Partial<BoardPermissions> | null): BoardPermissions => ({ ...DEFAULT_BOARD, ...(stored || {}), manageProjects: false });
 const LEGACY_TOOL_IDS: Record<string, string> = {
   mcp_open_harness_task: TASK_TOOL,
   mcp_open_harness_delegate_named_agent: HANDOFF_TOOL,
@@ -108,7 +171,7 @@ export const DEFAULT_TOOLS = [
 ];
 
 export function draftProfile(agent: Agent): AgentProfile {
-  if (agent.profile) return { ...agent.profile, allowedTools: [...new Set([...normalizeToolIds(agent.profile.allowedTools || [], (agent.profile.connectors || []).map(connector => connector.name)), TASK_TOOL])], board: { ...DEFAULT_BOARD, ...(agent.profile.board || {}) }, computer: agent.profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
+  if (agent.profile) return { ...agent.profile, allowedTools: [...new Set([...normalizeToolIds(agent.profile.allowedTools || [], (agent.profile.connectors || []).map(connector => connector.name)), TASK_TOOL])], board: boardPermissions(agent.profile.board), computer: agent.profile.computer || { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
   return { id: agent.id, revision: 0, name: agent.name, role: agent.role, description: agent.description, tone: agent.tone,
     prompt: { enabled: true, text: agent.instructions }, model: { ...DEFAULT_MODEL, inherit: true }, allowedTools: [...DEFAULT_TOOLS], board: { ...DEFAULT_BOARD }, connectors: [], computer: { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } };
 }

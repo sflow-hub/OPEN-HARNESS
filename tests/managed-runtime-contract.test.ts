@@ -5,13 +5,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GROUP_CHAT_TOOL } from '../lib/group-chat';
 import { WORKSPACE_TOOL } from '../lib/product';
 import { COORDINATION_TOOLS, prepareProfile } from '../runtime/profile-runtime';
 import { hermesApprovalDecision } from '../runtime/hermes';
-import { COMPUTER_TOOL, DEFAULT_BOARD, DEFAULT_COMPUTER, HANDOFF_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
+import { COMPUTER_TOOL, DEFAULT_BOARD, DEFAULT_COMPUTER, API_TOOL, DECIDE_TOOL, DIRECTORY_TOOL, HANDOFF_TOOL, PROJECT_TOOL, ROUTINES_TOOL, RUNS_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
 
 const model: ModelChoice = { provider: 'custom', model: 'some-model', credentialRef: 'SOME_KEY', baseUrl: 'http://localhost:9/v1' };
 const profile: AgentProfile = {
@@ -140,10 +142,35 @@ test('coordination tools are named the way Hermes registers them', () => {
   assert.equal(mcpServerOf('terminal'), null);
   // Every name the coordination server offers must be a tool Open Harness can grant, or the
   // model is shown a tool the policy will refuse; and every tool it grants must exist there.
-  const offered = readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs'), 'utf8')
-    .match(/^\s*name: "([a-z_]+)",$/gm)!.map(line => line.split('"')[1]);
-  assert.deepEqual(offered.map(name => mcpToolId('open_harness', name)).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, COMPUTER_TOOL].sort());
-  assert.deepEqual(COORDINATION_TOOLS.map(tool => tool.id).sort(), [HANDOFF_TOOL, ROUTINE_TOOL, TASK_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, COMPUTER_TOOL].sort());
+  const response = execFileSync(process.execPath, [join(import.meta.dirname, '..', 'runtime/hermes/coordination.mjs')], { input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n', encoding: 'utf8', timeout: 5000 });
+  const schemas = JSON.parse(response.trim()).result.tools as Array<{ name: string; inputSchema: { properties: Record<string, { type?: string }>; required: string[] } }>;
+  const offered = schemas.map(tool => tool.name);
+  const all = [API_TOOL, COMPUTER_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, DECIDE_TOOL, DIRECTORY_TOOL, HANDOFF_TOOL, PROJECT_TOOL, ROUTINE_TOOL, ROUTINES_TOOL, RUNS_TOOL, TASK_TOOL].sort();
+  assert.deepEqual(offered.map(name => mcpToolId('open_harness', name)).sort(), all);
+  assert.deepEqual(COORDINATION_TOOLS.map(tool => tool.id).sort(), all);
+  assert.deepEqual([PROJECT_TOOL, ROUTINES_TOOL, DIRECTORY_TOOL, RUNS_TOOL, DECIDE_TOOL], ['mcp__open_harness__project', 'mcp__open_harness__routines', 'mcp__open_harness__directory', 'mcp__open_harness__runs', 'mcp__open_harness__decide']);
+});
+
+// Hermes gives an object schema with no properties an empty property list, so a model can only
+// ever send {} for it: every task call then failed with "Task title is required." Each field a
+// model fills in must say what it is.
+test('every coordination tool schema describes each field a model must fill in', async () => {
+  const source = readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs'), 'utf8');
+  type Schema = { type?: string; properties?: Record<string, Schema>; items?: Schema; additionalProperties?: boolean | Schema };
+  const tools = Function(`${source.slice(source.indexOf('const tools = ['), source.indexOf('class Unreachable'))}; return tools;`)() as Array<{ name: string; inputSchema: Schema }>;
+  const walk = (schema: Schema | undefined, path: string): string[] => {
+    if (path.endsWith('.body')) return []; // api_request forwards any JSON body unchanged.
+    // Upstream's workspace tool passes a free-form input object. Pinned Hermes empties property-less
+    // objects, so this field needs typed properties before models can fill it in; tracked separately.
+    if (path === 'workspace.input') return [];
+    if (!schema?.type) return [`${path} has no type`];
+    if (schema.type === 'array') return walk(schema.items, `${path}[]`);
+    if (schema.type !== 'object') return [];
+    if (!schema.properties) return typeof schema.additionalProperties === 'object' && schema.additionalProperties.type ? [] : [`${path} is an object with no properties`];
+    return Object.entries(schema.properties).flatMap(([key, value]) => walk(value, `${path}.${key}`));
+  };
+  assert.deepEqual(tools.flatMap(tool => walk(tool.inputSchema, tool.name)), []);
+  for (const tool of tools) assert.equal(tool.inputSchema.additionalProperties, false, tool.name);
 });
 
 // A grant saved by an earlier version must keep working. This renames; it must never widen.
@@ -163,7 +190,9 @@ test('the agent runs the checkout copy of the coordination server', () => {
   const root = mkdtempSync(join(tmpdir(), 'harness-coordination-'));
   prepareProfile(root, { ...profile, allowedTools: [TASK_TOOL] }, model, { environment: () => ({}) }, 'token', 'run-1');
   const config = JSON.parse(readFileSync(join(root, 'agents', profile.id, 'profile', 'config.yaml'), 'utf8'));
-  assert.deepEqual(config.mcp_servers.open_harness.args, ['/run/open-harness/coordination.mjs']);
+  // The schema hash is in the args because Hermes keys its schema cache on command and args only.
+  const source = readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs'));
+  assert.deepEqual(config.mcp_servers.open_harness.args, ['/run/open-harness/coordination.mjs', `--schema=${createHash('sha256').update(source).digest('hex').slice(0, 12)}`]);
   const shipped = join(root, 'agents', profile.id, 'managed', 'coordination.mjs');
   assert.equal(readFileSync(shipped, 'utf8'), readFileSync(join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs'), 'utf8'));
 });

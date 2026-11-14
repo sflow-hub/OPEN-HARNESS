@@ -1,4 +1,5 @@
 import type { PersistentRun } from "./control-client";
+import type { SharedFolder } from "./agent-profile";
 
 export type WorkflowCategory = "backlog" | "ready" | "in_progress" | "review" | "done";
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
@@ -23,6 +24,9 @@ export type TaskBoardSettings = {
 export const BOARD_COLORS = ["sage", "blue", "amber", "violet", "rose", "teal"] as const;
 export type BoardColor = typeof BOARD_COLORS[number];
 
+// A folder a project shares. Project folders are always on the computer running Open Harness.
+export type ProjectFolder = Omit<SharedFolder, "machineId">;
+
 export type TaskBoard = {
   id: string;
   name: string;
@@ -34,6 +38,7 @@ export type TaskBoard = {
   revision: number;
   stages: TaskStage[];
   settings: TaskBoardSettings;
+  folders: ProjectFolder[];
   createdAt: string;
   updatedAt: string;
 };

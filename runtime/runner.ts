@@ -9,7 +9,7 @@ import { readRunnerResponse } from './runner-response';
 import { HERMES_IMAGE, RUNTIME_LABEL, classifyContract } from './readiness';
 import { discoverModels, prepareProfile, runtimeProbe, runtimeToolCatalog, writeRunLease } from './profile-runtime';
 import type { AgentProfile, MachineInfo } from '../lib/agent-profile';
-import { runToolGrants } from '../lib/agent-profile';
+import { runCwd, runToolGrants } from '../lib/agent-profile';
 import { exportAgentTransfer, importAgentTransfer } from './transfer-files';
 import { openAgentTransfer, sealAgentTransfer, type TransferBinding } from './transfer-crypto';
 import { SecretStore } from './secrets';
@@ -36,10 +36,10 @@ catch (error) { console.error(error instanceof Error ? error.message : 'The runn
 type Capabilities = MachineInfo['capabilities'];
 // Bounded asynchronous probes keep heartbeats responsive even when Docker hangs.
 function output(command: string, args: string[], timeout: number) {
-  return new Promise<{ status: number | null; stdout: string }>(resolve => {
-    let done = false, stdout = ''; const settle = (status: number | null) => { if (!done) { done = true; resolve({ status, stdout }); } };
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'], timeout, killSignal: 'SIGKILL' });
-    child.stdout.on('data', chunk => stdout += chunk); child.on('error', () => settle(null)); child.on('exit', code => settle(code));
+  return new Promise<{ status: number | null; stdout: string; stderr: string }>(resolve => {
+    let done = false, stdout = '', stderr = ''; const settle = (status: number | null) => { if (!done) { done = true; resolve({ status, stdout, stderr }); } };
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout, killSignal: 'SIGKILL' });
+    child.stdout.on('data', chunk => stdout += chunk); child.stderr.on('data', chunk => stderr += chunk); child.on('error', () => settle(null)); child.on('exit', code => settle(code));
   });
 }
 async function probeCapabilities(): Promise<Capabilities> {
@@ -137,7 +137,7 @@ async function run(command: RunnerCommand) {
     active.set(payload.runId, live);
     gateway.on('event', event => void emit(command, event)); await gateway.start();await phase('gateway-ready');
     if (live.stopping) throw new Error('Run stopped before its session started.');
-    const session = await gateway.request('session.create', { cwd: '/workspace/shared', profile: 'default', messages: payload.history || [] });
+    const session = await gateway.request('session.create', { cwd: runCwd(profile.computer), profile: 'default', messages: payload.history || [] });
     const sessionId = String(session?.session_id || session?.id || ''); if (!sessionId) throw new Error('Hermes did not return a session ID.');
     live.sessionId = sessionId;
     await emit(command, { type: 'session.started', session_id: sessionId, payload: { session_id: sessionId } });
@@ -170,7 +170,7 @@ async function control(command: RunnerCommand) {
       if (profile) assertSandboxedComputer(profile.computer);
       const binding = transferBinding(command);
       if (!profile || profile.id !== command.agentId || profile.computer.machineId !== credentials.machineId || binding.destinationMachineId !== credentials.machineId) throw new Error('The destination computer profile does not match this runner.');
-      if (profile) validateComputerTarget(profile, await capabilities(), Array.isArray(command.payload.requiredSecrets) ? command.payload.requiredSecrets.map(String) : [], name => runnerSecrets.has(name) || Boolean(process.env[name]));
+      if (profile) validateComputerTarget(profile, await capabilities(), stateRoot, Array.isArray(command.payload.requiredSecrets) ? command.payload.requiredSecrets.map(String) : [], name => runnerSecrets.has(name) || Boolean(process.env[name]));
       // Only authenticated ciphertext enters the command queue; opened files live in memory until restore.
       const bundle = await openAgentTransfer(command.payload.sealedTransfer, binding, credentials.encryptionPrivateKey);
       const imported = await importAgentTransfer(stateRoot, command.agentId, bundle, profile.computer);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ControlClient } from '../lib/control-client';
 import { CODEX_PROVIDER } from '../lib/codex';
 import CodexSignIn from './codex-sign-in';
@@ -10,10 +10,11 @@ export default function ModelPicker({ client, provider, credentialRef = '', base
   value: string; onChange: (value: string) => void; label?: string;
   onCredentialChange?: (ref: string) => void;
 }) {
-  const id = useId();
+  const [search, setSearch] = useState('');
+  const [custom, setCustom] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const source = JSON.stringify([provider, credentialRef, baseUrl, apiKey, refresh]);
-  const [result, setResult] = useState<{ source: string; catalog: { models: string[]; error?: string } } | null>(null);
+  const [result, setResult] = useState<{ source: string; catalog: { models: string[]; modelNames?: Record<string, string>; error?: string } } | null>(null);
   const catalog = result?.source === source ? result.catalog : { models: [] };
   const busy = Boolean(provider || baseUrl) && result?.source !== source;
   useEffect(() => {
@@ -22,19 +23,23 @@ export default function ModelPicker({ client, provider, credentialRef = '', base
     const timer = setTimeout(() => {
       const query = { provider, credentialRef, baseUrl };
       const result = apiKey
-        ? client.request<{ models: string[]; error?: string }>('/v1/models', { method: 'POST', body: JSON.stringify({ ...query, value: apiKey }) })
-        : client.request<{ models: string[]; error?: string }>(`/v1/models?${new URLSearchParams(query)}`);
+        ? client.request<{ models: string[]; modelNames?: Record<string, string>; error?: string }>('/v1/models', { method: 'POST', body: JSON.stringify({ ...query, value: apiKey }) })
+        : client.request<{ models: string[]; modelNames?: Record<string, string>; error?: string }>(`/v1/models?${new URLSearchParams(query)}`);
       void result.then(value => { if (!cancelled) setResult({ source, catalog: value }); }, () => { if (!cancelled) setResult({ source, catalog: { models: [], error: 'Could not load models. Enter an exact model ID or try again.' } }); });
     }, 350);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [client, provider, credentialRef, baseUrl, apiKey, source]);
+  const customMode = custom || Boolean(value && !catalog.models.includes(value));
+  const choices = catalog.models.filter(model => model === value || model.toLowerCase().includes(search.toLowerCase()));
   return <div className="model-picker">
     {provider === CODEX_PROVIDER && onCredentialChange && <CodexSignIn client={client} credentialRef={credentialRef} onConnected={onCredentialChange} />}
-    <label>{label}<input aria-label={label} list={id} value={value} onChange={event => onChange(event.target.value)} placeholder="Choose a model or enter its exact ID" autoComplete="off" />
-      <datalist id={id}>{catalog.models.map(model => <option key={model} value={model} />)}</datalist>
-    </label>
-    {catalog.models.length > 0 && <label>Available models<select aria-label="Available models" value={catalog.models.includes(value) ? value : ''} onChange={event => { if (event.target.value) onChange(event.target.value); }}><option value="">Choose a model…</option>{catalog.models.map(model => <option key={model} value={model}>{model}</option>)}</select></label>}
-    <small role="status">{busy ? 'Loading models…' : catalog.error || (catalog.models.length ? `${catalog.models.length} models available. You can also enter any exact ID.` : 'Enter an exact model ID. A provider and key or endpoint can load available models.')}</small>
+    <label>Search models<input type="search" aria-label={`Search ${label.toLowerCase()}`} value={search} onChange={event => setSearch(event.target.value)} placeholder="Filter available models" /></label>
+    <label>{label} choices<select aria-label="Available models" value={customMode ? '__custom' : value} onChange={event => {
+      if (event.target.value === '__custom') setCustom(true);
+      else { setCustom(false); onChange(event.target.value); }
+    }}><option value="">Choose a model…</option>{choices.map(model => <option key={model} value={model}>{catalog.modelNames?.[model] || model}</option>)}<option value="__custom">Custom model ID…</option></select></label>
+    {customMode && <label>{label}<input aria-label={label} value={value} onChange={event => onChange(event.target.value)} placeholder="Enter the exact model ID" autoComplete="off" /></label>}
+    <small role="status">{busy ? 'Loading models…' : catalog.error || (catalog.models.length ? `${catalog.models.length} models available.` : 'No model list available. Choose Custom model ID to enter one.')}</small>
     <button type="button" className="subtle-button" disabled={busy} onClick={() => setRefresh(value => value + 1)}>Refresh model list</button>
   </div>;
 }

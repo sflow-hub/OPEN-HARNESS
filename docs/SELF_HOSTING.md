@@ -16,6 +16,8 @@ curl -fsS http://127.0.0.1:3000/api/health
 
 Compose requires browser pairing. Use the launcher to open a paired browser. For a manual start, mint a fresh five-minute, one-use code on the trusted host with `docker compose exec -T open-harness node /opt/open-harness/runtime/browser-pair.mjs`, then open `http://localhost:3000/#pair=<code>` using the returned `code` value. Do not share the code or put it in a query parameter. A plain dashboard visit cannot obtain an operator token.
 
+A native source dashboard also requires pairing when bootstrap goes through `/api/local`, even if direct loopback coordinator bootstrap is enabled. Mint a code with `node --env-file-if-exists=.env --import tsx runtime/browser-pair-cli.ts` using the coordinator’s state directory, then open `/#pair=<code>`. Paired tokens survive refresh. Native production defaults to loopback; a custom listener address never bypasses proxy pairing.
+
 The health endpoint returns only `{"ok":true}`. It reports that the dashboard can reach the coordinator; model credentials and the Hermes execution runtime are checked separately in the first-run guide. Follow logs with `docker compose logs -f open-harness` and download a credential-free diagnostic bundle from **Workspace settings → Download diagnostics**.
 
 ## Authenticated HTTPS access
@@ -64,9 +66,16 @@ docker compose ps
 
 Database migrations run when the coordinator starts. Existing SQLite state, credentials, profiles, and the private container engine remain in named volumes.
 
-The current source requires runtime contract 11. Normal browser shutdown now tolerates a process exiting while it is inspected, while still refusing unidentified live browser processes. It refreshes the runtime base and dependency packages, keeps confirmed desktop initialization for selected-folder startup, and enables the private desktop's accessibility bus before applications launch, including browsers opened before the first computer-control call. If Readiness reports **Update agent runtime**, run runtime setup from the dashboard before starting agents. Rebuilding the coordinator alone does not rebuild the image inside the private engine. A policy-only patch cannot upgrade an older full runtime.
+The current source requires runtime contract 12. It includes the security dependency refresh and the authenticated API tool. Normal browser shutdown now tolerates a process exiting while it is inspected, while still refusing unidentified live browser processes. It refreshes the runtime base and dependency packages, keeps confirmed desktop initialization for selected-folder startup, and enables the private desktop's accessibility bus before applications launch, including browsers opened before the first computer-control call. If Readiness reports **Update agent runtime**, run runtime setup from the dashboard before starting agents. Rebuilding the coordinator alone does not rebuild the image inside the private engine. A policy-only patch cannot upgrade an older full runtime.
 
 To roll back, stop the stack and restore the backup taken before the update into empty volumes, then start the previous release. Do not run older code against a state volume that has already been opened by a newer release.
+
+This update encrypts file-backed credentials. Older code cannot read the new
+encrypted `secrets.json` and may replace its control token instead of rejecting
+the format. Rollback therefore requires the complete pre-update backup, including
+its original credential store and key. Keep the existing generated key or
+deployment-supplied `OPEN_HARNESS_ENCRYPTION_KEY` unchanged; setting a different
+environment key does not migrate or rotate an existing store.
 
 ### Existing root-owned data volumes
 
@@ -83,6 +92,13 @@ These examples use the default Compose project name `open-harness`; substitute y
 ## Backup and restore
 
 Back up application data with **all writers stopped**. The archive includes SQLite, operator and model credentials, profiles, private/shared files, memories, skills, and history; protect it like a password vault. Keep backup files outside folders granted to agents. Selected host folders are not inside this volume and need their own backup.
+
+File-backed credentials also require their original encryption key. A full-volume
+archive includes the generated `/data/secrets.json.key`; protect and preserve it
+with the encrypted store. If you supplied `OPEN_HARNESS_ENCRYPTION_KEY`, back up
+that value securely outside the volume and supply the same value after restore.
+A missing or different key prevents startup. OS-vault installations also need
+the original vault entry. See [Credentials and API access](CREDENTIALS.md).
 
 Use the same Compose project and override options as your launcher. These examples assume the default project `open-harness`; verify the actual volume with `docker volume inspect open-harness_harness-data` before continuing. Capture the coordinator image before stopping the stack. The helper writes the archive directly, avoiding PowerShell's binary redirection behavior.
 

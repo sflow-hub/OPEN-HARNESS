@@ -13,7 +13,7 @@ const base = 'open-harness-atlas';
 function fixture(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), 'harness-owner-')), root = join(dir, 'selected'), stateFile = join(dir, 'docker-state.json'), log = join(dir, 'calls.jsonl');
   const savedPath = process.env.PATH, savedMock = process.env.OPEN_HARNESS_MOCK;
-  const state: { containers: Record<string, ReturnType<typeof container>>; psFailure?: boolean; inspectFailure?: boolean } = { containers: {} };
+  const state: { containers: Record<string, ReturnType<typeof container>>; psFailure?: boolean; inspectFailure?: boolean; imageIdFailure?: boolean; imageIdEmpty?: boolean; sharingFailure?: boolean } = { containers: {} };
   const save = () => writeFileSync(stateFile, JSON.stringify(state));
   save(); writeFileSync(log, '');
   writeFileSync(join(dir, 'docker'), String.raw`#!${process.execPath}
@@ -21,13 +21,18 @@ const fs = require('node:fs');
 const args = process.argv.slice(2), file = ${JSON.stringify(stateFile)}, state = JSON.parse(fs.readFileSync(file, 'utf8'));
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\n');
 const container = state.containers[args.at(-1)] || Object.values(state.containers).find(c => c.Id === args.at(-1));
-if (args[0] === 'image') console.log(args.includes('{{.Id}}') ? 'sha256:test' : '${RUNTIME_CONTRACT}');
+if (args[0] === 'image') {
+  if (args.includes('{{.Id}}') && state.imageIdFailure) { console.error('image lookup temporarily unavailable'); process.exit(1); }
+  if (args.includes('{{.Id}}') && state.imageIdEmpty) process.exit(0);
+  console.log(args.includes('{{.Id}}') ? 'sha256:test' : '${RUNTIME_CONTRACT}');
+}
 if (args[0] === 'inspect') {
   if (state.inspectFailure) { console.error('daemon not available'); process.exit(1); }
   if (!container) { console.error('Error: No such object: ' + args.at(-1)); process.exit(1); }
   console.log(JSON.stringify(container));
 }
 if (args[0] === 'run' && args.includes('--rm')) {
+  if (state.sharingFailure) { console.error('daemon temporarily unavailable'); process.exit(1); }
   const mount = args[args.indexOf('-v') + 1]; console.log(fs.readFileSync(mount.slice(0, -':/probe:ro'.length) + '/' + args.at(-1).split('/').at(-1), 'utf8'));
 }
 if (args[0] === 'ps' && state.psFailure) { console.error('cannot confirm container cleanup'); process.exit(1); }
@@ -48,25 +53,25 @@ function container(root: string, id = 'owned-id', options: { legacy?: boolean; r
   ] };
 }
 
-test('another workspace keeps its base container while this workspace gets an owned alternate', { skip: process.platform === 'win32' }, t => {
+test('another workspace keeps its base container while this workspace gets an owned alternate', { skip: process.platform === 'win32' }, async t => {
   const f = fixture(t); f.state.containers[base] = container(join(f.dir, 'foreign'), 'foreign-id'); f.save();
-  assert.equal(ensureContainer('atlas', f.root, computer), f.alternate);
+  assert.equal(await ensureContainer('atlas', f.root, computer), f.alternate);
   const mutations = f.mutations(); assert.equal(mutations.length, 1); assert.equal(mutations[0][0], 'run'); assert.ok(mutations[0].includes(f.alternate)); assert.ok(mutations[0].includes(`open-harness.state=${containerStateKey(f.root)}`));
   assert.equal(mutations.some(args => args.includes('foreign-id') || args.includes(base)), false);
 });
 
-test('selected folder grants require a directory before container replacement', { skip: process.platform === 'win32' }, t => {
+test('selected folder grants require a directory before container replacement', { skip: process.platform === 'win32' }, async t => {
   const f = fixture(t), file = join(f.dir, 'not-a-folder'); writeFileSync(file, 'file');
   f.state.containers[base] = container(f.root); f.save();
-  assert.throws(() => ensureContainer('atlas', f.root, { ...computer, access: 'folders', folders: [{ id: 'file', path: file, mode: 'read' }] }), /not a directory/);
+  await assert.rejects(async () => ensureContainer('atlas', f.root, { ...computer, access: 'folders', folders: [{ id: 'file', name: 'file', path: file, mode: 'read' }] }), /not a directory/);
   assert.deepEqual(f.mutations(), []);
 });
 
-test('long agent IDs sharing their first 48 characters keep distinct containers and full profile paths', { skip: process.platform === 'win32' }, t => {
+test('long agent IDs sharing their first 48 characters keep distinct containers and full profile paths', { skip: process.platform === 'win32' }, async t => {
   const f = fixture(t), prefix = 'a'.repeat(48), first = `${prefix}${'b'.repeat(32)}`, second = `${prefix}${'c'.repeat(32)}`;
-  const firstName = ensureContainer(first, f.root, computer);
+  const firstName = await ensureContainer(first, f.root, computer);
   f.state.containers[firstName] = container(f.root, 'first-id'); f.save();
-  const secondName = ensureContainer(second, f.root, computer);
+  const secondName = await ensureContainer(second, f.root, computer);
   assert.equal(firstName, `open-harness-${first}`); assert.equal(secondName, `open-harness-${second}`); assert.notEqual(firstName, secondName);
   const created = f.mutations(); assert.equal(created.length, 2);
   for (const [index, id] of [first, second].entries()) {
@@ -77,28 +82,28 @@ test('long agent IDs sharing their first 48 characters keep distinct containers 
   }
 });
 
-test('a foreign alternate is refused without stopping, starting, replacing, or reusing either container', { skip: process.platform === 'win32' }, t => {
+test('a foreign alternate is refused without stopping, starting, replacing, or reusing either container', { skip: process.platform === 'win32' }, async t => {
   const f = fixture(t); f.state.containers[base] = container(join(f.dir, 'foreign'), 'foreign-base'); f.state.containers[f.alternate] = container(join(f.dir, 'other'), 'foreign-alternate'); f.save();
-  assert.throws(() => ensureContainer('atlas', f.root, computer), /belongs to another workspace/); assert.deepEqual(f.mutations(), []);
+  await assert.rejects(async () => ensureContainer('atlas', f.root, computer), /belongs to another workspace/); assert.deepEqual(f.mutations(), []);
 });
 
-test('a verified workspace can restart or replace its own container by immutable ID', { skip: process.platform === 'win32' }, t => {
+test('a verified workspace can restart or replace its own container by immutable ID', { skip: process.platform === 'win32' }, async t => {
   const f = fixture(t); f.state.containers[base] = container(f.root, 'owned-id', { running: false }); f.save();
-  assert.equal(ensureContainer('atlas', f.root, computer), base); assert.deepEqual(f.mutations(), [['start', 'owned-id']]);
+  assert.equal(await ensureContainer('atlas', f.root, computer), base); assert.deepEqual(f.mutations(), [['start', 'owned-id']]);
   f.state.containers[base] = container(f.root, 'old-id', { signature: 'stale' }); f.save();
-  assert.equal(ensureContainer('atlas', f.root, computer), base); assert.deepEqual(f.mutations()[1], ['rm', '-f', 'old-id']); assert.equal(f.mutations()[2][0], 'run');
+  assert.equal(await ensureContainer('atlas', f.root, computer), base); assert.deepEqual(f.mutations()[1], ['rm', '-f', 'old-id']); assert.equal(f.mutations()[2][0], 'run');
 });
 
-test('legacy containers require all private mounts to match and are recreated to acquire a state label', { skip: process.platform === 'win32' }, t => {
+test('legacy containers require all private mounts to match and are recreated to acquire a state label', { skip: process.platform === 'win32' }, async t => {
   const f = fixture(t); f.state.containers[base] = container(f.root, 'legacy-id', { legacy: true }); f.save();
-  assert.equal(ensureContainer('atlas', f.root, computer), base); assert.deepEqual(f.mutations()[0], ['rm', '-f', 'legacy-id']); assert.ok(f.mutations()[1].includes(`open-harness.state=${containerStateKey(f.root)}`));
+  assert.equal(await ensureContainer('atlas', f.root, computer), base); assert.deepEqual(f.mutations()[0], ['rm', '-f', 'legacy-id']); assert.ok(f.mutations()[1].includes(`open-harness.state=${containerStateKey(f.root)}`));
   f.state.containers[base].Mounts[2].Source = join(f.dir, 'foreign/private'); f.save();
-  assert.equal(ensureContainer('atlas', f.root, computer), f.alternate); assert.equal(f.mutations().length, 3); assert.ok(f.mutations()[2].includes(f.alternate));
+  assert.equal(await ensureContainer('atlas', f.root, computer), f.alternate); assert.equal(f.mutations().length, 3); assert.ok(f.mutations()[2].includes(f.alternate));
 });
 
-test('an existing alternate remains the selected container after the base name becomes free', { skip: process.platform === 'win32' }, t => {
+test('an existing alternate remains the selected container after the base name becomes free', { skip: process.platform === 'win32' }, async t => {
   const f = fixture(t); f.state.containers[f.alternate] = container(f.root); f.save();
-  assert.equal(ensureContainer('atlas', f.root, computer), f.alternate); assert.deepEqual(f.mutations(), []);
+  assert.equal(await ensureContainer('atlas', f.root, computer), f.alternate); assert.deepEqual(f.mutations(), []);
 });
 
 test('recovery stops only verified containers across both candidate names, including legacy same-root containers', { skip: process.platform === 'win32' }, async t => {
@@ -110,8 +115,31 @@ test('recovery stops only verified containers across both candidate names, inclu
 
 test('Docker inspection failures cannot be mistaken for a missing container', { skip: process.platform === 'win32' }, async t => {
   const f = fixture(t); f.state.inspectFailure = true; f.save();
-  assert.throws(() => ensureContainer('atlas', f.root, computer), /daemon not available/);
+  await assert.rejects(async () => ensureContainer('atlas', f.root, computer), /daemon not available/);
   await assert.rejects(stopAgentContainers('atlas', f.root), /daemon not available/); assert.deepEqual(f.mutations(), []);
+});
+
+test('a temporary sharing failure recovers without restarting the coordinator', { skip: process.platform === 'win32' }, async t => {
+  const f = fixture(t); f.state.containers[base] = container(f.root); f.state.sharingFailure = true; f.save();
+  await assert.rejects(async () => ensureContainer('atlas', f.root, computer), /data folder/);
+  f.state.sharingFailure = false; f.save();
+  const now = Date.now(); t.mock.method(Date, 'now', () => now + 16_000);
+  assert.equal(await ensureContainer('atlas', f.root, computer), base);
+  assert.deepEqual(f.mutations(), [], 'a recovered probe must reuse the existing container');
+});
+
+test('an inconclusive image ID never replaces a healthy container and is not cached', { skip: process.platform === 'win32' }, async t => {
+  const f = fixture(t); f.state.containers[base] = container(f.root); f.state.imageIdFailure = true; f.save();
+  // Far enough ahead to expire an image ID cached by any earlier test, including one that moved the clock.
+  const now = Date.now(); t.mock.method(Date, 'now', () => now + 60_000);
+  await assert.rejects(async () => ensureContainer('atlas', f.root, computer), /image/i);
+  assert.deepEqual(f.mutations(), [], 'failed image inspection must not remove or restart the existing workspace');
+  f.state.imageIdFailure = false; f.state.imageIdEmpty = true; f.save();
+  await assert.rejects(async () => ensureContainer('atlas', f.root, computer), /image/i);
+  assert.deepEqual(f.mutations(), [], 'an empty successful response is still inconclusive');
+  f.state.imageIdEmpty = false; f.save();
+  assert.equal(await ensureContainer('atlas', f.root, computer), base);
+  assert.deepEqual(f.mutations(), [], 'the next successful check must reuse the existing container');
 });
 
 test('coordinator shutdown exits unsuccessfully when workspace cleanup cannot be confirmed', { skip: process.platform === 'win32', timeout: 15_000 }, async t => {

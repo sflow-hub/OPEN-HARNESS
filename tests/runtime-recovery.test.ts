@@ -1,3 +1,4 @@
+import { encryptionKey, openSecrets } from '../runtime/secret-encryption';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -71,6 +72,12 @@ test('durable conversations seed follow-ups, pending prompts survive replay, and
     await f.request(`/v1/runs/${clarify.id}/input`, 'POST', { inputId: needsInput.pendingInputs[0].inputId, value: 'Use Bluebird' });
     assert.match((await f.waitRun(clarify.id)).result, /Use Bluebird/);
     await assert.rejects(f.request(`/v1/runs/${clarify.id}/input`, 'POST', { inputId: needsInput.pendingInputs[0].inputId, value: 'again' }), { status: 409 });
+    const batch = await f.run('atlas', 'MOCK_CLARIFY_BATCH');
+    const asked = await f.waitRun(batch.id, ['waiting_input']);
+    assert.deepEqual(asked.pendingInputs[0].payload.questions.map((question: any) => question.question), ['Which language?', 'Any extras?']);
+    await assert.rejects(f.request(`/v1/runs/${batch.id}/input`, 'POST', { inputId: asked.pendingInputs[0].inputId, value: 'Go' }), { status: 400 });
+    await f.request(`/v1/runs/${batch.id}/input`, 'POST', { inputId: asked.pendingInputs[0].inputId, value: { answers: { q0: 'Go', q1: 'tests' } } });
+    assert.match((await f.waitRun(batch.id)).result, /q0=Go, q1=tests/);
     const active = await f.run('atlas', 'MOCK_APPROVAL'); await f.waitRun(active.id, ['waiting_approval']);
     const queued = await f.run('atlas', 'resume this queued work');
     assert.equal(queued.state, 'queued');
@@ -144,10 +151,10 @@ test('failed model validation keeps working credentials and successful save uses
     await f.request('/v1/workspace/model', 'PUT', { model, revision: 0 });
     const failed = await f.request('/v1/onboarding/model-test', 'POST', { model, apiKey: 'bad-draft', save: true, revision: 1 });
     assert.equal(failed.ok, false); assert.equal((await f.request('/v1/workspace/model')).revision, 1);
-    assert.equal(JSON.parse(readFileSync(join(f.state, 'secrets.json'), 'utf8')).EXISTING_KEY, 'old-working-key');
+    assert.equal(JSON.parse(openSecrets(readFileSync(join(f.state, 'secrets.json'), 'utf8'), encryptionKey(join(f.state, 'secrets.json'), false))).EXISTING_KEY, 'old-working-key');
     const saved = await f.request('/v1/onboarding/model-test', 'POST', { model, apiKey: 'valid-draft', save: true, revision: 1 });
     assert.equal(saved.ok, true); assert.equal(saved.revision, 2); assert.match(saved.model.credentialRef, /^MODEL_/);
-    const vault = JSON.parse(readFileSync(join(f.state, 'secrets.json'), 'utf8'));
+    const vault = JSON.parse(openSecrets(readFileSync(join(f.state, 'secrets.json'), 'utf8'), encryptionKey(join(f.state, 'secrets.json'), false)));
     assert.equal(vault.EXISTING_KEY, 'old-working-key'); assert.equal(vault[saved.model.credentialRef], 'valid-draft');
     assert.equal(JSON.stringify(await f.request('/v1/workspace/model')).includes('valid-draft'), false);
     const savedCredentials = await f.request('/v1/credentials');

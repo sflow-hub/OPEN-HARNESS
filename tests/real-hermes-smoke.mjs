@@ -18,6 +18,7 @@ assert.notEqual(process.env.OPEN_HARNESS_MOCK, '1', 'This verification must use 
 if (container) execFileSync('docker', ['image', 'inspect', HERMES_IMAGE], { stdio: 'ignore', timeout: 10_000 });
 const agentId = container ? `real-smoke-${process.pid}` : 'real-smoke';
 const containerName = `open-harness-${agentId}`;
+const helperId = `${agentId}-helper`;
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const root = mkdtempSync(join(tmpdir(), 'open-harness-real-smoke-'));
 const profile = join(root, 'profile'), workspace = join(root, 'workspace');
@@ -36,16 +37,41 @@ const server = createServer(async (req, res) => {
     const latestPrompt = String(transcript.filter(message => message.role === 'user').at(-1)?.content);
     const followup = latestPrompt.includes('REAL_HERMES_FOLLOWUP');
     const approval = latestPrompt.includes('APPROVAL_SMOKE');
+    const projectTurn = latestPrompt.includes('PROJECT_SMOKE');
     const mainTurn = !followup && body.tools?.some(tool => tool.function?.name === 'write_file') && transcript.some(message => String(message.content).includes('REAL_HERMES_SMOKE'));
     const called = transcript.flatMap(message => message.tool_calls || []).map(call => call.function?.name);
-    const tool = approval && !called.includes('terminal') ? { name: 'terminal', arguments: { command: `chmod 666 ${JSON.stringify(toolArtifact)}` } }
+    // Four malformed task calls in a row used to trip Hermes's breaker ("unreachable after 3
+    // consecutive failures"); after them the project and its first card must still be created.
+    const taskCalls = called.filter(name => name === 'mcp__open_harness__task').length;
+    const toolText = String(transcript.filter(message => message.role === 'tool').at(-1)?.content || '');
+    // Hermes wraps MCP output in an <untrusted_tool_result> envelope, so fall back to the raw text.
+    const createdBoard = (() => { try { const outer = JSON.parse(toolText); return JSON.parse(typeof outer.result === 'string' ? outer.result : JSON.stringify(outer)).id; } catch { return /id\\*"\s*:\s*\\*"([0-9a-f-]{36})/.exec(toolText)?.[1]; } })();
+    // Two agents collaborating: the lead plans a project, gives the helper a card and starts it,
+    // the helper does the work in its own container and reports on the card, then the lead hands
+    // the helper a follow-up and waits for its answer.
+    const collabTurn = latestPrompt.includes('COLLAB_SMOKE'), cardTurn = latestPrompt.includes('You are completing board task'), handoffTurn = latestPrompt.includes('HANDOFF_SMOKE');
+    const cardId = /board task ([0-9a-f-]{36})/.exec(latestPrompt)?.[1];
+    const collab = collabTurn && !called.includes('mcp__open_harness__directory') ? { name: 'mcp__open_harness__directory', arguments: { action: 'agents' } }
+      : collabTurn && !called.includes('mcp__open_harness__project') ? { name: 'mcp__open_harness__project', arguments: { action: 'create', name: 'Collaboration project' } }
+      : collabTurn && taskCalls === 0 ? { name: 'mcp__open_harness__task', arguments: { action: 'create', boardId: createdBoard, title: 'Write test.md', description: 'Create test.md in the shared folder containing the word test.', ownerAgentId: helperId } }
+      : collabTurn && taskCalls === 1 ? { name: 'mcp__open_harness__task', arguments: { action: 'run', taskId: createdBoard } }
+      : collabTurn && !called.includes('mcp__open_harness__delegate_named_agent') ? { name: 'mcp__open_harness__delegate_named_agent', arguments: { agentId: helperId, prompt: 'HANDOFF_SMOKE: Confirm test.md is in the shared folder.' } }
+      : cardTurn && !called.includes('write_file') ? { name: 'write_file', arguments: { path: '/workspace/shared/test.md', content: 'test\n' } }
+      : cardTurn && !called.includes('mcp__open_harness__task') ? { name: 'mcp__open_harness__task', arguments: { action: 'comment', taskId: cardId, text: 'Wrote test.md in the shared folder.' } }
+      : null;
+    const tool = collab ? collab : collabTurn || cardTurn || handoffTurn ? null
+      : projectTurn && taskCalls < 4 ? { name: 'mcp__open_harness__task', arguments: { action: 'create' } }
+      : projectTurn && !called.includes('mcp__open_harness__project') ? { name: 'mcp__open_harness__project', arguments: { action: 'create', name: 'Smoke project' } }
+      : projectTurn && taskCalls === 4 ? { name: 'mcp__open_harness__task', arguments: { action: 'create', boardId: createdBoard, title: 'Smoke task' } }
+      : projectTurn ? null
+      : approval && !called.includes('terminal') ? { name: 'terminal', arguments: { command: `chmod 666 ${JSON.stringify(toolArtifact)}` } }
       : mainTurn && !called.includes('write_file') ? { name: 'write_file', arguments: { path: toolArtifact, content: 'Written by the real Hermes tool loop.\n' } }
       : mainTurn && !called.includes('clarify') ? { name: 'clarify', arguments: { question: 'Which acceptance marker should I use?' } }
       : mainTurn && body.tools?.some(tool => tool.function?.name === 'mcp__open_harness__task') && !called.includes('mcp__open_harness__task') ? { name: 'mcp__open_harness__task', arguments: { action: 'list' } }
       : mainTurn && !called.includes('terminal') ? { name: 'terminal', arguments: { command: `touch ${JSON.stringify(toolDenied)}` } }
       : null;
-    const content = approval ? 'APPROVAL_SMOKE_COMPLETE' : followup ? (transcript.some(message => String(message.content).includes('SERVICE_SEED_729')) ? 'FOLLOWUP_SERVICE_SEED_729' : 'FOLLOWUP_CONTEXT_MISSING') : mainTurn ? 'REAL_HERMES_SMOKE_COMPLETE' : 'Smoke verification';
-    const message = tool ? { role: 'assistant', content: null, tool_calls: [{ id: `call-${tool.name}`, type: 'function', function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } }] } : { role: 'assistant', content };
+    const content = collabTurn ? 'COLLAB_SMOKE_COMPLETE' : cardTurn ? 'CARD_REPORT: test.md written.' : handoffTurn ? 'HANDOFF_CONFIRMED: test.md is present.' : projectTurn ? 'PROJECT_SMOKE_COMPLETE' : approval ? 'APPROVAL_SMOKE_COMPLETE' : followup ? (transcript.some(message => String(message.content).includes('SERVICE_SEED_729')) ? 'FOLLOWUP_SERVICE_SEED_729' : 'FOLLOWUP_CONTEXT_MISSING') : mainTurn ? 'REAL_HERMES_SMOKE_COMPLETE' : 'Smoke verification';
+    const message = tool ? { role: 'assistant', content: null, tool_calls: [{ id: `call-${tool.name}-${called.length}`, type: 'function', function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } }] } : { role: 'assistant', content };
     const common = { id: `fixture-${requests.length}`, created: Math.floor(Date.now() / 1000), model: 'fixture-model' };
     if (body.stream) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -140,7 +166,7 @@ async function verifyCoordinator() {
   const modelRequests = requests.slice(requestStart).filter(body => body.tools?.some(tool => tool.function?.name === 'write_file') && body.messages?.some(message => String(message.content).includes('REAL_HERMES_SMOKE')));
   assert.ok(modelRequests.length >= 5, 'The coordinator must exercise file, clarify, task and denied terminal calls.');
   for (const body of modelRequests) assert.ok(body.tools.every(tool => ['write_file', 'clarify', 'mcp__open_harness__task'].includes(tool.function?.name)), 'Only granted tools may be model-visible.');
-  assert.ok(modelRequests.some(body => body.messages.some(message => message.role === 'tool' && message.tool_call_id === 'call-terminal' && /tool_disabled|does not exist/.test(String(message.content)))), 'The managed policy must reject the fixture\'s ungranted terminal call.');
+  assert.ok(modelRequests.some(body => body.messages.some(message => message.role === 'tool' && String(message.tool_call_id).startsWith('call-terminal-') && /tool_disabled|does not exist/.test(String(message.content)))), 'The managed policy must reject the fixture\'s ungranted terminal call.');
   const assertContainerStopped = () => {
     if (!container) return;
     assert.equal(execFileSync('docker', ['inspect', '-f', '{{.State.Running}}', containerName], { encoding: 'utf8', timeout: 10_000 }).trim(), 'false', 'A completed run must stop its container.');
@@ -174,7 +200,51 @@ async function verifyCoordinator() {
     approvalRuns.push({ runId: run.id, decision, resultingMode: mode.toString(8) });
   }
   chmodSync(artifact, 0o600);
-  return { firstRun: first.id, followupRun: second.id, firstSession: completed.run.session_id, followupSession: followed.run.session_id, modelRequests: modelRequests.length, clarificationAnswered: true, realApprovalRoundTrips: approvalRuns, crossRunContext: true, authenticatedMcpDispatch: true, deniedTerminal: true, ...(container ? { containerStopped: true, hostModelNetworking: true } : {}), artifact };
+  const { profile: projectProfile } = await api(`/v1/agents/${agentId}/profile`);
+  await api(`/v1/agents/${agentId}/profile`, 'PUT', { ...projectProfile, allowedTools: ['mcp__open_harness__task', 'mcp__open_harness__project'] });
+  const projectStart = requests.length;
+  const projectRun = await waitRun(await api('/v1/runs', 'POST', { agentId, conversationId: 'project-smoke', prompt: 'PROJECT_SMOKE: Create a project and a first task on it.' }));
+  events.push(...projectRun.events);
+  const projectCalls = projectRun.events.filter(event => event.type === 'tool.complete');
+  assert.equal(projectCalls.length, 6, `Every tool call must complete: ${JSON.stringify(projectRun.events.filter(event => event.type.startsWith('tool.')).map(event => event.type))}`);
+  assert.ok(!JSON.stringify(projectRun.events).includes('consecutive failures'), 'A refusal must not trip the MCP circuit breaker.');
+  const smokeBoard = (await api('/v1/boards')).boards.find(board => board.name === 'Smoke project');
+  assert.ok(smokeBoard, 'The project tool must create the project.');
+  assert.ok((await api('/v1/tasks')).tasks.some(task => task.title === 'Smoke task' && task.boardId === smokeBoard.id), 'The task must land on the new project.');
+  const offered = requests.slice(projectStart).flatMap(body => body.tools || []).find(item => item.function?.name === 'mcp__open_harness__task');
+  assert.ok(offered.function.parameters.properties.title && !offered.function.parameters.properties.input, 'The model must see flat task fields.');
+  const agentLog = join(state, 'agents', agentId, 'profile', 'logs', 'agent.log');
+  if (existsSync(agentLog)) assert.ok(!/Unsupported MCP method|consecutive failures/.test(readFileSync(agentLog, 'utf8')), 'Hermes must not report MCP failures.');
+  assertContainerStopped();
+  const collaboration = container ? await (async () => {
+    await api('/v1/agents/sync', 'POST', { agents: [{ id: agentId, name: 'Real smoke', role: 'Integration verification', instructions: 'Work only on this isolated smoke task.', memory: [] }, { id: helperId, name: 'Smoke helper', role: 'Collaborator', instructions: 'Do the work you are given.', memory: [] }] });
+    const { profile: helper } = await api(`/v1/agents/${helperId}/profile`);
+    await api(`/v1/agents/${helperId}/profile`, 'PUT', { ...helper, model: { inherit: false, provider: 'local', model: 'fixture-model', baseUrl, credentialRef: 'OPENAI_API_KEY' }, allowedTools: ['write_file', 'mcp__open_harness__task'], computer: { ...helper.computer, access: 'private', desktop: 'none' } });
+    const team = await api('/v1/teams', 'POST', { name: 'Smoke collaborators', description: 'Lead and helper', color: 'blue', icon: 'people', memberAgentIds: [agentId, helperId] });
+    const { profile: lead } = await api(`/v1/agents/${agentId}/profile`);
+    await api(`/v1/agents/${agentId}/profile`, 'PUT', { ...lead, allowedTools: ['mcp__open_harness__task', 'mcp__open_harness__project', 'mcp__open_harness__directory', 'mcp__open_harness__delegate_named_agent'], board: { ...lead.board, assignOthers: true, dispatch: true } });
+    const leadRun = await waitRun(await api('/v1/runs', 'POST', { agentId, conversationId: 'collab-smoke', prompt: 'COLLAB_SMOKE: Plan the work with your teammate.' }));
+    events.push(...leadRun.events);
+    const board = (await api('/v1/boards')).boards.find(item => item.name === 'Collaboration project');
+    assert.ok(board, 'The lead must create the project.');
+    let card;
+    for (const deadline = Date.now() + 180_000; Date.now() < deadline; await new Promise(resolve => setTimeout(resolve, 500))) {
+      card = (await api('/v1/tasks')).tasks.find(task => task.boardId === board.id);
+      if (card?.runs?.[0] && ['completed', 'failed', 'interrupted', 'cancelled'].includes(card.runs[0].state)) break;
+    }
+    assert.equal(card.ownerAgentId, helperId); assert.equal(card.runs[0].agent_id, helperId);
+    assert.equal(card.runs[0].state, 'completed', JSON.stringify(card.runs[0]));
+    assert.ok(card.comments.some(comment => comment.body === 'Wrote test.md in the shared folder.' && comment.author === 'Smoke helper'), 'The helper must report on its card.');
+    assert.equal(readFileSync(join(state, 'shared', 'test.md'), 'utf8'), 'test\n', "The helper's file must land in the shared folder.");
+    const handoff = leadRun.events.find(event => event.type === 'tool.complete' && event.payload.name === 'mcp__open_harness__delegate_named_agent');
+    assert.match(JSON.stringify(handoff?.payload.result), /HANDOFF_CONFIRMED/, 'The lead must receive the helper\'s handoff result.');
+    assert.ok(leadRun.events.some(event => event.type === 'handoff.completed'));
+    assert.ok(!JSON.stringify(leadRun.events).includes('consecutive failures'));
+    await api(`/v1/teams/${team.id}`, 'DELETE').catch(() => {});
+    return { project: board.id, card: card.id, helperRun: card.runs[0].id, handoffConfirmed: true, sharedFile: true };
+  })() : null;
+  return { collaboration, projectTools: { project: smokeBoard.id, refusalsBeforeSuccess: 4, breakerTripped: false },
+    firstRun: first.id, followupRun: second.id, firstSession: completed.run.session_id, followupSession: followed.run.session_id, modelRequests: modelRequests.length, clarificationAnswered: true, realApprovalRoundTrips: approvalRuns, crossRunContext: true, authenticatedMcpDispatch: true, deniedTerminal: true, ...(container ? { containerStopped: true, hostModelNetworking: true } : {}), artifact };
 }
 try {
   const service = await verifyCoordinator();
@@ -194,7 +264,7 @@ try {
     await exited; clearTimeout(force);
   }
   if (container) {
-    try { execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore', timeout: 15_000 }); }
+    for (const name of [containerName, `open-harness-${helperId}`]) try { execFileSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 15_000 }); }
     catch { /* the fixture may have failed before creating its container */ }
   }
   await new Promise(resolve => server.close(resolve));

@@ -53,6 +53,11 @@ test("stamps the schema version, upgrades a 0.3.0 file in place, and refuses a n
       due_at TEXT, position REAL NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
       revision INTEGER NOT NULL DEFAULT 1, active_run_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
+    CREATE TABLE runs (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, conversation_id TEXT NOT NULL, prompt TEXT NOT NULL,
+      state TEXT NOT NULL, session_id TEXT, parent_run_id TEXT, depth INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, result TEXT, error TEXT
+    );
     INSERT INTO task_boards VALUES('board-1','Delivery',0,1,'2026-09-01T00:00:00.000Z','2026-09-01T00:00:00.000Z');
     INSERT INTO task_stages VALUES('stage-1','board-1','Doing','active',1000);
     INSERT INTO tasks VALUES('task-1','board-1','stage-1','Ship the beta','',NULL,'normal',NULL,1000,0,1,NULL,'2026-09-01T00:00:00.000Z','2026-09-01T00:00:00.000Z');
@@ -63,7 +68,10 @@ test("stamps the schema version, upgrades a 0.3.0 file in place, and refuses a n
   assert.equal(Number((store.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), SCHEMA_VERSION);
   new TaskStore(store.db);
   const columns = (store.db.prepare("PRAGMA table_info(task_boards)").all() as Array<{ name: string }>).map(column => column.name);
-  for (const added of ["settings_json", "description", "color", "position", "default_owner_agent_id"]) assert.ok(columns.includes(added), `missing ${added}`);
+  for (const added of ["settings_json", "description", "color", "position", "default_owner_agent_id", "folders_json"]) assert.ok(columns.includes(added), `missing ${added}`);
+  // Runs from before project folders belong to no project, so they mount only the agent's own folders.
+  assert.ok((store.db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>).some(column => column.name === "project_id"));
+  assert.deepEqual(new TaskStore(store.db).getBoard("board-1").folders, []);
   // The upgrade is in place: the operator's board and task are still there, and the board
   // that predates ordering is given a rank rather than left at zero.
   const board = store.db.prepare("SELECT name,position FROM task_boards WHERE id='board-1'").get() as { name: string; position: number };

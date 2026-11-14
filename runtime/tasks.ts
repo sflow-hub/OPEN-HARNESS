@@ -1,6 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { DatabaseSync } from "node:sqlite";
 import { addColumn, type RunRow } from "./db";
+import type { FolderGrant } from "../lib/agent-profile";
+import { changedFolders, folderGrants, parseFolderList } from "./folder-list";
+import type { ProjectFolder } from "../lib/task-types";
 
 type Row = Record<string, any>;
 const categories = ["backlog", "ready", "in_progress", "review", "done"] as const;
@@ -27,7 +30,9 @@ export class TaskError extends Error {
 const conflict = (message: string): never => { throw new TaskError(message, 409); };
 
 export class TaskStore {
-  constructor(private db: DatabaseSync) {
+  // Host paths are checked by the coordinator, which knows its own data folder; the store only
+  // calls it for folders that are new or changed so an unrelated rename never fails on disk state.
+  constructor(private db: DatabaseSync, private checkFolder: (folder: ProjectFolder) => void = () => {}) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS task_boards (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
@@ -88,6 +93,7 @@ export class TaskStore {
       ['task_boards', 'position', 'REAL NOT NULL DEFAULT 0'],
       ['task_boards', 'default_owner_agent_id', 'TEXT'],
       ['tasks', 'team_id', 'TEXT'],
+      ['task_boards', 'folders_json', "TEXT NOT NULL DEFAULT '[]'"],
     ] as const) addColumn(db, table, column, definition);
     // Create this only after the column is added above. On an existing database,
     // CREATE TABLE IF NOT EXISTS keeps the legacy tasks table unchanged, so indexing
@@ -143,17 +149,34 @@ export class TaskStore {
     };
   }
 
+  private storedFolders(raw: unknown): ProjectFolder[] {
+    try { const value = JSON.parse(String(raw || "[]")); return Array.isArray(value) ? value : []; } catch { return []; }
+  }
+
+  private folders(input: Row, current: ProjectFolder[] = []) {
+    if (input.folders === undefined) return current;
+    const folders = parseFolderList(input.folders, { max: 20, label: "A project", fail: message => new TaskError(message) });
+    changedFolders(folders, current).forEach(this.checkFolder);
+    return folders;
+  }
+
+  // What one agent may use from a project, ready to mount for a single run.
+  projectGrants(boardId: string, agentId: string): FolderGrant[] {
+    const row = this.db.prepare("SELECT folders_json FROM task_boards WHERE id=?").get(boardId) as Row | undefined;
+    return folderGrants(this.storedFolders(row?.folders_json), agentId, "project");
+  }
+
   ensureDefaultBoard() {
     if (this.db.prepare("SELECT 1 FROM task_boards LIMIT 1").get()) return;
     this.createBoard({ name: "Product launch" });
   }
 
   createBoard(input: Row) {
-    const boardId = id(), createdAt = stamp(), name = required(input.name, "Board name", 120), meta = this.meta(input);
+    const boardId = id(), createdAt = stamp(), name = required(input.name, "Board name", 120), meta = this.meta(input), folders = this.folders(input);
     this.transaction(() => {
       const position = Number((this.db.prepare("SELECT COALESCE(MAX(position),0) n FROM task_boards").get() as Row).n) + boardStep;
-      this.db.prepare("INSERT INTO task_boards(id,name,description,color,position,default_owner_agent_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
-        .run(boardId, name, meta.description, meta.color, position, meta.defaultOwnerAgentId, createdAt, createdAt);
+      this.db.prepare("INSERT INTO task_boards(id,name,description,color,position,default_owner_agent_id,folders_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
+        .run(boardId, name, meta.description, meta.color, position, meta.defaultOwnerAgentId, JSON.stringify(folders), createdAt, createdAt);
       const names = ["Backlog", "Ready", "In progress", "Review", "Done"];
       categories.forEach((category, position) => this.db.prepare("INSERT INTO task_stages(id,board_id,name,category,position) VALUES(?,?,?,?,?)").run(id(), boardId, names[position], category, position));
     });
@@ -172,7 +195,7 @@ export class TaskStore {
     return {
       id: row.id, name: row.name, description: String(row.description || ""), color: colors.has(String(row.color)) ? String(row.color) : "sage",
       defaultOwnerAgentId: row.default_owner_agent_id || null, position: Number(row.position || 0),
-      archived: bool(row.archived), revision: Number(row.revision), stages, settings: this.settings(String(row.id), row.settings_json),
+      archived: bool(row.archived), revision: Number(row.revision), stages, settings: this.settings(String(row.id), row.settings_json), folders: this.storedFolders(row.folders_json),
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
   }
@@ -189,9 +212,9 @@ export class TaskStore {
     const archived = input.archived === undefined ? board.archived : Boolean(input.archived);
     if (archived && this.db.prepare("SELECT 1 FROM tasks WHERE board_id=? AND active_run_id IS NOT NULL LIMIT 1").get(boardId)) conflict("Finish or stop active tasks before archiving this board.");
     const settings = input.settings === undefined ? board.settings : { ...board.settings, ...input.settings };
-    const repaired = this.settings(boardId, JSON.stringify(settings)), meta = this.meta(input, board as unknown as Row);
-    this.db.prepare("UPDATE task_boards SET name=?,description=?,color=?,default_owner_agent_id=?,archived=?,settings_json=?,revision=revision+1,updated_at=? WHERE id=?")
-      .run(input.name === undefined ? board.name : required(input.name, "Board name", 120), meta.description, meta.color, meta.defaultOwnerAgentId, archived ? 1 : 0, JSON.stringify(repaired), stamp(), boardId);
+    const repaired = this.settings(boardId, JSON.stringify(settings)), meta = this.meta(input, board as unknown as Row), folders = this.folders(input, board.folders);
+    this.db.prepare("UPDATE task_boards SET name=?,description=?,color=?,default_owner_agent_id=?,archived=?,settings_json=?,folders_json=?,revision=revision+1,updated_at=? WHERE id=?")
+      .run(input.name === undefined ? board.name : required(input.name, "Board name", 120), meta.description, meta.color, meta.defaultOwnerAgentId, archived ? 1 : 0, JSON.stringify(repaired), JSON.stringify(folders), stamp(), boardId);
     return this.getBoard(boardId);
   }
 
@@ -229,8 +252,8 @@ export class TaskStore {
     const meta = this.meta(input, source as unknown as Row), stageIds = new Map<string, string>();
     this.transaction(() => {
       const position = Number((this.db.prepare("SELECT COALESCE(MAX(position),0) n FROM task_boards").get() as Row).n) + boardStep;
-      this.db.prepare("INSERT INTO task_boards(id,name,description,color,position,default_owner_agent_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
-        .run(target, name, meta.description, meta.color, position, meta.defaultOwnerAgentId, createdAt, createdAt);
+      this.db.prepare("INSERT INTO task_boards(id,name,description,color,position,default_owner_agent_id,folders_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
+        .run(target, name, meta.description, meta.color, position, meta.defaultOwnerAgentId, JSON.stringify(source.folders), createdAt, createdAt);
       for (const stage of source.stages) {
         const stageId = id(); stageIds.set(stage.id, stageId);
         this.db.prepare("INSERT INTO task_stages(id,board_id,name,category,position) VALUES(?,?,?,?,?)").run(stageId, target, stage.name, stage.category, stage.position);
@@ -279,6 +302,18 @@ export class TaskStore {
     return [...summaries.values()];
   }
 
+  preserveRunStage(boardId: string, change: () => void) {
+    return this.transaction(() => {
+      const board = this.getBoard(boardId);
+      change();
+      const changed = this.getBoard(boardId), runStageId = board.settings.runStageId;
+      // Older and newly created boards derive defaults from categories and order. Pin the
+      // existing trigger so an agent's workflow edit cannot change automatic-start behavior.
+      if (runStageId ? !changed.stages.some(stage => stage.id === runStageId) : Boolean(changed.settings.runStageId)) throw new TaskError('Ask the user to choose a run stage in the project settings before making this stage change.', 403);
+      return this.updateBoard(boardId, { revision: changed.revision, settings: { runStageId } });
+    });
+  }
+
   addStage(boardId: string, input: Row) {
     this.getBoard(boardId);
     const category = String(input.category || "backlog");
@@ -289,15 +324,33 @@ export class TaskStore {
     return this.getBoard(boardId);
   }
 
-  updateStage(stageId: string, input: Row) {
+  // Task completion and review routing need a stage in each of these categories.
+  private keepDestination(row: Row) {
+    const sameCategory = Number((this.db.prepare("SELECT COUNT(*) n FROM task_stages WHERE board_id=? AND category=? AND id<>?").get(row.board_id, row.category, row.id) as Row).n);
+    if (["in_progress", "review", "done"].includes(String(row.category)) && sameCategory === 0) throw new Error("Keep at least one In progress, Review, and Done destination.");
+  }
+
+  // A person may leave a board without a destination (no automatic starts, say); agent edits may not.
+  updateStage(stageId: string, input: Row, keepDestinations = false) {
     const row = this.db.prepare("SELECT * FROM task_stages WHERE id=?").get(stageId) as Row | undefined;
     if (!row) throw new Error("Stage not found.");
     const category = input.category === undefined ? String(row.category) : String(input.category);
     if (!categories.includes(category as typeof categories[number])) throw new Error("Invalid workflow category.");
+    if (keepDestinations && category !== row.category) this.keepDestination(row);
     this.db.prepare("UPDATE task_stages SET name=?,category=?,position=? WHERE id=?").run(
       input.name === undefined ? row.name : required(input.name, "Stage name", 80), category,
       input.position === undefined ? row.position : Number(input.position), stageId,
     );
+    return this.getBoard(String(row.board_id));
+  }
+
+  // One statement rewrites the whole order, so a move cannot leave positions half rewritten.
+  moveStage(stageId: string, position: number) {
+    const row = this.db.prepare("SELECT board_id FROM task_stages WHERE id=?").get(stageId) as Row | undefined;
+    if (!row) throw new Error("Stage not found.");
+    const order = (this.db.prepare("SELECT id FROM task_stages WHERE board_id=? AND id<>? ORDER BY position").all(row.board_id, stageId) as Row[]).map(stage => String(stage.id));
+    order.splice(Math.max(0, Math.min(order.length, Math.round(position) || 0)), 0, stageId);
+    this.db.prepare(`UPDATE task_stages SET position=CASE id ${order.map(() => "WHEN ? THEN ?").join(" ")} END WHERE board_id=?`).run(...order.flatMap((stage, index) => [stage, index]), String(row.board_id));
     return this.getBoard(String(row.board_id));
   }
 
@@ -306,8 +359,7 @@ export class TaskStore {
     if (!row) throw new Error("Stage not found.");
     const count = Number((this.db.prepare("SELECT COUNT(*) n FROM tasks WHERE stage_id=?").get(stageId) as Row).n);
     if (count && !moveToStageId) throw new Error("Choose another stage for the tasks in this stage.");
-    const sameCategory = Number((this.db.prepare("SELECT COUNT(*) n FROM task_stages WHERE board_id=? AND category=? AND id<>?").get(row.board_id, row.category, stageId) as Row).n);
-    if (["in_progress", "review", "done"].includes(String(row.category)) && sameCategory === 0) throw new Error("Keep at least one In progress, Review, and Done destination.");
+    this.keepDestination(row);
     if (moveToStageId) {
       const target = this.db.prepare("SELECT * FROM task_stages WHERE id=? AND board_id=?").get(moveToStageId, row.board_id);
       if (!target) throw new Error("Move-to stage is not on this board.");
@@ -448,7 +500,7 @@ export class TaskStore {
     this.activity(taskId, "checklist", "Checklist item added"); return this.getTask(taskId);
   }
 
-  start(taskId: string, input: Row, createRun: (input: { agentId: string; conversationId?: string; prompt: string }) => RunRow) {
+  start(taskId: string, input: Row, createRun: (input: { agentId: string; conversationId?: string; prompt: string; projectId?: string }) => RunRow) {
     const task = this.getTask(taskId), key = required(input.idempotencyKey, "Idempotency key", 200);
     const duplicate = this.db.prepare("SELECT run_id FROM task_runs WHERE idempotency_key=?").get(`${taskId}:${key}`) as Row | undefined;
     if (duplicate) return { task: this.getTask(taskId), run: this.db.prepare("SELECT * FROM runs WHERE id=?").get(duplicate.run_id) };
@@ -463,7 +515,7 @@ export class TaskStore {
     const prompt = [`You are completing board task ${task.id}: ${task.title}`, `Stage: ${progress.name}`, `Priority: ${task.priority}`, task.dueAt && `Due: ${task.dueAt}`, task.description && `Brief:\n${task.description}`, checklistText && `Checklist (use item IDs when reporting progress):\n${checklistText}`, recentComments && `Recent comments:\n${recentComments}`, feedback && `Requested changes:\n${feedback}`, "Work independently. Update checklist items and leave concise progress comments when useful. Do not move this card; successful work is sent for review automatically. End with a short report for the card."].filter(Boolean).join("\n\n");
     let run!: RunRow;
     this.transaction(() => {
-      run = createRun({ agentId: task.ownerAgentId!, prompt });
+      run = createRun({ agentId: task.ownerAgentId!, prompt, projectId: task.boardId });
       const attempt = Number((this.db.prepare("SELECT COALESCE(MAX(attempt),0)+1 n FROM task_runs WHERE task_id=?").get(taskId) as Row).n);
       this.db.prepare("INSERT INTO task_runs(task_id,run_id,attempt,instructions_snapshot,checklist_snapshot,idempotency_key,started_at) VALUES(?,?,?,?,?,?,?)")
         .run(taskId, run.id, attempt, task.description, JSON.stringify(task.checklist), `${taskId}:${key}`, stamp());

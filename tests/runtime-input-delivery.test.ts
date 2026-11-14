@@ -91,6 +91,26 @@ test('remote approval failure restores the pending approval without duplicate de
   assert.equal((await request(`/v1/runs/${run.id}`)).pendingApprovals.length, 0);
 });
 
+test('remote clarify batches go back as one keyed JSON answer', async () => {
+  await emit('clarify.request', { request_id: 'batch-1', questions: [{ qid: 'q0', question: 'Which language?', choices: ['Python', 'Go'], multi_select: false }, { qid: 'q1', question: 'Any extras?', choices: [], multi_select: true }] });
+  const pending = (await request(`/v1/runs/${run.id}`)).pendingInputs[0];
+  for (const value of ['plain text', { answers: { q9: 'x' } }, { answers: { q0: 3 } }, { answers: {} }]) assert.equal((await call(`/v1/runs/${run.id}/input`, { inputId: pending.inputId, value })).status, 400);
+  await request(`/v1/runs/${run.id}/input`, { inputId: pending.inputId, value: { answers: { q0: 'Go', q1: ['tests', 'docs'] } } });
+  const reply = (await commands('input'))[0];
+  assert.equal(reply.payload.requestId, 'batch-1');
+  assert.deepEqual(JSON.parse(reply.payload.value), { answers: { q0: 'Go', q1: ['tests', 'docs'] } });
+  await complete(reply);
+  assert.equal((await request(`/v1/runs/${run.id}`)).pendingInputs.length, 0);
+  // A one-question batch still takes a bare answer, for tabs opened before this shape was understood.
+  await emit('clarify.request', { request_id: 'batch-2', questions: [{ qid: 'q0', question: 'Name?', choices: [], multi_select: false }] });
+  const single = (await request(`/v1/runs/${run.id}`)).pendingInputs[0];
+  await request(`/v1/runs/${run.id}/input`, { inputId: single.inputId, value: 'Ada' });
+  const wrapped = (await commands('input'))[0];
+  assert.deepEqual(JSON.parse(wrapped.payload.value), { answers: { q0: 'Ada' } });
+  await complete(wrapped);
+  assert.equal((await request(`/v1/runs/${run.id}`)).pendingInputs.length, 0);
+});
+
 test('restart recovers response claims interrupted before or after command completion', async () => {
   await emit('clarify.request', { request_id: 'clarify-crash', question: 'Which option?' });
   const abandoned = (await request(`/v1/runs/${run.id}`)).pendingInputs[0];

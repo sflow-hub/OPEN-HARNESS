@@ -5,10 +5,12 @@ import { ArrowLeft, ArrowRight, Check, CircleAlert, ExternalLink, LoaderCircle, 
 import type { ModelChoice } from '../lib/agent-profile';
 import { ControlClient } from '../lib/control-client';
 import type { OnboardingStatus, ReadinessCheck } from '../lib/onboarding';
-import { PROVIDERS, type Provider } from '../lib/provider';
+import { PROVIDERS } from '../lib/provider';
 import ModelPicker from './model-picker';
 import { CODEX_PROVIDER } from '../lib/codex';
 import type { SetupJob } from '../lib/product';
+import { CredentialSelector } from './credential-editor';
+import { CREDENTIAL_PROVIDERS, modelForCredential, type CredentialRecord, type CredentialList } from '../lib/credentials';
 
 type Props = {
   client: ControlClient;
@@ -23,7 +25,8 @@ type Props = {
   onRuntimeChecked?: (status: OnboardingStatus) => void;
 };
 
-const keyFor = (provider: string) => ({ xai: 'XAI_API_KEY', openai: 'OPENAI_API_KEY', openrouter: 'OPENROUTER_API_KEY' } as Record<string,string>)[provider] || '';
+const keyFor = (provider: string) => ({ xai: 'XAI_API_KEY', openai: 'OPENAI_API_KEY', openrouter: 'OPENROUTER_API_KEY', anthropic: 'ANTHROPIC_API_KEY' } as Record<string,string>)[provider] || '';
+const defaultModel = (provider: string) => (PROVIDERS as Record<string, { model: string }>)[provider]?.model || '';
 const providerHelp = { xai: 'https://console.x.ai/', openai: 'https://platform.openai.com/api-keys', openrouter: 'https://openrouter.ai/settings/keys' } as Record<string,string>;
 
 function CheckRow({ check, busy, onAction }: { check: ReadinessCheck; busy: boolean; onAction: (action: NonNullable<ReadinessCheck['action']>) => void }) {
@@ -42,12 +45,15 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
-  const initialProvider = Object.hasOwn(PROVIDERS, model.provider) ? model.provider as Provider : 'xai';
-  const [provider, setProvider] = useState<Provider>(initialProvider);
-  const [modelId, setModelId] = useState(model.model || PROVIDERS[initialProvider].model);
+  const initialProvider = model.provider || 'xai';
+  const [provider, setProvider] = useState(initialProvider);
+  const [modelId, setModelId] = useState(model.model || defaultModel(initialProvider));
   const [baseUrl, setBaseUrl] = useState(model.baseUrl || '');
   const [apiKey, setApiKey] = useState('');
   const [codexRef,setCodexRef] = useState(model.provider === CODEX_PROVIDER ? model.credentialRef : '');
+  const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
+  const [selectedRef, setSelectedRef] = useState(model.credentialRef || '');
+  useEffect(() => { let cancelled = false; void client.request<CredentialList>('/v1/credentials').then(value => { if (!cancelled) setCredentials(value.credentials); }, () => {}); return () => { cancelled = true; }; }, [client]);
   const [secretNames, setSecretNames] = useState<string[]>([]);
   const [modelReady, setModelReady] = useState(false);
   const [jobs, setJobs] = useState<SetupJob[]>([]), [taskVerified, setTaskVerified] = useState(false);
@@ -81,14 +87,14 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
     finally { setBusy(''); }
   }
 
-  const savedKeyFor = (candidate: Provider) => candidate === model.provider && model.credentialRef ? model.credentialRef : keyFor(candidate);
+  const savedKeyFor = (candidate: string) => candidate === provider && selectedRef ? selectedRef : candidate === model.provider && model.credentialRef ? model.credentialRef : keyFor(candidate);
   async function saveModel() {
     if (!modelId.trim()) { setMessage('Choose or enter a model.'); return; }
     if (provider === CODEX_PROVIDER && !codexRef) { setMessage('Sign in with ChatGPT before saving this provider.'); return; }
     if (provider !== CODEX_PROVIDER && provider !== 'local' && !apiKey && !secretNames.includes(savedKeyFor(provider))) { setMessage('Paste an API key, or choose a local model server.'); return; }
     setBusy('model'); setMessage('Saving and testing the connection…');
-    const credentialRef = provider === CODEX_PROVIDER ? codexRef : provider === 'local' ? '' : savedKeyFor(provider);
-    const selected: ModelChoice = { provider, model: modelId.trim(), baseUrl: provider === 'local' ? baseUrl.trim() : '', credentialRef };
+    const credentialRef = provider === CODEX_PROVIDER ? codexRef : selectedRef || (provider === 'local' ? '' : savedKeyFor(provider));
+    const selected: ModelChoice = { provider, model: modelId.trim(), baseUrl: provider === CODEX_PROVIDER ? '' : baseUrl.trim(), credentialRef };
     try {
       const test = await client.request<{ ok: boolean; message: string; model?: ModelChoice; revision?: number }>('/v1/onboarding/model-test', { method: 'POST', body: JSON.stringify({ model: selected, apiKey: provider === CODEX_PROVIDER ? undefined : apiKey || undefined, save: true, revision }) });
       if (!test.ok || !test.model) { setModelReady(false); setMessage(`${test.message} Your previous workspace model is still active.`); return; }
@@ -130,9 +136,14 @@ export default function Onboarding({ client, model, revision, onModelSaved, onCo
 
       {step === 2 && <div className="onboarding-step">
         <p className="onboarding-lead">Sign in with ChatGPT, use a provider API key, or connect a compatible model server on your network.</p>
-        <label>Provider<select value={provider} onChange={event => { const next = event.target.value as Provider; setProvider(next); setApiKey(''); setModelId(PROVIDERS[next].model); setBaseUrl(''); setMessage(''); }}>{Object.entries(PROVIDERS).map(([id, value]) => <option key={id} value={id}>{value.label}</option>)}</select></label>
-        <ModelPicker client={client} provider={provider === CODEX_PROVIDER ? provider : provider === 'local' ? (baseUrl.trim() ? provider : '') : (apiKey && status?.credentialMode !== 'runner') || secretNames.includes(savedKeyFor(provider)) ? provider : ''} credentialRef={provider === CODEX_PROVIDER ? codexRef : provider === 'local' ? '' : savedKeyFor(provider)} onCredentialChange={setCodexRef} apiKey={status?.credentialMode === 'runner' ? '' : apiKey} baseUrl={provider === 'local' ? baseUrl.trim() : ''} value={modelId} onChange={setModelId} />
-        {provider !== CODEX_PROVIDER && (provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder={selfHosted ? 'https://models.example.com/v1' : 'http://127.0.0.1:11434/v1'} /><small>{selfHosted ? 'Enter an OpenAI-compatible API address that the coordinator and the agent containers can reach over the network. localhost, 127.0.0.1 and host.docker.internal on this computer are refused here.' : 'Enter the OpenAI-compatible API address shown by your model app.'}</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(savedKeyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a></small></label>)}
+        <label>Provider<select value={provider} onChange={event => { const next = event.target.value; setProvider(next); setApiKey(''); setSelectedRef(''); setModelId(defaultModel(next)); setBaseUrl(''); setMessage(''); }}>{CREDENTIAL_PROVIDERS.filter(item => item.id).map(item => <option key={item.id} value={item.id}>{item.label}</option>)}{!CREDENTIAL_PROVIDERS.some(item => item.id === provider) && <option value={provider}>{provider}</option>}</select></label>
+        {provider !== CODEX_PROVIDER && <CredentialSelector client={client} credentials={credentials} value={selectedRef} provider={provider} modelOnly onCreated={credential => { setCredentials(current => [...current, credential]); setSecretNames(current => [...current, credential.ref]); }} onSelect={credential => {
+          setSelectedRef(credential?.ref || '');
+          if (credential) { const selected = modelForCredential({ provider, model: modelId, baseUrl, credentialRef: selectedRef }, credential); setProvider(selected.provider); setModelId(selected.model); setBaseUrl(selected.baseUrl); setApiKey(''); }
+        }} />}
+        <ModelPicker client={client} provider={provider === CODEX_PROVIDER ? provider : provider === 'local' ? (baseUrl.trim() ? provider : '') : (apiKey && status?.credentialMode !== 'runner') || secretNames.includes(savedKeyFor(provider)) ? provider : ''} credentialRef={provider === CODEX_PROVIDER ? codexRef : selectedRef || (provider === 'local' ? '' : savedKeyFor(provider))} onCredentialChange={setCodexRef} apiKey={status?.credentialMode === 'runner' ? '' : apiKey} baseUrl={provider === CODEX_PROVIDER ? '' : baseUrl.trim()} value={modelId} onChange={setModelId} />
+        {provider !== 'local' && provider !== CODEX_PROVIDER && <label>Model API base URL<input type="url" value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="Optional custom endpoint" /></label>}
+        {provider !== CODEX_PROVIDER && (provider === 'local' ? <label>Model server address<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder={selfHosted ? 'https://models.example.com/v1' : 'http://127.0.0.1:11434/v1'} /><small>{selfHosted ? 'Enter an OpenAI-compatible API address that the coordinator and the agent containers can reach over the network. localhost, 127.0.0.1 and host.docker.internal on this computer are refused here.' : 'Enter the OpenAI-compatible API address shown by your model app.'}</small></label> : <label>API key<input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} autoComplete="new-password" placeholder={secretNames.includes(savedKeyFor(provider)) ? 'A saved key is available — paste only to replace it' : 'Paste your API key'} /><small>{status?.credentialMode === 'runner' ? 'The key is encrypted for the connected computer and saved by its OS credential vault. The hosted coordinator cannot decrypt it.' : 'The key is stored on your coordinator and is only sent to runs that use it.'} {providerHelp[provider] && <a href={providerHelp[provider]} target="_blank" rel="noreferrer">Get a key <ExternalLink size={11} /></a>}</small></label>)}
         {message && <p className={`onboarding-message ${modelReady ? 'success' : ''}`} role="status">{message}</p>}
         <div className="onboarding-actions"><button type="button" className="subtle-button" onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</button><button type="button" className="light-button" disabled={busy === 'model'} onClick={saveModel}>{busy === 'model' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Save and test</button></div>
       </div>}

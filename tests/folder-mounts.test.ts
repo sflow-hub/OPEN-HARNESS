@@ -10,7 +10,7 @@ import { RUNTIME_CONTRACT } from '../runtime/readiness';
 
 const bootId = 'b9e3931c-e849-4e14-847b-e8e4152f8ac4';
 const id = 'a'.repeat(64), otherId = 'b'.repeat(64);
-const mounts = [{ path: '/workspace/mounts/folder-1', device: '9007199254740993', inode: '18446744073709551001', readOnly: true }];
+const mounts = [{ path: '/workspace/folders/project', device: '9007199254740993', inode: '18446744073709551001', readOnly: true }];
 const computer = draftProfile({ id: 'atlas', name: 'Atlas', role: 'Assistant', description: '', tone: 0, instructions: '', memory: [] }).computer;
 const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
 const failed = (stderr = 'verification failed') => ({ status: 1, stdout: '', stderr });
@@ -19,7 +19,7 @@ test('native folder verification is limited to selected host grants outside Comp
   const original = process.env.OPEN_HARNESS_DEPLOYMENT;
   t.after(() => { if (original === undefined) delete process.env.OPEN_HARNESS_DEPLOYMENT; else process.env.OPEN_HARNESS_DEPLOYMENT = original; });
   delete process.env.OPEN_HARNESS_DEPLOYMENT;
-  const selected = { ...computer, access: 'folders' as const, folders: [{ id: 'project', path: '/project', mode: 'read' as const }] };
+  const selected = { ...computer, access: 'folders' as const, folders: [{ id: 'project', name: 'project', path: '/project', mode: 'read' as const }] };
   assert.equal(requiresFolderVerification(computer), false);
   assert.equal(requiresFolderVerification({ ...selected, folders: [] }), false);
   assert.equal(requiresFolderVerification(selected), true);
@@ -38,10 +38,10 @@ test('mount identity preserves large integers and rejects cross-kernel, changed,
   }
 });
 
-test('fresh native folder containers use immutable inert startup and initialize only after successful verification', () => {
+test('fresh native folder containers use immutable inert startup and initialize only after successful verification', async () => {
   const calls: string[][] = [], timeouts: number[] = []; let closed = 0;
   const pinned: PinnedFolders = { bootId, mounts, close: () => { closed++; } };
-  const result = createVerifiedFolderContainer(['--name', 'unit-agent', 'unit-image'], pinned, true, (args, timeout) => {
+  const result = await createVerifiedFolderContainer(['--name', 'unit-agent', 'unit-image'], pinned, true, (args, timeout) => {
     calls.push(args); timeouts.push(timeout);
     if (args[0] === 'create') return ok(id);
     if (args.includes('/usr/local/bin/python')) return ok(JSON.stringify({ bootId, mounts }));
@@ -59,10 +59,10 @@ test('fresh native folder containers use immutable inert startup and initialize 
   assert.equal(timeouts[3], 45_000);
 });
 
-test('verifier and start failures remove only the immutable container and never initialize its desktop', () => {
+test('verifier and start failures remove only the immutable container and never initialize its desktop', async () => {
   for (const failure of ['start', 'exec', 'identity', 'kernel', 'malformed']) {
     const calls: string[][] = []; let closed = 0;
-    assert.throws(() => createVerifiedFolderContainer(['--name', 'unit-agent', 'unit-image'], { bootId, mounts, close: () => { closed++; } }, true, args => {
+    await assert.rejects(createVerifiedFolderContainer(['--name', 'unit-agent', 'unit-image'], { bootId, mounts, close: () => { closed++; } }, true, args => {
       calls.push(args);
       if (args[0] === 'create') return ok(id);
       if (args[0] === failure) return failed();
@@ -74,10 +74,10 @@ test('verifier and start failures remove only the immutable container and never 
   }
 });
 
-test('failed creation recovers ownership by its unique label and cleanup errors remain visible', () => {
+test('failed creation recovers ownership by its unique label and cleanup errors remain visible', async () => {
   for (const owned of [true, false]) {
     const calls: string[][] = []; let attempt = '';
-    assert.throws(() => createVerifiedFolderContainer(['--name', 'unit-agent', 'unit-image'], { bootId, mounts, close: () => {} }, false, args => {
+    await assert.rejects(createVerifiedFolderContainer(['--name', 'unit-agent', 'unit-image'], { bootId, mounts, close: () => {} }, false, args => {
       calls.push(args);
       if (args[0] === 'create') { attempt = args[args.indexOf('--label') + 1].split('=')[1]; return failed('create timed out'); }
       if (args[0] === 'inspect') return ok(JSON.stringify({ Id: otherId, Config: { Labels: { 'open-harness.folder-attempt': owned ? attempt : 'foreign' } } }));
@@ -88,9 +88,9 @@ test('failed creation recovers ownership by its unique label and cleanup errors 
   }
 });
 
-test('private desktop initialization failure removes the verified container before returning failure', () => {
+test('private desktop initialization failure removes the verified container before returning failure', async () => {
   const calls: string[][] = [];
-  assert.throws(() => createVerifiedFolderContainer(['--name', 'unit-agent', 'unit-image'], { bootId, mounts, close: () => {} }, true, args => {
+  await assert.rejects(createVerifiedFolderContainer(['--name', 'unit-agent', 'unit-image'], { bootId, mounts, close: () => {} }, true, args => {
     calls.push(args);
     if (args[0] === 'create') return ok(id);
     if (args.includes('/usr/local/bin/python')) return ok(JSON.stringify({ bootId, mounts }));
@@ -104,10 +104,10 @@ test('directory pins retain filesystem identity across an ordinary rename and cl
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-folder-pin-'))), selected = join(root, 'project'), renamed = join(root, 'renamed');
   t.after(() => rmSync(root, { recursive: true, force: true })); mkdirSync(selected);
   const original = statSync(selected, { bigint: true });
-  const pinned = pinSelectedFolders([{ id: 'project', path: selected, mode: 'write' }]);
+  const pinned = pinSelectedFolders([{ id: 'project', name: 'project', path: selected, mode: 'write' }]);
   t.after(pinned.close);
   assert.equal(pinned.bootId, readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim());
-  assert.deepEqual(pinned.mounts, [{ path: '/workspace/mounts/folder-1', device: String(original.dev), inode: String(original.ino), readOnly: false }]);
+  assert.deepEqual(pinned.mounts, [{ path: '/workspace/folders/project', device: String(original.dev), inode: String(original.ino), readOnly: false }]);
   renameSync(selected, renamed);
   const descriptor = readdirSync('/proc/self/fd').find(fd => { try { return readlinkSync(`/proc/self/fd/${fd}`) === renamed; } catch { return false; } });
   assert.notEqual(descriptor, undefined);
@@ -121,21 +121,21 @@ test('directory pinning rejects final and ancestor symlinks and non-directory se
   t.after(() => rmSync(root, { recursive: true, force: true })); mkdirSync(join(root, 'real/child'), { recursive: true });
   symlinkSync(join(root, 'real'), join(root, 'link'));
   for (const path of [join(root, 'link'), join(root, 'link/child'), join(root, 'missing'), '/proc/version']) {
-    assert.throws(() => pinSelectedFolders([{ id: 'project', path, mode: 'read' }]), /Could not safely open selected folder/);
+    assert.throws(() => pinSelectedFolders([{ id: 'project', name: 'project', path, mode: 'read' }]), /Could not safely open selected folder/);
   }
 });
 
 test('native folder pinning explains unsupported host platforms before opening directories', { skip: process.platform === 'linux' }, () => {
-  assert.throws(() => pinSelectedFolders([{ id: 'project', path: '/unused', mode: 'read' }]), /same Linux kernel.*Compose installation.*Linux runner/);
+  assert.throws(() => pinSelectedFolders([{ id: 'project', name: 'project', path: '/unused', mode: 'read' }]), /same Linux kernel.*Compose installation.*Linux runner/);
 });
 
-test('native folder admission recreates both running and stopped owned containers before returning a verified ID', { skip: process.platform !== 'linux' }, t => {
+test('native folder admission recreates both running and stopped owned containers before returning a verified ID', { skip: process.platform !== 'linux' }, async t => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-folder-admission-'))), root = join(dir, 'state'), folder = join(dir, 'project'), log = join(dir, 'calls.jsonl'), statePath = join(dir, 'docker.json');
   mkdirSync(folder); writeFileSync(log, '');
   const saved = { PATH: process.env.PATH, OPEN_HARNESS_MOCK: process.env.OPEN_HARNESS_MOCK, OPEN_HARNESS_DEPLOYMENT: process.env.OPEN_HARNESS_DEPLOYMENT };
   t.after(() => { for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } rmSync(dir, { recursive: true, force: true }); });
   delete process.env.OPEN_HARNESS_MOCK; delete process.env.OPEN_HARNESS_DEPLOYMENT;
-  const selected = { ...computer, access: 'folders' as const, folders: [{ id: 'project', path: folder, mode: 'read' as const }] };
+  const selected = { ...computer, access: 'folders' as const, folders: [{ id: 'project', name: 'project', path: folder, mode: 'read' as const }] };
   const oldId = 'f'.repeat(64);
   const state = { next: 0, container: { Id: oldId, Name: 'open-harness-atlas', State: { Running: true }, Config: { Labels: { 'open-harness.managed': '1', 'open-harness.state': containerStateKey(root), 'open-harness.config': containerSignature(selected, 'sha256:test', root) } } } };
   writeFileSync(statePath, JSON.stringify(state));
@@ -161,15 +161,15 @@ if (args[0] === 'start') { if (state.container?.Id !== args.at(-1)) process.exit
 if (args[0] === 'exec') {
   if (!args.includes('/usr/local/bin/python')) process.exit(5);
   const info = fs.statSync(${JSON.stringify(folder)}, { bigint: true });
-  console.log(JSON.stringify({ bootId: fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), mounts: [{ path: '/workspace/mounts/folder-1', device: String(info.dev), inode: String(info.ino), readOnly: true }] }));
+  console.log(JSON.stringify({ bootId: fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), mounts: [{ path: '/workspace/folders/project', device: String(info.dev), inode: String(info.ino), readOnly: true }] }));
 }
 fs.writeFileSync(file, JSON.stringify(state));
 `, { mode: 0o700 });
   process.env.PATH = `${dir}:${saved.PATH || ''}`;
-  const first = ensureContainer('atlas', root, selected);
+  const first = await ensureContainer('atlas', root, selected);
   assert.equal(first, '1'.padStart(64, '0'));
   const current = JSON.parse(readFileSync(statePath, 'utf8')); current.container.State.Running = false; writeFileSync(statePath, JSON.stringify(current));
-  const second = ensureContainer('atlas', root, selected);
+  const second = await ensureContainer('atlas', root, selected);
   assert.equal(second, '2'.padStart(64, '0'));
   const calls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]);
   assert.deepEqual(calls.filter(args => args[0] === 'rm'), [['rm', '-f', oldId], ['rm', '-f', first]]);

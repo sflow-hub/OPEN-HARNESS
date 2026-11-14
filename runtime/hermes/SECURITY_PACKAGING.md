@@ -1,7 +1,7 @@
 # Runtime dependency packaging
 
 These dependency updates are integrated into unreleased source under runtime
-contract 11. They are not a released or scan-approved image. Hermes stays pinned to
+contract 12. They are not a released or scan-approved image. Hermes stays pinned to
 `939e45c91d751fadd94dcd1b873ac3cb44846213`.
 No reasoning-loop source is modified.
 
@@ -32,9 +32,11 @@ contract-6 image evidence is recorded separately in `runtime/VERIFICATION.md`.
   brace-expansion with 5.0.11 and undici with 6.28.1. Original package versions
   and source hashes are checked before any mutation. A reviewed max-stale backport
   prevents shared-cache reuse forbidden by no-cache, proxy-revalidate or private
-  Set-Cookie responses. Its upstream http-cache-semantics version remains 4.2.0;
-  scanners can still report CVE-2026-93748. The release gate remains strict; a
-  proposed narrow exception requires direct approval and is not active.
+  Set-Cookie responses. The authenticated http-cache-semantics 4.3.0 archive
+  retains that backport because stock 4.3.0 still reproduces the leak. The
+  installer and Dockerfile enforce the reviewed patched SHA256, and the actual
+  image passes the cache regressions. The proposed exception was retired;
+  the release gate remains strict with no exception or ignore.
 - Python: `httpx2` 2.7.0 and its matching `httpcore2` 2.7.0 become 2.12.0.
   `httpx2` 2.12.0 requires `httpcore2==2.12.0`; MCP 2.0.0 permits `httpx2>=2.5.0`.
   CVE-2026-84381 is fixed in 2.10.0; CVE-2026-84382 requires httpx2 2.12.0.

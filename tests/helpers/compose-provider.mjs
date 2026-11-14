@@ -24,17 +24,26 @@ const server = createServer(async (req, res) => {
     const soak = main && /(?:^|\s)COMPOSE_SOAK:([a-z0-9-]{1,80})(?:\s|$)/.exec(prompt)?.[1];
     const shutdown = hasTools && prompt.includes('COMPOSE_SHUTDOWN');
     const followup = hasTools && prompt.includes('COMPOSE_FOLLOWUP');
+    const approval = body.tools?.some(tool => tool.function?.name === 'terminal') && prompt.includes('COMPOSE_APPROVAL');
+    const apiTool = 'mcp__open_harness__api_request';
+    const apiCalls = called.filter(name => name === apiTool).length;
+    const apiChecks = main && !soak && body.tools?.some(tool => tool.function?.name === apiTool);
     const context = hasTools && prompt.includes('RUNNER_CONTEXT');
-    const tool = context && !called.includes('memory') ? { name: 'memory', arguments: { target: 'memory', action: 'add', content: 'The remote tool memory marker is RUNNER_TOOL_MEMORY_527.' } }
+    // Writes one file at the path named in the prompt, to prove which host folders a run can reach.
+    const folderWrite = hasTools && /(?:^|\s)COMPOSE_FOLDERS:(\/workspace\/\S+)/.exec(prompt)?.[1];
+    const tool = approval ? (called.includes('terminal') ? null : { name: 'terminal', arguments: { command: 'chmod 666 /workspace/shared/compose-verified.txt' } })
+      : folderWrite ? (called.includes('write_file') ? null : { name: 'write_file', arguments: { path: folderWrite, content: 'COMPOSE_FOLDERS_729\n' } })
+      : context && !called.includes('memory') ? { name: 'memory', arguments: { target: 'memory', action: 'add', content: 'The remote tool memory marker is RUNNER_TOOL_MEMORY_527.' } }
       : context && !called.includes('skill_view') ? { name: 'skill_view', arguments: { name: 'runner-verification' } }
       : shutdown ? { name: 'clarify', arguments: { question: 'Keep this run waiting until the stack shuts down.' } }
       : main && !called.includes('write_file') ? { name: 'write_file', arguments: { path: `/workspace/shared/${soak ? 'compose-soak.txt' : 'compose-verified.txt'}`, content: soak ? `COMPOSE_SOAK:${soak}\n` : 'Written through the real Compose Hermes tool loop.\n' } }
       : main && !called.includes('clarify') ? { name: 'clarify', arguments: { question: 'Which acceptance marker should I use?' } }
       : main && !called.includes('mcp__open_harness__task') ? { name: 'mcp__open_harness__task', arguments: { action: 'list' } }
+      : apiChecks && apiCalls < 3 ? { name: apiTool, arguments: { credentialRef: apiCalls === 2 ? 'NOT_GRANTED' : 'COMPOSE_API_KEY', url: apiCalls === 0 ? 'https://other.example.test/account' : 'https://api.example.test/account', method: apiCalls === 1 ? 'DELETE' : 'GET' } }
       : main && !called.includes('terminal') ? { name: 'terminal', arguments: { command: 'touch /workspace/shared/compose-forbidden.txt' } }
       : null;
-    const content = context ? 'RUNNER_CONTEXT_COMPLETE' : followup ? (messages.some(message => String(message.content).includes('COMPOSE_SEED_729')) ? 'FOLLOWUP_COMPOSE_SEED_729' : 'FOLLOWUP_CONTEXT_MISSING') : main ? (soak ? `COMPOSE_SOAK_COMPLETE:${soak}` : 'COMPOSE_SMOKE_COMPLETE') : 'Compose acceptance';
-    const message = tool ? { role: 'assistant', content: null, tool_calls: [{ id: `compose-${tool.name}`, type: 'function', function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } }] } : { role: 'assistant', content };
+    const content = approval ? 'COMPOSE_APPROVAL_COMPLETE' : folderWrite ? 'COMPOSE_FOLDERS_COMPLETE' : context ? 'RUNNER_CONTEXT_COMPLETE' : followup ? (messages.some(message => String(message.content).includes('COMPOSE_SEED_729')) ? 'FOLLOWUP_COMPOSE_SEED_729' : 'FOLLOWUP_CONTEXT_MISSING') : main ? (soak ? `COMPOSE_SOAK_COMPLETE:${soak}` : 'COMPOSE_SMOKE_COMPLETE') : 'Compose acceptance';
+    const message = tool ? { role: 'assistant', content: null, tool_calls: [{ id: `compose-${tool.name}${tool.name === apiTool ? '-' + apiCalls : ''}`, type: 'function', function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } }] } : { role: 'assistant', content };
     const common = { id: `compose-${requests.length}`, created: Math.floor(Date.now() / 1000), model: 'compose-fixture' };
     if (body.stream) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
