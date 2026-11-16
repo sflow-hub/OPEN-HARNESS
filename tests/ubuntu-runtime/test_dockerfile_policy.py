@@ -75,6 +75,7 @@ class DockerfilePolicy(unittest.TestCase):
         candidate = support.PRODUCTION_DOCKERFILE.read_text()
         tail = candidate[candidate.index(BEGIN) + len(BEGIN):candidate.index(END)]
         tail = tail.replace('ARG OPEN_HARNESS_RUNTIME=6', 'ARG OPEN_HARNESS_RUNTIME=11')
+        tail = tail.replace('RUN apt-get update &&', 'RUN --mount=type=bind,from=build-inputs,source=/opt/open-harness-build,target=/opt/open-harness-build \\\n    sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh --update &&')
         start = self.text.index('COPY runtime/hermes/security-constraints.txt')
         self.assertEqual(self.text[start:start + len(tail)], tail)
 
@@ -123,7 +124,14 @@ class DockerfilePolicy(unittest.TestCase):
     def test_ubuntu_apt_uses_the_locked_snapshot_before_anything_else(self):
         call = ('sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh '
                 f'{self.lock["ubuntu"]["snapshot"]} /opt/open-harness-build/lock/ubuntu-os-packages.txt')
-        self.assertEqual(self.text.count('sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh '), 2)
+        self.assertEqual(self.text.count(call), 2)
+        refresh = 'sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh --update'
+        for stage in ('curl-builder', 'runtime'):
+            for step in self.runs(stage):
+                self.assertNotIn('apt-get update', step)
+                self.assertNotIn('Acquire::Retries=0', step)
+                if refresh in step:
+                    self.assertIn('from=build-inputs,source=/opt/open-harness-build,target=/opt/open-harness-build', step)
         for stage in ('curl-builder', 'runtime'):
             first = self.runs(stage)[0]
             self.assertLess(first.index('check-native-platform.sh'), first.index(call), stage)

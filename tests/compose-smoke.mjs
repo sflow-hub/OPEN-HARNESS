@@ -410,15 +410,15 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
   console.log('Asking real Hermes to edit a private dashboard copy, then reviewing, applying and undoing it.');
   const { profile: editor } = await api(`/v1/agents/${editorId}/profile`);
   const editorSaved = await api(`/v1/agents/${editorId}/profile`, 'PUT', { ...editor, model: saved.profile.model,
-    allowedTools: ['read_file', 'write_file', 'clarify'], computer: { ...editor.computer, access: 'folders', folders: [folders[0]], desktop: 'none' } });
+    allowedTools: ['read_file', 'patch', 'clarify'], computer: { ...editor.computer, access: 'folders', folders: [folders[0]], desktop: 'none' } });
   const previousRevision = (await api('/v1/bootstrap')).localDashboardRevision;
   assert.equal(previousRevision, null);
   const requestId = randomUUID(), marker = `LOCAL-DASHBOARD-${requestId}`;
   const improvement = await api('/v1/local-improvements', 'POST', { requestId, agentId: editorId,
-    request: `COMPOSE_LOCAL_DASHBOARD: Set the dashboard's offline version label in lib/version.ts to ${marker}.` });
+    request: `COMPOSE_LOCAL_DASHBOARD: Change the Assistant heading from “What would you like done?” to “${marker}”. Keep the rest of my dashboard as it is.` });
   assert.equal(improvement.id, requestId);
   const editRun = await waitRun({ id: improvement.runId });
-  for (const name of ['read_file', 'write_file']) assert.ok(editRun.events.some(event => event.type === 'tool.complete' && event.payload.name === name), name);
+  for (const name of ['read_file', 'patch']) assert.ok(editRun.events.some(event => event.type === 'tool.complete' && event.payload.name === name), name);
   const deadline = Date.now() + timing.runMs;
   let reviewed;
   do {
@@ -429,8 +429,12 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
     await pause(200);
   } while (Date.now() < deadline);
   assert.equal(reviewed.state, 'review', reviewed.error || 'The dashboard build did not reach review.');
-  assert.deepEqual(reviewed.changes.map(({ path, kind }) => ({ path, kind })), [{ path: 'lib/version.ts', kind: 'modified' }]);
-  assert.ok(reviewed.changes[0].diff.includes(`+export const APP_VERSION = '${marker}';`), 'The frozen diff must contain the exact tool-written label.');
+  assert.deepEqual(reviewed.changes.map(({ path, kind }) => ({ path, kind })), [{ path: 'components/assistant-workspace.tsx', kind: 'modified' }]);
+  const edits = reviewed.changes[0].diff.split('\n').filter(line => /^[+-]/.test(line) && !line.startsWith('+++ ') && !line.startsWith('--- '));
+  assert.equal(edits.length, 2, 'Only the heading line may change.');
+  const removed = edits.find(line => line[0] === '-')?.slice(1), added = edits.find(line => line[0] === '+')?.slice(1);
+  assert.ok(removed?.includes('<h1>What would you like done?</h1>'));
+  assert.equal(added, removed.replace('<h1>What would you like done?</h1>', `<h1>${marker}</h1>`), 'Every other character in the changed line must be preserved.');
   assert.match(reviewed.check, /Dashboard build passed/);
   const changePath = `/v1/local-improvements/${requestId}`;
   assert.ok((await api(changePath + '/preview')).html.includes(marker), 'The preview must contain the compiled, unique label.');
@@ -650,7 +654,7 @@ for name in ['/workspace/private', '/workspace/shared']:
     });
   }
   evidence = { ok: true, mode: 'real Compose stack and pinned Hermes with scripted completion fixture; not model reasoning', project, restoreProject, root, deployment, packaged, coordinatorImage, image: HERMES_IMAGE, providerIp, dashboardCsp: true, authenticatedApi: true, browserPairing: { required: true, invalidDenied: true, expiredDenied: true, replayDenied: true }, hostFolderPermissions, explicitHostFolders: { physicalPathsContainSpaces: true, readOnlyCeiling: true, selectedAgentWrite: true, otherAgentDenied: true, unexportedPathsDenied: true }, savedCredentialRotation: true, teamTaskPersistence: true, teamSharedFiles: { memberWrite: true, hostReadback: true, nonmemberDenied: true, restoredReadback: true }, localBootstrap: true, forgedHostDenied: true, nestedBootstrapDenied: nestedBootstrap, privateDockerTcp: tcp, identity, agentMounts, fileTool: true, clarification: true, taskMcp: true, deniedTerminal: true, freshSessionContext: true, replayStable: true, restartPersistence: true, gracefulAgentCleanup: true, privateDesktop: desktop, twoAgentDesktopIsolation: true, sharedFilesPreserved: true, backupRestore: { destinationWasEmpty: true, stoppedFileOwnerModeHashesEqual: true, entries: restoredManifest.length, profiles: true, credentialsUsedByRealRun: true, privateFiles: true, sharedFiles: true, memory: true, skills: true, tasks: true, history: true, interruptedRunsNotReplayed: true, freshEngineCache: true }, firstRun: first.id, followupRun: second.id, restoredRun: restoredRun.run.id };
-  evidence.localDashboardImprovement = { requestId, agentRunId: improvement.runId, file: 'lib/version.ts', realFileTools: true, compiledPreview: true, applied: true, undone: true, savedGrantsPreserved: true };
+  evidence.localDashboardImprovement = { requestId, agentRunId: improvement.runId, file: 'components/assistant-workspace.tsx', heading: marker, realFileTools: true, compiledPreview: true, applied: true, undone: true, savedGrantsPreserved: true };
   if (soakResult) evidence.soak = soakResult;
   if (browserOverrides) {
     evidence.mode = `emulated AMD64 with timing allowances and canonical managed browser: ${evidence.mode}`;

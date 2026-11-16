@@ -121,7 +121,7 @@ if (command === "help") {
 } else if (command === "setup") {
   const docker = dockerStatus(false); if (!docker.available) { console.error(docker.message); process.exitCode = 1; }
   else {
-    try { await prepareRuntime(); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
+    try { await prepareRuntime({ showProgress: true }); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
     if (!process.exitCode) {
       // The sharing probe runs a container from the image, so it has to come after the build.
       const choice = chooseStateDir({
@@ -153,7 +153,7 @@ if (command === "help") {
 } else if (command === 'runner-install') {
   const docker = dockerStatus(false);
   if (docker.available && imageContract() !== 'current') {
-    try { await prepareRuntime(); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); }
+    try { await prepareRuntime({ showProgress: true }); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); }
   }
   if (!docker.available) { console.error('This machine needs Docker for sandboxed agents. Install and start Docker, then retry.'); process.exit(1); }
   const forwarded = process.argv.slice(3), paired = spawnSync(process.execPath, ['--import', 'tsx', 'runtime/runner.ts', ...forwarded, '--once', '1'], { cwd: project, stdio: 'inherit' });

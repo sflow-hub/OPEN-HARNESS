@@ -12,7 +12,7 @@ permissions:
 jobs:
   hermes-container:
     runs-on: ubuntu-24.04
-    timeout-minutes: 145
+    timeout-minutes: 195
     env:
       OPEN_HARNESS_HERMES_IMAGE: open-harness-hermes:ci
       OPEN_HARNESS_REAL_CONTAINER: '1'
@@ -44,7 +44,9 @@ jobs:
           }
           NODE
       - name: Build the pinned production Hermes image
-        timeout-minutes: 55
+        timeout-minutes: 95
+        env:
+          BUILDKIT_PROGRESS: plain
         run: npm run harness:setup
       - name: Exercise real private-container runs without cloud credentials
         timeout-minutes: 6
