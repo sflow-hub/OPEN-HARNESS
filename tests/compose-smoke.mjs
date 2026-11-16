@@ -360,12 +360,12 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
     runtimeSetup = { ...runtimeSetup, after, durationMs: Date.now() - startedAt, localSetupSucceeded: true };
     save('runtime-setup.json', runtimeSetup);
   }
-  const agentId = 'compose-smoke', otherId = 'compose-peer', conversationId = 'compose-continuity';
+  const agentId = 'compose-smoke', otherId = 'compose-peer', editorId = 'compose-dashboard-editor', conversationId = 'compose-continuity';
   const credential = await api('/v1/credentials', 'POST', { ref: 'COMPOSE_FIXTURE_KEY', label: 'Compose fixture', provider: 'local', value: 'local-scripted-provider-only' });
   assert.equal(credential.ref, 'COMPOSE_FIXTURE_KEY');
   assert.equal(credential.present, true);
   assert.doesNotMatch(JSON.stringify(credential), /local-scripted-provider-only/);
-  await api('/v1/agents/sync', 'POST', { agents: [agentId, otherId].map(id => ({ id, name: id, role: 'Integration verification', instructions: 'Work only on this isolated acceptance task.', memory: [] })) });
+  await api('/v1/agents/sync', 'POST', { agents: [agentId, otherId, editorId].map(id => ({ id, name: id, role: 'Integration verification', instructions: 'Work only on this isolated acceptance task.', memory: [] })) });
   const { profile } = await api(`/v1/agents/${agentId}/profile`);
   const folders = [{ id: 'fixture-ro', path: '/host-folders/fixture-ro', mode: 'read' }, { id: 'fixture-rw', path: '/host-folders/fixture-rw', mode: 'write' }];
   for (const grant of [{ ...folders[0], mode: 'write' }, { id: 'unexported', path: '/data', mode: 'read' }, { id: 'descendant', path: '/host-folders/fixture-rw/nested', mode: 'read' }]) {
@@ -407,11 +407,50 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
   assert.notEqual(firstSnapshot.run.session_id, followupSnapshot.run.session_id);
   assert.deepEqual((await api(`/v1/runs/${first.id}/events?after=0`)).events, firstSnapshot.events);
   assert.equal(await nestedRunning(), false);
+  console.log('Asking real Hermes to edit a private dashboard copy, then reviewing, applying and undoing it.');
+  const { profile: editor } = await api(`/v1/agents/${editorId}/profile`);
+  const editorSaved = await api(`/v1/agents/${editorId}/profile`, 'PUT', { ...editor, model: saved.profile.model,
+    allowedTools: ['read_file', 'write_file', 'clarify'], computer: { ...editor.computer, access: 'folders', folders: [folders[0]], desktop: 'none' } });
+  const previousRevision = (await api('/v1/bootstrap')).localDashboardRevision;
+  assert.equal(previousRevision, null);
+  const requestId = randomUUID(), marker = `LOCAL-DASHBOARD-${requestId}`;
+  const improvement = await api('/v1/local-improvements', 'POST', { requestId, agentId: editorId,
+    request: `COMPOSE_LOCAL_DASHBOARD: Set the dashboard's offline version label in lib/version.ts to ${marker}.` });
+  assert.equal(improvement.id, requestId);
+  const editRun = await waitRun({ id: improvement.runId });
+  for (const name of ['read_file', 'write_file']) assert.ok(editRun.events.some(event => event.type === 'tool.complete' && event.payload.name === name), name);
+  const deadline = Date.now() + timing.runMs;
+  let reviewed;
+  do {
+    const { items } = await api('/v1/local-improvements');
+    reviewed = items.find(item => item.id === requestId);
+    assert.ok(reviewed, 'The improvement must remain available after its agent finishes.');
+    if (!['editing', 'building'].includes(reviewed.state)) break;
+    await pause(200);
+  } while (Date.now() < deadline);
+  assert.equal(reviewed.state, 'review', reviewed.error || 'The dashboard build did not reach review.');
+  assert.deepEqual(reviewed.changes.map(({ path, kind }) => ({ path, kind })), [{ path: 'lib/version.ts', kind: 'modified' }]);
+  assert.ok(reviewed.changes[0].diff.includes(`+export const APP_VERSION = '${marker}';`), 'The frozen diff must contain the exact tool-written label.');
+  assert.match(reviewed.check, /Dashboard build passed/);
+  const changePath = `/v1/local-improvements/${requestId}`;
+  assert.ok((await api(changePath + '/preview')).html.includes(marker), 'The preview must contain the compiled, unique label.');
+  assert.equal((await api('/v1/bootstrap')).localDashboardRevision, previousRevision);
+  assert.equal((await api(changePath + '/apply', 'POST', {})).state, 'applied');
+  assert.equal((await api('/v1/bootstrap')).localDashboardRevision, requestId);
+  assert.ok((await api(changePath + '/active')).html.includes(marker));
+  assert.equal((await api(changePath + '/undo', 'POST', {})).state, 'undone');
+  assert.equal((await api('/v1/bootstrap')).localDashboardRevision, previousRevision);
+  assert.deepEqual((await api(`/v1/agents/${editorId}/profile`)).profile, editorSaved.profile);
+  assert.equal((await api('/v1/files?scope=shared&name=compose-verified.txt')).content, artifact.content);
+  assert.deepEqual((await api(`/v1/conversations?agentId=${agentId}`)).conversations.find(item => item.id === conversationId).runs.map(run => run.id), [first.id, second.id]);
   const requests = await nodeIn('fixture', `console.log(JSON.stringify(await (await fetch('http://127.0.0.1:3131/__fixture/requests')).json()));`);
   save('provider-requests.json', requests);
   assert.ok(requests.some(request => request.fixtureCredential === 'original'));
   assert.ok(requests.some(request => request.fixtureCredential === 'rotated'));
   assert.ok(requests.every(request => request.fixtureCredential !== 'invalid'), 'Every real provider request must resolve the saved credential.');
+  const editRequests = requests.filter(body => body.tools?.length && body.messages?.some(message => message.role === 'user' && String(message.content).includes(marker)));
+  assert.ok(editRequests.length >= 3, 'Hermes must request the model before and after each tool call.');
+  for (const body of editRequests) assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), ['read_file', 'write_file']);
   const mainRequests = requests.filter(body => body.tools?.some(tool => tool.function?.name === 'write_file') && body.messages?.some(message => String(message.content).includes('COMPOSE_SMOKE')));
   assert.ok(mainRequests.length >= 5);
   for (const body of mainRequests) assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), ['clarify', 'mcp__open_harness__computer', 'mcp__open_harness__task', 'write_file'], 'Only the four explicitly granted tools may be model-visible.');
@@ -611,6 +650,7 @@ for name in ['/workspace/private', '/workspace/shared']:
     });
   }
   evidence = { ok: true, mode: 'real Compose stack and pinned Hermes with scripted completion fixture; not model reasoning', project, restoreProject, root, deployment, packaged, coordinatorImage, image: HERMES_IMAGE, providerIp, dashboardCsp: true, authenticatedApi: true, browserPairing: { required: true, invalidDenied: true, expiredDenied: true, replayDenied: true }, hostFolderPermissions, explicitHostFolders: { physicalPathsContainSpaces: true, readOnlyCeiling: true, selectedAgentWrite: true, otherAgentDenied: true, unexportedPathsDenied: true }, savedCredentialRotation: true, teamTaskPersistence: true, teamSharedFiles: { memberWrite: true, hostReadback: true, nonmemberDenied: true, restoredReadback: true }, localBootstrap: true, forgedHostDenied: true, nestedBootstrapDenied: nestedBootstrap, privateDockerTcp: tcp, identity, agentMounts, fileTool: true, clarification: true, taskMcp: true, deniedTerminal: true, freshSessionContext: true, replayStable: true, restartPersistence: true, gracefulAgentCleanup: true, privateDesktop: desktop, twoAgentDesktopIsolation: true, sharedFilesPreserved: true, backupRestore: { destinationWasEmpty: true, stoppedFileOwnerModeHashesEqual: true, entries: restoredManifest.length, profiles: true, credentialsUsedByRealRun: true, privateFiles: true, sharedFiles: true, memory: true, skills: true, tasks: true, history: true, interruptedRunsNotReplayed: true, freshEngineCache: true }, firstRun: first.id, followupRun: second.id, restoredRun: restoredRun.run.id };
+  evidence.localDashboardImprovement = { requestId, agentRunId: improvement.runId, file: 'lib/version.ts', realFileTools: true, compiledPreview: true, applied: true, undone: true, savedGrantsPreserved: true };
   if (soakResult) evidence.soak = soakResult;
   if (browserOverrides) {
     evidence.mode = `emulated AMD64 with timing allowances and canonical managed browser: ${evidence.mode}`;

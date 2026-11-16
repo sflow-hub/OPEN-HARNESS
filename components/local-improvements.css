@@ -1,0 +1,50 @@
+.local-improvements-entry > button { min-height: 40px; }
+.local-improvements-dialog {
+  box-sizing: border-box;
+  width: min(760px, calc(100% - 32px));
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  color: inherit;
+  box-shadow: 0 24px 80px #0006;
+  overflow: hidden;
+}
+.local-improvements-dialog[open] { display: flex; flex-direction: column; }
+.local-improvements-dialog::backdrop { background: #080a0cbe; backdrop-filter: blur(5px); }
+.local-improvements-dialog .improvements-heading,
+.local-improvements-dialog .improvements-history { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.local-improvements-dialog .improvements-heading { padding: 12px 20px; border-bottom: 1px solid var(--line); }
+.local-improvements-dialog .improvements-heading h2 { margin: 0; font-size: 20px; line-height: 1.3; }
+.local-improvements-dialog .improvements-body { min-height: 0; overflow: auto; padding: 16px 20px 20px; }
+.local-improvements-dialog .improvements-body > :first-child { margin-top: 0; }
+.local-improvements-dialog article { padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.local-improvements-dialog h3, .local-improvements-dialog h4 { margin: 12px 0 6px; overflow-wrap: anywhere; }
+.local-improvements-dialog article > h3 { margin-top: 0; }
+.local-improvements-dialog label { display: grid; gap: 6px; }
+.local-improvements-dialog textarea { resize: vertical; }
+.local-improvements-dialog details { border-top: 1px solid var(--line); }
+.local-improvements-dialog summary { padding: 10px 0; overflow-wrap: anywhere; }
+.local-improvements-dialog pre {
+  max-height: 14rem;
+  margin: 0 0 10px;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: 0.82rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre;
+  tab-size: 2;
+}
+.local-improvements-dialog iframe { display: block; width: 100%; height: min(400px, 52dvh); margin: 8px 0; border: 1px solid var(--line); background: white; }
+.local-improvements-dialog [role="alert"] { color: var(--error, #efaca2); }
+.local-improvements-dialog :focus-visible, .local-improvements-entry > button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.local-improvements-dialog a { color: var(--accent); text-decoration: underline; }
+@media (max-width: 640px) {
+  .local-improvements-dialog { width: 100%; max-width: 100%; height: 100dvh; max-height: 100dvh; margin: 0; border: 0; border-radius: 0; }
+  .local-improvements-dialog .improvements-heading { padding: max(12px, env(safe-area-inset-top)) 14px 12px; }
+  .local-improvements-dialog .improvements-body { padding: 12px 14px max(14px, env(safe-area-inset-bottom)); }
+  .local-improvements-dialog button, .local-improvements-dialog summary { min-height: 44px; }
+}

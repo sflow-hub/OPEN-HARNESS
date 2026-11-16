@@ -70,6 +70,7 @@ import {ConnectionEvents} from './connection-events';
 import {AssistantResults} from './assistant-overview';
 import {AssistantStarters,buildStarterPrompt} from './assistant-starters';
 import {AttentionPreferences} from './attention-preferences';
+import { DashboardChanges } from './dashboard-changes';
 
 const root = resolve(process.env.OPEN_HARNESS_STATE_DIR || ".open-harness");
 mkdirSync(root, { recursive: true });
@@ -192,7 +193,20 @@ const assistantStarters = new AssistantStarters(store.db, {
 });
 let checkingHumanLeases=false;setInterval(()=>{if(process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY!=='1'||checkingHumanLeases||maintenance)return;checkingHumanLeases=true;void(async()=>{for(const run of store.liveRuns().filter(run=>!run.parent_run_id)){try{workspaceIdentity.runActor(run.id);}catch{for(const entry of [run,...store.descendants(run.id).map(item=>store.getRun(item.id)).filter((item):item is RunRow=>Boolean(item))])if(existsSync(join(root,'agents',entry.agent_id,'managed')))writeRunLease(root,entry.agent_id,null);await stopRunTree(run.id);}}})().catch(()=>{}).finally(()=>{checkingHumanLeases=false;});},5000).unref();
 setInterval(()=>{if(!maintenance)void connectionEvents.tick().catch(()=>{});},15000).unref();
-store.runListener = run => { tasks.syncRun(run); messaging.onRun(run); groups.onRunChanged(run); workflows.onRunChanged(run); evidence.onRunChanged(run); setupJobs.onRunChanged(run); responsibilities.onRunChanged(run);if(['completed','failed','interrupted','cancelled'].includes(run.state))setImmediate(()=>{resumeVerifiedActions(run.id);gatherHandoffResults(run.parent_run_id||run.id);}); };
+function validateDashboardAgent(agentId:string) {
+  const agent = profiles.get(agentId);
+  if (!agent || agent.computer.machineId !== 'local') throw new ProductError('Choose an agent on this computer for a local dashboard change.',409);
+  assertSandboxedComputer(agent.computer);
+  if (!agent.allowedTools.includes('read_file') || !agent.allowedTools.some(tool => ['write_file','patch'].includes(tool))) {
+    throw new ProductError('Give this agent permission to read and edit files in Agent settings, then try again.',409);
+  }
+}
+const dashboardChanges = new DashboardChanges(store.db,root,{
+  validate: validateDashboardAgent,
+  start: (agentId,prompt) => createRun({agentId,prompt,purpose:'local-improvement',deferStart:true}),
+  get: id => store.getRun(id),
+});
+store.runListener = run => { dashboardChanges.onRun(run); tasks.syncRun(run); messaging.onRun(run); groups.onRunChanged(run); workflows.onRunChanged(run); evidence.onRunChanged(run); setupJobs.onRunChanged(run); responsibilities.onRunChanged(run);if(['completed','failed','interrupted','cancelled'].includes(run.state))setImmediate(()=>{resumeVerifiedActions(run.id);gatherHandoffResults(run.parent_run_id||run.id);}); };
 function gatherHandoffResults(parentId:string){
   if(shuttingDown||maintenance||store.db.prepare('SELECT 1 FROM handoff_summaries WHERE parent_run_id=?').get(parentId))return;
   const parent=store.getRun(parentId);if(!parent||parent.agent_id!==PRIMARY_ASSISTANT_ID||!terminalStates.has(parent.state)||parent.state==='cancelled')return;
@@ -699,6 +713,13 @@ async function execute(run: RunRow) {
     assertSandboxedComputer(profile.computer);
     const snapshot = profiles.snapshot(run.id, profile);
     const intent = store.db.prepare('SELECT purpose FROM run_contexts WHERE run_id=?').get(run.id) as { purpose: string } | undefined;
+    if (intent?.purpose === 'local-improvement') {
+      validateDashboardAgent(profile.id);
+      snapshot.computer = {...snapshot.computer, access:'private', folders:[], desktop:'none', browserSessionTeamId:undefined};
+      snapshot.allowedTools = snapshot.allowedTools.filter(tool=>['read_file','write_file','patch','search_files'].includes(tool));
+      snapshot.connectors = [];
+      store.db.prepare('UPDATE run_profiles SET json=? WHERE run_id=?').run(JSON.stringify(snapshot), run.id);
+    }
     if (['responsibility','workflow-synthesis','handoff-report','setup'].includes(intent?.purpose || '')) {
       const allowed = new Set(intent?.purpose === 'setup' ? ['read_file','write_file'] : ['workflow-synthesis','handoff-report'].includes(intent?.purpose||'') ? [] : ['read_file','search_files','session_search','skills_list','skill_view','web_search','web_extract','clarify', WORKSPACE_TOOL]);
       snapshot.allowedTools = snapshot.allowedTools.filter(tool => allowed.has(tool));
@@ -742,7 +763,7 @@ async function execute(run: RunRow) {
     event(run.id, 'run.phase', { phase: 'gateway-ready' });
     const listener = (value: any) => mapHermesEvent(run, value); gateway.on("event", listener); subscribed = { gateway, listener };
     const history=priorHistory(run);event(run.id,'run.context',{turns:history.length,characters:history.reduce((sum,turn)=>sum+turn.content.length,0)});
-    const session = run.session_id ? { session_id: run.session_id } : await gateway.request("session.create", { cwd: "/workspace/shared", profile: "default", messages: history });
+    const session = run.session_id ? { session_id: run.session_id } : await gateway.request("session.create", { cwd: (intent?.purpose === 'local-improvement' ? dashboardChanges.location(run.id) : null) || "/workspace/shared", profile: "default", messages: history });
     if (cancelledRuns.has(run.id) || store.getRun(run.id)?.state === "cancelled") return;
     const sessionId = String(session?.session_id || session?.id || run.session_id || "");
     if (!sessionId) throw new Error("Hermes did not return a session ID.");
@@ -916,7 +937,7 @@ function createRun(input: { agentId: string; conversationId?: string; prompt: st
   } catch (error) { store.db.exec('ROLLBACK TO create_run; RELEASE create_run'); throw error; }
   event(run.id, "run.queued", { position: store.listRuns().filter(item => item.state === "queued").length }); if (!input.deferStart) void pump(); return run;
 }
-function runResponse(run: RunRow) { const profile = profiles.runSnapshot(run.id) || profiles.get(run.agent_id); const machineId = profile?.computer.machineId || null; let machineConnection: string | null = null; if (machineId) { try { machineConnection = machines.get(machineId).status; } catch { machineConnection = 'revoked'; } } return { ...run, reply_only:runReplyOnly(run.id), machine_id: machineId, machine_connection: machineConnection, pendingApprovals: store.pendingApprovals(run.id), pendingInputs: store.pendingInputs(run.id) }; }
+function runResponse(run: RunRow) { const profile = profiles.runSnapshot(run.id) || profiles.get(run.agent_id); const machineId = profile?.computer.machineId || null; let machineConnection: string | null = null; if (machineId) { try { machineConnection = machines.get(machineId).status; } catch { machineConnection = 'revoked'; } } return { ...run, ...(dashboardChanges.location(run.id) ? {local_improvement:true} : {}), reply_only:runReplyOnly(run.id), machine_id: machineId, machine_connection: machineConnection, pendingApprovals: store.pendingApprovals(run.id), pendingInputs: store.pendingInputs(run.id) }; }
 function assertRecoveryReviewed(runId:string){const ids=[runId,...store.descendants(runId).map(run=>run.id)];for(const id of ids)if(store.db.prepare("SELECT 1 FROM unclassified_actions WHERE run_id=? AND state IN ('uncertain','dispatching') LIMIT 1").get(id)||store.db.prepare("SELECT 1 FROM action_intents WHERE run_id=? AND state IN ('uncertain','dispatching') LIMIT 1").get(id))throw new ProductError('Check this task’s uncertain actions at their destinations before continuing or repairing it. Confirm the outcome in the task review; no action will be replayed automatically.',409);}
 
 function listFiles(anchor: string, base: string) {
@@ -961,7 +982,7 @@ function agentMayTouchTask(agentId: string, assignOthers: boolean, task: ReturnT
 }
 
 async function bootstrapStatus() {
-  return { token: secrets.token, fileSafety: safeFsMode(), mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: APP_VERSION,features:['reply-only','runtime-preparation'], hermes: { release: HERMES_RELEASE, commit: HERMES_COMMIT } };
+  return { token: secrets.token, fileSafety: safeFsMode(), mode: process.env.OPEN_HARNESS_MOCK === '1' ? 'test' : 'live', runtime: await dockerStatusCached(), version: APP_VERSION,localDashboardRevision: workspaceIdentity.actor().source==='local' && workspaceIdentity.get().edition==='self-hosted' ? dashboardChanges.source.activeRevision() : null,features:['reply-only','runtime-preparation'], hermes: { release: HERMES_RELEASE, commit: HERMES_COMMIT } };
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse) {
@@ -1107,6 +1128,21 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       try { if (!upstream.body) throw new Error('No stream'); const reader=upstream.body.getReader(); for (;;) { const {value,done}=await reader.read(); if(done || res.destroyed)break; await new Promise<void>((resolve,reject)=>res.write(value,error=>error?reject(error):resolve())); } res.end(); }
       catch { res.destroy(); } finally { controller.abort(); }
       return;
+    }
+    if (url.pathname === '/v1/local-improvements' || url.pathname.startsWith('/v1/local-improvements/')) {
+      workspaceIdentity.requireOwner();
+      if (workspaceIdentity.actor().source !== 'local' || workspaceIdentity.get().edition !== 'self-hosted') throw new ProductError('Open this feature in your locally installed dashboard.',403);
+      if (!dashboardChanges.available) throw new ProductError('This desktop build has no dashboard compiler for this computer. Open the browser installation to make a local improvement.',409);
+      if (url.pathname === '/v1/local-improvements') {
+        if(req.method === 'GET') return json(res,200,dashboardChanges.list());
+        if(req.method === 'POST') { const item=dashboardChanges.start(await body(req)); void pump(); return json(res,202,item); }
+      }
+      const target=url.pathname.match(/^\/v1\/local-improvements\/([a-f0-9-]{36})\/(preview|active|apply|undo)$/i);
+      if (target && req.method === 'GET' && ['preview','active'].includes(target[2])) return json(res,200,await dashboardChanges.document(target[1],target[2]==='preview'));
+      if (target && req.method === 'POST' && (target[2]==='apply'||target[2]==='undo')) {
+        const item=dashboardChanges.decide(target[1],target[2]); workspaceIdentity.audit('local-dashboard.'+target[2],item.id); return json(res,200,item);
+      }
+      throw new ProductError('Local improvement action not found.',404);
     }
     if(url.pathname==='/v1/backups'){workspaceIdentity.requireOwner();if(req.method==='GET')return json(res,200,{backups:backups.list(),configured:Boolean(backupSecretValues().BACKUP_RECOVERY_KEY),retention:workspaceIdentity.get().retention});if(req.method==='POST')return json(res,202,backups.start(String((await body(req)).requestId||'')));}
     if(url.pathname==='/v1/backups/configure'&&req.method==='POST'){workspaceIdentity.requireOwner();const input=object(await body(req)),key=String(input.recoveryKey||'');backupKey(key);backupSecrets||=new SecretStore(join(root,'backup-secrets.json'));backupSecrets.set('BACKUP_RECOVERY_KEY',key);return json(res,200,{configured:true});}
@@ -2014,6 +2050,7 @@ server.on("error", error => {
   process.exit(1);
 });
 await new Promise<void>(resolve => server.listen(port, bind, resolve));
+dashboardChanges.recover();
 await recoverRuns();
 messaging.bootSweep();
 void pump();

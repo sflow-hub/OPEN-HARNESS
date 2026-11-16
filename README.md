@@ -28,7 +28,19 @@ See [Working with persistent teammates](docs/TEAMMATE_WORKFLOWS.md) for the comp
 
 ## Install
 
-Open Harness runs on Linux with Docker. The default setup uses a browser on the same machine; phone access requires the authenticated HTTPS setup linked above. Either install below works; the first-run guide then checks the machine, starts Docker when it can, prepares the pinned Hermes runtime, connects a model, and creates the first private workspace. It gives a direct installation link and a plain-language explanation for anything it cannot do itself.
+### Start on your computer
+
+1. Install Docker with Linux containers and Compose. On Mac or Windows, open Docker Desktop once to finish setup. Allow about 20 GB for the runtime and data.
+2. Download **Code → Download ZIP** from this repository, extract the whole folder, and open **Start Open Harness.command** on Mac or **Start Open Harness.cmd** on Windows. On Linux run `bash launchers/start.sh` in the extracted folder.
+3. The launcher builds the source and opens a paired browser window. Follow setup to connect a model and verify that your first agent can write a file. First launch can take several minutes. Hosted model calls use your provider's account.
+
+The launcher can also open a packaged release with pinned images. For operating-system prompts and startup recovery, see [Local browser installation](docs/LOCAL_BROWSER.md).
+
+### Ask an agent to improve your dashboard
+
+Open **Assistant → Improve my Open Harness**, choose a local agent, and describe your change. Try *“Change the Assistant heading to ‘How can I help?’”* The agent edits a separate copy of the browser dashboard source using its file permissions. Open Harness builds the edited interface and shows the changed files. **Download source patch** saves the edit for your own checkout. **Preview dashboard** opens it with an empty offline workspace. **Apply on this computer** opens the approved version with your workspace and conversations. Reopen the dialog and choose **Undo this change** to restore the previous version.
+
+**Open original dashboard** is always available at `/?original=1`, including when a custom interface fails to render. Each change is local to this installation. The editable source covers interface text, components, interactions and styles. Coordinator code, dependencies and other installation changes use the repository's usual development and release process. The current installation keeps the revisions in its state directory. A full data-volume backup includes them.
 
 ### Run from source
 
@@ -46,7 +58,7 @@ Open `http://localhost:3000`. `npm run dev` starts Docker if it is installed, th
 
 ### Self-host with Docker Compose
 
-Download and unzip the source release, install Docker, then run this command from that folder:
+For manual startup from an extracted source copy, run this command from that folder:
 
 ```bash
 docker compose up -d --build

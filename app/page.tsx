@@ -541,6 +541,12 @@ export default function Home() {
       try {
         const status = await client.bootstrap();
         if (!isCurrent()) return;
+        if (status.localDashboardRevision && !client.managed && window.location.pathname === '/' && new URLSearchParams(location.search).get('original') !== '1') {
+          const edition = new URL(window.location.href);
+          edition.pathname = '/local-edition';
+          window.location.replace(edition.href);
+          return;
+        }
         setPairing({ state: "none", message: "" });
         setRuntime(status);
         if(client.managed){const requestedDesktop=new URL(window.location.href).searchParams.get('desktop');if(requestedDesktop&&/^[A-Za-z0-9_-]+$/.test(requestedDesktop))setDesktopAgentId(requestedDesktop);}
@@ -598,9 +604,10 @@ export default function Home() {
             const liveNow = runs.filter(run => !run.parent_run_id && isLiveRun(run));
             for (const run of liveNow) attachRun(run);
             // A late response may reattach work, but must not undo the user's navigation.
-            if (liveNow[0] && !navigated.current) {
-              setSelectedAgent(liveNow[0].agent_id);
-              setConversationId(liveNow[0].conversation_id);
+            const foreground = liveNow.find(run => !run.local_improvement);
+            if (foreground && !navigated.current) {
+              setSelectedAgent(foreground.agent_id);
+              setConversationId(foreground.conversation_id);
               setView("chat");
             }
             const notificationRun = new URL(window.location.href).searchParams.get("run");

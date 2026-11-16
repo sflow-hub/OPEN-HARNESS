@@ -23,11 +23,13 @@ export type RuntimeStatus = {
   runtime: { available: boolean; version: string | null; message: string };
   version: string;
   features?: string[];
+  localDashboardRevision?: string | null;
   hermes: { release: string; commit: string };
   workspaceRole?: 'owner'|'operator'|'viewer';
 };
 
 export type PersistentRun = {
+  local_improvement?: boolean;
   id: string;
   agent_id: string;
   conversation_id: string;

@@ -25,7 +25,12 @@ const server = createServer(async (req, res) => {
     const shutdown = hasTools && prompt.includes('COMPOSE_SHUTDOWN');
     const followup = hasTools && prompt.includes('COMPOSE_FOLLOWUP');
     const context = hasTools && prompt.includes('RUNNER_CONTEXT');
-    const tool = context && !called.includes('memory') ? { name: 'memory', arguments: { target: 'memory', action: 'add', content: 'The remote tool memory marker is RUNNER_TOOL_MEMORY_527.' } }
+    const dashboardLabel = hasTools && prompt.includes('COMPOSE_LOCAL_DASHBOARD:') && /\b(LOCAL-DASHBOARD-[a-f0-9-]{36})\b/.exec(prompt)?.[1];
+    const candidate = dashboardLabel && /\/workspace\/private\/improvement-[a-f0-9-]{36}-[a-f0-9-]{36}\b/.exec(prompt)?.[0];
+    const versionFile = candidate && `${candidate}/lib/version.ts`;
+    const tool = versionFile && !called.includes('read_file') ? { name: 'read_file', arguments: { path: versionFile } }
+      : versionFile && !called.includes('write_file') ? { name: 'write_file', arguments: { path: versionFile, content: `export const APP_VERSION = '${dashboardLabel}';\n` } }
+      : context && !called.includes('memory') ? { name: 'memory', arguments: { target: 'memory', action: 'add', content: 'The remote tool memory marker is RUNNER_TOOL_MEMORY_527.' } }
       : context && !called.includes('skill_view') ? { name: 'skill_view', arguments: { name: 'runner-verification' } }
       : shutdown ? { name: 'clarify', arguments: { question: 'Keep this run waiting until the stack shuts down.' } }
       : main && !called.includes('write_file') ? { name: 'write_file', arguments: { path: `/workspace/shared/${soak ? 'compose-soak.txt' : 'compose-verified.txt'}`, content: soak ? `COMPOSE_SOAK:${soak}\n` : 'Written through the real Compose Hermes tool loop.\n' } }
