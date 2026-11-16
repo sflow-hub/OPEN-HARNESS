@@ -2408,3 +2408,9 @@ h1 span {
 .decision-disclosure p { margin: 4px 0 0; }
 .decision-log { list-style: none; padding: 0; margin: 8px 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .decision-log li { display: flex; flex-wrap: wrap; gap: 4px 10px; overflow-wrap: anywhere; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+
+.harness-files { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--border, #333); display: grid; gap: .75rem; }
+.harness-files h4 { margin: 0; }
+.harness-file-row { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:.75rem; padding:.75rem 0; border-bottom:1px solid var(--border, #333); }
+.harness-file-row > span { min-width:0; overflow-wrap:anywhere; display:grid; gap:.25rem; }
+.harness-file-row small { opacity:.7; }

@@ -1,3 +1,4 @@
+import type { HarnessFeatures, HarnessChoice } from './harness';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { ClarifyAnswers } from "./clarify";
 export type RuntimeStatus = {
@@ -11,6 +12,8 @@ export type RuntimeStatus = {
 };
 
 export type PersistentRun = {
+  harness?:HarnessChoice;
+  harnessFeatures?:HarnessFeatures;
   id: string;
   agent_id: string;
   conversation_id: string;

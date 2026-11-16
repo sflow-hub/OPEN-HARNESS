@@ -5,10 +5,10 @@ import { CODEX_PROVIDER } from './codex';
 // The coordinator owns the authoritative catalog at GET /v1/harnesses; FALLBACK_HARNESSES
 // only keeps the picker usable against a coordinator that predates that endpoint, and it
 // never claims OpenCode is installed.
-export type HarnessKind = 'hermes' | 'opencode';
-export type HarnessChoice = { kind: HarnessKind };
+export type HarnessKind = 'hermes' | 'opencode' | `custom:${string}`;
+export type HarnessChoice = { kind: HarnessKind; version?: string; configRevision?: string };
 export type HarnessFeatures = { memory: boolean; skills: boolean; sessionRecall: boolean; scheduling: boolean; desktop: boolean; mcp: boolean; approvals: boolean; steer: boolean; clarify: boolean };
-export type HarnessInfo = { kind: HarnessKind; label: string; version: string; license: string; description: string; available: boolean; reason?: string; features: HarnessFeatures; providers: string[] };
+export type HarnessInfo = { kind: HarnessKind; label: string; version: string; license: string; description: string; available: boolean; reason?: string; features: HarnessFeatures; providers: string[]; versions?: string[]; machineId?: string; installationId?: string };
 export type HarnessProfile = AgentProfile & { harness?: HarnessChoice };
 export const DEFAULT_HARNESS: HarnessChoice = { kind: 'hermes' };
 export const HARNESS_KINDS: HarnessKind[] = ['hermes', 'opencode'];
@@ -20,7 +20,7 @@ export const FALLBACK_HARNESSES: HarnessInfo[] = [
   { kind: 'opencode', label: 'OpenCode', version: '', license: 'MIT', description: 'A coding-focused agent that is strong at reading, editing and running code in a project.', available: false, reason: 'This coordinator does not offer OpenCode yet. You can choose it now; it will run once the OpenCode runtime is installed.', features: { ...ALL, memory: false, skills: false, sessionRecall: false, desktop: false, steer: false, clarify: false }, providers: ['xai', 'openai', 'openrouter', 'anthropic', 'local', 'custom'] },
 ];
 export function mergeCatalog(served: HarnessInfo[] | undefined): HarnessInfo[] {
-  return HARNESS_KINDS.map(kind => served?.find(item => item.kind === kind) || FALLBACK_HARNESSES.find(item => item.kind === kind)!);
+  return [...HARNESS_KINDS.map(kind => served?.find(item => item.kind === kind) || FALLBACK_HARNESSES.find(item => item.kind === kind)!), ...(served || []).filter(item => item.kind.startsWith('custom:'))];
 }
 
 // Tool groups a harness can only offer when it has the matching feature. Groups not listed

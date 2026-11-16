@@ -73,7 +73,7 @@ test('a running task keeps its non-terminal snapshot; the next queued task uses 
   const policy = JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')); assert.deepEqual(policy.allowedTools, ['read_file', 'mcp__open_harness__task']);
   assert.equal((await waitRun(first.id)).state, 'completed'); assert.equal((await waitRun(next.id)).state, 'failed');
   assert.deepEqual(JSON.parse(readFileSync(join(state, 'agents/atlas/managed/policy.json'), 'utf8')).allowedTools, ['mcp__open_harness__task']);
-  assert.equal(readFileSync(join(state, 'agents/atlas/profile/SOUL.md'), 'utf8'), '');
+  const soul = readFileSync(join(state, 'agents/atlas/profile/SOUL.md'), 'utf8'); assert.match(soul, /^## Who you are\nYour name is atlas\. Your role: Assistant\./); assert.doesNotMatch(soul, /Keep context/);
   const config = JSON.parse(readFileSync(join(state, 'agents/atlas/profile/config.yaml'), 'utf8'));
   assert.deepEqual(config.approvals, { mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' });
 });

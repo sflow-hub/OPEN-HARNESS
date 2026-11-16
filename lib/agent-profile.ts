@@ -1,3 +1,4 @@
+import type { HarnessChoice, HarnessInfo } from './harness';
 import type { Agent } from './types';
 import type { CredentialRecord } from './credentials';
 
@@ -65,13 +66,14 @@ export type MachineInfo = {
   id: string; name: string; platform: 'linux' | 'darwin' | 'win32' | 'unknown'; arch: string;
   status: 'online' | 'offline' | 'pairing' | 'revoked'; lastSeenAt: string | null;
   local: boolean; reservedAgentId: string | null; assignedAgents: number;
-  capabilities: { container: boolean; direct: boolean; desktop: boolean; virtualDesktop: boolean; detail?: string;protocol?:number;features?:string[] };
+  capabilities: { container: boolean; direct: boolean; desktop: boolean; virtualDesktop: boolean; detail?: string;protocol?:number;features?:string[];harnesses?:HarnessInfo[];installedHarnessBytes?:number };
 };
 // Spread these defaults over whatever is stored rather than testing the stored object
 // directly: profiles saved before a permission existed must keep loading and saving.
 export type BoardPermissions = { assignOthers: boolean; dispatch: boolean; manageProjects: boolean };
 export const DEFAULT_BOARD: BoardPermissions = { assignOthers: false, dispatch: false, manageProjects: false };
 export type AgentProfile = {
+  harness?: HarnessChoice;
   id: string; revision: number; name: string; role: string; description: string; tone: number;
   prompt: { enabled: boolean; text: string };
   model: ModelChoice & { inherit: boolean };

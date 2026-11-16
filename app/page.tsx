@@ -195,7 +195,7 @@ export default function Home() {
   const [confirmCloseSettings, setConfirmCloseSettings] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
-  const [editingAgentTab, setEditingAgentTab] = useState<'profile' | 'computer'>('profile');
+  const [editingAgentTab, setEditingAgentTab] = useState<'profile' | 'computer' | 'harness'>('profile');
   const [mobileOpen, setMobileOpen] = useState(false);
   const [input, setInput] = useState("");
   const [replyOnly, setReplyOnly] = useState(false);
@@ -303,6 +303,7 @@ export default function Home() {
   // one queued. `running` is about this conversation only; other agents keep working.
   const activeRun = conversationRuns.find((run) => run.state !== "queued") || conversationRuns[0] || null;
   const running = Boolean(activeRun);
+  const canSteer = activeRun?.harnessFeatures?.steer ?? (!agent.profile?.harness || agent.profile.harness.kind==='hermes');
   const replyOnlyAvailable = runtime?.features?.includes('reply-only') === true;
   const replyOnlyMode = replyOnlyAvailable && (activeRun ? Boolean(activeRun.reply_only) : replyOnly);
   // Starting Hermes is most of the wait before a first word. Someone who has started typing
@@ -1137,7 +1138,7 @@ export default function Home() {
     // Steering and follow-ups go to this conversation's own run — never to whatever some
     // other agent is doing. A run that is only queued has nothing to steer yet.
     if (activeRun) {
-      const steer = inputMode === "steer" && activeRun.state !== "queued";
+      const steer = canSteer && inputMode === "steer" && activeRun.state !== "queued";
       beginSending(steer ? "Sending guidance…" : "Sending follow-up…");
       try {
         if (steer) {
@@ -1844,6 +1845,7 @@ export default function Home() {
                     >
                       <Paperclip size={17} />
                     </button>
+              <button className="subtle-button" onClick={()=>{setEditingAgentTab('harness');setEditingAgent(agent);}}>Upload to {agent.name}’s computer</button>
                     <button
                       type="button"
                       className="model-choice"
@@ -1882,14 +1884,16 @@ export default function Home() {
                     {running ? (
                       <>
                         <button
-                          className={`run-mode ${inputMode === "steer" ? "active" : ""}`}
+                          className={`run-mode ${canSteer && inputMode === "steer" ? "active" : ""}`}
                           type="button"
+                          disabled={!canSteer}
+                          title={canSteer?undefined:"This harness accepts follow-ups after the current task."}
                           onClick={() => setInputMode("steer")}
                         >
                           Steer
                         </button>
                         <button
-                          className={`run-mode ${inputMode === "followup" ? "active" : ""}`}
+                          className={`run-mode ${!canSteer || inputMode === "followup" ? "active" : ""}`}
                           type="button"
                           onClick={() => setInputMode("followup")}
                         >
@@ -1899,7 +1903,7 @@ export default function Home() {
                           className="send-button"
                           type="submit"
                           disabled={!input.trim() || Boolean(submitting)}
-                          aria-label={`Send ${inputMode}`}
+                          aria-label={`Send ${canSteer?inputMode:"followup"}`}
                         >
                           <ArrowUp size={18} />
                         </button>
@@ -2083,6 +2087,7 @@ export default function Home() {
                 >
                   <Plus size={12} /> Add a file
                 </button>
+                <button className="subtle-button" onClick={()=>{setEditingAgentTab('harness');setEditingAgent(agent);}}>Upload to {agent.name}’s computer</button>
                 <div className="inspector-label">
                   <Brain size={13} /> MEMORY{" "}
                   <span>{agentContext?.memory ? "HERMES" : agent.memory.length}</span>
@@ -2162,7 +2167,7 @@ export default function Home() {
                   {testMode
                     ? "Automated test mode does not run agents. Open the installed desktop app for live work."
                     : runtime?.runtime.available
-                    ? "Hermes is ready in this agent’s isolated workspace. External actions still follow the approval policy."
+                    ? "The container engine is ready. Check this agent’s selected harness in Agent settings."
                     : runtime?.runtime.message ||
                       "Run npm run harness:doctor to connect the local Hermes runtime."}
                 </div>
@@ -2187,6 +2192,7 @@ export default function Home() {
               >
                 <Plus size={14} /> Add files
               </button>
+              <button className="subtle-button" onClick={()=>{setEditingAgentTab('harness');setEditingAgent(agent);}}>Upload to {agent.name}’s computer</button>
             </div>
             {!workspace.files.length ? (
               <div className="files-empty">

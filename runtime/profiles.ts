@@ -1,3 +1,5 @@
+import type { HarnessFeatures } from '../lib/harness';
+import { validateHarnessChoice } from './harness-manifest';
 import type { DatabaseSync } from 'node:sqlite';
 import { boardPermissions, DEFAULT_COMPUTER, DEFAULT_MODEL, draftProfile, FOLDER_NAME, namedFolders, normalizeToolIds, runToolGrants, TASK_TOOL, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
 import type { Agent } from '../lib/types';
@@ -70,7 +72,7 @@ export function validateProfile(value: AgentProfile): AgentProfile {
   }
   const board = boardPermissions(value.board);
   if (![board.assignOthers, board.dispatch, board.manageProjects].every(permission => typeof permission === 'boolean')) throw new ProfileError('Invalid board permissions.');
-  return { id: validId(value.id), revision: value.revision, name: short(value.name, 'Name', 30, true).trim(), role: short(value.role, 'Role', 60, true).trim(), description: short(value.description, 'Description', 180), tone: value.tone, prompt: { enabled: value.prompt.enabled, text: short(value.prompt.text, 'System prompt', 12000) }, model: { ...validateModel(value.model.inherit ? { ...DEFAULT_MODEL, ...value.model, model: value.model.model || DEFAULT_MODEL.model } : value.model), inherit: value.model.inherit }, allowedTools: [...new Set([...normalizeToolIds(value.allowedTools, connectors.map(connector => connector.name)), TASK_TOOL])].filter(id => computer.desktop !== 'none' || id !== 'computer_use'), board, connectors, computer, ...(credentialGrants.length ? { credentialGrants } : {}) };
+  return { harness: validateHarnessChoice(value.harness), id: validId(value.id), revision: value.revision, name: short(value.name, 'Name', 30, true).trim(), role: short(value.role, 'Role', 60, true).trim(), description: short(value.description, 'Description', 180), tone: value.tone, prompt: { enabled: value.prompt.enabled, text: short(value.prompt.text, 'System prompt', 12000) }, model: { ...validateModel(value.model.inherit ? { ...DEFAULT_MODEL, ...value.model, model: value.model.model || DEFAULT_MODEL.model } : value.model), inherit: value.model.inherit }, allowedTools: [...new Set([...normalizeToolIds(value.allowedTools, connectors.map(connector => connector.name)), TASK_TOOL])].filter(id => computer.desktop !== 'none' || id !== 'computer_use'), board, connectors, computer, ...(credentialGrants.length ? { credentialGrants } : {}) };
 }
 export class Profiles {
   // Lasting folder access lives in the workspace folder list; grants arriving on a profile (an older
@@ -89,7 +91,7 @@ export class Profiles {
       CREATE TABLE IF NOT EXISTS run_profiles(run_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, revision INTEGER NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tool_catalogs(agent_id TEXT PRIMARY KEY, json TEXT NOT NULL);`);
   }
-  get(id: string): AgentProfile | null { const row = this.db.prepare('SELECT json FROM agent_profiles WHERE id=?').get(id) as { json: string } | undefined; if (!row) return null; const profile = JSON.parse(row.json); return { ...profile, allowedTools: [...new Set([...normalizeToolIds(profile.allowedTools || [], (profile.connectors || []).map((connector: { name: string }) => connector.name)), TASK_TOOL])], board: boardPermissions(profile.board), computer: profile.computer ? { ...profile.computer, folders: namedFolders(profile.computer.folders || []) } : { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } }; }
+  get(id: string): AgentProfile | null { const row = this.db.prepare('SELECT json FROM agent_profiles WHERE id=?').get(id) as { json: string } | undefined; if (!row) return null; const profile = JSON.parse(row.json); return { ...profile, harness: validateHarnessChoice(profile.harness), allowedTools: [...new Set([...normalizeToolIds(profile.allowedTools || [], (profile.connectors || []).map((connector: { name: string }) => connector.name)), TASK_TOOL])], board: boardPermissions(profile.board), computer: profile.computer ? { ...profile.computer, folders: namedFolders(profile.computer.folders || []) } : { ...DEFAULT_COMPUTER, resources: { ...DEFAULT_COMPUTER.resources } } }; }
   list(): AgentProfile[] { return (this.db.prepare('SELECT json FROM agent_profiles ORDER BY rowid').all() as Array<{ json: string }>).map(row => this.get(JSON.parse(row.json).id)!).filter(Boolean); }
   defaults(): { model: ModelChoice; revision: number } { const row = this.db.prepare('SELECT revision,json FROM workspace_settings WHERE id=1').get() as { revision: number; json: string } | undefined; return row ? { model: JSON.parse(row.json), revision: row.revision } : { model: DEFAULT_MODEL, revision: 0 }; }
   setDefaults(model: ModelChoice, revision: number) { const current = this.defaults(); if (revision !== current.revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409); this.db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(revision + 1, JSON.stringify(validateModel(model))); return this.defaults(); }
@@ -107,7 +109,7 @@ export class Profiles {
     if (profile.revision !== (current?.revision || 0)) throw new ProfileError('This profile was changed elsewhere. Reload the saved profile before saving again; your draft is still here.', 409);
     // A transfer validates the destination now but keeps the current assignment until verification.
     // This also preserves a blocked legacy profile if conversion to a remote sandbox fails.
-    if (deferComputer && current) profile.computer = current.computer;
+    if (deferComputer && current) { profile.computer = current.computer; profile.harness = current.harness; }
     profile.revision++;
     this.db.exec('BEGIN IMMEDIATE');
     try { this.absorb(profile); this.db.prepare('INSERT INTO agent_profiles VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(profile.id, profile.revision, JSON.stringify(profile)); this.db.prepare('INSERT INTO profile_revisions VALUES(?,?,?)').run(profile.id, profile.revision, JSON.stringify(profile)); this.db.prepare(`INSERT INTO agents(id,name,role,instructions,config_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role=excluded.role,instructions=excluded.instructions,updated_at=excluded.updated_at`).run(profile.id, profile.name, profile.role, profile.prompt.text, '{}', new Date().toISOString()); onSaved?.(profile); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; }
@@ -130,7 +132,7 @@ export class Profiles {
     return this.save(draft);
   }
   // A project run stores the computer it actually mounted, so recovery and cleanup see the same folders.
-  snapshot(runId: string, profile: AgentProfile, project?: { id: string; name: string } | null) { this.validateBrowserSharing(profile); const allowedTools = runToolGrants(profile);
-    const value = { ...profile, allowedTools, effectiveModel: this.effective(profile), workspaceRevision: this.defaults().revision, ...(project ? { projectId: project.id, projectName: project.name } : {}) }; this.db.prepare('INSERT INTO run_profiles VALUES(?,?,?,?)').run(runId, profile.id, profile.revision, JSON.stringify(value)); return value; }
-  runSnapshot(runId: string): (AgentProfile & { effectiveModel: ModelChoice; projectId?: string; projectName?: string }) | null { const row = this.db.prepare('SELECT json FROM run_profiles WHERE run_id=?').get(runId) as { json: string } | undefined; return row ? JSON.parse(row.json) : null; }
+  snapshot(runId: string, profile: AgentProfile, project?: { id: string; name: string } | null, harnessFeatures?: HarnessFeatures) { this.validateBrowserSharing(profile); const allowedTools = runToolGrants(profile);
+    const value = { ...profile, ...(harnessFeatures?{harnessFeatures}:{}), allowedTools, effectiveModel: this.effective(profile), workspaceRevision: this.defaults().revision, ...(project ? { projectId: project.id, projectName: project.name } : {}) }; this.db.prepare('INSERT INTO run_profiles VALUES(?,?,?,?)').run(runId, profile.id, profile.revision, JSON.stringify(value)); return value; }
+  runSnapshot(runId: string): (AgentProfile & { effectiveModel: ModelChoice; harnessFeatures?:HarnessFeatures; projectId?: string; projectName?: string }) | null { const row = this.db.prepare('SELECT json FROM run_profiles WHERE run_id=?').get(runId) as { json: string } | undefined; return row ? JSON.parse(row.json) : null; }
 }

@@ -21,6 +21,8 @@ function bundleDigest(bundle: Pick<TransferBundle, 'files' | 'browser'>) { retur
 function exportFiles(stateRoot: string, agentId: string, omitLegacy = false): TransferBundle {
   const agentRoot = safeWorkspacePath(stateRoot, `agents/${agentId}`), files: TransferBundle['files'] = []; let total = 0;
   const visit = (path: string) => {
+    // Native harness caches are regenerated; app conversation history travels separately.
+    if (relative(agentRoot,path).replaceAll('\\','/') === 'private/.harness') return;
     if (omitLegacy && relative(agentRoot, path).replaceAll('\\', '/') === 'private/.config/chromium') return;
     if (!existsSync(path)) return; const stat = lstatSync(path); if (stat.isSymbolicLink()) return;
     safeWorkspacePath(stateRoot, relative(stateRoot, path));

@@ -1,3 +1,9 @@
+import { createAgentRuntime, type AgentRuntime } from './agent-runtime';
+import { harnessCatalog, installationBytes, installCustomPackage, installOpenCode, resolveInstallation } from './harness-registry';
+import { harnessOf } from '../lib/harness';
+import { receiveRunnerFile, exportRunnerFiles, runnerManagedFileBytes } from './runner-files';
+import { installedFilePath, type UploadRecord } from './agent-files';
+import { testHarnessInstallation } from './agent-assets';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, unlinkSync } from 'node:fs';
 import { homedir, hostname, platform, arch } from 'node:os';
@@ -6,8 +12,8 @@ import { spawn } from 'node:child_process';
 import { HermesGateway, ensureContainerAsync, hermesApprovalDecision, stopAgentContainers, stopManagedContainers } from './hermes';
 import { closeContainerAdmissions } from './container-admission';
 import { readRunnerResponse } from './runner-response';
-import { HERMES_IMAGE, RUNTIME_LABEL, classifyContract } from './readiness';
-import { discoverModels, prepareProfile, runtimeProbe, runtimeToolCatalog, writeRunLease } from './profile-runtime';
+
+import { discoverModels, prepareProfile, runtimeProbe, probeAgentRuntime, runtimeToolCatalog, writeRunLease } from './profile-runtime';
 import type { AgentProfile, MachineInfo } from '../lib/agent-profile';
 import { runCwd, runToolGrants } from '../lib/agent-profile';
 import { exportAgentTransfer, importAgentTransfer } from './transfer-files';
@@ -22,8 +28,9 @@ import { admitRunnerTerminal, closeRunnerDuplex, executeRunnerDuplex, type Duple
 import { assertComputerOwnership, type ComputerOwnership } from './computer-ownership';
 import { ensureDesktopContainerAsync } from './computer-runtime';
 
+function validFileId(value:unknown){if(typeof value!=='string'||! /^[a-zA-Z0-9_-]{1,80}$/.test(value))throw new Error('Invalid file identity.');return value;}
 type Credentials = { coordinator: string; machineId: string; token: string; encryptionPublicKey: string; encryptionPrivateKey: string };
-type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'input' | 'agent-context' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'store-secret' | 'desktop' | 'duplex'; payload: any };
+type RunnerCommand = { id: string; agentId: string; kind: 'run' | 'stop' | 'steer' | 'approval' | 'input' | 'agent-context' | 'export-agent' | 'import-agent' | 'probe-tools' | 'probe-runtime' | 'probe-models' | 'store-secret' | 'desktop' | 'duplex' | 'file-delivery' | 'file-delete' | 'harness-install' | 'file-export'; payload: any };
 const args = new Map<string,string>();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith('--')) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith('--') ? '' : process.argv[++i] || '');
 const stateRoot = resolve(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join(homedir(), '.open-harness-runner'));
@@ -43,13 +50,13 @@ function output(command: string, args: string[], timeout: number) {
   });
 }
 async function probeCapabilities(): Promise<Capabilities> {
-  const container = process.env.OPEN_HARNESS_MOCK === '1' || classifyContract(await output('docker', ['image', 'inspect', '-f', `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE], 5_000)) === 'current';
+  const container = process.env.OPEN_HARNESS_MOCK === '1' || (await output('docker', ['version','--format','{{.Server.Version}}'], 5_000)).status === 0;
   return { container, direct: false, desktop: false, virtualDesktop: process.platform === 'linux' && container, detail: container ? 'Private agent workspaces are ready. Desktop control uses an isolated agent desktop.' : 'Install Docker and prepare the pinned runtime to enable sandboxed agents.' };
 }
 // Heartbeats send the last known value and refresh in the background; only pairing and
 // import-agent validation wait for a fresh probe.
 let known: Capabilities | null = null, probing: Promise<Capabilities> | null = null;
-function capabilities() { return probing ??= probeCapabilities().then(value => (known = {...value,protocol:1,features:['workspace-tools','run-leases','scoped-tool-review','async-admission','desktop-preview','computer-duplex','computer-ownership','execution-quiescence','continuous-computer','terminal-pty','browser-state-transfer','sealed-agent-transfer']})).finally(() => { probing = null; }); }
+function capabilities() { return probing ??= probeCapabilities().then(async value => (known = {...value,protocol:1,features:['workspace-tools','run-leases','scoped-tool-review','opencode-policy-v2','async-admission','desktop-preview','computer-duplex','computer-ownership','execution-quiescence','continuous-computer','terminal-pty','browser-state-transfer','sealed-agent-transfer','agent-harnesses','agent-files'],harnesses:await harnessCatalog(stateRoot),installedHarnessBytes:installationBytes(stateRoot)})).finally(() => { probing = null; }); }
 async function pair(): Promise<Credentials> {
   const coordinator = String(args.get('coordinator') || '').replace(/\/$/, ''), code = String(args.get('pairing-code') || '');
   if (!coordinator || !code) throw new Error('Use --coordinator URL and --pairing-code CODE, or keep an existing runner connection.');
@@ -72,9 +79,10 @@ async function request(path: string, init: RequestInit = {}, retry = false): Pro
   }
 }
 
-const active = new Map<string, { gateway: HermesGateway; sessionId: string | null; commandId: string; stopping: boolean; agentId: string }>();
+const active = new Map<string, { gateway: AgentRuntime; sessionId: string | null; commandId: string; stopping: boolean; agentId: string }>();
 const admittedCommands = new Set<string>();
 const agentOperations = new Map<string, Promise<void>>();
+let assetOperation:Promise<void>|undefined;
 const browserOperations = new Map<string, Promise<void>>();
 const blockedBrowserGroups = new Map<string, string>();
 const blockedAgents = new Set<string>();
@@ -113,7 +121,7 @@ async function openDispatchedSecrets(sealed?: Record<string, EncryptedRunnerSecr
 async function run(command: RunnerCommand) {
   const payload = command.payload as { runId: string; prompt: string; history?: Array<{ role: 'user' | 'assistant'; content: string }>; snapshot: AgentProfile & { effectiveModel: any }; encryptedSecrets?: Record<string, EncryptedRunnerSecret>; coordinationToken: string;reviewUnclassified?:boolean;ownership?:ComputerOwnership };
   const profile = payload.snapshot;
-  let gateway: HermesGateway | undefined, result: unknown, failure: unknown;
+  let gateway: AgentRuntime | undefined, result: unknown, failure: unknown;
   const admittedAt=performance.now(),phase=(name:string)=>emit(command,{type:'run.phase',payload:{phase:name,runnerElapsedMs:Math.round(performance.now()-admittedAt)}});
   try {
     assertSandboxedComputer(profile.computer);
@@ -129,10 +137,9 @@ async function run(command: RunnerCommand) {
     const coordinatorForContainer = credentials.coordinator.replace('://localhost', '://host.docker.internal').replace('://127.0.0.1', '://host.docker.internal');
     prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, { controlUrl: coordinatorForContainer,reviewUnclassified:payload.reviewUnclassified });
     await phase('profile-ready');
-    const container = await ensureContainerAsync(profile.id, stateRoot, profile.computer);
     assertOwnership();
     if (admittedRuns.get(payload.runId)?.cancelled || blockedAgents.has(profile.id)) throw new Error('Run stopped before its runtime started.');
-    gateway = new HermesGateway(container, runToolGrants(profile));
+    gateway = await createAgentRuntime(stateRoot, profile, runToolGrants(profile));
     const live = { gateway, sessionId: null as string | null, commandId: command.id, stopping: false, agentId: profile.id };
     active.set(payload.runId, live);
     gateway.on('event', event => void emit(command, event)); await gateway.start();await phase('gateway-ready');
@@ -159,6 +166,16 @@ async function control(command: RunnerCommand) {
   try {
     if (command.kind === 'agent-context') { await finish(command, agentContext(stateRoot, command.agentId, command.payload)); return; }
     if (command.kind === 'store-secret') { const name = String(command.payload.name || ''), value = await decryptRunnerSecret(credentials.encryptionPrivateKey, command.payload.encrypted as EncryptedRunnerSecret); runnerSecrets.set(name, value); await finish(command, { stored: true, name, backend: runnerSecrets.backend }); return; }
+    if (command.kind === 'file-export') { await stopAgentContainers(command.agentId,stateRoot); await finish(command,await exportRunnerFiles(stateRoot,command.agentId,credentials.machineId,command.payload.transferId,command.payload.publicKey,(path,init)=>request(path,init))); return; }
+    if (command.kind === 'file-delivery') { await finish(command,await receiveRunnerFile(stateRoot,credentials,String(command.payload.uploadId),command.agentId,path=>request(path))); return; }
+    if (command.kind === 'file-delete') { const file=command.payload.file as UploadRecord; if(file.agentId!==command.agentId)throw new Error('File belongs to another agent.'); const {rmSync}=await import('node:fs');rmSync(installedFilePath(stateRoot,file),{force:true});rmSync(join(stateRoot,'delivered-files',`${validFileId(file.id)}.json`),{force:true});await finish(command,{ok:true});return; }
+    if (command.kind === 'harness-install') {
+      let item;
+      if(command.payload.action==='test')item=resolveInstallation(stateRoot,{kind:command.payload.kind,version:command.payload.version});
+      else if(command.payload.kind==='opencode')item=await installOpenCode(stateRoot);
+      else {const path=join(stateRoot,'delivered-files',`${validFileId(command.payload.fileId)}.json`),file=JSON.parse(readFileSync(path,'utf8')) as UploadRecord;if(file.agentId!==command.agentId||file.destination!=='package')throw new Error('Package does not belong to this agent.');item=await installCustomPackage(stateRoot,installedFilePath(stateRoot,file),Math.min(command.payload.quotaBytes??Infinity,Number(process.env.OPEN_HARNESS_MACHINE_FILE_QUOTA||100*1024**3)-runnerManagedFileBytes(stateRoot)));}
+      await testHarnessInstallation(stateRoot,item,String(command.payload.jobId));await capabilities();await capabilities();await request('/v1/runner/heartbeat',{method:'POST',body:JSON.stringify({capabilities:known})});await finish(command,{installation:item});return;
+    }
     if (command.kind === 'export-agent') {
       const profile = command.payload.profile as AgentProfile | undefined, binding = transferBinding(command);
       if (!profile || profile.id !== command.agentId || profile.computer.machineId !== credentials.machineId || binding.sourceMachineId !== credentials.machineId || typeof command.payload.transferPublicKey !== 'string') throw new Error('An exact source computer profile and encrypted destination are required for transfer.');
@@ -197,10 +214,11 @@ async function control(command: RunnerCommand) {
         if (probeInput.action === 'computer') probeInput.desktop = profile.computer.desktop;
         if (probeInput.action === 'connection' && !probeInput.apiKey) probeInput.apiKey = command.payload.encryptedApiKey ? await decryptRunnerSecret(credentials.encryptionPrivateKey, command.payload.encryptedApiKey) : secretSource.environment()[profile.effectiveModel.credentialRef] || '';
         if (probeInput.action === 'mcp' && probeInput.env) for (const name of Object.keys(probeInput.env)) if (!probeInput.env[name] && secretSource.environment()[name]) probeInput.env[name] = secretSource.environment()[name];
-        const container = probeInput.action === 'computer' && profile.computer.desktop === 'virtual' ? await ensureDesktopContainerAsync(profile.id, stateRoot, profile.computer) : await ensureContainerAsync(profile.id, stateRoot, profile.computer);
-        await finish(command, await runtimeProbe(container, probeInput));
+        const container = probeInput.action === 'computer' && profile.computer.desktop === 'virtual' ? await ensureDesktopContainerAsync(profile.id, stateRoot, profile.computer) : (await createAgentRuntime(stateRoot,profile)).container;
+        await finish(command, harnessOf(profile).kind.startsWith('custom:')?await probeAgentRuntime(stateRoot,profile,probeInput):await runtimeProbe(container, probeInput));
         return;
       }
+      if (harnessOf(profile).kind !== 'hermes') { const {discoverTools}=await import('./profile-runtime'); await finish(command,command.kind==='probe-tools'?await discoverTools(profile.id,stateRoot,profile):{models:[]}); return; }
       const container = await ensureContainerAsync(profile.id, stateRoot, profile.computer);
       if (command.kind === 'probe-tools') { const input = await runtimeProbe(container, { action: 'catalog' }); await finish(command, { source: 'runtime', tools: runtimeToolCatalog(Array.isArray(input.tools) ? input.tools : [], profile) }); return; }
       const gateway = new HermesGateway(container, []);
@@ -256,6 +274,7 @@ async function desktopCommand(command: RunnerCommand) {
   if (action !== 'frame' && action !== 'claim' && !agentAction) { agentOperations.set(agentId, operation); if (group) browserOperations.set(group, operation); }
   try { await operation; }
   finally {
+    if(assetOperation===operation)assetOperation=undefined;
     if (agentOperations.get(agentId) === operation) agentOperations.delete(agentId);
     if (group && browserOperations.get(group) === operation) browserOperations.delete(group);
   }
@@ -289,10 +308,11 @@ async function executeCommand(command: RunnerCommand) {
     } catch (error) { await finish(command, undefined, error); }
     return;
   }
-  const usesProfile = command.kind === 'run' || command.kind.startsWith('probe-') || command.kind === 'import-agent' || command.kind === 'export-agent' || command.kind === 'agent-context';
+  const usesProfile = command.kind === 'run' || command.kind.startsWith('probe-') || command.kind === 'import-agent' || command.kind === 'export-agent' || command.kind === 'agent-context' || command.kind === 'file-delivery' || command.kind === 'file-delete' || command.kind === 'harness-install' || command.kind === 'file-export';
   if (!usesProfile) return control(command);
   const agentId = String(command.kind === 'run' ? command.payload.snapshot?.id : command.payload.profile?.id || command.agentId);
   const group = browserGroup(command.kind === 'run' ? command.payload.snapshot : command.payload.profile);
+  const usesAssets=['file-delivery','file-delete','file-export','harness-install'].includes(command.kind),previousAsset=usesAssets?assetOperation:undefined;
   const previous = agentOperations.get(agentId), sharedPrevious = group ? browserOperations.get(group) : undefined;
   if (blockedAgents.has(agentId) || browserBlocked(group) || ((previous || sharedPrevious) && command.kind !== 'run')) {
     return finish(command, undefined, new Error(blockedAgents.has(agentId) ? 'The previous agent runtime could not be stopped. Stop it before checking settings or starting more work.' : 'This agent is busy. Wait for its current task or settings check to finish before checking or moving its profile.'));
@@ -302,15 +322,17 @@ async function executeCommand(command: RunnerCommand) {
   // Claim ownership before yielding, including gateway startup. A run queued behind
   // a probe cannot share files/container with it, and probes never mutate live runs.
   const operation = (async () => {
-    await Promise.all([previous, sharedPrevious].filter(Boolean).map(item => item!.catch(() => {})));
+    await Promise.all([previous, sharedPrevious, previousAsset].filter(Boolean).map(item => item!.catch(() => {})));
     if (admission.cancelled) return finish(command, undefined, new Error('Run stopped before its runtime started.'));
     if (blockedAgents.has(agentId) || browserBlocked(group)) return finish(command, undefined, new Error('The previous agent runtime could not be stopped.'));
     return command.kind === 'run' ? run(command) : control(command);
   })();
+  if(usesAssets)assetOperation=operation;
   agentOperations.set(agentId, operation);
   if (group) browserOperations.set(group, operation);
   try { await operation; }
   finally {
+    if(assetOperation===operation)assetOperation=undefined;
     if (agentOperations.get(agentId) === operation) agentOperations.delete(agentId);
     if (group && browserOperations.get(group) === operation) browserOperations.delete(group);
     if (group && blockedAgents.has(agentId)) blockedBrowserGroups.set(group, agentId);

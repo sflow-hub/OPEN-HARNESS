@@ -9,7 +9,7 @@ import { stateSharing, stateSharingAsync, imageContractAsync } from './hermes';
 
 const releaseImageFile=join(import.meta.dirname,'release-image.json');
 const releaseImage=existsSync(releaseImageFile)?JSON.parse(readFileSync(releaseImageFile,'utf8')) as {ref:string;contract:number}:null;
-if(releaseImage&&(!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref)||releaseImage.contract!==12))throw new Error('The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.');
+if(releaseImage&&(!/^ghcr\.io\/[a-z0-9-]+\/open-harness-hermes@sha256:[a-f0-9]{64}$/.test(releaseImage.ref)||releaseImage.contract!==13))throw new Error('The installed runtime image manifest is invalid. Reinstall this signed Open Harness release.');
 // Docker Desktop can list the local tag yet fail to resolve its shorthand. Use
 // the same fully qualified reference for inspection, builds, and container starts.
 // Docker's rule: the first path part names a registry only when it is localhost or
@@ -28,7 +28,7 @@ const pullRuntime=Boolean(releaseImage)||process.env.OPEN_HARNESS_HERMES_PULL===
 // label. Anything else means "rebuild", including no label at all: contract 1 is the set
 // of images built before the label existed. Bump it whenever runtime/hermes/ changes, except
 // coordination.mjs: prepareProfile copies the checkout's copy into every run, so it needs no rebuild.
-export const RUNTIME_CONTRACT = 12;
+export const RUNTIME_CONTRACT = 13;
 export const RUNTIME_LABEL = 'dev.openharness.runtime';
 export type ImageContract = 'missing' | 'unknown' | 'stale' | 'current';
 type ImageInspection = { status: number | null; stdout: string; stderr?: string };

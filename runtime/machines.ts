@@ -56,7 +56,7 @@ export class Machines {
     for (const transfer of interrupted) db.prepare('UPDATE machines SET reserved_agent_id=NULL,updated_at=? WHERE id=? AND reserved_agent_id=?').run(now(), transfer.destination_machine_id, transfer.agent_id);
     db.prepare("UPDATE agent_transfers SET state='failed',detail='The coordinator restarted during transfer. The source assignment and data were preserved.',updated_at=? WHERE state IN ('queued','exporting','importing','verifying')").run(now());
     const stamp = now();
-    const mock = process.env.OPEN_HARNESS_MOCK === '1', container = mock || dockerStatus().available;
+    const mock = process.env.OPEN_HARNESS_MOCK === '1', container = mock || dockerStatus(false).available;
     const capabilities = { container, direct: false, desktop: false, virtualDesktop: process.platform === 'linux' && container, detail: container ? 'Private agent workspaces are ready. Desktop control uses an isolated agent desktop.' : 'Finish Docker setup from Workspace settings.' };
     db.prepare(`INSERT INTO machines(id,name,platform,arch,status,last_seen_at,local,reserved_agent_id,capabilities_json,credential_hash,revoked_at,created_at,updated_at)
       VALUES('local',?,?,?,?,?,1,NULL,?,NULL,NULL,?,?)

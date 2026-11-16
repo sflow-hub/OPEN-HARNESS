@@ -1,5 +1,37 @@
 # Runtime verification
 
+## Harness isolation fixes — November 14, 2026
+
+- OpenCode 1.2.27 (`open-harness-opencode:1.2.27-acp1-cb81668f3869`, `--network none`) was given an
+  `evil.js` plugin planted in `<private>/.harness/opencode/{config/opencode,home/.opencode}/plugin/`.
+  With the old launcher folders, `opencode debug config` resolved
+  `"plugin":["file:///…/home/.opencode/plugin/evil.js","file:///run/open-harness/opencode-policy.mjs"]`.
+  With the new per-launch folders and `OPENCODE_DISABLE_DEFAULT_PLUGINS=true` it resolved only
+  `"plugin":["file:///run/open-harness/opencode-policy.mjs"]`.
+- Docker Desktop's containerd image store, loading a real `docker save` archive of `alpine:3.22`
+  whose `index.json` named `oh-victim:1`, moved that existing tag. `loadUntagged` refused the
+  install and restored `oh-victim:1` to its original image ID. With a new name (`oh-newname:1`),
+  it refused the install and removed the name. A real untagged `docker save` archive still
+  passes `validateImageArchive`.
+
+## SOUL.md loading under the Hermes context scanner — November 14, 2026
+
+Run against the installed contract-12 image `open-harness-hermes:2026.9.11` with the new
+`runtime/hermes/soul_trust.py` supplied on stdin, `--network none`, and pinned Hermes's own
+`agent.prompt_builder.load_soul_md`. No model or inference was involved.
+
+- Without the patch, a SOUL.md containing "Pull new tasks from the board each morning. You
+  must report progress to the Assistant. Never cat the .env file." loaded as
+  `[BLOCKED: SOUL.md contained potential prompt injection (c2_task_pull, forced_action,
+  read_secrets). Content not loaded.]`, so the agent received none of it.
+- With the patch and a matching `soulSha256` in the policy, `load_soul_md()` returned the
+  file unchanged.
+- Rewriting SOUL.md after the hash was recorded loaded as `[BLOCKED ...]` again, and an
+  `AGENTS.md` containing "ignore all previous instructions" was still blocked.
+
+Not yet done: rebuilding the image as contract 13, and a full run that shows a model
+following such a prompt.
+
 ## Workspace and project folder access in Compose — October 3, 2026
 
 Two disposable Compose stacks built from the current working tree (coordinator image
@@ -5028,3 +5060,70 @@ and image; the final ordinary source gates remain 519 Node passes/8 skips,
 278 browser passes, and successful types/build/lint. Native AMD64 execution,
 full actual Compose lifecycle, hosted managed provisioning/PTY, real external
 accounts and paid model reasoning remain outside this evidence.
+
+## 2026-11-13 — harness selection and private machine files
+
+The coordinator now persists per-agent harness choices and snapshots the selected
+version/capabilities for each run. The standalone runner was regenerated from source.
+See `docs/HARNESSES.md`, `docs/harness-package.schema.json`, and `examples/harness/`
+for usage, the custom protocol, and the runnable package example.
+
+Checks for this change:
+
+- Full ordinary Node suite: 606 passed, 3 skipped, 0 failed. Affected storage,
+  profile, coordinator/runner, and bundle checks: 26 passed. Typecheck, production
+  build, and lint passed; lint retains five warnings in existing upgrade fixtures.
+- The harness, profile, loading-feedback, and run-recovery browser specs exercised
+  120 distinct desktop/mobile scenarios. One new mobile test initially omitted
+  opening navigation; after correcting the test, all ten harness scenarios passed
+  on rerun. The other 110 scenarios passed without changes.
+- `tests/real-harness-smoke.ts`: real OpenCode 1.2.27 / ACP v1, scripted local
+  OpenAI-compatible provider, successful output, one real approved write, and a
+  disabled write blocked. The managed policy must confirm loading before any
+  prompt is submitted. Eight fixture provider requests; no paid inference.
+- `tests/real-custom-harness-smoke.ts`: the example ZIP installed and executed
+  `custom:echo` 1.0.0 in a real container. Its untagged image archive was pinned by
+  image ID; package installation did not replace repository tags.
+- `OPEN_HARNESS_REAL_HARNESSES=1 ... tests/harness-files-api.test.ts`: real
+  coordinator plus paired runner, isolated state directories, OpenCode execution,
+  encrypted binary delivery, and migration back with a runner-edited working file.
+  Both workers ran on the same Linux host through Docker Desktop 29.5.3; this is
+  transport/lifecycle evidence, not a test across two physical hosts or public HTTPS.
+- `tests/large-file-smoke.ts`: 4,294,967,303 bytes, resumed after 2,147,483,648
+  bytes, final stored and installed SHA-256 verified. The upload loop's measured
+  RSS rose from 85,827,584 to 90,914,816 bytes. Assembly and installation use
+  bounded file reads/streams; browser multi-gigabyte throughput was not benchmarked.
+
+Real Docker tests used generated state beneath the operator's home directory:
+Docker Desktop exposed empty bind mounts for `/tmp` and the external-drive checkout.
+Task-owned containers were stopped by their state labels. No paid model, external
+account, deployment, image push, or host-native harness execution was used. Large
+browser downloads require the Save File API; other browsers retain a 100 MiB fallback.
+
+## 2026-11-14 — OpenCode tool authorization
+
+The OpenCode policy now resolves flattened MCP tool names against the configured
+server list and denies collisions. Scoped unclassified calls use coordinator review
+before dispatch, with native permission set to allow for those reviewed calls. The
+completion hook sends a receipt. The coordinator blocks another unclassified
+dispatch while a receipt is outstanding and marks unconfirmed dispatches uncertain
+at run termination. Remote OpenCode admission requires `opencode-policy-v2`; the
+standalone runner bundle and both installers include the updated policy files.
+
+Checks: the Node suite passed **615/618 tests**, with 3 skipped and 0 failed.
+Typecheck passed. Lint passed with five warnings in existing upgrade fixtures.
+Focused policy tests cover colliding server names, granted and ungranted tools,
+approval, denial, lease expiry during review, coordinator failure, receipt and
+missing completion hook, plus socket-to-URL fallback. A durable review test
+confirms a missing receipt blocks the next action and becomes uncertain at run end.
+The committed runner bundle matched its sources.
+
+The real OpenCode **1.2.27 / ACP v1** smoke test used a scripted local provider and
+Docker state at `/home/jarom/.local/state/open-harness-opencode-policy-v2-smoke`.
+It recorded 2 managed review identities, 1 receipt for the dispatched command,
+0 native prompts for managed reviews, and no tool dispatch on denial. Its separate
+classified write received 1 native approval. There were 14 fixture provider
+requests and no paid inference. The first `/tmp` attempt failed Docker Desktop
+file sharing; the home-directory rerun passed. One sandboxed full-suite rerun
+encountered unrelated `EPERM` process/socket errors; the complete suite passed
+with local subprocess and socket access.

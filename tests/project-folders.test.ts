@@ -94,7 +94,7 @@ test('chat uses the agent’s own folders unless a project is chosen, and handof
   const plain = await request<PersistentRun & { project_id: string | null }>('/v1/runs', 'POST', { agentId: 'atlas', prompt: 'hello' });
   assert.equal(plain.project_id, null); await waitRun(plain.id);
   assert.deepEqual((await mounted(plain.id)).folders.map(folder => folder.name), ['notes']);
-  assert.equal(soul('atlas'), `## Folders you can use\nThese host folders are mounted in your workspace. Nothing else on the host computer is available to you.\n- /workspace/folders/notes (read and write): your folder "notes"`);
+  assert.equal(soul('atlas'), `## Who you are\nYour name is atlas. Your role: Assistant.\n\n## Folders you can use\nThese host folders are mounted in your workspace. Nothing else on the host computer is available to you.\n- /workspace/folders/notes (read and write): your folder "notes"`);
 
   const chosen = await request<PersistentRun & { project_id: string }>('/v1/runs', 'POST', { agentId: 'atlas', prompt: 'MOCK_SLOW hello', projectId: project.id });
   assert.equal(chosen.project_id, project.id);

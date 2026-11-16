@@ -4,8 +4,10 @@ import os
 from hermes_cli.plugins import discover_plugins
 import open_harness_policy
 from cua_compat import install as install_cua_compat
+from soul_trust import install as install_soul_trust
 
 install_cua_compat()
+install_soul_trust()
 
 discover_plugins()
 if not open_harness_policy._REGISTERED:

@@ -1,9 +1,12 @@
+import { createAgentRuntime, type AgentRuntime } from './agent-runtime';
+import { resolveInstallation, harnessCatalog, harnessToolCatalog } from './harness-registry';
+import { harnessOf } from '../lib/harness';
 import { spawn } from 'node:child_process';
 import { copyFileSync, mkdirSync, chmodSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { API_TOOL, bindingSecretName, COMPUTER_TOOL, folderNotice, HANDOFF_TOOL, ROUTINE_TOOL, runCwd, TASK_TOOL, WORKSPACE_PERMISSIONS, runToolGrants, type AgentProfile, type ModelChoice, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
-import { dockerStatusCached, ensureContainerAsync, HermesGateway } from './hermes';
+import { API_TOOL, bindingSecretName, COMPUTER_TOOL, folderNotice, folderTarget, HANDOFF_TOOL, ROUTINE_TOOL, runCwd, TASK_TOOL, WORKSPACE_PERMISSIONS, runToolGrants, type AgentProfile, type ModelChoice, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
+import { dockerStatusCached, ensureContainerAsync } from './hermes';
 import { WORKSPACE_TOOL } from '../lib/product';
 import { profileMemory } from './profile-memory';
 import { assertSandboxedComputer } from './computer-validation';
@@ -56,15 +59,36 @@ export function runtimeProbe(container: string, input: object): Promise<Record<s
     child.stdin.end(JSON.stringify(request) + '\n');
   });
 }
+export async function probeAgentRuntime(root:string,profile:AgentProfile,input:object):Promise<Record<string,unknown>> {
+  if(harnessOf(profile).kind==='hermes')return runtimeProbe(await ensureContainerAsync(profile.id,root,profile.computer),input);
+  const runtime=await createAgentRuntime(root,profile,[]);
+  if(harnessOf(profile).kind==='opencode')return runtimeProbe(runtime.container,input);
+  try{await runtime.start();return await runtime.request('runtime.probe',input as Record<string,unknown>,25000);}finally{await runtime.stop();}
+}
 export function nativeRuntimeProbe(..._input: unknown[]): never { void _input; throw new Error(UNSANDBOXED_COMPUTER_MESSAGE); }
 export async function discoverTools(agentId: string, root: string, profile?: AgentProfile): Promise<ToolCatalog> {
   assertSandboxedComputer(profile?.computer);
-  if (process.env.OPEN_HARNESS_MOCK === '1') return { source: 'mock', tools: runtimeToolCatalog(mockTools, profile) };
+  if (process.env.OPEN_HARNESS_MOCK === '1' && (!profile || harnessOf(profile).kind === 'hermes')) return { source: 'mock', tools: runtimeToolCatalog(mockTools, profile) };
+  if (profile && harnessOf(profile).kind !== 'hermes') {
+    const info=(await harnessCatalog(root)).find(h=>h.kind===harnessOf(profile).kind);
+    if(!info?.available)return {source:'unavailable',tools:[],error:info?.reason||'Install this harness first.'};
+    const installation=resolveInstallation(root,harnessOf(profile));
+    const native = installation.kind==='opencode' ? mockTools.filter(t=>['terminal','read_file','write_file','search_files','web_search','web_extract'].includes(t.id)) : installation.manifest?.tools || [];
+    return {source:'runtime',tools:harnessToolCatalog([...native,...(info.features.mcp?COORDINATION_TOOLS:[])],info)};
+  }
   const status = await dockerStatusCached(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
   try { const result = await runtimeProbe(await ensureContainerAsync(agentId, root, profile?.computer), { action: 'catalog' }); return { source: 'runtime', tools: runtimeToolCatalog(result.tools as ToolInfo[], profile) }; }
   catch (error) { return { source: 'unavailable', tools: [], error: error instanceof Error ? error.message : 'Tool inventory is unavailable.' }; }
 }
 export type PrepareProfileOptions = { cwd?: string; coordinationCommand?: string; controlUrl?: string; controlSocket?: string; idle?: boolean;reviewUnclassified?:boolean };
+// Every harness receives the same text: SOUL.md for Hermes, instructions.md for the others.
+// Identity, folders and API grants are runtime context, so they are written even when the
+// operator's instructions are switched off; otherwise the agent cannot know its own name.
+export function agentInstructions(profile: AgentProfile & { projectName?: string }) {
+  const grants = profile.allowedTools.includes(API_TOOL) && profile.credentialGrants?.length ? '## API access\nUse api_request with these credential references and permitted origins/methods:\n' + profile.credentialGrants.map(grant => `${grant.credentialRef}: ${grant.allowedOrigins.join(', ')} (${grant.allowedMethods.join(', ')})`).join('\n') : '';
+  const identity = ['## Who you are', `Your name is ${profile.name}.${profile.role ? ` Your role: ${profile.role}.` : ''}`, profile.description.trim()].filter(Boolean).join('\n');
+  return [identity, profile.prompt.enabled ? profile.prompt.text : '', folderNotice(profile.computer, profile.projectName), grants].filter(Boolean).join('\n\n');
+}
 export function prepareProfile(root: string, profile: AgentProfile & { projectName?: string }, effective: ModelChoice, secrets: { environment(): Record<string,string> }, token: string, runId: string, options: PrepareProfileOptions = {}) {
   assertSandboxedComputer(profile.computer);
   const allowedTools = runToolGrants(profile);
@@ -143,13 +167,46 @@ export function prepareProfile(root: string, profile: AgentProfile & { projectNa
   atomic(join(home, 'config.yaml'), JSON.stringify(config, null, 2));
   // The folder notice is runtime context, not the operator's instructions, so it is written even
   // when those are switched off: otherwise an agent cannot know where its granted folders are.
-  atomic(join(home, 'SOUL.md'), [profile.prompt.enabled ? profile.prompt.text : '', folderNotice(profile.computer, profile.projectName), profile.allowedTools.includes(API_TOOL) && profile.credentialGrants?.length ? '## API access\nUse api_request with these credential references and permitted origins/methods:\n' + profile.credentialGrants.map(grant => `${grant.credentialRef}: ${grant.allowedOrigins.join(', ')} (${grant.allowedMethods.join(', ')})`).join('\n') : ''].filter(Boolean).join('\n\n'));
+  const soul = agentInstructions(profile);
+  atomic(join(home, 'SOUL.md'), soul);
   atomic(join(home, '.env'), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join('\n') + '\n');
-  atomic(join(managed, 'policy.json'), JSON.stringify({ runId, revision: profile.revision, modelProvider:effective.provider, allowedTools, coordination: coordinationEnv,reviewUnclassified:options.reviewUnclassified??(process.env.OPEN_HARNESS_SCOPED_AUTONOMY!=='0'||process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY==='1') }));
+  // Pinned Hermes replaces a whole SOUL.md with a "[BLOCKED ...]" notice when any line resembles
+  // prompt injection, and ordinary instructions ("pull new tasks", "check in with ...") match. The
+  // read-only policy carries the hash of the file written here, so the managed entry trusts exactly
+  // the operator's text and still scans a SOUL.md the agent rewrote and every project context file.
+  const reviewUnclassified = options.reviewUnclassified??(process.env.OPEN_HARNESS_SCOPED_AUTONOMY!=='0'||process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY==='1');
+  const mcpServers = Object.keys(mcp);
+  atomic(join(managed, 'policy.json'), JSON.stringify({ runId, revision: profile.revision, soulSha256: createHash('sha256').update(soul).digest('hex'), modelProvider:effective.provider, allowedTools, mcpServers, coordination: coordinationEnv, reviewUnclassified }));
+  if (harnessOf(profile).kind !== 'hermes') {
+    const runtime = resolveInstallation(root, harnessOf(profile));
+    copyFileSync(join(import.meta.dirname, 'runtime-launch.mjs'), join(managed, 'runtime-launch.mjs'));
+    copyFileSync(join(import.meta.dirname, 'opencode-policy.mjs'), join(managed, 'opencode-policy.mjs'));
+    copyFileSync(join(import.meta.dirname, 'opencode-policy-core.mjs'), join(managed, 'opencode-policy-core.mjs'));
+    atomic(join(managed,'instructions.md'), soul + '\n\nYour uploaded working files are in /workspace/uploads. Harness configuration is in /workspace/harness-config.');
+    const provider = effective.baseUrl ? 'open-harness' : effective.provider;
+    const permission: Record<string,string|Record<string,string>> = { '*':'deny', task:'deny', question:'deny' };
+    const toolMap: Record<string,string[]> = {terminal:['bash'],read_file:['read'],write_file:['edit','write','apply_patch'],search_files:['glob','grep','list'],web_search:['websearch'],web_extract:['webfetch']};
+    const collides = (name:string) => mcpServers.filter(server=>name.startsWith(server+'_')&&name.length>server.length+1).length;
+    const reviewed = (tool:string) => reviewUnclassified && !['read_file','write_file','patch','search_files','web_search','web_extract','session_search','skills_list','skill_view','clarify'].includes(tool) && !/^mcp__open_harness__(workspace|group_chat|task|delegate_named_agent|create_open_harness_routine|computer)$/.test(tool);
+    for (const tool of allowedTools) for (const name of toolMap[tool] || []) if(!collides(name))permission[name] = reviewed(tool)?'allow':'ask';
+    for (const tool of allowedTools.filter(id=>id.startsWith('mcp__'))) {
+      const name=tool.slice(5).replace('__','_');
+      if(collides(name)===1&&!Object.values(toolMap).some(names=>names.includes(name)))permission[name]=reviewed(tool)?'allow':'ask';
+    }
+    permission.external_directory = Object.fromEntries(['/workspace/uploads','/workspace/private','/workspace/shared','/workspace/harness-config',...profile.computer.folders.map(folder=>folderTarget(folder))].flatMap(path=>[[path,'allow'],[path+'/**','allow']]));
+    const opencodeMcp = Object.fromEntries(Object.entries(mcp).map(([name, value]) => {
+      const c = value as {command:string;args:string[];env:Record<string,string>};
+      return [name, {type:'local',command:[c.command,...c.args],environment:Object.fromEntries(Object.entries(c.env).map(([k,v])=>[k,v.startsWith('${')?env[v.slice(2,-1)]||'':v])),enabled:true}];
+    }));
+    const opencode = { model: provider + '/' + effective.model, autoupdate:false, share:'disabled', instructions:['/run/open-harness/instructions.md'], plugin:['file:///run/open-harness/opencode-policy.mjs'], permission, mcp:opencodeMcp,
+      ...(effective.baseUrl ? {provider:{'open-harness':{npm:'@ai-sdk/openai-compatible',name:'Open Harness endpoint',options:{baseURL:baseUrl,...(hasCredential?{apiKey:secretValues[effective.credentialRef]}:{})},models:{[effective.model]:{name:effective.model}}}}} : {}) };
+    atomic(join(managed,'runtime-context.json'), JSON.stringify({protocol:'open-harness-runtime/v1',model:{...effective,baseUrl},mcpServers:mcp,instructions:'/run/open-harness/instructions.md',workingFiles:'/workspace/uploads',configuration:harnessOf(profile).configRevision?'/workspace/harness-config/'+harnessOf(profile).configRevision:'/workspace/harness-config'}));
+    atomic(join(managed,'runtime-command.json'), JSON.stringify({command:runtime.command, configRevision:harnessOf(profile).configRevision, ...(runtime.protocol==='acp/v1'?{opencode}:{})}));
+  }
   writeRunLease(root,profile.id,options.idle?null:runId);
 }
 export function writeRunLease(root:string,agentId:string,runId:string|null){atomic(join(root,'agents',agentId,'managed','run-lease.json'),JSON.stringify({runId,active:Boolean(runId),expiresAt:Date.now()+86400000}));}
-export async function discoverModels(gateway: HermesGateway) {
+export async function discoverModels(gateway: AgentRuntime) {
   if (process.env.OPEN_HARNESS_MOCK === '1') return { models: [{ id: 'mock-atlas', provider: 'mock', label: 'Mock Atlas' }, { id: 'mock-scout', provider: 'mock', label: 'Mock Scout' }] };
   const result = await gateway.request('model.options', { refresh: true }, 30000);
   return normalizeModels(result);

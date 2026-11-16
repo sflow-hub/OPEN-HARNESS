@@ -17,7 +17,7 @@ import { assertContainerAdmission, withContainerAdmission } from './container-ad
 
 function authorizeWorkspaceMounts(stateRoot:string,computer:ComputerConfig){if(process.env.OPEN_HARNESS_REQUIRE_RELAY_IDENTITY!=='1'||computer.access!=='folders'||computer.machineId!=='local')return;const shared=resolve(stateRoot,'shared');if(computer.folders.some(folder=>{const source=resolve(folder.path);return source!==shared&&!source.startsWith(shared+sep);}))throw new Error('Authenticated shared workspaces may mount only their shared files. Upload project files to the workspace or use a private agent computer.');}
 function prepareExecutionDirectories(agentId: string, stateRoot: string) {
-  const names = ['shared', ...['profile', 'private', 'managed'].map(name => `agents/${agentId}/${name}`)];
+  const names = ['shared', ...['profile', 'private', 'managed', 'files/work', 'files/configuration'].map(name => `agents/${agentId}/${name}`)];
   // Docker would create missing bind sources as root before a human's first shell.
   const paths = names.map(name => safeWorkspacePath(stateRoot, name));
   for (const [index, path] of paths.entries()) { mkdirSync(path, { recursive: true, mode: 0o700 }); if (!lstatSync(safeWorkspacePath(stateRoot, names[index])).isDirectory()) throw new Error('The managed execution workspace must contain ordinary directories.'); }
@@ -117,7 +117,7 @@ export class HermesGateway extends EventEmitter {
   // Hermes reports its failures on stderr and then dies. Without a copy, the exit
   // code is all that survives, and "exited with code 1" tells an operator nothing.
   private stderrTail: string[] = [];
-  constructor(readonly container: string, readonly allowedTools: string[] | null = null, readonly native: NativeGatewayOptions | null = null) { super(); }
+  constructor(readonly container: string, readonly allowedTools: string[] | null = null, readonly native: NativeGatewayOptions | null = null, readonly runtimeCommand?: string[]) { super(); }
 
   async start() {
     if (this.native) throw new Error(UNSANDBOXED_COMPUTER_MESSAGE);
@@ -128,7 +128,7 @@ export class HermesGateway extends EventEmitter {
       return;
     }
     if (this.child && !this.child.killed) return;
-    const child = this.child = spawn("docker", ["exec", "-i", ...GATEWAY_ENV, this.container, "node", "/run/open-harness/gateway-entry.mjs"], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = this.child = spawn("docker", ["exec", "-i", ...GATEWAY_ENV, this.container, ...(this.runtimeCommand || ["node", "/run/open-harness/gateway-entry.mjs"])], { stdio: ["pipe", "pipe", "pipe"] });
     let exited = false;
     const failed = (error: Error) => {
       if (exited) return; exited = true;
@@ -284,6 +284,11 @@ async function execDocker(args: string[], timeout: number): Promise<{ code: numb
   const result=await commandAsync('docker',args,timeout);return {code:result.status,stdout:result.stdout,stderr:result.stderr||result.error?.message||''};
 }
 
+export async function dockerEngineStatus() {
+  if(process.env.OPEN_HARNESS_MOCK==='1')return {available:true,version:'mock',message:'Deterministic container engine is ready.'};
+  const result=await commandAsync('docker',['version','--format','{{.Server.Version}}'],5000);
+  return {available:result.status===0,version:result.status===0?result.stdout.trim():null,message:result.status===0?'Docker is ready.':'Docker is not responding. Start Docker Desktop or the Docker service.'};
+}
 async function probeDockerStatus(): Promise<ReturnType<typeof dockerStatus>> {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { available: true, version: "mock", message: "Deterministic Hermes runtime is ready." };
   const version = await execDocker(["version", "--format", "{{.Server.Version}}"], 5000);
@@ -362,7 +367,7 @@ export function stateSharing(stateRoot: string): SharingProbe {
 // pointing at the previous path, Docker recreated that path empty, and every run died with
 // "Hermes gateway exited during startup" and a log line blaming the image.
 export function containerSignature(selected: ComputerConfig, imageId: string, stateRoot = '') {
-  return createHash('sha256').update(JSON.stringify({ role: 'execution-v1', access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...(selected.browserSessionTeamId ? { browserSessionTeamId: selected.browserSessionTeamId, machineId: selected.machineId } : {}), imageId, stateRoot: stateRoot && resolve(stateRoot), ...(requiresFolderVerification(selected) ? { folderStartup: 'verified-inert-v1' } : {}) })).digest('hex').slice(0, 24);
+  return createHash('sha256').update(JSON.stringify({ role: 'execution-v2-files', access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...(selected.browserSessionTeamId ? { browserSessionTeamId: selected.browserSessionTeamId, machineId: selected.machineId } : {}), imageId, stateRoot: stateRoot && resolve(stateRoot), ...(requiresFolderVerification(selected) ? { folderStartup: 'verified-inert-v1' } : {}) })).digest('hex').slice(0, 24);
 }
 // Short-lived so a rebuild from Settings takes effect without restarting the coordinator.
 let imageIdCache: { id: string; at: number } | null = null;
@@ -515,6 +520,7 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
       '-e', 'OPEN_HARNESS_RUNTIME_ROLE=execution', '-e', 'DISPLAY=', '-e', 'DBUS_SESSION_BUS_ADDRESS=', '-e', 'OPEN_HARNESS_VIRTUAL_DESKTOP=0',
       "-v", `${stateRoot}/agents/${safe}/managed:/run/open-harness:ro`,
       "-v", `${profile}:/home/hermes/.hermes`, "-v", `${privateDir}:/workspace/private`, "-v", `${shared}:/workspace/shared`,
+      "-v", `${stateRoot}/agents/${safe}/files/work:/workspace/uploads`, "-v", `${stateRoot}/agents/${safe}/files/configuration:/workspace/harness-config:ro`,
       ...mounts,
       HERMES_IMAGE];
     if (pinned) return createVerifiedFolderContainer(args, pinned, false);
@@ -540,9 +546,9 @@ async function inspectContainerAsync(name: string) {
   return inspectedContainer(result.status, result.stdout, result.stderr, name);
 }
 const asyncSharing = new Map<string, { at: number; value: Promise<SharingProbe>; ok?: boolean }>();
-export function stateSharingAsync(stateRoot: string, fresh = false): Promise<SharingProbe> {
+export function stateSharingAsync(stateRoot: string, fresh = false, image = HERMES_IMAGE): Promise<SharingProbe> {
   if (process.env.OPEN_HARNESS_MOCK === '1') return Promise.resolve({ ok: true, detail: 'Deterministic test runtime shares state directly.' });
-  const root = resolve(stateRoot), cached = asyncSharing.get(root);
+  const root = resolve(stateRoot), cacheKey = root + ':' + image, cached = asyncSharing.get(cacheKey);
   // A failure says nothing permanent, so it expires sooner and the next check recovers without a restart.
   if (cached && !fresh && Date.now() - cached.at < (cached.ok === false ? 15_000 : 60_000)) return cached.value;
   const value = (async () => {
@@ -550,7 +556,7 @@ export function stateSharingAsync(stateRoot: string, fresh = false): Promise<Sha
       const dir = join(root, '.mount-probe'), token = randomUUID(); mkdirSync(dir, { recursive: true });
       const canary = `canary-${token}`; writeFileSync(join(dir, canary), token, { mode: 0o644 });
       try {
-        const result = await commandAsync('docker', ['run', '--rm', '--user', `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, '-v', `${dir}:/probe:ro`, HERMES_IMAGE, 'cat', `/probe/${canary}`], 60_000);
+        const result = await commandAsync('docker', ['run', '--rm', '--user', `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, '-v', `${dir}:/probe:ro`, image, 'cat', `/probe/${canary}`], 60_000);
         // Only a timeout or Docker's own exit code (125) means Docker did not answer. Docker Desktop
         // runs the probe with an unshared folder showing up empty, so cat exits 1: that, and a
         // "mounts denied" refusal, are the file-sharing problem the advice fixes.
@@ -558,21 +564,21 @@ export function stateSharingAsync(stateRoot: string, fresh = false): Promise<Sha
         return result.status === 0 && result.stdout.trim() === token ? { ok: true, detail: 'Docker can read the Open Harness data folder.' } : { ok: false, detail: `Docker cannot read the Open Harness data folder at ${root}, so agent containers would start with an empty profile and never receive your model credential. Add this folder to Docker Desktop → Settings → Resources → File sharing, or set OPEN_HARNESS_STATE_DIR to a folder inside your home directory.` };
       } finally { try { unlinkSync(join(dir, canary)); } catch {} }
     } catch { return { ok: false, detail: 'Open Harness could not verify Docker access to its data folder.' }; }
-  })(); const entry: { at: number; value: Promise<SharingProbe>; ok?: boolean } = { at: Date.now(), value }; asyncSharing.set(root, entry); void value.then(probe => { entry.ok = probe.ok; }); return value;
+  })(); const entry: { at: number; value: Promise<SharingProbe>; ok?: boolean } = { at: Date.now(), value }; asyncSharing.set(cacheKey, entry); void value.then(probe => { entry.ok = probe.ok; }); return value;
 }
 
-export function ensureContainerAsync(agentId: string, stateRoot: string, computer?: ComputerConfig, fresh = false) {
-  return withContainerAdmission(stateRoot, () => startExecutionContainer(agentId, stateRoot, computer, fresh));
+export function ensureContainerAsync(agentId: string, stateRoot: string, computer?: ComputerConfig, fresh = false, runtime?: { image: string; payload?: string }) {
+  return withContainerAdmission(stateRoot, () => startExecutionContainer(agentId, stateRoot, computer, fresh, runtime));
 }
-async function startExecutionContainer(agentId: string, stateRoot: string, computer?: ComputerConfig, fresh = false) {
+async function startExecutionContainer(agentId: string, stateRoot: string, computer?: ComputerConfig, fresh = false, runtime?: { image: string; payload?: string }) {
   assertSandboxedComputer(computer);
   if(computer)authorizeWorkspaceMounts(stateRoot,computer);
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
   // Refuse here, not just in readiness: a container from an image that predates a fix
   // would start and then die with "gateway exited during startup", which says nothing.
-  const contract = await imageContractAsync();
-  if (contract !== 'current') throw new Error(runtimeImageMessage(contract));
-  const sharing = await stateSharingAsync(stateRoot);
+  const image = runtime?.image || HERMES_IMAGE;
+  if (!runtime) { const contract = await imageContractAsync(); if (contract !== 'current') throw new Error(runtimeImageMessage(contract)); }
+  const sharing = await stateSharingAsync(stateRoot, false, image);
   if (!sharing.ok) throw new Error(sharing.detail);
   const { safe, names } = agentContainerNames(agentId, stateRoot);
   prepareExecutionDirectories(safe, stateRoot);
@@ -586,7 +592,7 @@ async function startExecutionContainer(agentId: string, stateRoot: string, compu
   });
   const pinned = requiresFolderVerification(selected) ? pinSelectedFolders(selected.folders) : null;
   try {
-    const signature = containerSignature(selected, await currentImageIdAsync(), stateRoot);
+    const signature = containerSignature(selected, runtime ? image + ':' + (runtime.payload || '') : await currentImageIdAsync(), stateRoot);
     let name = names[0], container = await inspectContainerAsync(name);
     if (!container || !ownsContainer(container, safe, stateRoot)) {
       const alternate = await inspectContainerAsync(names[1]);
@@ -610,8 +616,10 @@ async function startExecutionContainer(agentId: string, stateRoot: string, compu
       '-e', 'OPEN_HARNESS_RUNTIME_ROLE=execution', '-e', 'DISPLAY=', '-e', 'DBUS_SESSION_BUS_ADDRESS=', '-e', 'OPEN_HARNESS_VIRTUAL_DESKTOP=0',
       "-v", `${stateRoot}/agents/${safe}/managed:/run/open-harness:ro`,
       "-v", `${profile}:/home/hermes/.hermes`, "-v", `${privateDir}:/workspace/private`, "-v", `${shared}:/workspace/shared`,
+      "-v", `${stateRoot}/agents/${safe}/files/work:/workspace/uploads`, "-v", `${stateRoot}/agents/${safe}/files/configuration:/workspace/harness-config:ro`,
+      ...(runtime?.payload ? ["-v", `${runtime.payload}:/opt/open-harness/package:ro`] : []),
       ...mounts,
-      HERMES_IMAGE];
+      ...(runtime ? (pinned ? [image] : ["--entrypoint", "/bin/sleep", image, "infinity"]) : [image])];
     if (pinned) return await createVerifiedFolderContainerAsync(args, pinned, false);
     const run = await commandAsync("docker", ['run', '-d', '--restart', 'unless-stopped', ...args], 30_000);
     if (run.status !== 0) throw new Error((run.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ? 'Docker did not respond within 30s. Check the Docker daemon.' : run.stderr.trim() || "Could not create the private agent workspace. Open Readiness in Settings and finish setup.");

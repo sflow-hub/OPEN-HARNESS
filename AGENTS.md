@@ -2,12 +2,13 @@
 
 <!-- Kept byte-identical across the contributor instruction files below the title. -->
 
-MIT-licensed, local-first named-agent workspace. Each named agent runs as a persistent
-[Hermes](https://hermes-agent.nousresearch.com) worker behind a loopback-only Node.js
-control service. The browser is only a client — closing it must never cancel active work.
+MIT-licensed, local-first named-agent workspace. Each named agent runs in a managed container through
+Hermes (the default), OpenCode, or a compatible custom harness behind a loopback-only
+Node.js control service. The browser is only a client — closing it must never cancel active work.
 Pre-1.0 (`0.4.0-beta.1`). Repo: `sflow-hub/OPEN-HARNESS`. Not affiliated with xAI or Nous Research.
 
-The integration stays behind a gateway adapter and does not modify Hermes's reasoning loop.
+The integration stays behind gateway adapters and does not modify Hermes's reasoning loop.
+See `docs/HARNESSES.md` for harness packages, configuration, upload limits, and runner compatibility.
 Hermes is pinned to `v2026.9.11`, commit `939e45c91d751fadd94dcd1b873ac3cb44846213`
 (attribution in `runtime/hermes/NOTICE.md`).
 
@@ -59,6 +60,8 @@ Service lifecycle: `harness:install-service`, `harness:start`, `harness:stop`,
 | `runtime/service.ts` | Coordinator API, queue, schedules, approvals, runner dispatch, migration, handoffs (largest file in the repo) |
 | `runtime/runner.ts` | Outbound runner polling, execution, durable result delivery, remote controls |
 | `runtime/machines.ts` | Pairing, scoped credentials, machine health, commands, reservations, transfers |
+| `runtime/agent-runtime.ts` / `runtime/harness-registry.ts` | Harness adapters, pinned installations, and machine-specific catalogs |
+| `runtime/agent-assets.ts` / `runtime/agent-files.ts` | Resumable private file uploads, encrypted runner delivery, installation jobs, and asset migration |
 | `runtime/hermes.ts` | Hermes TUI gateway JSON-RPC adapter and container lifecycle |
 | `runtime/db.ts` | SQLite schema, runs, events, approvals, recovery state |
 | `runtime/profiles.ts` | Profile validation, revisions, inheritance, migration, run snapshots |
@@ -84,10 +87,19 @@ Service lifecycle: `harness:install-service`, `harness:start`, `harness:stop`,
 
 `SOUL.md` is Hermes's per-agent system prompt and is **generated, never authored in the repo**.
 `prepareProfile` in `runtime/profile-runtime.ts` writes it into each agent's profile home
-beside `config.yaml` and `.env`, using `profile.prompt.text` when `profile.prompt.enabled` is
-true and an empty file when it is false. When the run mounts host folders (the agent's own or
-its project's), a generated "Folders you can use" notice is appended, even with instructions
-disabled. `runtime/runner.mjs` contains the bundled copy of the same logic.
+beside `config.yaml` and `.env`. `agentInstructions` composes it: a "Who you are" block
+(name, role, description), then `profile.prompt.text` when `profile.prompt.enabled` is true,
+then a "Folders you can use" notice when the run mounts host folders, then any API grants.
+Identity, folders and grants are written even with instructions disabled. OpenCode and custom
+harnesses receive the same text as `managed/instructions.md`. `runtime/runner.mjs` contains
+the bundled copy of the same logic.
+
+Pinned Hermes scans SOUL.md for prompt injection and replaces the whole file with a
+`[BLOCKED ...]` notice on any match, and ordinary instructions match ("pull new tasks",
+"check in with ..."). `prepareProfile` therefore writes the file's sha256 to the read-only
+`policy.json` as `soulSha256`, and `runtime/hermes/soul_trust.py` (installed by
+`managed_entry.py`) skips the scan only for a SOUL.md whose bytes match it. Project
+`AGENTS.md`/`CLAUDE.md` files and a SOUL.md the agent rewrote are still scanned.
 
 Consequences:
 
@@ -95,12 +107,13 @@ Consequences:
   and it reads as a contradiction of the runtime contract.
 - To change an agent's instructions, edit the profile: **Agent settings → System prompt**, or
   the `prompt.text` field on the stored profile. The cap is 12,000 characters, enforced in
-  `validateProfile`. Disabling instructions preserves the text but writes a `SOUL.md` that is
-  empty apart from any folder notice.
+  `validateProfile`. Disabling instructions preserves the text but writes a `SOUL.md` that
+  holds only the identity, folder and API notices.
 - Every profile save creates a revision. Active work keeps its original revision; queued work
   snapshots the latest profile when it starts.
-- `tests/agent-profiles.test.ts` and `tests/project-folders.test.ts` assert the generated file's
-  contents, so changes to this plumbing show up there first.
+- `tests/agent-instructions.test.ts`, `tests/agent-profiles.test.ts` and
+  `tests/project-folders.test.ts` assert the generated file's contents, so changes to this
+  plumbing show up there first. `tests/soul-trust-test.py` covers the Hermes trust patch.
 
 ## Generated — do not hand-edit
 

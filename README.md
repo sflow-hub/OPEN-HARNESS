@@ -287,3 +287,5 @@ and generic OAuth2 connections. Model settings include searchable dropdowns and
 inline credential creation. Agent settings can map fields to MCP servers or grant
 selected API origins to the authenticated API tool. See [Credentials and API access](docs/CREDENTIALS.md)
 for OAuth setup, encrypted storage, and encryption-key backup requirements.
+
+Per-agent harness selection and private machine uploads are described in [Harnesses and files](docs/HARNESSES.md).

@@ -23,6 +23,8 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 ### Fixed
 
+- Close two harness isolation gaps. Image archives must use standard POSIX tar headers with valid checksums, since Docker reads other formats' names differently and a hidden second manifest could retag another agent's runtime; any tag a load applies anyway is undone and the install fails. OpenCode no longer loads plugins or downloaded tools from the agent's writable private folder: its config, data, cache, and home are created fresh for each launch. (claude)
+- Make agent instructions reliably reach the model. Pinned Hermes discarded a whole SOUL.md, folder and API notices included, when any line resembled prompt injection, which ordinary phrases such as "pull new tasks from the board" do. The managed entry now trusts only the SOUL.md whose hash the coordinator recorded in the read-only policy, and keeps scanning project context files. Every harness also receives the agent's name, role and description, and OpenCode and custom harnesses now receive API grants. Requires runtime contract 13. (claude)
 - Reuse a matching prepared private runtime between chat turns, expire unused preparation, and coordinate cleanup with active tasks, settings probes, backups and shutdown. Keep the newest reply visible on short phone viewports. (codex)
 
 - Count agents inheriting the workspace credential in its usage, and require explicit deletion when an active task still uses a credential after its agent switches away. (codex)
