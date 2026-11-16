@@ -1,5 +1,31 @@
 # Runtime verification
 
+## Local dashboard improvements — November 16, 2026
+
+Feature revision `999ff91d67ec885bc0feea2c7984441ee490dd0d` was built from
+`07d1b1d`. In a local Chromium run the owner asked Atlas to change the Assistant
+heading to “How can I help?” Claude Code (`claude-sonnet-5-5`) performed the
+source edit through a disposable test gateway. It changed one file,
+`components/assistant-workspace.tsx`. The coordinator froze the diff and built
+70 dashboard source files. Chromium showed the new heading inside the offline
+preview, on the applied dashboard, and after reopening. After Undo, a fresh
+browser and restarted coordinator showed the original heading.
+
+The desktop and mobile browser regression uses deterministic editing in the
+test gateway and the production compiler, source store, preview and activation
+paths. It verifies a downloaded patch with Git and checks an unrelated binary
+workspace file before and after activation and undo. On macOS with Node 22.23.5
+the complete Node suite passed 661 tests with 41 skips. The complete browser
+suite passed 369 tests with seven skips. GitHub's Linux, Mac, Windows and browser
+checks passed in [Verify](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43832027691).
+
+The separate [real-container workflow](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43832027552)
+runs the Linux Compose test through the pinned Hermes file tools and a scripted
+model provider. The first attempt stopped during the upstream Ubuntu snapshot
+download with HTTP 500. On retry, setup reached its 45-minute Docker image
+build limit. Both attempts stopped before any Compose assertion ran. The
+real-model browser trial above used Claude Code through its test gateway.
+
 ## Branch integration review — November 13, 2026
 
 Candidate `89a4ae6b3fff4640b117247cd971379d560ff863` includes all reviewed

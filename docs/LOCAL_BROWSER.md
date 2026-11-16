@@ -45,6 +45,7 @@ running, double-click **Start Open Harness.command** on Mac or **Start Open Harn
 on Windows. On Linux, open a terminal in the folder and run `bash launchers/start.sh`.
 The first launch builds the app from that folder. Leave the launcher open until it opens
 your browser. The setup guide there prepares the agent runtime and connects your model.
+Allow tens of minutes for the first runtime build.
 
 ### Prebuilt browser release
 
@@ -83,8 +84,8 @@ repository, including the coordinator and agent runtime, use the source ZIP unde
    `bash launchers/start.sh` — the same launcher, without the double-click wrapper.
 3. A Terminal window shows progress. The launcher finds Docker (on your `PATH`, or inside
    `Docker.app` if the command-line tools have not been put on `PATH` yet), starts Docker
-   Desktop if it is installed but not running, waits for it (up to five minutes), downloads the
-   pinned images on first use, starts the stack, waits for the app to answer, and then opens
+   Desktop if needed, and waits up to five minutes for Docker. It builds the dashboard from
+   a source ZIP or downloads pinned images for a prebuilt release, starts the stack, waits for the app to answer, and then opens
    your default browser on a freshly paired window. The Terminal window waits for a key press when it is done, so that a
    message stays readable if something went wrong.
 
@@ -99,7 +100,8 @@ repository, including the coordinator and agent runtime, use the source ZIP unde
 3. The console shows the same steps as on the Mac: find Docker (on `PATH`, or in the per-user
    `%LOCALAPPDATA%\Programs\DockerDesktop` or all-users `C:\Program Files\Docker\Docker`
    install), start Docker Desktop if needed, wait for it, check that it runs Linux containers,
-   download the images once, start the stack, wait for health, open a paired browser window.
+   build the dashboard from the source ZIP or download the release images, start the stack,
+   wait for it to answer, and open a paired browser window.
 
 ## The pairing link
 

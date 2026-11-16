@@ -32,7 +32,7 @@ See [Working with persistent teammates](docs/TEAMMATE_WORKFLOWS.md) for the comp
 
 1. Install Docker with Linux containers and Compose. On Mac or Windows, open Docker Desktop once to finish setup. Allow about 20 GB for the runtime and data.
 2. Download **Code → Download ZIP** from this repository, extract the whole folder, and open **Start Open Harness.command** on Mac or **Start Open Harness.cmd** on Windows. On Linux run `bash launchers/start.sh` in the extracted folder.
-3. The launcher builds the source and opens a paired browser window. Follow setup to connect a model and verify that your first agent can write a file. First launch can take several minutes. Hosted model calls use your provider's account.
+3. Leave the launcher open while it builds the dashboard and opens your browser. Follow setup to prepare the agent runtime, connect a model and verify that your first agent can write a file. Allow tens of minutes for the first runtime build. Hosted model calls use your provider's account.
 
 The launcher can also open a packaged release with pinned images. For operating-system prompts and startup recovery, see [Local browser installation](docs/LOCAL_BROWSER.md).
 
