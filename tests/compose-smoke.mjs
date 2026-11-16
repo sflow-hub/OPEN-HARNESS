@@ -409,8 +409,9 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
   assert.equal(await nestedRunning(), false);
   console.log('Asking real Hermes to edit a private dashboard copy, then reviewing, applying and undoing it.');
   const { profile: editor } = await api(`/v1/agents/${editorId}/profile`);
+  const editTools = ['read_file', 'patch'];
   const editorSaved = await api(`/v1/agents/${editorId}/profile`, 'PUT', { ...editor, model: saved.profile.model,
-    allowedTools: ['read_file', 'patch', 'clarify'], computer: { ...editor.computer, access: 'folders', folders: [folders[0]], desktop: 'none' } });
+    allowedTools: [...editTools, 'clarify'], computer: { ...editor.computer, access: 'folders', folders: [folders[0]], desktop: 'none' } });
   const previousRevision = (await api('/v1/bootstrap')).localDashboardRevision;
   assert.equal(previousRevision, null);
   const requestId = randomUUID(), marker = `LOCAL-DASHBOARD-${requestId}`;
@@ -418,7 +419,7 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
     request: `COMPOSE_LOCAL_DASHBOARD: Change the Assistant heading from “What would you like done?” to “${marker}”. Keep the rest of my dashboard as it is.` });
   assert.equal(improvement.id, requestId);
   const editRun = await waitRun({ id: improvement.runId });
-  for (const name of ['read_file', 'patch']) assert.ok(editRun.events.some(event => event.type === 'tool.complete' && event.payload.name === name), name);
+  for (const name of editTools) assert.ok(editRun.events.some(event => event.type === 'tool.complete' && event.payload.name === name), name);
   const deadline = Date.now() + timing.runMs;
   let reviewed;
   do {
@@ -454,7 +455,7 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
   assert.ok(requests.every(request => request.fixtureCredential !== 'invalid'), 'Every real provider request must resolve the saved credential.');
   const editRequests = requests.filter(body => body.tools?.length && body.messages?.some(message => message.role === 'user' && String(message.content).includes(marker)));
   assert.ok(editRequests.length >= 3, 'Hermes must request the model before and after each tool call.');
-  for (const body of editRequests) assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), ['read_file', 'write_file']);
+  for (const body of editRequests) assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), editTools.toSorted(), 'Only the granted dashboard editing tools may be visible.');
   const mainRequests = requests.filter(body => body.tools?.some(tool => tool.function?.name === 'write_file') && body.messages?.some(message => String(message.content).includes('COMPOSE_SMOKE')));
   assert.ok(mainRequests.length >= 5);
   for (const body of mainRequests) assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), ['clarify', 'mcp__open_harness__computer', 'mcp__open_harness__task', 'write_file'], 'Only the four explicitly granted tools may be model-visible.');

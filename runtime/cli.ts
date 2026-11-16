@@ -121,8 +121,8 @@ if (command === "help") {
 } else if (command === "setup") {
   const docker = dockerStatus(false); if (!docker.available) { console.error(docker.message); process.exitCode = 1; }
   else {
-    try { await prepareRuntime({ showProgress: true }); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
-    if (!process.exitCode) {
+    try {
+      await prepareRuntime({ showProgress: true });
       // The sharing probe runs a container from the image, so it has to come after the build.
       const choice = chooseStateDir({
         explicit: process.env.OPEN_HARNESS_STATE_DIR, projectDefault, homeDefault: join(homedir(), ".open-harness", basename(project)),
@@ -138,6 +138,12 @@ if (command === "help") {
         console.log(`Docker cannot read ${projectDefault}, so agents started there would never receive their profile or model credential.`);
         console.log(`Recorded as OPEN_HARNESS_STATE_DIR in .env; edit that line to choose another folder.`);
       }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      console.error(code === 'ENOSPC' || code === 'EDQUOT'
+        ? 'Open Harness ran out of disk space while preparing its local files. Free space on the drive that stores your workspace and Docker images, then run setup again.'
+        : error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
     }
   }
 } else if (command === "install-service") {

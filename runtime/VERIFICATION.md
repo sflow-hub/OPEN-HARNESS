@@ -26,6 +26,39 @@ download with HTTP 500. On retry, setup reached its 45-minute Docker image
 build limit. Both attempts stopped before any Compose assertion ran. The
 real-model browser trial above used Claude Code through its test gateway.
 
+### Native Linux Docker and a live model
+
+On November 16, the Ubuntu ARM64 VM built the pinned production Hermes revision
+`939e45c91d751fadd94dcd1b873ac3cb44846213` from the repaired Dockerfile at
+`19f0b27`. Docker reported runtime contract 11. A fresh Chromium session chose
+**Set up later**, opened **Improve my Open Harness**, and asked a named local
+editor to change the Assistant heading to “My local workspace 960b8b98”.
+Claude Sonnet 5.5 provided model responses through a temporary adapter. Hermes
+executed `search_files` and `patch` inside the VM's real Docker worker.
+
+Run `4e1d708d-2c39-4638-8ea7-7dc5b4e0b1ff` changed one line in
+`components/assistant-workspace.tsx`. The coordinator built 70 source files.
+Chromium verified the actual heading in the offline preview, on the live
+dashboard, and in a reopened tab. After clicking Undo, a new tab showed the
+original heading. The test checked the pre-existing binary file byte for byte,
+the editor's saved profile, and the restored dashboard revision. This run
+included the fix for first-run setup reopening during recovery.
+
+The VM started with about 19 GiB free and briefly exhausted it during image
+unpacking. Docker completed the image export and the final readiness check
+confirmed the coordinator, runtime and data mount. The source install guide
+now reserves room for temporary layers. The redacted browser receipt and four
+screenshots are in `real-browser` under the VM evidence directory
+`/home/developer/open-harness-evidence/improve-20261116-XD0dfl`.
+
+The hosted AMD64 [real-container run](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43906049359)
+built the same pinned source, ran the real Hermes gates and reached Compose.
+The new dashboard checks passed through apply, undo, and preservation of
+history and file grants. A subsequent test assertion still expected the old
+write tool. The corrected fixture checks that the model sees exactly the
+configured read and patch tools. The [feature PR](https://github.com/sflow-hub/OPEN-HARNESS/pull/3)
+tracks the full hosted rerun.
+
 ## Branch integration review — November 13, 2026
 
 Candidate `89a4ae6b3fff4640b117247cd971379d560ff863` includes all reviewed

@@ -24,3 +24,43 @@ test('ready runtime clears obsolete setup failures from onboarding and the works
   await setup.getByRole('button', { name: 'Set up later' }).click();
   await expect(page.getByText(failure, { exact: false })).toHaveCount(0, { timeout: 10000 });
 });
+
+test('Set up later survives recovery, reconnect and other tabs while setup remains available', async ({ page, context, isMobile }) => {
+  const url = '/?controlPort=' + (process.env.OPEN_HARNESS_TEST_PORT || 4317);
+  const welcome = (tab: typeof page) => tab.getByRole('dialog', { name: 'Welcome to Open Harness' });
+  await page.goto(url);
+  await expect(welcome(page)).toBeVisible();
+  const second = await context.newPage();
+  await second.goto(url);
+  await expect(welcome(second)).toBeVisible();
+  await welcome(page).getByRole('button', { name: 'Set up later' }).click();
+  await expect(welcome(second)).toBeHidden();
+  expect(await second.evaluate(() => localStorage.getItem('open-harness.onboarding.v1'))).toBe('deferred');
+
+  // Returning from an applied edition opens the original dashboard. Its first
+  // coordinator connection can fail, so exercise both automatic setup paths.
+  await page.route(/\/v1\/bootstrap$/, route => route.abort('failed'), { times: 1 });
+  await page.goto(url + '&original=1');
+  await expect(page.locator('.offline-banner')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Improve my Open Harness' })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.offline-banner')).toBeHidden();
+  await expect(welcome(page)).toBeHidden();
+  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await page.getByRole('button', { name: 'Run setup again' }).click();
+  await expect(welcome(page)).toBeVisible();
+  await welcome(page).getByRole('button', { name: 'Set up later' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('open-harness.onboarding.v1'))).toBe('deferred');
+  await second.close();
+});
+
+test('closing manually reopened setup preserves an existing completion', async ({ page, isMobile }) => {
+  await page.addInitScript(() => localStorage.setItem('open-harness.onboarding.v1', 'done'));
+  await page.goto('/?controlPort=' + (process.env.OPEN_HARNESS_TEST_PORT || 4317));
+  await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
+  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await page.getByRole('button', { name: 'Run setup again' }).click();
+  await page.getByRole('button', { name: 'Set up later' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('open-harness.onboarding.v1'))).toBe('done');
+});

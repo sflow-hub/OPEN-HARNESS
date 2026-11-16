@@ -30,7 +30,7 @@ See [Working with persistent teammates](docs/TEAMMATE_WORKFLOWS.md) for the comp
 
 ### Start on your computer
 
-1. Install Docker with Linux containers and Compose. On Mac or Windows, open Docker Desktop once to finish setup. Allow about 20 GB for the runtime and data.
+1. Install Docker with Linux containers and Compose. On Mac or Windows, open Docker Desktop once to finish setup. Allow about 40 GB of free space for the first source build, including temporary Docker layers.
 2. Download **Code → Download ZIP** from this repository, extract the whole folder, and open **Start Open Harness.command** on Mac or **Start Open Harness.cmd** on Windows. On Linux run `bash launchers/start.sh` in the extracted folder.
 3. Leave the launcher open while it builds the dashboard and opens your browser. Follow setup to prepare the agent runtime, connect a model and verify that your first agent can write a file. Allow tens of minutes for the first runtime build. Hosted model calls use your provider's account.
 
@@ -54,7 +54,7 @@ npm run dev
 
 Open `http://localhost:3000`. `npm run dev` starts Docker if it is installed, the persistent control service, and the dashboard. Closing the browser does not stop active work; stopping the control service does.
 
-`npm run harness:setup` builds the pinned agent runtime image on first use, which takes a while and needs several gigabytes of disk. Set `OPEN_HARNESS_HERMES_IMAGE` to use an image you already have instead.
+`npm run harness:setup` builds the pinned agent runtime image. Allow tens of minutes and about 40 GB of free Docker storage for the first build. If you already have a matching image, export `OPEN_HARNESS_HERMES_IMAGE` with its local tag and run `npm run harness:doctor` to check it before starting the coordinator.
 
 ### Self-host with Docker Compose
 

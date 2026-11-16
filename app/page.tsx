@@ -106,6 +106,7 @@ function describe(value: unknown, fallback: string): string {
 }
 
 const ONBOARDING_KEY = "open-harness.onboarding.v1";
+const suppressFirstRun = (choice: string | null) => choice === 'done' || choice === 'deferred';
 const ADVANCED_KEY = "open-harness.advanced.v1";
 const MIGRATED_KEY = "open-harness.migrated.v1";
 // Kept apart from SETTINGS_KEY on purpose: the onboarding save rewrites that whole
@@ -194,7 +195,7 @@ export default function Home() {
   // the coordinator's answer was still in flight flagged an untouched form as edited.
   const [settingsBaseline, setSettingsBaseline] = useState(JSON.stringify(defaultSettings));
   const [confirmCloseSettings, setConfirmCloseSettings] = useState(false);
-  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingMode, setOnboardingMode] = useState<'automatic' | 'manual' | null>(null);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [editingAgentTab, setEditingAgentTab] = useState<'profile' | 'computer'>('profile');
   const [agentBusy, setAgentBusy] = useState(false);
@@ -516,6 +517,16 @@ export default function Home() {
     let cancelled = false;
     let retryTimer = 0;
     let connectionEpoch = 0;
+    function offerFirstRun() {
+      if (!controlRef.current.managed && !suppressFirstRun(localStorage.getItem(ONBOARDING_KEY))) {
+        setOnboardingMode(current => current ?? 'automatic');
+      }
+    }
+    function syncFirstRun(event: StorageEvent) {
+      if (event.key === ONBOARDING_KEY && suppressFirstRun(event.newValue)) {
+        setOnboardingMode(current => current === 'automatic' ? null : current);
+      }
+    }
     const connect = async () => {
       const client = controlRef.current;
       const epoch = ++connectionEpoch;
@@ -591,7 +602,7 @@ export default function Home() {
             if (!form.open || JSON.stringify(form.settings) === form.baseline) setSettings(saved);
             setSettingsBaseline(JSON.stringify(saved));
             setWorkspaceModelRevision(defaults.revision);
-            if (!client.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
+            offerFirstRun();
           }),
           client.request<{ credentials: CredentialRecord[] }>("/v1/credentials")
             .then(saved => { if (isCurrent()) setCredentials(saved.credentials); }).catch(() => {}),
@@ -639,15 +650,17 @@ export default function Home() {
         setOffline(error instanceof Error ? error.message : "The local agent runtime is unavailable.");
         // First run needs the guide most when nothing is reachable yet, and the gate for it
         // used to sit inside the success path.
-        if (!client.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
+        offerFirstRun();
         // Back off, but keep trying: starting the coordinator should be enough to recover
         // without reloading the page.
         const wait = Math.min(30_000, 2_000 * 2 ** Math.min(connectAttempt.current++, 4));
         retryTimer = window.setTimeout(() => { if (!cancelled) void connect(); }, wait);
       }
     };
+    if (!controlRef.current.managed) window.addEventListener('storage', syncFirstRun);
     void connect();
     return () => {
+      window.removeEventListener('storage', syncFirstRun);
       cancelled = true;
       if (retryTimer) window.clearTimeout(retryTimer);
     };
@@ -820,7 +833,7 @@ export default function Home() {
   useEffect(trackKeyboardInset, []);
   useMobileBackGuard(mobileOpen, () => setMobileOpen(false));
   useMobileBackGuard(settingsOpen, () => { if (confirmCloseSettings) setConfirmCloseSettings(false); else requestCloseSettings(); });
-  useMobileBackGuard(onboardingOpen, () => setOnboardingOpen(false));
+  useMobileBackGuard(Boolean(onboardingMode), () => setOnboardingMode(null));
   useMobileBackGuard(Boolean(selectedFile), () => setSelectedFile(null));
 
   useEffect(() => {
@@ -2726,7 +2739,7 @@ export default function Home() {
               </button>
               <button
                 className="subtle-button"
-                onClick={() => { closeSettings(); setOnboardingOpen(true); }}
+                onClick={() => { closeSettings(); setOnboardingMode('manual'); }}
               >
                 <Sparkles size={14} /> Run setup again
               </button>
@@ -2799,7 +2812,7 @@ export default function Home() {
         </div>
       )}
       {credentialsOpen && <CredentialManager client={controlRef.current} provider={settings.provider} onClose={() => setCredentialsOpen(false)} onChanged={setCredentials} />}
-      {onboardingOpen && runtime && <Onboarding client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: settings.credentialRef || "" }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
+      {onboardingMode && runtime && <Onboarding client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: settings.credentialRef || "" }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
         const chosen = { provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl, credentialRef: model.credentialRef };
         setSettings(chosen);
         setSettingsBaseline(JSON.stringify(chosen));
@@ -2809,16 +2822,17 @@ export default function Home() {
       }} onComputerSettings={() => {
         setAdvancedFeatures(true);
         localStorage.setItem(ADVANCED_KEY, 'on');
-        setOnboardingOpen(false);
+        setOnboardingMode(null);
         refreshRuntime();
         setEditingAgentTab('computer');
         setEditingAgent(agent);
       }} onDismiss={() => {
-        setOnboardingOpen(false);
+        if (!controlRef.current.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') localStorage.setItem(ONBOARDING_KEY, 'deferred');
+        setOnboardingMode(null);
         refreshRuntime();
       }} onFinished={() => {
         localStorage.setItem(ONBOARDING_KEY, 'done');
-        setOnboardingOpen(false);
+        setOnboardingMode(null);
         refreshRuntime();
       }} onRuntimeChecked={status => refreshRuntime(status.executionReady)} />}
       {reviewRun && <RunReview client={controlRef.current} run={reviewRun} onClose={() => setReviewRun(null)} onRepair={run => { setReviewRun(null); openTaskRun(run, 'Repair task result'); }} />}

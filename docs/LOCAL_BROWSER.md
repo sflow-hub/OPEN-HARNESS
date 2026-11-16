@@ -27,7 +27,7 @@ remain follow-up work in `ROADMAP.md`, and are not implied by the Linux results.
   [Mac](https://docs.docker.com/desktop/setup/install/mac-install/) or
   [Windows](https://docs.docker.com/desktop/setup/install/windows-install/).
   It must be in *Linux containers* mode (the default; Windows containers are refused).
-- About **20 GB** of free disk for images, agent runtime and data.
+- Allow about **40 GB of free Docker storage** when building from the source ZIP. The builder temporarily stores both compressed and unpacked layers. For a prebuilt release, allow about **20 GB** for images, the runtime and data.
 - **A model provider.** Your agents, files, conversations and credentials stay on this
   computer, in Docker volumes. Model inference does not: requests go to the provider you
   configure (xAI, OpenAI, OpenRouter, or another hosted endpoint), and may cost money. A model
