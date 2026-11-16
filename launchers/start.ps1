@@ -1,7 +1,7 @@
 <#
 Open Harness - local browser launcher for Windows.
 
-Starts the Docker-backed Open Harness stack from a downloaded release directory
+Starts the Docker-backed Open Harness stack from a source folder or browser release
 and opens the dashboard in the default browser once it is healthy. Needs only
 Docker Desktop with Linux containers: no Node, Python or Git on the host.
 Written for Windows PowerShell 5.1; also runs on PowerShell 7. Kept to
@@ -73,9 +73,8 @@ Usage: launchers\start.ps1 [options]
   (no option)          Start Open Harness and open a paired browser window.
   --no-open            Start and wait for health, but do not mint a pairing code
                        or open a browser (for scripts and acceptance runs).
-  --build              Development only: build the coordinator image from the
-                       source tree next to compose.yaml instead of using the
-                       pinned release image.
+  --build              Explicitly build from source. A source download is
+                       recognized automatically when no option is supplied.
   --override <file>    Add an explicitly chosen Compose override file, such as
                        your edited copy of compose.host-folders.example.yaml.
                        Nothing on this computer is shared without it.
@@ -124,21 +123,22 @@ Set-Location -LiteralPath $releaseDir
 Say ("Open Harness launcher starting in: {0}" -f $releaseDir)
 
 # ------------------------------------------------------- release contract ----
-# A downloaded release carries compose.yaml, image-lock.json and the engine
-# entrypoint; a source checkout has no lock and is used only through --build,
-# which needs the coordinator Dockerfile instead. The check follows the mode,
-# not the action, so --build --stop works in a source tree too.
+# Source ZIPs contain the coordinator source and Dockerfile but no Git metadata.
+# A missing release lock alone must never select a source build.
 foreach ($required in @($composeFile, 'runtime\dind-entrypoint.sh')) {
   if (-not (Test-Path -LiteralPath (Join-Path $releaseDir $required) -PathType Leaf)) {
     Fail 64 ("This does not look like a complete Open Harness release: {0} is missing from {1}. Extract the whole archive and run the launcher from inside it." -f $required, $releaseDir)
   }
 }
+$sourceTree = (Test-Path -LiteralPath 'Dockerfile.coordinator' -PathType Leaf) -and (Test-Path -LiteralPath 'runtime/service.ts' -PathType Leaf)
 if ($build) {
-  if (-not (Test-Path -LiteralPath (Join-Path $releaseDir 'Dockerfile.coordinator') -PathType Leaf)) {
-    Fail 64 '--build needs the source tree (Dockerfile.coordinator) next to compose.yaml. A downloaded browser release uses the pinned images and does not need it.'
+  if (-not $sourceTree) {
+    Fail 64 '--build needs the source folder containing Dockerfile.coordinator and runtime/service.ts. Extract the complete Open Harness source ZIP to build from source.'
   }
-} elseif (-not (Test-Path -LiteralPath (Join-Path $releaseDir $lockFile) -PathType Leaf)) {
-  Fail 64 ("This does not look like a complete Open Harness release: {0} is missing from {1}. Extract the whole archive and run the launcher from inside it (a source checkout is started with --build)." -f $lockFile, $releaseDir)
+} elseif (-not (Test-Path -LiteralPath $lockFile) -and $sourceTree) {
+  $build = $true
+} elseif (-not (Test-Path -LiteralPath $lockFile -PathType Leaf)) {
+  Fail 64 ("{0} is missing or unreadable in {1}. Extract the whole browser release or the complete Open Harness source ZIP, then open its launcher." -f $lockFile, $releaseDir)
 }
 if ($overrideFile -and -not (Test-Path -LiteralPath $overrideFile -PathType Leaf)) { Fail 64 ("The folder override file does not exist: {0}" -f $overrideFile) }
 

@@ -36,14 +36,21 @@ path = os.environ['FAKE_APT_STATE']
 state = json.load(open(path))
 tool, args = os.path.basename(sys.argv[0]), sys.argv[1:]
 state['calls'].append([tool] + args)
-snapshot = os.path.exists(os.path.join(os.environ['OH_APT_ETC'], 'apt.conf.d', '99-open-harness-snapshot'))
+snapshot = 'snapshot.ubuntu.com' in open(os.path.join(os.environ['OH_APT_ETC'], 'sources.list.d', 'ubuntu.sources')).read()
 code = 0
 if tool == 'dpkg-query':
     print(''.join(f'ii  {name} {version}\\n' for name, version in sorted(state['installed'].items())), end='')
 elif tool == 'apt-cache':
     print(state['policy'], end='')
 elif 'update' in args:
-    code = state['update'].get('snapshot' if snapshot else 'live', 0)
+    value = state['update'].get('snapshot' if snapshot else 'live', 0)
+    if isinstance(value, list):
+        error = value.pop(0)
+        if error:
+            code = 100
+            print(error, file=sys.stderr)
+    else:
+        code = value
 elif 'install' in args:
     options = {i + 1 for i, arg in enumerate(args) if arg == '-o'}
     for name, separator, version in (arg.partition('=') for i, arg in enumerate(args) if ('=' in arg or arg == 'ca-certificates') and i not in options):
@@ -67,7 +74,7 @@ class SnapshotHelper(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir)
         tools = self.dir / 'bin'
         tools.mkdir()
-        for name in ('apt-get', 'apt-cache', 'dpkg-query'):
+        for name in ('apt-get', 'apt-cache', 'dpkg-query', 'sleep'):
             (tools / name).write_text(f'#!{sys.executable}\n{FAKE}')
             (tools / name).chmod(0o755)
         (self.dir / 'etc/apt.conf.d').mkdir(parents=True)
@@ -91,13 +98,15 @@ class SnapshotHelper(unittest.TestCase):
     def test_bootstrap_changes_are_reinstalled_from_the_snapshot_exactly(self):
         result, state, apt = self.run_helper()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.conf.read_text(), 'APT::Update::Error-Mode "any";\n')
+        self.assertEqual(self.conf.read_text().splitlines(), [
+            'APT::Update::Error-Mode "any";', 'Acquire::Retries "3";', 'Acquire::Retries::Delay::Maximum "10";',
+            'Acquire::http::Timeout "30";', 'Acquire::https::Timeout "30";'])
         self.assertEqual(self.sources.read_text(), SOURCES.replace('http://ports.ubuntu.com/ubuntu-ports/',
                          f'https://snapshot.ubuntu.com/ubuntu/{SNAPSHOT}/'))
         self.assertEqual(apt, [
-            ['-o', 'Acquire::Retries=0', '-o', 'APT::Update::Error-Mode=any', 'update'],
+            ['update'],
             ['install', '-y', '--no-install-recommends', 'ca-certificates'],
-            ['-o', 'Acquire::Retries=0', 'update'],
+            ['update'],
             ['install', '-y', '--no-install-recommends', '--allow-downgrades', CA, 'libssl3t64=3.5.5-1ubuntu3.5',
              'openssl-provider-legacy=3.5.5-1ubuntu3.5', 'openssl=3.5.5-1ubuntu3.5']])
         self.assertEqual(state['installed'], {**BASE, 'ca-certificates': '20260601~26.04.1', 'openssl': '3.5.5-1ubuntu3.5'})
@@ -160,6 +169,34 @@ class SnapshotHelper(unittest.TestCase):
         result, _, apt = self.run_helper(update={'snapshot': 100})
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(len(apt), 3)
+
+    def test_gateway_failures_retry_the_same_snapshot_with_one_final_attempt(self):
+        url = f'https://snapshot.ubuntu.com/ubuntu/{SNAPSHOT}/dists/resolute-updates/InRelease'
+        for status, recovered in [(500, True), (502, True), (502, False)]:
+            with self.subTest(status=status, recovered=recovered):
+                self.conf.unlink(missing_ok=True)
+                error = f'E: Failed to fetch {url}  {status}  Gateway failure [IP: 127.0.0.1 443]'
+                result, state, apt = self.run_helper(update={'snapshot': [error, None if recovered else error]})
+                self.assertEqual(result.returncode, 0 if recovered else 100, result.stderr)
+                self.assertEqual([call for call in state['calls'] if call[0] == 'sleep'], [['sleep', '5']])
+                self.assertEqual(apt[2:4], [['update'], ['-o', 'Acquire::Retries=0', 'update']])
+                self.assertEqual(len(apt), 5 if recovered else 4)
+                self.assertIn('retrying the signed index', result.stderr)
+
+    def test_later_layer_refreshes_indexes_without_repeating_the_bootstrap(self):
+        result, state, _ = self.run_helper()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(['sh', str(HELPER), '--update'], env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        final = json.loads((self.dir / 'state.json').read_text())
+        self.assertEqual(final['calls'][len(state['calls']):], [['apt-get', 'update']])
+        self.assertEqual(final['installed'], state['installed'])
+
+    def test_invalid_signature_is_not_retried_or_repaired(self):
+        result, state, apt = self.run_helper(update={'snapshot': ['E: The repository is not signed.']})
+        self.assertEqual(result.returncode, 100, result.stderr)
+        self.assertEqual(len(apt), 3)
+        self.assertFalse(any(call[0] == 'sleep' for call in state['calls']))
 
     def test_bad_arguments_are_refused_before_any_apt_call(self):
         cases = [('latest', PINS, 'is not YYYYMMDDTHHMMSSZ'), (SNAPSHOT, 'openssl=3.5.5-1ubuntu3.5\n', 'exactly once'),

@@ -1,5 +1,64 @@
 # Runtime verification
 
+## Local dashboard improvements — November 16, 2026
+
+Feature revision `999ff91d67ec885bc0feea2c7984441ee490dd0d` was built from
+`07d1b1d`. In a local Chromium run the owner asked Atlas to change the Assistant
+heading to “How can I help?” Claude Code (`claude-sonnet-5-5`) performed the
+source edit through a disposable test gateway. It changed one file,
+`components/assistant-workspace.tsx`. The coordinator froze the diff and built
+70 dashboard source files. Chromium showed the new heading inside the offline
+preview, on the applied dashboard, and after reopening. After Undo, a fresh
+browser and restarted coordinator showed the original heading.
+
+The desktop and mobile browser regression uses deterministic editing in the
+test gateway and the production compiler, source store, preview and activation
+paths. It verifies a downloaded patch with Git and checks an unrelated binary
+workspace file before and after activation and undo. On macOS with Node 22.23.5
+the complete Node suite passed 661 tests with 41 skips. The complete browser
+suite passed 369 tests with seven skips. GitHub's Linux, Mac, Windows and browser
+checks passed in [Verify](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43832027691).
+
+The separate [real-container workflow](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43832027552)
+runs the Linux Compose test through the pinned Hermes file tools and a scripted
+model provider. The first attempt stopped during the upstream Ubuntu snapshot
+download with HTTP 500. On retry, setup reached its 45-minute Docker image
+build limit. Both attempts stopped before any Compose assertion ran. The
+real-model browser trial above used Claude Code through its test gateway.
+
+### Native Linux Docker and a live model
+
+On November 16, the Ubuntu ARM64 VM built the pinned production Hermes revision
+`939e45c91d751fadd94dcd1b873ac3cb44846213` from the repaired Dockerfile at
+`19f0b27`. Docker reported runtime contract 11. A fresh Chromium session chose
+**Set up later**, opened **Improve my Open Harness**, and asked a named local
+editor to change the Assistant heading to “My local workspace 960b8b98”.
+Claude Sonnet 5.5 provided model responses through a temporary adapter. Hermes
+executed `search_files` and `patch` inside the VM's real Docker worker.
+
+Run `4e1d708d-2c39-4638-8ea7-7dc5b4e0b1ff` changed one line in
+`components/assistant-workspace.tsx`. The coordinator built 70 source files.
+Chromium verified the actual heading in the offline preview, on the live
+dashboard, and in a reopened tab. After clicking Undo, a new tab showed the
+original heading. The test checked the pre-existing binary file byte for byte,
+the editor's saved profile, and the restored dashboard revision. This run
+included the fix for first-run setup reopening during recovery.
+
+The VM started with about 19 GiB free and briefly exhausted it during image
+unpacking. Docker completed the image export and the final readiness check
+confirmed the coordinator, runtime and data mount. The source install guide
+now reserves room for temporary layers. The redacted browser receipt and four
+screenshots are in `real-browser` under the VM evidence directory
+`/home/developer/open-harness-evidence/improve-20261116-XD0dfl`.
+
+The hosted AMD64 [real-container run](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43906049359)
+built the same pinned source, ran the real Hermes gates and reached Compose.
+The new dashboard checks passed through apply, undo, and preservation of
+history and file grants. A subsequent test assertion still expected the old
+write tool. The corrected fixture checks that the model sees exactly the
+configured read and patch tools. The [feature PR](https://github.com/sflow-hub/OPEN-HARNESS/pull/3)
+tracks the full hosted rerun.
+
 ## Branch integration review — November 13, 2026
 
 Candidate `89a4ae6b3fff4640b117247cd971379d560ff863` includes all reviewed

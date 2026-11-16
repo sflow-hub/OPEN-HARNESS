@@ -107,6 +107,14 @@ printf '%s\\n' "open $*" >> "${state}/calls"
     path: `${join(dir, 'bin')}:${sysbin}`,
   };
 }
+function sourceArchive() {
+  const fixture = release();
+  rmSync(join(fixture.dir, 'image-lock.json'));
+  writeFileSync(join(fixture.dir, 'Dockerfile.coordinator'), 'FROM scratch\n');
+  writeFileSync(join(fixture.dir, 'runtime', 'service.ts'), '');
+  writeFileSync(join(fixture.dir, 'Start Open Harness.command'), readFileSync(join(root, 'Start Open Harness.command')));
+  return fixture;
+}
 function run(fixture: ReturnType<typeof release>, args: string[], env: Record<string, string> = {}, viaWrapper = false) {
   const command = viaWrapper ? join(fixture.dir, 'Start Open Harness.command') : join(fixture.dir, 'launchers', 'start.sh');
   return spawnSync('/bin/bash', [command, ...args], {
@@ -234,23 +242,25 @@ posixTest('start.sh: --no-open neither mints a code nor opens anything, and says
   assert.match(result.stdout, /browser-pair\.mjs/);
 });
 
-posixTest('start.sh: --build is the only way to build, and it switches Hermes pulling off; a release without the source tree refuses it', () => {
-  // A source checkout has no image-lock.json — --build is what starts one, and it needs the
-  // coordinator Dockerfile instead of the lock.
-  const fixture = release();
-  rmSync(join(fixture.dir, 'image-lock.json'));
-  writeFileSync(join(fixture.dir, 'Dockerfile.coordinator'), 'FROM scratch\n');
-  const result = run(fixture, ['--build', '--no-open']);
+posixTest('start.sh: double-clicking a source ZIP builds and opens a paired browser; source lifecycle commands reuse the project', () => {
+  const fixture = sourceArchive();
+  const env = { COMPOSE_PROJECT_NAME: 'source-download' };
+  const result = run(fixture, [], env, true);
   assert.equal(result.status, 0, result.stderr);
-  const compose = fixture.calls().filter(call => call.startsWith('docker compose -f'));
-  assert.deepEqual(compose, ['docker compose -f compose.yaml up -d --build']);
-  assert.match(fixture.env(), /HERMES_PULL=0/);
-  // --stop, --status and --logs stay usable in that checkout when --build says which mode it is.
-  for (const [flag, call] of [['--stop', 'docker compose -f compose.yaml stop'], ['--status', 'docker compose -f compose.yaml ps'], ['--logs', 'docker compose -f compose.yaml logs --tail=200']]) {
-    const action = run(fixture, ['--build', flag]);
+  assert.deepEqual(fixture.calls().filter(call => call.startsWith('docker compose -f')), [
+    'docker compose -f compose.yaml up -d --build',
+    'docker compose -f compose.yaml exec -T open-harness node /opt/open-harness/runtime/browser-pair.mjs',
+  ]);
+  assert.ok(fixture.calls().includes(`browser http://localhost:3000/#pair=${ENCODED}`));
+  const explicit = run(fixture, ['--build', '--no-open'], env);
+  assert.equal(explicit.status, 0, explicit.stderr);
+  for (const [flag, expected] of [['--stop', 'stop'], ['--status', 'ps'], ['--logs', 'logs --tail=200']]) {
+    const before = fixture.calls().length;
+    const action = run(fixture, [flag], env);
     assert.equal(action.status, 0, action.stderr);
-    assert.ok(fixture.calls().includes(call), `${flag}: ${fixture.calls().join('\n')}`);
+    assert.deepEqual(fixture.calls().slice(before).filter(call => call.startsWith('docker compose -f')), [`docker compose -f compose.yaml ${expected}`]);
   }
+  assert.ok(fixture.env().trim().split('\n').every(line => line === 'HERMES_PULL=0 HERMES_IMAGE=unset PROJECT=source-download'));
   const plain = release();
   const refused = run(plain, ['--build', '--no-open']);
   assert.equal(refused.status, 64);
@@ -344,14 +354,15 @@ posixTest('start.sh: the double-click wrapper finds the release directory with s
 });
 
 posixTest('start.sh: a directory that is not a full release is refused before Docker is touched', () => {
-  // Without --build the lock is part of the contract, whatever the action.
+  // A stray Dockerfile in a damaged release cannot make it a source download.
   const fixture = release();
   rmSync(join(fixture.dir, 'image-lock.json'));
-  for (const args of [['--no-open'], ['--stop'], ['--status']]) {
+  writeFileSync(join(fixture.dir, 'Dockerfile.coordinator'), 'FROM scratch\n');
+  for (const args of [[], ['--stop'], ['--status'], ['--logs']]) {
     const result = run(fixture, args);
     assert.equal(result.status, 64, args.join(' '));
     assert.match(result.stderr, /image-lock\.json is missing/);
-    assert.match(result.stderr, /started with --build/);
+    assert.match(result.stderr, /Extract the whole browser release/);
   }
   assert.deepEqual(fixture.calls(), []);
   const noEntrypoint = release();
@@ -397,21 +408,30 @@ test('start.ps1: the same contract holds for the PowerShell launcher', { skip: p
   const stopped = await runPs(release(), ['--stop']);
   assert.equal(stopped.status, 0, stopped.stderr + stopped.stdout);
   assert.equal((await runPs(release(), ['--bogus'])).status, 64);
-  // A source checkout: no image-lock.json, a Dockerfile instead; --build starts it and
-  // --build --stop works there too, while the release path still insists on the lock.
-  const source = release();
-  rmSync(join(source.dir, 'image-lock.json'));
-  writeFileSync(join(source.dir, 'Dockerfile.coordinator'), 'FROM scratch\n');
-  const built = await runPs(source, ['--build', '--no-open']);
+  const source = sourceArchive();
+  const env = { COMPOSE_PROJECT_NAME: 'source-download' };
+  const built = await runPs(source, [], 0, env);
   assert.equal(built.status, 0, built.stderr + built.stdout);
-  assert.deepEqual(source.calls().filter(call => call.startsWith('docker compose -f')), ['docker compose -f compose.yaml up -d --build']);
-  assert.match(source.env(), /HERMES_PULL=0/);
-  const sourceStop = await runPs(source, ['-Build', '-Stop']);
-  assert.equal(sourceStop.status, 0, sourceStop.stderr + sourceStop.stdout);
-  assert.ok(source.calls().includes('docker compose -f compose.yaml stop'));
-  const noLock = await runPs(source, ['--no-open']);
+  assert.deepEqual(source.calls().filter(call => call.startsWith('docker compose -f')), [
+    'docker compose -f compose.yaml up -d --build',
+    'docker compose -f compose.yaml exec -T open-harness node /opt/open-harness/runtime/browser-pair.mjs',
+  ]);
+  assert.ok(source.calls().includes(`browser http://localhost:3000/#pair=${ENCODED}`));
+  const explicit = await runPs(source, ['--build', '--no-open'], 0, env);
+  assert.equal(explicit.status, 0, explicit.stderr + explicit.stdout);
+  for (const [flag, expected] of [['-Stop', 'stop'], ['-Status', 'ps'], ['-Logs', 'logs --tail=200']]) {
+    const before = source.calls().length;
+    const action = await runPs(source, [flag], 0, env);
+    assert.equal(action.status, 0, action.stderr + action.stdout);
+    assert.deepEqual(source.calls().slice(before).filter(call => call.startsWith('docker compose -f')), [`docker compose -f compose.yaml ${expected}`]);
+  }
+  assert.ok(source.env().trim().split('\n').every(line => line === 'HERMES_PULL=0 HERMES_IMAGE=unset PROJECT=source-download'));
+  const damaged = sourceArchive();
+  rmSync(join(damaged.dir, 'runtime', 'service.ts'));
+  const noLock = await runPs(damaged, []);
   assert.equal(noLock.status, 64, noLock.stderr + noLock.stdout);
   assert.match(noLock.stderr, /image-lock\.json is missing/);
+  assert.deepEqual(damaged.calls(), []);
 
   // A pairing helper that fails, or prints a code in another shape, is exit 5 with nothing opened.
   const unmintable = release({ pairFails: true });

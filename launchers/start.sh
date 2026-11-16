@@ -1,7 +1,7 @@
 #!/bin/bash
 # Open Harness — local browser launcher for macOS (and Linux).
 #
-# Starts the Docker-backed Open Harness stack from a downloaded release directory
+# Starts the Docker-backed Open Harness stack from a source folder or browser release
 # and opens the dashboard in the default browser once it is healthy. Needs only
 # Docker Desktop (or another Docker engine with Compose v2): no Node, Python or
 # Git on the host. Written for /bin/bash 3.2, which is what macOS ships.
@@ -49,9 +49,8 @@ Usage: launchers/start.sh [options]
   (no option)          Start Open Harness and open a paired browser window.
   --no-open            Start and wait for health, but do not mint a pairing code
                        or open a browser (for scripts and acceptance runs).
-  --build              Development only: build the coordinator image from the
-                       source tree next to compose.yaml instead of using the
-                       pinned release image.
+  --build              Explicitly build from source. A source download is
+                       recognized automatically when no option is supplied.
   --override <file>    Add an explicitly chosen Compose override file, such as
                        your edited copy of compose.host-folders.example.yaml.
                        Nothing on this computer is shared without it.
@@ -89,17 +88,18 @@ cd "$release_dir" || fail 64 "Could not enter the release directory: $release_di
 say "Open Harness launcher starting in: $release_dir"
 
 # ------------------------------------------------------- release contract ----
-# A downloaded release carries compose.yaml, image-lock.json and the engine
-# entrypoint; a source checkout has no lock and is used only through --build,
-# which needs the coordinator Dockerfile instead. The check follows the mode,
-# not the action, so --build --stop works in a source tree too.
+# Source ZIPs contain the coordinator source and Dockerfile but no Git metadata.
+# A missing release lock alone must never select a source build.
 for required in "$compose_file" "runtime/dind-entrypoint.sh"; do
   [ -f "$required" ] || fail 64 "This does not look like a complete Open Harness release: $required is missing from $release_dir. Extract the whole archive and run the launcher from inside it."
 done
+source_tree() { [ -f "Dockerfile.coordinator" ] && [ -f "runtime/service.ts" ]; }
 if [ "$build" = "1" ]; then
-  [ -f "Dockerfile.coordinator" ] || fail 64 "--build needs the source tree (Dockerfile.coordinator) next to compose.yaml. A downloaded browser release uses the pinned images and does not need it."
-else
-  [ -f "$lock_file" ] || fail 64 "This does not look like a complete Open Harness release: $lock_file is missing from $release_dir. Extract the whole archive and run the launcher from inside it (a source checkout is started with --build)."
+  source_tree || fail 64 "--build needs the source folder containing Dockerfile.coordinator and runtime/service.ts. Extract the complete Open Harness source ZIP to build from source."
+elif [ ! -e "$lock_file" ] && source_tree; then
+  build=1
+elif [ ! -f "$lock_file" ]; then
+  fail 64 "$lock_file is missing or unreadable in $release_dir. Extract the whole browser release or the complete Open Harness source ZIP, then open its launcher."
 fi
 if [ -n "$override_file" ]; then
   [ -f "$override_file" ] || fail 64 "The folder override file does not exist: $override_file"

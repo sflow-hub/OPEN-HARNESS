@@ -1,6 +1,7 @@
 #!/bin/sh
 # Pin every later Ubuntu APT step of this stage to one fixed, signed Ubuntu snapshot. Run it after the platform
 # guard and before any other apt-get. Usage: ubuntu-snapshot.sh SNAPSHOT OS_PACKAGE_LIST
+# Later layers use ubuntu-snapshot.sh --update to refresh the configured signed indexes.
 #
 # The fixed snapshot is fetched over HTTPS, and the base image has no CA certificates. Bootstrap ca-certificates from
 # the signed live archive; older versions may have rotated out. This also installs or upgrades OpenSSL packages.
@@ -9,6 +10,23 @@
 # state plus those pins. Signature checks are unchanged (the base image's Ubuntu archive keyring verifies the live
 # and snapshot InRelease files), every update fails on any fetch error, and every package index must be the snapshot.
 set -eu
+
+# Some proxies return an empty error page. APT retries 500/502/503/504 responses
+# with a body but can classify a bodyless response as permanent. Retry that index
+# refresh once after APT exhausts its own attempts, using the same signed sources.
+refresh_indexes() (
+  errors=$(mktemp)
+  trap 'rm -f "$errors"' EXIT
+  if LC_ALL=C apt-get update 2>"$errors"; then cat "$errors" >&2; exit 0; else status=$?; fi
+  cat "$errors" >&2
+  grep -Eq '^E: Failed to fetch https://snapshot[.]ubuntu[.]com/[^[:space:]]+[[:space:]]+50[0234]([[:space:]]|$)' "$errors" || exit "$status"
+  echo "ubuntu-snapshot: retrying the signed index after an upstream HTTP error" >&2
+  sleep 5
+  # A single final acquisition keeps the combined retry count bounded.
+  LC_ALL=C apt-get -o Acquire::Retries=0 update
+)
+if [ "$#" -eq 1 ] && [ "$1" = '--update' ]; then refresh_indexes; exit 0; fi
+
 snapshot=${1:-}
 pins=${2:-}
 conf=${OH_APT_ETC:-/etc/apt}/apt.conf.d/99-open-harness-snapshot
@@ -40,13 +58,20 @@ awk -v uri="https://snapshot.ubuntu.com/ubuntu/$snapshot/" '
 
 installed > "$work/base"
 [ -s "$work/base" ] || fail "dpkg-query listed no installed packages"
-apt-get -o Acquire::Retries=0 -o APT::Update::Error-Mode=any update
+# These per-acquisition limits also cover subsequent source and .deb downloads.
+cat > "$conf" <<'APT'
+APT::Update::Error-Mode "any";
+Acquire::Retries "3";
+Acquire::Retries::Delay::Maximum "10";
+Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
+APT
+apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates
 installed > "$work/bootstrap"
 
-printf 'APT::Update::Error-Mode "any";\n' > "$conf"
 cat "$work/sources" > "$sources"
-apt-get -o Acquire::Retries=0 update
+refresh_indexes
 apt-cache policy > "$work/policy"
 awk -v want="^https://snapshot[.]ubuntu[.]com/[a-z-]+/$snapshot\$" '
   $1 ~ /^[0-9]+$/ && $2 ~ /:\/\// { files++; if ($2 !~ want) { print "ubuntu-snapshot: package index not from the snapshot: " $0 > "/dev/stderr"; bad = 1 } }

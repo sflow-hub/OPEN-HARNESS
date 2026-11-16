@@ -116,18 +116,48 @@ async function waitForDocker(timeout = 120_000) {
   throw new Error('Docker did not become ready. Open Docker Desktop, wait for it to finish starting, then try again.');
 }
 
-function runStreaming(name: string, args: string[], cwd?: string, timeoutMs = 45 * 60_000) {
+// Build output may contain command arguments, authenticated URLs, or private registry
+// names. Only copy recognized status information into persisted setup-job errors.
+function dockerFailureDetail(tail: string) {
+  const steps = [...tail.matchAll(/(?:^|[\r\n])(?:#(\d{1,5})\s|Step (\d{1,5})\/\d{1,5}\s)/g)];
+  const last = steps.at(-1);
+  const step = last ? ` Last reported Docker step: ${last[1] || last[2]}.` : '';
+  const reasons: [RegExp, string][] = [
+    [/no space left on device|disk quota exceeded/i, 'Docker ran out of disk space.'],
+    [/hash sum mismatch|digest mismatch|checksum mismatch/i, 'A downloaded file failed its integrity check.'],
+    [/temporary failure resolving|no such host|could not resolve/i, 'Docker could not resolve a download host.'],
+    [/unauthorized|authentication required|pull access denied/i, 'The registry denied access to the image.'],
+    [/failed to fetch|unable to fetch|download refused|connection (?:refused|reset)|TLS handshake timeout|i\/o timeout/i, 'Docker could not download a required file.'],
+  ];
+  const reason = reasons.find(([pattern]) => pattern.test(tail))?.[1];
+  return step + (reason ? ' ' + reason : '');
+}
+
+function runStreaming(args: string[], timeoutMinutes: number, showProgress: boolean, cwd?: string) {
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(name, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let error = '';
-    // Both pipes must be drained. Whatever the builder decides to write progress to, an
-    // unread pipe fills at about 64 KB and blocks the child forever.
-    child.stdout.resume();
-    child.stderr.on('data', chunk => { error = (error + String(chunk)).slice(-8_000); });
-    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`${name} did not finish within ${Math.round(timeoutMs / 60_000)} minutes. Check that Docker has disk space and network access, then try again.`)); }, timeoutMs);
+    const child = spawn('docker', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    let tail = '';
+    // Both streams must drain even for browser jobs. In a CLI, pipe() preserves
+    // backpressure when Docker streams faster than the terminal or CI log sink.
+    for (const stream of [child.stdout, child.stderr]) {
+      stream.setEncoding('utf8');
+      stream.on('data', (chunk: string) => { tail = (tail + chunk).slice(-8_000); });
+    }
+    if (showProgress) {
+      child.stdout.pipe(process.stdout, { end: false });
+      child.stderr.pipe(process.stderr, { end: false });
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`Docker ${args[0]} did not finish within ${timeoutMinutes} minutes.${dockerFailureDetail(tail)} Check Docker's disk space and network connection, then retry.`));
+    }, timeoutMinutes * 60_000);
     timer.unref();
     child.once('error', failure => { clearTimeout(timer); reject(failure); });
-    child.once('exit', code => { clearTimeout(timer); if (code === 0) resolve(); else reject(new Error(error.trim() || `${name} exited with code ${code ?? 'unknown'}.`)); });
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`Docker ${args[0]} stopped ${signal ? 'with signal ' + signal : 'with exit code ' + code}.${dockerFailureDetail(tail)}`));
+    });
   });
 }
 
@@ -148,15 +178,15 @@ export async function onboardingAction(action: unknown, credentialNames: string[
   throw new Error('Unknown setup action.');
 }
 
-export async function prepareRuntime() {
+export async function prepareRuntime({ showProgress = false } = {}) {
   if (pullRuntime && !/^\S+@sha256:[a-f0-9]{64}$/.test(HERMES_IMAGE)) throw new Error('This release is missing its pinned agent image. Download a complete Open Harness release; its image-lock.json and Compose file must stay together.');
   await waitForDocker(10_000);
   if (pullRuntime) {
-    await runStreaming('docker', ['pull', HERMES_IMAGE]);
+    await runStreaming(['pull', HERMES_IMAGE], 45, showProgress);
   } else {
     const projectRoot = join(import.meta.dirname, '..'), dockerfile = join(import.meta.dirname, 'hermes', 'Dockerfile');
     if (!existsSync(dockerfile)) throw new Error('The bundled agent runtime files are missing. Reinstall Open Harness.');
-    await runStreaming('docker', ['build', '-f', dockerfile, '-t', HERMES_IMAGE, projectRoot], projectRoot);
+    await runStreaming(['build', '-f', dockerfile, '-t', HERMES_IMAGE, projectRoot], 90, showProgress, projectRoot);
   }
   if (await imageContractAsync() !== 'current') throw new Error('The downloaded or built agent runtime does not match this Open Harness release. Setup stopped without starting an agent. Check the release files and try again.');
 }
