@@ -10,5 +10,5 @@ export default defineConfig({
   server: isCodexSeatbeltSandbox
     ? { watch: { useFsEvents: false, usePolling: true } }
     : undefined,
-  plugins: [vinext()],
+  plugins: [vinext({ precompress: true })],
 });
