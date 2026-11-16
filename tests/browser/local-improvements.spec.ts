@@ -81,6 +81,9 @@ test('an owner asks a named agent for a local dashboard change, reviews it, appl
     const frame = review.locator('iframe[title="Preview of your dashboard change"]');
     await expect(frame).toHaveAttribute('sandbox', 'allow-scripts');
     await expect(frame.contentFrame().getByRole('heading', { name: 'How can I help?' })).toBeVisible();
+    const reconnectMessage = frame.contentFrame().getByText('Open Harness cannot reach its control service.', { exact: true });
+    await expect(reconnectMessage).toBeAttached();
+    await expect(reconnectMessage).toBeHidden();
     await expect(review.getByRole('link', { name: 'Open the original dashboard' })).toHaveAttribute('href', /original=1/);
     await review.getByRole('button', { name: 'Apply on this computer' }).click();
     const changedHeading = page.getByRole('heading', { name: 'How can I help?', exact: true });

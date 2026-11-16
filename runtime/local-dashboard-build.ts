@@ -65,7 +65,10 @@ export async function compileDashboard(root: string, changed: string[], removed:
 export async function dashboardDocument(assets: DashboardAssets, preview: boolean) {
   const deps = await libraries();
   const script = (source: string) => source.replace(/<\/script/gi, '<\\/script');
-  const css = (deps.css + '\n' + assets.css).replace(/<\/style/gi, '<\\/style');
+  // The surrounding review dialog explains the offline workspace. A live
+  // reconnect alert inside the isolated preview would tell the owner to repair it.
+  const previewStyle = preview ? '\n#local-dashboard .offline-banner { display: none !important; }' : '';
+  const css = (deps.css + '\n' + assets.css + previewStyle).replace(/<\/style/gi, '<\\/style');
   const offline = preview ? `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none';"><script>
     for(const key of ['localStorage','sessionStorage']) { const values=new Map([['open-harness.onboarding.v1','done'],['open-harness.assistant-home','1']]);Object.defineProperty(window,key,{value:{getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,String(v)),removeItem:k=>values.delete(k),clear:()=>values.clear(),key:i=>[...values.keys()][i]??null,get length(){return values.size;}}}); }
     </script>` : '';
