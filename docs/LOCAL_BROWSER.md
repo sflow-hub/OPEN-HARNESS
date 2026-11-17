@@ -2,7 +2,9 @@
 
 Open Harness runs on Linux, macOS and Windows. Open the dashboard in your browser at
 `http://localhost:3000`. Docker runs the coordinator, private container engine and agents.
-On Linux, the source launcher also offers a local CPU model.
+On Linux, the source launcher also offers a local CPU model. A fresh Ubuntu ARM64
+installation completed model setup and an Atlas edit, preview, apply, reopen and undo.
+[Linux verification record](../runtime/VERIFICATION.md#linux-source-launcher-with-an-on-device-atlas-model-2026-11-17-utc)
 
 **Status, stated plainly.** The launchers, the one-use browser pairing link and the exported
 host-folder editor are implemented. Automated launcher tests drive both scripts against a
