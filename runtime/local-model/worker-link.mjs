@@ -13,7 +13,7 @@ if (process.argv[2] === '--health') {
 } else net.createServer(client => {
   const model = net.connect(8080, 'atlas-model');
   const close = () => { client.destroy(); model.destroy(); };
-  client.on('error', close).on('close', close);
-  model.on('error', close).on('close', close);
+  client.on('error', close).once('close', () => model.destroy());
+  model.on('error', close);
   client.pipe(model).pipe(client);
 }).listen(17572, gateway.address);
