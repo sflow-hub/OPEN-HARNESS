@@ -69,7 +69,7 @@ services:
     environment:
       DOCKER_HOST: unix:///run/open-harness-docker/docker.sock
       OPEN_HARNESS_STATE_DIR: /data
-      OPEN_HARNESS_PUBLIC_URL: ${OPEN_HARNESS_PUBLIC_URL:-http://localhost:3000/api/local}
+      OPEN_HARNESS_PUBLIC_URL: ${OPEN_HARNESS_PUBLIC_URL:-http://localhost:${OPEN_HARNESS_DASHBOARD_PORT:-3000}/api/local}
       OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD: ${OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD:-0}
       OPEN_HARNESS_REQUIRE_BROWSER_PAIRING: "1"
       OPEN_HARNESS_DEPLOYMENT: compose

@@ -10,10 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libssl
     && command -v flock && install -d -o node -g node /models
 COPY --from=runtime /opt/llama/ /opt/llama/
 ENV LD_LIBRARY_PATH=/opt/llama
-RUN /opt/llama/llama-server --version
 WORKDIR /opt/atlas
-COPY *.mjs model-lock.json ./
+COPY --chmod=0644 *.mjs model-lock.json ./
 USER node
+RUN node --input-type=module -e "await import('./server.mjs')" && node --check worker-link.mjs \
+    && /opt/llama/llama-server --version && test -w /models
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=4s --start-period=30m \
     CMD ["node","-e","fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

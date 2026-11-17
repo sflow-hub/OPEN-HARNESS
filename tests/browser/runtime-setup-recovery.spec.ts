@@ -139,10 +139,10 @@ test('explicit provider launch opens a clean provider form after a saved on-devi
   await returningWorkspace(page, atlas, false);
   await page.goto('/?controlPort=' + launcherPort + '&setupModel=provider');
   const dialog = page.getByRole('dialog', { name: 'Connect your model' });
-  await expect(dialog.getByLabel('Provider', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('combobox', { name: 'Provider', exact: true })).toBeVisible();
   await expect(dialog.getByLabel('Model server address')).toHaveCount(0);
   await expect(dialog.getByText('http://atlas-model:8080/v1')).toHaveCount(0);
-  await dialog.getByLabel('Provider', { exact: true }).selectOption('openai');
+  await dialog.getByRole('combobox', { name: 'Provider', exact: true }).selectOption('openai');
   await dialog.getByLabel('API key').fill('fixture-only');
   await page.route('**/v1/onboarding/model-test', async route => {
     const body = route.request().postDataJSON();

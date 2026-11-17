@@ -71,7 +71,8 @@ prepare_model() {
   compose up -d --no-build atlas-model || {
     model_error='Docker could not start the local model server. Check Docker and free disk space, then retry.'; return 1;
   }
-  if [[ "$initial" = error\|* ]]; then
+  if [[ "$initial" = error\|* ]] || [ "${model_restart_needed:-0}" = 1 ]; then
+    model_restart_needed=0
     compose restart atlas-model || { model_error='Docker could not restart the local model server.'; return 1; }
   fi
   began=$SECONDS
@@ -86,11 +87,19 @@ prepare_model() {
       fi
       case "$phase" in ready) return 0 ;; error) model_error="$message"; return 1 ;; esac
     else
-      local id state
+      local id state restarts elapsed
       id=$(compose ps --all --quiet atlas-model 2>/dev/null)
       if [ -n "$id" ]; then
-        state=$(docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null)
+        read -r state restarts <<< "$(docker inspect --format '{{.State.Status}} {{.RestartCount}}' "$id" 2>/dev/null)"
         case "$state" in exited|dead) model_error='The local model server stopped. Check Docker and free disk space, then retry.'; return 1 ;; esac
+        elapsed=$((SECONDS - began))
+        [[ "$restarts" =~ ^[0-9]+$ ]] || restarts=0
+        if [[ "$state" = restarting && ( $restarts -ge 2 || $elapsed -ge 10 ) ]] ||
+          [[ "$state" = running && $restarts -ge 2 && $elapsed -ge 10 ]]; then
+          model_restart_needed=1
+          model_error='The local model server keeps restarting. Check Docker, available disk space and the model volume permissions, then retry.'
+          return 1
+        fi
       fi
     fi
     sleep 2

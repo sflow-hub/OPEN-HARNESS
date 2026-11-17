@@ -62,6 +62,7 @@ function release(scenario: Scenario = {}) {
 printf '%s\\n' "docker $*" >> "${state}/calls"
 printf 'HERMES_PULL=%s HERMES_IMAGE=%s PROJECT=%s\\n' "\${OPEN_HARNESS_HERMES_PULL-unset}" "\${OPEN_HARNESS_HERMES_IMAGE-unset}" "\${COMPOSE_PROJECT_NAME-unset}" >> "${state}/env"
 case "$1" in
+  inspect) if [ -f "${state}/model-crash" ]; then echo 'restarting 3'; fi; exit 0 ;;
   info)
     ${counter('info')}
     if [ "$count" -le ${scenario.infoFailures ?? 0} ]; then echo "Cannot connect to the Docker daemon" >&2; exit 1; fi
@@ -78,7 +79,10 @@ case "$1" in
         if [ -f "${state}/fail-first-build" ] && [ "$count" -eq 1 ]; then exit 1; fi
         exit 0 ;;
       *"exec -T atlas-worker-link node "*) [ ! -f "${state}/link-broken" ]; exit $? ;;
+      *" ps --all --quiet atlas-model") echo atlas-container; exit 0 ;;
+      *" restart atlas-model") echo restarted > "${state}/model-restarted"; exit 0 ;;
       *"exec -T atlas-model node"*)
+        if [ -f "${state}/model-crash" ] && [ ! -f "${state}/model-restarted" ]; then exit 1; fi
         ${counter('model-check')}
         row=$(sed -n "\${count}p" "${state}/model-status")
         [ -n "$row" ] || row=$(sed -n '$p' "${state}/model-status")
@@ -221,6 +225,18 @@ posixTest('Linux desktop retries a failed image build before starting the model,
   assert.equal(builds[0], builds[1]);
   assert.match(builds[2], / up -d --no-build atlas-model$/);
   assert.ok(!fixture.calls().some(line => line.includes('browser-pair.mjs') || line.startsWith('browser ')));
+});
+
+posixTest('Linux desktop detects a model restart loop before the long download timeout and offers a successful retry', () => {
+  const { fixture, env } = linuxDesktop(['ready||Atlas is ready']);
+  writeFileSync(join(fixture.dir, 'state/model-crash'), '');
+  const result = run(fixture, ['--desktop', '--no-open'], { ...env, OPEN_HARNESS_MODEL_TIMEOUT: '6' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /local model server keeps restarting/);
+  assert.doesNotMatch(result.stderr, /taking longer than expected/);
+  assert.match(readFileSync(join(fixture.dir, 'state/dialogs'), 'utf8'), /--yesno/);
+  assert.ok(fixture.calls().includes('docker compose -f compose.yaml --profile atlas-model restart atlas-model'));
+  assert.equal(fixture.calls().filter(call => call.includes('build atlas-model open-harness')).length, 1);
 });
 
 posixTest('Linux desktop own-provider and cancel choices leave the model unstarted', () => {
