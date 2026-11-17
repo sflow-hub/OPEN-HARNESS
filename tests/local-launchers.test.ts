@@ -390,6 +390,89 @@ posixTest('start.sh: --no-open neither mints a code nor opens anything, and says
   assert.match(result.stdout, /browser-pair\.mjs/);
 });
 
+const linuxPython = process.platform === 'linux' ? ['/usr/bin/python3', '/bin/python3'].find(binary => existsSync(binary)) : undefined;
+const setsidBinary = process.platform === 'linux' ? ['/usr/bin/setsid', '/bin/setsid'].find(binary => existsSync(binary)) : undefined;
+test('start.sh: Linux default browser survives the launcher terminal closing and reports opener failures', { skip: linuxPython && setsidBinary ? false : 'Requires Linux with Python PTY support and util-linux setsid.' }, t => {
+  const fixture = release();
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  symlinkSync(setsidBinary!, join(fixture.dir, 'sysbin', 'setsid'));
+  const opener = join(fixture.dir, 'bin', 'xdg-open');
+  // Exo returns before its helper starts the browser. GLib restores SIG_DFL even
+  // after nohup, so the child must survive losing the terminal with normal HUP handling.
+  writeFileSync(opener, `#!${linuxPython}
+import json, os, pathlib, signal, sys, time
+state = pathlib.Path(__file__).resolve().parent.parent / 'state'
+with (state / 'opener-calls').open('a') as calls:
+    calls.write(json.dumps(sys.argv[1:]) + '\\n')
+ready_read, ready_write = os.pipe()
+if os.fork():
+    os.close(ready_write)
+    assert os.read(ready_read, 1) == b'1'
+    os._exit(0)
+os.close(ready_read)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+signal.alarm(10)
+os.write(ready_write, b'1')
+os.close(ready_write)
+while not (state / 'terminal-closed').exists():
+    time.sleep(0.02)
+(state / 'invocation.tmp').write_text(json.dumps(sys.argv[1:]))
+os.replace(state / 'invocation.tmp', state / 'invocation')
+os._exit(0)
+`);
+  chmodSync(opener, 0o755);
+  // One driver owns the PTY and all synchronization. It drains output until the
+  // launcher exits, closes the terminal, then lets the asynchronous browser proceed.
+  const driver = `
+import errno, json, os, pathlib, pty, select, sys, time
+state = pathlib.Path(sys.argv[1]) / 'state'
+pid, terminal = pty.fork()
+if pid == 0:
+    os.execv('/bin/bash', ['/bin/bash', str(pathlib.Path(sys.argv[1]) / 'launchers/start.sh')])
+output = bytearray()
+status = None
+try:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if select.select([terminal], [], [], 0.02)[0]:
+            try:
+                output.extend(os.read(terminal, 65536))
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+        done, result = os.waitpid(pid, os.WNOHANG)
+        if done:
+            status = os.waitstatus_to_exitcode(result)
+            break
+    assert status is not None, 'The launcher did not exit'
+finally:
+    os.close(terminal)
+    if status is None:
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+(state / 'terminal-closed').touch()
+deadline = time.monotonic() + 3
+while not (state / 'invocation').exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+print(json.dumps({'status': status, 'output': output.decode(errors='replace'), 'args': json.loads((state / 'invocation').read_text()) if (state / 'invocation').exists() else None}))
+`;
+  const env: NodeJS.ProcessEnv = { NODE_ENV: 'test', PATH: fixture.path, HOME: fixture.dir, OPEN_HARNESS_LAUNCHER_PLATFORM: 'linux' };
+  const launched = spawnSync(linuxPython!, ['-c', driver, fixture.dir], { env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(launched.status, 0, launched.stderr);
+  const result = JSON.parse(launched.stdout) as { status: number; output: string; args: string[] | null };
+  assert.equal(result.status, 0, result.output);
+  assert.deepEqual(result.args, [`http://localhost:3000/#pair=${ENCODED}`]);
+  assert.equal(readFileSync(join(fixture.dir, 'state', 'opener-calls'), 'utf8').trim().split('\n').length, 1);
+  assert.equal(fixture.calls().filter(call => call.includes('browser-pair.mjs')).length, 1);
+  assert.ok(!result.output.includes(CODE) && !fixture.log().includes(CODE));
+
+  writeFileSync(opener, '#!/bin/sh\nexit 23\n');
+  const refused = run(fixture, [], { OPEN_HARNESS_LAUNCHER_PLATFORM: 'linux', OPEN_HARNESS_BROWSER_COMMAND: '' });
+  assert.equal(refused.status, 5, refused.stderr);
+  assert.match(refused.stderr, /no browser could be opened/);
+  assert.ok(!refused.stdout.includes(CODE) && !refused.stderr.includes(CODE) && !fixture.log().includes(CODE));
+});
+
 posixTest('start.sh: double-clicking a source ZIP builds and opens a paired browser; source lifecycle commands reuse the project', () => {
   const fixture = sourceArchive();
   const env = { COMPOSE_PROJECT_NAME: 'source-download' };
