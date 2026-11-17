@@ -79,7 +79,7 @@ import RunReview, { PerformanceSummary } from "../components/run-review";
 import AssistantWorkspace from '../components/assistant-workspace';
 import { DesktopPanel } from "../components/desktop-panel";
 import { CREDENTIAL_PROVIDERS, modelForCredential, providerLabel, type CredentialRecord } from "../lib/credentials";
-import { isSandboxedComputer, profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
+import { BUNDLED_MODEL, isSandboxedComputer, profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
 import RoutineHistoryDrawer from "../components/routine-history-drawer";
 import GroupChatView from "../components/group-chat-view";
 import ComputersPage from "../components/computers-page";
@@ -106,6 +106,32 @@ function describe(value: unknown, fallback: string): string {
 }
 
 const ONBOARDING_KEY = "open-harness.onboarding.v1";
+type LauncherModel = 'local' | 'provider';
+function launcherModelKey(url: URL) {
+  return 'open-harness.launcher-model.' + (url.searchParams.get('controlPort') || 'dashboard');
+}
+function launcherModelIntent(): LauncherModel | null {
+  const url = new URL(window.location.href);
+  const choice = url.searchParams.get('setupModel') ?? sessionStorage.getItem(launcherModelKey(url));
+  return choice === 'local' || choice === 'provider' ? choice : null;
+}
+function openActiveEdition(runtime: RuntimeStatus) {
+  const url = new URL(window.location.href);
+  if (!runtime.localDashboardRevision || url.pathname !== '/' || url.searchParams.get('original') === '1') return false;
+  url.pathname = '/local-edition';
+  window.location.replace(url.href);
+  return true;
+}
+function rememberLauncherModel(pending: LauncherModel | null) {
+  const url = new URL(window.location.href);
+  if (pending) sessionStorage.setItem(launcherModelKey(url), pending);
+  else sessionStorage.removeItem(launcherModelKey(url));
+  if (url.searchParams.has('setupModel')) {
+    url.searchParams.delete('setupModel');
+    window.history.replaceState(window.history.state, '', url);
+  }
+}
+
 const suppressFirstRun = (choice: string | null) => choice === 'done' || choice === 'deferred';
 const ADVANCED_KEY = "open-harness.advanced.v1";
 const MIGRATED_KEY = "open-harness.migrated.v1";
@@ -195,7 +221,9 @@ export default function Home() {
   // the coordinator's answer was still in flight flagged an untouched form as edited.
   const [settingsBaseline, setSettingsBaseline] = useState(JSON.stringify(defaultSettings));
   const [confirmCloseSettings, setConfirmCloseSettings] = useState(false);
-  const [onboardingMode, setOnboardingMode] = useState<'automatic' | 'manual' | null>(null);
+  const [onboardingMode, setOnboardingMode] = useState<'automatic' | 'manual' | LauncherModel | null>(null);
+  const [checkingLauncherModel, setCheckingLauncherModel] = useState(false);
+  const launcherModel = onboardingMode === 'local' || onboardingMode === 'provider' ? onboardingMode : undefined;
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [editingAgentTab, setEditingAgentTab] = useState<'profile' | 'computer'>('profile');
   const [agentBusy, setAgentBusy] = useState(false);
@@ -504,6 +532,7 @@ export default function Home() {
         "Saved data could not be loaded. Import a workspace backup or start fresh.",
       );
     }
+    setCheckingLauncherModel(!controlRef.current.managed && Boolean(launcherModelIntent()));
     setReady(true);
     const watchers = watchControllers.current;
     return () => {
@@ -552,12 +581,7 @@ export default function Home() {
       try {
         const status = await client.bootstrap();
         if (!isCurrent()) return;
-        if (status.localDashboardRevision && !client.managed && window.location.pathname === '/' && new URLSearchParams(location.search).get('original') !== '1') {
-          const edition = new URL(window.location.href);
-          edition.pathname = '/local-edition';
-          window.location.replace(edition.href);
-          return;
-        }
+        if (!client.managed && !launcherModelIntent() && openActiveEdition(status)) return;
         setPairing({ state: "none", message: "" });
         setRuntime(status);
         if(client.managed){const requestedDesktop=new URL(window.location.href).searchParams.get('desktop');if(requestedDesktop&&/^[A-Za-z0-9_-]+$/.test(requestedDesktop))setDesktopAgentId(requestedDesktop);}
@@ -602,6 +626,16 @@ export default function Home() {
             if (!form.open || JSON.stringify(form.settings) === form.baseline) setSettings(saved);
             setSettingsBaseline(JSON.stringify(saved));
             setWorkspaceModelRevision(defaults.revision);
+            const requested = client.managed ? null : launcherModelIntent();
+            if (requested) {
+              const { provider, baseUrl, model } = defaults.model;
+              const isBundled = provider === 'local' && baseUrl.replace(/\/$/, '') === BUNDLED_MODEL.baseUrl && model === BUNDLED_MODEL.model;
+              const mismatch = (requested === 'local') !== isBundled;
+              rememberLauncherModel(mismatch ? requested : null);
+              setCheckingLauncherModel(false);
+              if (mismatch) { setOnboardingMode(requested); return; }
+              if (openActiveEdition(status)) return;
+            }
             offerFirstRun();
           }),
           client.request<{ credentials: CredentialRecord[] }>("/v1/credentials")
@@ -833,7 +867,7 @@ export default function Home() {
   useEffect(trackKeyboardInset, []);
   useMobileBackGuard(mobileOpen, () => setMobileOpen(false));
   useMobileBackGuard(settingsOpen, () => { if (confirmCloseSettings) setConfirmCloseSettings(false); else requestCloseSettings(); });
-  useMobileBackGuard(Boolean(onboardingMode), () => setOnboardingMode(null));
+  useMobileBackGuard(Boolean(onboardingMode) && !launcherModel, () => setOnboardingMode(null));
   useMobileBackGuard(Boolean(selectedFile), () => setSelectedFile(null));
 
   useEffect(() => {
@@ -1425,6 +1459,38 @@ export default function Home() {
     .slice(0, 12);
   const visibleAgents = workspace.agents.filter(candidate => !advancedFeatures || agentTeamFilter === "all"
     || (agentTeamFilter === "unassigned" ? !workspace.teams.some(team => team.memberAgentIds.includes(candidate.id)) : workspace.teams.find(team => team.id === agentTeamFilter)?.memberAgentIds.includes(candidate.id)));
+
+  const onboardingDialog = onboardingMode && runtime && <Onboarding launcherModel={launcherModel} client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: settings.credentialRef || "" }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
+        if (launcherModel) {
+          rememberLauncherModel(null);
+          if (suppressFirstRun(localStorage.getItem(ONBOARDING_KEY))) { setOnboardingMode(null); openActiveEdition(runtime); }
+        }
+        const chosen = { provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl, credentialRef: model.credentialRef };
+        setSettings(chosen);
+        setSettingsBaseline(JSON.stringify(chosen));
+        setWorkspaceModelRevision(revision);
+        void controlRef.current.request<{ credentials: CredentialRecord[] }>("/v1/credentials").then(saved => setCredentials(saved.credentials)).catch(() => {});
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify({ provider: model.provider, model: model.model, baseUrl: model.baseUrl }));
+      }} onComputerSettings={() => {
+        setAdvancedFeatures(true);
+        localStorage.setItem(ADVANCED_KEY, 'on');
+        setOnboardingMode(null);
+        refreshRuntime();
+        setEditingAgentTab('computer');
+        setEditingAgent(agent);
+      }} onDismiss={() => {
+        if (launcherModel) { rememberLauncherModel(null); openActiveEdition(runtime); }
+        if (!controlRef.current.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') localStorage.setItem(ONBOARDING_KEY, 'deferred');
+        setOnboardingMode(null);
+        refreshRuntime();
+      }} onFinished={() => {
+        if (launcherModel) openActiveEdition(runtime);
+        localStorage.setItem(ONBOARDING_KEY, 'done');
+        setOnboardingMode(null);
+        refreshRuntime();
+      }} onRuntimeChecked={status => refreshRuntime(status.executionReady)} />;
+  if (checkingLauncherModel && pairing.state === 'none') return <main role="status">{offline || 'Checking your workspace model…'}</main>;
+  if (launcherModel && onboardingDialog) return onboardingDialog;
 
   return (
     <div className="app-shell" onPointerDownCapture={() => { navigated.current = true; }} onKeyDownCapture={() => { navigated.current = true; }}>
@@ -2812,29 +2878,7 @@ export default function Home() {
         </div>
       )}
       {credentialsOpen && <CredentialManager client={controlRef.current} provider={settings.provider} onClose={() => setCredentialsOpen(false)} onChanged={setCredentials} />}
-      {onboardingMode && runtime && <Onboarding client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: settings.credentialRef || "" }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
-        const chosen = { provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl, credentialRef: model.credentialRef };
-        setSettings(chosen);
-        setSettingsBaseline(JSON.stringify(chosen));
-        setWorkspaceModelRevision(revision);
-        void controlRef.current.request<{ credentials: CredentialRecord[] }>("/v1/credentials").then(saved => setCredentials(saved.credentials)).catch(() => {});
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify({ provider: model.provider, model: model.model, baseUrl: model.baseUrl }));
-      }} onComputerSettings={() => {
-        setAdvancedFeatures(true);
-        localStorage.setItem(ADVANCED_KEY, 'on');
-        setOnboardingMode(null);
-        refreshRuntime();
-        setEditingAgentTab('computer');
-        setEditingAgent(agent);
-      }} onDismiss={() => {
-        if (!controlRef.current.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') localStorage.setItem(ONBOARDING_KEY, 'deferred');
-        setOnboardingMode(null);
-        refreshRuntime();
-      }} onFinished={() => {
-        localStorage.setItem(ONBOARDING_KEY, 'done');
-        setOnboardingMode(null);
-        refreshRuntime();
-      }} onRuntimeChecked={status => refreshRuntime(status.executionReady)} />}
+      {onboardingDialog}
       {reviewRun && <RunReview client={controlRef.current} run={reviewRun} onClose={() => setReviewRun(null)} onRepair={run => { setReviewRun(null); openTaskRun(run, 'Repair task result'); }} />}
       {desktopAgentId && <DesktopPanel agentId={desktopAgentId} agentName={workspace.agents.find(item => item.id === desktopAgentId)?.name} client={controlRef.current} onClose={() => setDesktopAgentId(null)} onWorkflowCreated={id => { setDesktopAgentId(null); setSelectedWorkflowId(id); setWorkflowSourceRunId(undefined); setView("routines"); }} />}
       {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} credentialCatalog={credentials} client={controlRef.current} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}

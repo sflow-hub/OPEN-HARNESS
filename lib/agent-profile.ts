@@ -46,6 +46,7 @@ export type ToolInfo = { id: string; name: string; group: string; description: s
 export type ToolCatalog = { tools: ToolInfo[]; source: 'runtime' | 'cached' | 'unavailable' | 'mock'; error?: string };
 export type ModelCatalog = { models: Array<{ id: string; provider: string; label: string }>; error?: string };
 export type ProfileResponse = { profile: AgentProfile; effectiveModel: ModelChoice; activeRevision: number | null; pending: boolean; secretNames: string[]; credentials: CredentialRecord[]; machine?: MachineInfo; transfer?: { state: string; detail: string } | null };
+export const BUNDLED_MODEL: ModelChoice = { provider: 'local', model: 'atlas-linux', credentialRef: '', baseUrl: 'http://atlas-model:8080/v1' };
 export const DEFAULT_MODEL: ModelChoice = { provider: 'xai', model: 'grok-4.6', credentialRef: 'XAI_API_KEY', baseUrl: '' };
 export const DEFAULT_COMPUTER: ComputerConfig = { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, network: { ...DEFAULT_NETWORK, allow: [] }, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
 export const TOOL_GROUPS = [

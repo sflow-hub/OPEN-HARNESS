@@ -3957,6 +3957,7 @@ var UNSANDBOXED_COMPUTER_MESSAGE = "Direct access to the signed-in computer is n
 function isSandboxedComputer(computer) {
   return ["private", "folders"].includes(computer.access) && ["none", "virtual"].includes(computer.desktop);
 }
+var BUNDLED_MODEL = { provider: "local", model: "atlas-linux", credentialRef: "", baseUrl: "http://atlas-model:8080/v1" };
 var DEFAULT_COMPUTER = { machineId: "local", access: "private", folders: [], desktop: "none", reserveMachine: false, network: { ...DEFAULT_NETWORK, allow: [] }, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } };
 var MCP_PREFIX = "mcp__";
 var COORDINATION_SERVER = "open_harness";
@@ -5784,52 +5785,6 @@ var WORKSPACE_TOOL = "mcp__open_harness__workspace";
 import { mkdirSync as mkdirSync4 } from "node:fs";
 import { join as join6 } from "node:path";
 
-// runtime/profiles.ts
-var ProfileError = class extends Error {
-  constructor(message, status = 400) {
-    super(message);
-    this.status = status;
-  }
-};
-function validId(id) {
-  if (typeof id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new ProfileError("Invalid agent ID.");
-  return id;
-}
-
-// runtime/profile-memory.ts
-function profileMemory(root, agentId) {
-  const anchor = safeWorkspacePath(root, `agents/${validId(agentId)}`);
-  mkdirSync4(anchor, { recursive: true, mode: 448 });
-  for (const rel of ["profile", "profile/memories"]) {
-    let stat = statInside(anchor, rel);
-    if (!stat) {
-      try {
-        mkdirInside(anchor, rel);
-      } catch (error) {
-        if (!(error instanceof SafeFsError) || error.code !== "conflict") throw error;
-      }
-      stat = statInside(anchor, rel);
-    }
-    if (stat?.isSymbolicLink) throw new SafeFsError("symlink", "Workspace paths cannot contain symbolic links.");
-    if (!stat?.isDirectory) throw new SafeFsError("invalid-path", "Workspace parent is not a directory.");
-  }
-  const paths2 = { memory: "", user: "" };
-  for (const [key, file] of [["memory", "MEMORY.md"], ["user", "USER.md"]]) {
-    const target = `profile/memories/${file}`, legacy = `profile/${file}`;
-    const current = statInside(anchor, target), previous = statInside(anchor, legacy);
-    if (current?.isSymbolicLink || previous?.isSymbolicLink) throw new SafeFsError("symlink", "Workspace paths cannot contain symbolic links.");
-    if (!current && previous) {
-      try {
-        writeInside(anchor, target, readInside(anchor, legacy, { maxBytes: 2e5 }), { exclusive: true, maxBytes: 2e5 });
-      } catch (error) {
-        if (!(error instanceof SafeFsError) || error.code !== "conflict") throw error;
-      }
-    }
-    paths2[key] = join6(anchor, target);
-  }
-  return paths2;
-}
-
 // runtime/model-validation.ts
 var endpoints = {
   xai: "https://api.x.ai/v1",
@@ -5838,8 +5793,12 @@ var endpoints = {
   anthropic: "https://api.anthropic.com/v1"
 };
 var COMPOSE_LOCAL_MODEL_MESSAGE = "This Docker browser installation cannot use localhost or Docker host aliases for a model server on your computer. Use a hosted provider or a model server network address reachable from both the coordinator and agent containers.";
+function bundledModelEnabled() {
+  return process.env.OPEN_HARNESS_DEPLOYMENT === "compose" && process.env.OPEN_HARNESS_BUNDLED_MODEL === "1";
+}
 function modelEndpointIssue(baseUrl) {
   if (process.env.OPEN_HARNESS_DEPLOYMENT !== "compose" || !baseUrl) return null;
+  if (baseUrl.replace(/\/$/, "") === BUNDLED_MODEL.baseUrl && !bundledModelEnabled()) return "The on-device model is turned off. Choose your provider in Workspace settings or open the launcher and select the model on this computer.";
   let host;
   try {
     host = new URL(baseUrl).hostname.toLowerCase().replace(/\.$/, "");
@@ -5887,6 +5846,52 @@ async function testModelConnection(model, apiKey) {
     const message = error instanceof Error ? error.message : "Could not reach the model provider.";
     return { ok: false, message: apiKey ? message.replaceAll(apiKey, "[redacted]") : message };
   }
+}
+
+// runtime/profiles.ts
+var ProfileError = class extends Error {
+  constructor(message, status = 400) {
+    super(message);
+    this.status = status;
+  }
+};
+function validId(id) {
+  if (typeof id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new ProfileError("Invalid agent ID.");
+  return id;
+}
+
+// runtime/profile-memory.ts
+function profileMemory(root, agentId) {
+  const anchor = safeWorkspacePath(root, `agents/${validId(agentId)}`);
+  mkdirSync4(anchor, { recursive: true, mode: 448 });
+  for (const rel of ["profile", "profile/memories"]) {
+    let stat = statInside(anchor, rel);
+    if (!stat) {
+      try {
+        mkdirInside(anchor, rel);
+      } catch (error) {
+        if (!(error instanceof SafeFsError) || error.code !== "conflict") throw error;
+      }
+      stat = statInside(anchor, rel);
+    }
+    if (stat?.isSymbolicLink) throw new SafeFsError("symlink", "Workspace paths cannot contain symbolic links.");
+    if (!stat?.isDirectory) throw new SafeFsError("invalid-path", "Workspace parent is not a directory.");
+  }
+  const paths2 = { memory: "", user: "" };
+  for (const [key, file] of [["memory", "MEMORY.md"], ["user", "USER.md"]]) {
+    const target = `profile/memories/${file}`, legacy = `profile/${file}`;
+    const current = statInside(anchor, target), previous = statInside(anchor, legacy);
+    if (current?.isSymbolicLink || previous?.isSymbolicLink) throw new SafeFsError("symlink", "Workspace paths cannot contain symbolic links.");
+    if (!current && previous) {
+      try {
+        writeInside(anchor, target, readInside(anchor, legacy, { maxBytes: 2e5 }), { exclusive: true, maxBytes: 2e5 });
+      } catch (error) {
+        if (!(error instanceof SafeFsError) || error.code !== "conflict") throw error;
+      }
+    }
+    paths2[key] = join6(anchor, target);
+  }
+  return paths2;
 }
 
 // lib/group-chat.ts
@@ -5939,6 +5944,7 @@ function containerBaseUrl(value) {
   const issue = modelEndpointIssue(value);
   if (issue) throw new Error(issue);
   const url = new URL(value);
+  if (bundledModelEnabled() && url.href.replace(/\/$/, "") === BUNDLED_MODEL.baseUrl) return "http://host.docker.internal:17572/v1";
   if (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) url.hostname = "host.docker.internal";
   return url.toString().replace(/\/$/, "");
 }

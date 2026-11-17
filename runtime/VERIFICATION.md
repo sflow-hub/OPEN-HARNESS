@@ -1,5 +1,47 @@
 # Runtime verification
 
+## Linux source launcher with an on-device Atlas model (2026-11-17 UTC)
+
+An Ubuntu ARM64 guest downloaded the GitHub source ZIP for
+`c4f8380f86f91ca1a31513f4225415a38f8bf820` and extracted it with umask 077.
+GIO launched the shipped `Start Open Harness.desktop` on an X display. In the
+launcher's terminal menu, selecting the local model took **1** and **Return**.
+The launcher built both images, downloaded the full 2,497,281,120-byte GGUF
+on Linux, verified SHA-256 `3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597`,
+and opened Chromium with its one-use pairing URL. The loaded server reported
+`atlas-linux` with a 65,536-token context. The previous native model was
+stopped for the test and the Mac inference relays stayed disabled.
+
+The new workspace had revision zero, zero saved credentials, zero previous
+file checks, and zero improvement proposals. In the setup guide, **Save and
+test** worked without entering a model name, address or key. Atlas used
+`write_file` and `read_file`, and the coordinator checked the unique contents.
+In **Improve my Open Harness**, the user asked Atlas to change “What would you
+like done?” to “How can I help today?”. Run `24c60387-03a3-44e3-9e97-77125fe53cec`
+used `search_files` and `patch`; one line changed in
+`components/assistant-workspace.tsx`. The coordinator compiled 70 source files.
+
+The sandboxed preview displayed the requested heading while the original
+dashboard was active. Apply and a fresh opening of the regular dashboard
+showed the new heading. Undo and another fresh opening showed the original
+heading. Proposal `dc9b9176-d49e-4127-9730-488c174729f6` finished in `undone`
+with no active revision. The verified shared file retained its hash.
+
+The guest had four CPU cores, 8 GB of RAM and swap. The test reused the pinned
+Hermes image layers with separate Docker state, and used temporary Linux
+storage for the build cache and empty model volume. The worker made a live
+TCP connection through the private model link. The model exposed zero host
+ports, and the link mounted neither the engine socket nor workspace data.
+The live trial covered ARM64. Both ARM64 and x86-64 runtime archives were
+checked against their pinned hashes.
+
+A separate launcher dispatch check on the same Ubuntu guest used Thunar 4.18.8
+and native GIO. Each opened the desktop entry from `Downloads/OPEN-HARNESS-main`
+and from a folder with spaces, parentheses and a dollar sign. In all four
+cases the terminal invoked the sibling launcher with `--desktop` and accepted
+**1** followed by **Return**. This check used a stand-in launcher to isolate
+file-manager argument handling.
+
 ## Local dashboard improvements — November 16, 2026
 
 Feature revision `999ff91d67ec885bc0feea2c7984441ee490dd0d` was built from

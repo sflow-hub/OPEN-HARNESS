@@ -8,7 +8,8 @@ import { profileMemory } from './profile-memory';
 import { assertSandboxedComputer } from './computer-validation';
 import { UNSANDBOXED_COMPUTER_MESSAGE } from '../lib/agent-profile';
 import { atomicWorkspaceWrite as atomic } from './path-safety';
-import { modelEndpointIssue } from './model-validation';
+import { BUNDLED_MODEL } from '../lib/agent-profile';
+import { bundledModelEnabled, modelEndpointIssue } from './model-validation';
 import { GROUP_CHAT_TOOL } from '../lib/group-chat';
 import { CODEX_PROVIDER, isCodexSession } from '../lib/codex';
 
@@ -38,6 +39,7 @@ export function runtimeToolCatalog(tools: ToolInfo[], profile?: AgentProfile): T
 export function containerBaseUrl(value: string) {
   const issue = modelEndpointIssue(value); if (issue) throw new Error(issue);
   const url = new URL(value);
+  if (bundledModelEnabled() && url.href.replace(/\/$/, '') === BUNDLED_MODEL.baseUrl) return 'http://host.docker.internal:17572/v1';
   if (['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) url.hostname = 'host.docker.internal';
   return url.toString().replace(/\/$/, '');
 }

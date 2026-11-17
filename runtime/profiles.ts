@@ -1,7 +1,8 @@
 import { isIP } from 'node:net';
 import type { DatabaseSync } from 'node:sqlite';
 import { TeamStore } from './teams';
-import { DEFAULT_BOARD, DEFAULT_COMPUTER, DEFAULT_NETWORK, DEFAULT_MODEL, draftProfile, normalizeToolIds, runToolGrants, TASK_TOOL, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
+import { bundledModelEnabled } from './model-validation';
+import { BUNDLED_MODEL, DEFAULT_BOARD, DEFAULT_COMPUTER, DEFAULT_NETWORK, DEFAULT_MODEL, draftProfile, normalizeToolIds, runToolGrants, TASK_TOOL, type AgentProfile, type ComputerConfig, type ModelChoice } from '../lib/agent-profile';
 import type { Agent } from '../lib/types';
 import { isSandboxedComputer, UNSANDBOXED_COMPUTER_MESSAGE } from '../lib/agent-profile';
 
@@ -113,7 +114,7 @@ export class Profiles {
   }
   get(id: string): AgentProfile | null { const row = this.db.prepare('SELECT json FROM agent_profiles WHERE id=?').get(id) as { json: string } | undefined; if (!row) return null; const profile = JSON.parse(row.json); return { ...profile, allowedTools: [...new Set([...normalizeToolIds(profile.allowedTools || [], (profile.connectors || []).map((connector: { name: string }) => connector.name)), TASK_TOOL])], board: { ...DEFAULT_BOARD, ...(profile.board || {}) }, computer: { ...DEFAULT_COMPUTER, ...profile.computer, network: { ...DEFAULT_NETWORK, ...profile.computer?.network, allow: [...(profile.computer?.network?.allow || [])] } } }; }
   list(): AgentProfile[] { return (this.db.prepare('SELECT json FROM agent_profiles ORDER BY rowid').all() as Array<{ json: string }>).map(row => this.get(JSON.parse(row.json).id)!).filter(Boolean); }
-  defaults(): { model: ModelChoice; revision: number } { const row = this.db.prepare('SELECT revision,json FROM workspace_settings WHERE id=1').get() as { revision: number; json: string } | undefined; return row ? { model: validateModel(JSON.parse(row.json)), revision: row.revision } : { model: DEFAULT_MODEL, revision: 0 }; }
+  defaults(): { model: ModelChoice; revision: number } { const row = this.db.prepare('SELECT revision,json FROM workspace_settings WHERE id=1').get() as { revision: number; json: string } | undefined; return row ? { model: validateModel(JSON.parse(row.json)), revision: row.revision } : { model: bundledModelEnabled() ? BUNDLED_MODEL : DEFAULT_MODEL, revision: 0 }; }
   setDefaults(model: ModelChoice, revision: number) { const current = this.defaults(); if (revision !== current.revision) throw new ProfileError('Workspace settings changed elsewhere. Reload before saving.', 409); this.db.prepare('INSERT INTO workspace_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,json=excluded.json').run(revision + 1, JSON.stringify({ ...validateModel(model), allowDirectAccess: this.security().allowDirectAccess })); return this.defaults(); }
   security(): { allowDirectAccess: boolean; revision: number } { const row = this.db.prepare('SELECT revision,json FROM workspace_settings WHERE id=1').get() as { revision: number; json: string } | undefined; return { allowDirectAccess: false, revision: row?.revision ?? 0 }; }
   setSecurity(allowDirectAccess: boolean, revision: number, confirm?: boolean) {

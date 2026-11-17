@@ -49,7 +49,7 @@ function release(scenario: Scenario = {}) {
   mkdirSync(join(dir, 'runtime'));
   mkdirSync(join(dir, 'bin'));
   mkdirSync(join(dir, 'state'));
-  for (const name of ['start.sh', 'start.ps1']) writeFileSync(join(dir, 'launchers', name), readFileSync(join(root, 'launchers', name)));
+  for (const name of ['start.sh', 'start.ps1', 'linux-model.sh']) writeFileSync(join(dir, 'launchers', name), readFileSync(join(root, 'launchers', name)));
   chmodSync(join(dir, 'launchers', 'start.sh'), 0o755);
   writeFileSync(join(dir, 'compose.yaml'), '{"name":"open-harness","services":{}}\n');
   writeFileSync(join(dir, 'image-lock.json'), JSON.stringify({ schemaVersion: 1, images: { hermes: { ref: 'ghcr.io/example/hermes@sha256:' + 'a'.repeat(64) } } }));
@@ -62,6 +62,7 @@ function release(scenario: Scenario = {}) {
 printf '%s\\n' "docker $*" >> "${state}/calls"
 printf 'HERMES_PULL=%s HERMES_IMAGE=%s PROJECT=%s\\n' "\${OPEN_HARNESS_HERMES_PULL-unset}" "\${OPEN_HARNESS_HERMES_IMAGE-unset}" "\${COMPOSE_PROJECT_NAME-unset}" >> "${state}/env"
 case "$1" in
+  inspect) if [ -f "${state}/model-crash" ]; then echo 'restarting 3'; fi; exit 0 ;;
   info)
     ${counter('info')}
     if [ "$count" -le ${scenario.infoFailures ?? 0} ]; then echo "Cannot connect to the Docker daemon" >&2; exit 1; fi
@@ -70,6 +71,24 @@ case "$1" in
   compose)
     ${scenario.composeMissing ? 'echo "docker: unknown command: compose" >&2; exit 1' : ''}
     if [ "$2" = "version" ]; then echo "Docker Compose version v2.29.0"; exit 0; fi
+    case "$*" in
+      *" config") echo "name: \${COMPOSE_PROJECT_NAME:-open-harness}"; exit 0 ;;
+      *" config --services") [ -f "${state}/model-status" ] && echo atlas-model; exit 0 ;;
+      *" build atlas-model open-harness")
+        ${counter('local-build')}
+        if [ -f "${state}/fail-first-build" ] && [ "$count" -eq 1 ]; then exit 1; fi
+        exit 0 ;;
+      *"exec -T atlas-worker-link node "*) [ ! -f "${state}/link-broken" ]; exit $? ;;
+      *" ps --all --quiet atlas-model") echo atlas-container; exit 0 ;;
+      *" restart atlas-model") echo restarted > "${state}/model-restarted"; exit 0 ;;
+      *"exec -T atlas-model node"*)
+        if [ -f "${state}/model-crash" ] && [ ! -f "${state}/model-restarted" ]; then exit 1; fi
+        ${counter('model-check')}
+        row=$(sed -n "\${count}p" "${state}/model-status")
+        [ -n "$row" ] || row=$(sed -n '$p' "${state}/model-status")
+        printf '%s\\n' "$row"; exit 0 ;;
+      *" up -d"*) printf '%s\\n' "\${OPEN_HARNESS_BUNDLED_MODEL-unset}" >> "${state}/model-mode-on-up" ;;
+    esac
     for arg in "$@"; do if [ "$arg" = "exec" ]; then ${scenario.pairFails ? 'echo "Could not create a browser connection link." >&2; exit 1' : `printf '%s\\n' '${scenario.pairOutput ?? `{"code":"${CODE}","expiresAt":"2030-01-01T00:00:00.000Z"}`}'`}; exit 0; fi; done
     exit 0 ;;
 esac
@@ -95,7 +114,7 @@ printf '%s\\n' "open $*" >> "${state}/calls"
   // suite (this sandbox has one, a developer's Mac has Docker Desktop's) must stay out of reach.
   const sysbin = join(dir, 'sysbin');
   mkdirSync(sysbin);
-  for (const tool of ['sh', 'bash', 'sed', 'tr', 'date', 'dirname', 'uname', 'sleep', 'cat', 'pwd', 'env']) {
+  for (const tool of ['sh', 'bash', 'sed', 'tr', 'date', 'dirname', 'uname', 'sleep', 'cat', 'pwd', 'env', 'grep', 'mkdir', 'mv']) {
     const found = ['/usr/bin', '/bin'].map(directory => join(directory, tool)).find(candidate => existsSync(candidate));
     if (found) symlinkSync(found, join(sysbin, tool));
   }
@@ -144,6 +163,135 @@ async function runPs(fixture: ReturnType<typeof release>, args: string[], health
       child.on('close', status => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
     });
   } finally { server.close(); }
+}
+
+// File-manager selection exercises the same Compose, readiness and pairing path as an ordinary launch.
+function linuxDesktop(states: string[], choice = 'local') {
+  const fixture = sourceArchive();
+  writeFileSync(join(fixture.dir, 'state/model-status'), states.join('\n') + '\n');
+  const dialog = join(fixture.dir, 'bin/kdialog');
+  writeFileSync(dialog, `#!/bin/sh
+printf '%s\\n' "$*" >> "${fixture.dir}/state/dialogs"
+case "$*" in *--menu*) ${choice === 'cancel' ? 'exit 1' : `echo ${choice}`} ;; *--yesno*) exit 0 ;; esac
+`);
+  chmodSync(dialog, 0o755);
+  return { fixture, env: { OPEN_HARNESS_LAUNCHER_PLATFORM: 'linux', DISPLAY: ':99', OPEN_HARNESS_DASHBOARD_PORT: '3001' } };
+}
+posixTest('Linux desktop installs only after a local choice, shows real download progress, reuses the saved model and pairs the selected port', () => {
+  const { fixture, env } = linuxDesktop(['', 'downloading|42|Downloading Atlas', 'ready||Atlas is ready']);
+  const result = run(fixture, ['--desktop'], env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Downloading Atlas \(42%\)/);
+  const local = 'docker compose -f compose.yaml --profile atlas-model ';
+  assert.deepEqual(fixture.calls().filter(call => call.startsWith(local + 'build ') || call.startsWith(local + 'up ') || call.includes('worker-link.mjs --health')), [
+    local + 'build atlas-model open-harness', local + 'up -d --no-build atlas-model', local + 'up -d --no-build', local + 'exec -T atlas-worker-link node /opt/atlas/worker-link.mjs --health'
+  ]);
+  assert.ok(fixture.calls().some(line => line.includes('http://127.0.0.1:3001/api/health')));
+  assert.ok(fixture.calls().includes('browser http://localhost:3001/?setupModel=local#pair=' + CODE));
+  assert.equal(readFileSync(join(fixture.dir, 'state/model-mode-on-up'), 'utf8'), '1\n1\n');
+  const reopened = run(fixture, [], env);
+  assert.equal(reopened.status, 0, reopened.stderr);
+  assert.equal(fixture.calls().filter(c => c.startsWith('browser ')).at(-1), 'browser http://localhost:3001/#pair=' + CODE);
+  assert.equal(fixture.calls().filter(c => c.includes('build atlas-model open-harness')).length, 2);
+  const own = run(fixture, ['--own-provider'], env);
+  assert.equal(own.status, 0, own.stderr);
+  assert.equal(fixture.calls().filter(c => c.startsWith('browser ')).at(-1), 'browser http://localhost:3001/?setupModel=provider#pair=' + CODE);
+  assert.match(own.stdout, /Choose your provider in Workspace settings/);
+  assert.ok(fixture.calls().includes('docker compose -f compose.yaml up -d --build'));
+  assert.ok(!fixture.calls().some(line => line.includes(' stop ')), 'Changing provider must leave active work running.');
+  assert.equal(readFileSync(join(fixture.dir, 'state/model-mode-on-up'), 'utf8').trim().split('\n').at(-1), '0');
+});
+
+posixTest('Linux desktop reports a model failure and retries it with the same download cache', () => {
+  const { fixture, env } = linuxDesktop(['', 'error||Download interrupted', 'error||Download interrupted', 'ready||Atlas is ready']);
+  assert.equal(run(fixture, ['--desktop', '--no-open'], env).status, 0);
+  assert.match(fixture.log(), /Download interrupted/);
+  assert.match(readFileSync(join(fixture.dir, 'state/dialogs'), 'utf8'), /--yesno/);
+  assert.ok(fixture.calls().includes('docker compose -f compose.yaml --profile atlas-model restart atlas-model'));
+  assert.equal(fixture.calls().filter(c => c.includes('build atlas-model open-harness')).length, 1);
+  assert.ok(!fixture.calls().some(line => /--volumes|volume rm|system prune/.test(line)));
+});
+
+posixTest('Linux desktop retries a failed image build before starting the model, and withholds pairing if the worker route is unavailable', () => {
+  const { fixture, env } = linuxDesktop(['ready||Atlas is ready']);
+  writeFileSync(join(fixture.dir, 'state/fail-first-build'), '');
+  writeFileSync(join(fixture.dir, 'state/link-broken'), '');
+  const result = run(fixture, ['--desktop', '--timeout', '0'], env);
+  assert.equal(result.status, 4, result.stderr);
+  assert.match(result.stderr, /Docker could not build the dashboard and local model server/);
+  assert.match(result.stderr, /agents cannot reach the local model/);
+  const builds = fixture.calls().filter(line => / build atlas-model open-harness$| up -d --no-build atlas-model$/.test(line));
+  assert.equal(builds.length, 3);
+  assert.equal(builds[0], builds[1]);
+  assert.match(builds[2], / up -d --no-build atlas-model$/);
+  assert.ok(!fixture.calls().some(line => line.includes('browser-pair.mjs') || line.startsWith('browser ')));
+});
+
+posixTest('Linux desktop detects a model restart loop before the long download timeout and offers a successful retry', () => {
+  const { fixture, env } = linuxDesktop(['ready||Atlas is ready']);
+  writeFileSync(join(fixture.dir, 'state/model-crash'), '');
+  const result = run(fixture, ['--desktop', '--no-open'], { ...env, OPEN_HARNESS_MODEL_TIMEOUT: '6' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /local model server keeps restarting/);
+  assert.doesNotMatch(result.stderr, /taking longer than expected/);
+  assert.match(readFileSync(join(fixture.dir, 'state/dialogs'), 'utf8'), /--yesno/);
+  assert.ok(fixture.calls().includes('docker compose -f compose.yaml --profile atlas-model restart atlas-model'));
+  assert.equal(fixture.calls().filter(call => call.includes('build atlas-model open-harness')).length, 1);
+});
+
+posixTest('Linux desktop own-provider and cancel choices leave the model unstarted', () => {
+  for (const choice of ['provider', 'cancel']) {
+    const { fixture, env } = linuxDesktop(['ready||Atlas is ready'], choice);
+    const result = run(fixture, ['--desktop'], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!fixture.calls().some(line => /up.*atlas-model|exec -T atlas-model/.test(line)));
+    assert.equal(fixture.calls().some(line => line.startsWith('browser ')), choice === 'provider');
+    if (choice === 'provider') assert.ok(fixture.calls().includes('browser http://localhost:3001/?setupModel=provider#pair=' + CODE));
+  }
+});
+
+posixTest('explicit local model CLI choice is passed to browser pairing, including the manual pairing hint', () => {
+  const { fixture, env } = linuxDesktop(['ready||Atlas is ready']);
+  assert.equal(run(fixture, ['--local-model'], env).status, 0);
+  assert.ok(fixture.calls().includes('browser http://localhost:3001/?setupModel=local#pair=' + CODE));
+  const manual = run(fixture, ['--local-model', '--no-open'], env);
+  assert.equal(manual.status, 0, manual.stderr);
+  assert.match(manual.stdout, /\?setupModel=local#pair=<code>/);
+  assert.ok(!manual.stdout.includes(CODE));
+});
+
+const desktopPython = process.platform === 'linux' && ['/usr/bin/python3', 'python3'].find(binary => spawnSync(binary, ['-c', 'from gi.repository import Gio; assert Gio.DesktopAppInfo']).status === 0);
+// Thunar 4.18 reads the raw Exec value, quotes %k, then parses argv. GIO unescapes the
+// value differently: a nested bash -c command passed its launch test but broke in Thunar.
+const thunarLaunch = `
+import os, sys
+from gi.repository import GLib
+entry = sys.argv[1]
+file = GLib.KeyFile()
+file.load_from_file(entry, GLib.KeyFileFlags.NONE)
+template = file.get_value('Desktop Entry', 'Exec')
+assert '%' not in template.replace('%k', ''), 'Implement expansion for the new desktop field code'
+_, argv = GLib.shell_parse_argv(template.replace('%k', GLib.shell_quote(entry)))
+os.execvp(argv[0], argv)
+`;
+// gio launch builds an anonymous entry without a filename. File managers activate a named entry.
+const gioLaunch = 'from gi.repository import Gio; import sys; app=Gio.DesktopAppInfo.new_from_filename(sys.argv[1]); assert app and app.launch([],None)';
+for (const [name, launch] of [['Thunar 4.18 parser', thunarLaunch], ['GIO', gioLaunch]]) {
+  test(`Linux file-manager entry dispatches the launcher from an extracted path with spaces and shell characters (${name})`, { skip: desktopPython ? false : 'Requires Linux with the GIO desktop-entry bindings.' }, async t => {
+    const base = mkdtempSync(join(tmpdir(), "Open Harness user's $files & (test) "));
+    t.after(() => rmSync(base, { recursive: true, force: true }));
+    mkdirSync(join(base, 'launchers'));
+    const entry = join(base, 'Start Open Harness.desktop');
+    const marker = join(base, 'invocation');
+    // CI has no terminal emulator. Only disable the terminal wrapper for the receipt script.
+    writeFileSync(entry, readFileSync(join(root, 'Start Open Harness.desktop'), 'utf8').replace('Terminal=true', 'Terminal=false'));
+    writeFileSync(join(base, 'launchers/start.sh'), 'printf "%s\\n" "$@" > "$LAUNCH_RECEIPT"\n');
+    const launched = spawnSync(desktopPython || 'python3', ['-c', launch, entry], { cwd: tmpdir(), env: { ...process.env, LAUNCH_RECEIPT: marker }, encoding: 'utf8', timeout: 10000 });
+    assert.equal(launched.status, 0, launched.stderr);
+    const deadline = Date.now() + 5000;
+    while (!existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(readFileSync(marker, 'utf8'), '--desktop\n');
+  });
 }
 
 posixTest('start.sh: a computer without Docker is told what to install, and nothing else runs', () => {
