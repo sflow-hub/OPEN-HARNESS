@@ -35,6 +35,13 @@ ports, and the link mounted neither the engine socket nor workspace data.
 The live trial covered ARM64. Both ARM64 and x86-64 runtime archives were
 checked against their pinned hashes.
 
+A separate launcher dispatch check on the same Ubuntu guest used Thunar 4.18.8
+and native GIO. Each opened the desktop entry from `Downloads/OPEN-HARNESS-main`
+and from a folder with spaces, parentheses and a dollar sign. In all four
+cases the terminal invoked the sibling launcher with `--desktop` and accepted
+**1** followed by **Return**. This check used a stand-in launcher to isolate
+file-manager argument handling.
+
 ## Local dashboard improvements — November 16, 2026
 
 Feature revision `999ff91d67ec885bc0feea2c7984441ee490dd0d` was built from

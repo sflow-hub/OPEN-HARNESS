@@ -261,22 +261,38 @@ posixTest('explicit local model CLI choice is passed to browser pairing, includi
 });
 
 const desktopPython = process.platform === 'linux' && ['/usr/bin/python3', 'python3'].find(binary => spawnSync(binary, ['-c', 'from gi.repository import Gio; assert Gio.DesktopAppInfo']).status === 0);
-test('Linux file-manager entry dispatches the launcher from an extracted path with spaces and shell characters', { skip: desktopPython ? false : 'Requires Linux with the GIO desktop-entry bindings.' }, async () => {
-  const base = mkdtempSync(join(tmpdir(), 'Open Harness $files & (test) '));
-  mkdirSync(join(base, 'launchers'));
-  const entry = join(base, 'Start Open Harness.desktop');
-  const marker = join(base, 'invocation');
-  // CI has no terminal emulator. GIO performs the real Exec parsing, %k expansion and process launch.
-  writeFileSync(entry, readFileSync(join(root, 'Start Open Harness.desktop'), 'utf8').replace('Terminal=true', 'Terminal=false'));
-  writeFileSync(join(base, 'launchers/start.sh'), 'printf "%s" "$1" > "$LAUNCH_RECEIPT"\n');
-  // gio launch builds an anonymous entry without a filename. File managers activate a named entry.
-  const launch = 'from gi.repository import Gio; import sys; app=Gio.DesktopAppInfo.new_from_filename(sys.argv[1]); assert app and app.launch([],None)';
-  const launched = spawnSync(desktopPython || 'python3', ['-c', launch, entry], { env: { ...process.env, LAUNCH_RECEIPT: marker }, encoding: 'utf8', timeout: 10000 });
-  assert.equal(launched.status, 0, launched.stderr);
-  const deadline = Date.now() + 5000;
-  while (!existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
-  assert.equal(readFileSync(marker, 'utf8'), '--desktop');
-});
+// Thunar 4.18 reads the raw Exec value, quotes %k, then parses argv. GIO unescapes the
+// value differently: a nested bash -c command passed its launch test but broke in Thunar.
+const thunarLaunch = `
+import os, sys
+from gi.repository import GLib
+entry = sys.argv[1]
+file = GLib.KeyFile()
+file.load_from_file(entry, GLib.KeyFileFlags.NONE)
+template = file.get_value('Desktop Entry', 'Exec')
+assert '%' not in template.replace('%k', ''), 'Implement expansion for the new desktop field code'
+_, argv = GLib.shell_parse_argv(template.replace('%k', GLib.shell_quote(entry)))
+os.execvp(argv[0], argv)
+`;
+// gio launch builds an anonymous entry without a filename. File managers activate a named entry.
+const gioLaunch = 'from gi.repository import Gio; import sys; app=Gio.DesktopAppInfo.new_from_filename(sys.argv[1]); assert app and app.launch([],None)';
+for (const [name, launch] of [['Thunar 4.18 parser', thunarLaunch], ['GIO', gioLaunch]]) {
+  test(`Linux file-manager entry dispatches the launcher from an extracted path with spaces and shell characters (${name})`, { skip: desktopPython ? false : 'Requires Linux with the GIO desktop-entry bindings.' }, async t => {
+    const base = mkdtempSync(join(tmpdir(), "Open Harness user's $files & (test) "));
+    t.after(() => rmSync(base, { recursive: true, force: true }));
+    mkdirSync(join(base, 'launchers'));
+    const entry = join(base, 'Start Open Harness.desktop');
+    const marker = join(base, 'invocation');
+    // CI has no terminal emulator. Only disable the terminal wrapper for the receipt script.
+    writeFileSync(entry, readFileSync(join(root, 'Start Open Harness.desktop'), 'utf8').replace('Terminal=true', 'Terminal=false'));
+    writeFileSync(join(base, 'launchers/start.sh'), 'printf "%s\\n" "$@" > "$LAUNCH_RECEIPT"\n');
+    const launched = spawnSync(desktopPython || 'python3', ['-c', launch, entry], { cwd: tmpdir(), env: { ...process.env, LAUNCH_RECEIPT: marker }, encoding: 'utf8', timeout: 10000 });
+    assert.equal(launched.status, 0, launched.stderr);
+    const deadline = Date.now() + 5000;
+    while (!existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(readFileSync(marker, 'utf8'), '--desktop\n');
+  });
+}
 
 posixTest('start.sh: a computer without Docker is told what to install, and nothing else runs', () => {
   const fixture = release({ dockerMissing: true });

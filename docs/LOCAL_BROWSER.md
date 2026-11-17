@@ -49,9 +49,10 @@ choose **Code → Download ZIP**, then extract the ZIP and open the folder conta
 `compose.yaml`. If you already cloned the repository, open your checkout. With Docker
 running, double-click **Start Open Harness.command** on Mac or **Start Open Harness.cmd**
 on Windows. On Linux, double-click **Start Open Harness.desktop** inside the extracted folder.
-If your file manager asks, choose **Trust and Launch** or right-click and choose **Allow Launching**.
-If it opens a text editor, right-click **Start Open Harness.sh** in the same folder and choose
-**Run as a Program**. Some file managers first require **Properties → Permissions → Allow executing file as program**.
+If Thunar shows **Untrusted application launcher**, choose **Launch Anyway**. Other file managers
+may offer **Trust and Launch** or **Allow Launching**. If the desktop entry opens in a text editor,
+open its **Properties → Permissions**, allow it to execute, then double-click it again. File managers
+with a **Run as a Program** option can also use **Start Open Harness.sh** in the same folder.
 Keep the launcher beside the extracted files.
 
 Choose **Use a model on this computer** to download about 2.5 GB and run Atlas locally on your CPU.
