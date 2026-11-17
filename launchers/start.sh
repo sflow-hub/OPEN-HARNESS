@@ -327,7 +327,14 @@ urlencode() {
 open_url() {
   if [ -n "${OPEN_HARNESS_BROWSER_COMMAND:-}" ]; then "$OPEN_HARNESS_BROWSER_COMMAND" "$1" >/dev/null 2>&1
   elif [ "$platform" = darwin ]; then open "$1" >/dev/null 2>&1
-  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1
+  elif command -v xdg-open >/dev/null 2>&1; then
+    # Desktop helpers may spawn the browser after the launcher terminal closes.
+    # A separate session keeps that terminal's hangup from killing the handoff.
+    if [ "$platform" = linux ] && command -v setsid >/dev/null 2>&1; then
+      setsid --wait xdg-open "$1" </dev/null >/dev/null 2>&1
+    else
+      xdg-open "$1" >/dev/null 2>&1
+    fi
   else return 1; fi
 }
 

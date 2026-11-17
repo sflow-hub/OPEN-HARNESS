@@ -1,5 +1,36 @@
 # Runtime verification
 
+## Linux default browser from the native desktop (2026-11-17 UTC)
+
+An Ubuntu 24.04 ARM64 guest downloaded the `main` source ZIP at
+`1d7b4d096930f6427c757e88331fb8fe36faf2de`. A native Xorg session on the virtual
+GPU and VT7 ran Xfce, Thunar, Zenity and Mozilla's signed Firefox package.
+The desktop used a fresh home directory and Firefox as its HTTP/HTTPS default.
+Ubuntu's AppArmor service and unprivileged-user-namespace restriction remained
+enabled throughout. Desktop packages and an independent Docker daemon used
+an isolated mount namespace and a temporary test disk.
+
+A genuine double-click on the unchanged desktop entry and a click on the
+local-model choice built the images and downloaded the model. The original
+launcher then closed its terminal. A process trace recorded the kernel sending
+`SIGHUP` to `xfce4-mime-helper` before Firefox executed.
+
+In a separate extraction with the Linux `setsid --wait` browser-handoff fix,
+the same GUI actions opened Firefox through the normal `xdg-open` path. The
+browser consumed one launcher-issued pairing link, cleared its address-bar
+fragment, and displayed the connected workspace with Atlas. A GUI reload
+retained the authenticated workspace without asking for another pairing code.
+There was no browser-command override, manual URL navigation, copied link or
+injected browser credential. Firefox's content processes had `NoNewPrivs=1`
+and `Seccomp=2`. The shipped Firefox AppArmor profile retained its original
+hash and Ubuntu's `unconfined` profile flag with the explicit `userns` permission.
+
+A Linux Python PTY regression reproduces the terminal hangup with a delayed
+browser helper that restores default `SIGHUP` handling. The original launcher
+loses the helper; the fixed launcher preserves the single exact URL, keeps the
+pairing code out of its output, and reports an opener failure with exit code 5.
+
+
 ## Linux source launcher with an on-device Atlas model (2026-11-17 UTC)
 
 An Ubuntu ARM64 guest downloaded the GitHub source ZIP for
