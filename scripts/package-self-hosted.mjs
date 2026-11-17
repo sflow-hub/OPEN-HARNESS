@@ -12,7 +12,7 @@ function command(binary, args, cwd, env) {
   return result.stdout.trim();
 }
 const requiredSource = ['package-lock.json', 'compose.yaml', 'Dockerfile.coordinator', '.env.example', 'docs/SELF_HOSTING.md', 'runtime/hermes/Dockerfile'];
-const browserFiles = ['runtime/dind-entrypoint.sh', 'compose.host-folders.example.yaml', 'docs/LOCAL_BROWSER.md', 'docs/SELF_HOSTING.md', 'LICENSE', 'Start Open Harness.command', 'Start Open Harness.cmd'];
+const browserFiles = ['runtime/dind-entrypoint.sh', 'compose.host-folders.example.yaml', 'docs/LOCAL_BROWSER.md', 'docs/SELF_HOSTING.md', 'LICENSE', 'Start Open Harness.command', 'Start Open Harness.cmd', 'Start Open Harness.desktop', 'Start Open Harness.sh'];
 const privateFile = path => /(^|\/)\.env(?:\.|$)/.test(path) && path !== '.env.example' || /(^|\/)(?:\.open-harness[^/]*|node_modules|dist|test-results|playwright-report)(?:\/|$)/.test(path);
 const collaborationFile = path => path === 'COORDINATION.md' || path.startsWith('Claude outputs/') || path.startsWith('work/') || path.endsWith('.bundle') || /(?:^|\/)\.DS_Store$/.test(path) || / 2\.[^/]+$/.test(path);
 
@@ -48,7 +48,7 @@ export function packageBrowser({ sourceRoot, destination, version, lock, compose
     writeFileSync(join(staging, 'compose.yaml'), `${JSON.stringify(browserCompose(compose, lock), null, 2)}\n`);
     writeFileSync(join(staging, 'image-lock.json'), `${JSON.stringify(lock, null, 2)}\n`);
     // ZIP extractors on macOS retain these modes; tar does too.
-    chmodSync(join(staging, 'Start Open Harness.command'), 0o755);
+    for (const file of ['Start Open Harness.command', 'Start Open Harness.desktop', 'Start Open Harness.sh']) chmodSync(join(staging, file), 0o755);
     for (const file of regularFiles(staging)) {
       assert.ok(!privateFile(file) && !collaborationFile(file), `Unexpected private file in browser release: ${file}`);
       if (file.endsWith('.sh')) chmodSync(join(staging, file), 0o755);

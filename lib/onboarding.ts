@@ -14,6 +14,7 @@ export type OnboardingStatus = {
   platform: 'linux' | 'darwin' | 'win32' | 'unknown';
   platformLabel: string;
   executionReady: boolean;
+  bundledModelAvailable?: boolean;
   recommendedAccess: 'private' | 'direct';
   credentialMode: 'coordinator' | 'runner';
   credentialMachineId?: string;

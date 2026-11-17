@@ -64,3 +64,27 @@ test('closing manually reopened setup preserves an existing completion', async (
   await page.getByRole('button', { name: 'Set up later' }).click();
   expect(await page.evaluate(() => localStorage.getItem('open-harness.onboarding.v1'))).toBe('done');
 });
+
+test('the launcher model can be tested without entering a provider or a key', async ({ page }) => {
+  const model = { provider: 'local', model: 'atlas-linux', baseUrl: 'http://atlas-model:8080/v1', credentialRef: '' };
+  await page.route(/\/v1\/workspace\/model(?:\/import)?$/, route => route.fulfill({ json: { model, revision: 0 } }));
+  await page.route(/\/v1\/(readiness|onboarding\/status)$/, async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...await response.json(), executionReady: true, bundledModelAvailable: true } });
+  });
+  await page.route('**/v1/onboarding/model-test', route => route.fulfill({ json: { ok: true, model, revision: 1, message: 'Model ready.' } }));
+  await page.goto('/?controlPort=' + (process.env.OPEN_HARNESS_TEST_PORT || 4317));
+  await page.getByRole('button', { name: 'Use this computer' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Connect your model' });
+  await expect(dialog.getByRole('heading', { name: 'Use the model on this computer' })).toBeVisible();
+  await expect(dialog.getByLabel('Model server address')).toHaveCount(0);
+  await expect(dialog.getByLabel('API key')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Choose another model' }).click();
+  await expect(dialog.getByLabel('Model server address')).toBeVisible();
+  await dialog.getByRole('button', { name: 'Use the model on this computer' }).click();
+  const saved = page.waitForRequest(request => request.url().endsWith('/v1/onboarding/model-test'));
+  await dialog.getByRole('button', { name: 'Save and test' }).click();
+  expect((await saved).postDataJSON()).toEqual({ model, save: true, revision: 0 });
+  await expect(page.getByRole('dialog', { name: /Verify a task|You’re ready/ })).toBeVisible();
+});

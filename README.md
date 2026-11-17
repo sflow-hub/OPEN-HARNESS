@@ -31,7 +31,7 @@ See [Working with persistent teammates](docs/TEAMMATE_WORKFLOWS.md) for the comp
 ### Start on your computer
 
 1. Install Docker with Linux containers and Compose. On Mac or Windows, open Docker Desktop once to finish setup. Allow about 40 GB of free space for the first source build, including temporary Docker layers.
-2. Download **Code → Download ZIP** from this repository, extract the whole folder, and open **Start Open Harness.command** on Mac or **Start Open Harness.cmd** on Windows. On Linux run `bash launchers/start.sh` in the extracted folder.
+2. Download **Code → Download ZIP** from this repository, extract the whole folder, and open **Start Open Harness.command** on Mac or **Start Open Harness.cmd** on Windows. On Linux, double-click **Start Open Harness.desktop** in the extracted folder. Choose **Use a model on this computer** to download Atlas for local CPU use (about 2.5 GB), or **Use my own model provider**.
 3. Leave the launcher open while it builds the dashboard and opens your browser. Follow setup to prepare the agent runtime, connect a model and verify that your first agent can write a file. Allow tens of minutes for the first runtime build. Hosted model calls use your provider's account.
 
 The launcher can also open a packaged release with pinned images. For operating-system prompts and startup recovery, see [Local browser installation](docs/LOCAL_BROWSER.md).

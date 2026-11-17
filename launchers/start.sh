@@ -21,8 +21,11 @@ set -u
 script_dir=$(cd "$(dirname "$0")" && pwd)
 release_dir=$(cd "$script_dir/.." && pwd)
 log_file="$release_dir/open-harness-launcher.log"
-app_url="http://localhost:3000"
-health_url=${OPEN_HARNESS_HEALTH_URL:-http://127.0.0.1:3000/api/health}
+dashboard_port=${OPEN_HARNESS_DASHBOARD_PORT:-3000}
+case "$dashboard_port" in ''|*[!0-9]*|0*|??????*) echo 'Choose a dashboard port between 1 and 65535.' >&2; exit 64 ;; esac
+[ "$dashboard_port" -le 65535 ] || { echo 'Choose a dashboard port between 1 and 65535.' >&2; exit 64; }
+app_url="http://localhost:$dashboard_port"
+health_url=${OPEN_HARNESS_HEALTH_URL:-http://127.0.0.1:$dashboard_port/api/health}
 compose_file="compose.yaml"
 lock_file="image-lock.json"
 
@@ -31,6 +34,15 @@ open_browser=1
 build=0
 override_file=""
 action="start"
+desktop=0
+model_choice=""
+setup_query=""
+model_images_built=0
+model_profile=()
+preference_file=""
+saved_model=""
+dialog_method=terminal
+progress_dialog=0
 
 # ----------------------------------------------------------------- output ----
 say() { printf '%s\n' "$*"; printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$log_file" 2>/dev/null || true; }
@@ -41,7 +53,15 @@ hints() {
   warn "Launcher log: $log_file"
 }
 pause_if_wrapped() { if [ "${OPEN_HARNESS_LAUNCHER_PAUSE:-0}" = "1" ] && [ -t 0 ]; then printf 'Press Return to close this window. '; read -r _ignored || true; fi; }
-fail() { code=$1; shift; warn "$*"; hints; pause_if_wrapped; exit "$code"; }
+fail() {
+  code=$1; shift; warn "$*"; hints
+  if [ "$desktop" = 1 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    if command -v zenity >/dev/null 2>&1; then zenity --error --title='Open Harness' --text="$*" || :
+    elif command -v kdialog >/dev/null 2>&1; then kdialog --title 'Open Harness' --error "$*" || :
+    else OPEN_HARNESS_LAUNCHER_PAUSE=1; fi
+  fi
+  pause_if_wrapped; exit "$code"
+}
 usage() {
   cat <<'USAGE'
 Usage: launchers/start.sh [options]
@@ -51,6 +71,9 @@ Usage: launchers/start.sh [options]
                        or open a browser (for scripts and acceptance runs).
   --build              Explicitly build from source. A source download is
                        recognized automatically when no option is supplied.
+  --desktop            Linux: choose a local CPU model or your own provider.
+  --local-model        Linux: download and use Atlas on this computer.
+  --own-provider       Linux: use your own provider without a local download.
   --override <file>    Add an explicitly chosen Compose override file, such as
                        your edited copy of compose.host-folders.example.yaml.
                        Nothing on this computer is shared without it.
@@ -68,6 +91,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-open) open_browser=0 ;;
     --build) build=1 ;;
+    --desktop) desktop=1 ;;
+    --local-model) model_choice=local ;;
+    --own-provider) model_choice=provider ;;
     --override|--folders)
       [ $# -ge 2 ] || { usage; exit 64; }
       override_file=$2; shift ;;
@@ -178,12 +204,57 @@ fi
 # Every Compose call uses the same file list so an override chosen once applies
 # to up, stop, ps and logs alike.
 compose() {
-  if [ -n "$override_file" ]; then docker compose -f "$compose_file" -f "$override_file" "$@"; else docker compose -f "$compose_file" "$@"; fi
+  if [ -n "$override_file" ]; then docker compose -f "$compose_file" -f "$override_file" ${model_profile[@]+"${model_profile[@]}"} "$@"; else docker compose -f "$compose_file" ${model_profile[@]+"${model_profile[@]}"} "$@"; fi
 }
 healthy() {
   status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$health_url" 2>/dev/null || echo 000)
   [ "$status" = "200" ]
 }
+
+if [ "$platform" = linux ]; then
+  . "$script_dir/linux-model.sh"
+  preference_file=$(model_state_file) || preference_file=''
+  if [ -n "$preference_file" ] && [ -r "$preference_file" ]; then
+    read -r saved_model < "$preference_file" || :
+  fi
+  if [ "$desktop" = 1 ] && [ "$action" = start ]; then
+    dialog_method=$(model_dialog)
+    if compose --profile atlas-model config --services 2>/dev/null | grep -qx atlas-model; then
+      model_choice=$(choose_model "$saved_model" "$dialog_method") || exit 0
+    fi
+  fi
+  # Only a choice made on this launch should open the dashboard's model setup.
+  case "$model_choice" in local|provider) setup_query="?setupModel=$model_choice" ;; esac
+  model_choice=${model_choice:-$saved_model}
+  if [ "$action" = stop ]; then model_profile=(--profile atlas-model); fi
+  case "$model_choice" in
+    local)
+      model_profile=(--profile atlas-model)
+      export OPEN_HARNESS_BUNDLED_MODEL=1
+      if [ "$action" = start ]; then
+        compose config --services 2>/dev/null | grep -qx atlas-model || fail 3 'This package does not include the local CPU model. Download the complete source ZIP to use it.'
+        while :; do
+          if [ "$desktop" = 1 ] && [ "$dialog_method" = zenity ]; then
+            exec 3> >(zenity --progress --title='Local model setup' --text='Preparing the local CPU model…' --percentage=0 --auto-close --no-cancel >/dev/null 2>&1)
+            progress_dialog=1
+          fi
+          model_error=''
+          if prepare_model; then model_ready=1; else model_ready=0; fi
+          if [ "$progress_dialog" = 1 ]; then update_progress 'Model setup finished' 100; exec 3>&-; progress_dialog=0; fi
+          [ "$model_ready" = 1 ] && break
+          warn "$model_error"
+          [ "$desktop" = 1 ] && retry_model || { hints; exit 3; }
+        done
+      fi ;;
+    provider)
+      export OPEN_HARNESS_BUNDLED_MODEL=0
+      if [ "$saved_model" = local ] && [ "$action" = start ]; then
+        say 'Choose your provider in Workspace settings. A running local model stops when you stop Open Harness.'
+      fi ;;
+  esac
+elif [ -n "$model_choice" ] || [ "$desktop" = 1 ]; then
+  fail 64 'The bundled CPU model launcher is available on Linux.'
+fi
 
 case "$action" in
   stop)
@@ -200,7 +271,10 @@ case "$action" in
     pause_if_wrapped; exit 0 ;;
 esac
 
-if [ "$build" = "1" ]; then
+if [ "$model_images_built" = 1 ]; then
+  say 'Starting the dashboard with the local CPU model…'
+  compose up -d --no-build || fail 3 "Docker Compose could not start the stack."
+elif [ "$build" = "1" ]; then
   say "Building the coordinator image from source and starting the Open Harness containers…"
   compose up -d --build || fail 3 "Docker Compose could not build and start the stack."
 else
@@ -216,6 +290,22 @@ until healthy; do
   [ "$waited" -lt "$timeout_seconds" ] || fail 4 "The app did not answer at $health_url within $timeout_seconds seconds. The containers are still running and your data is intact."
   sleep 2; waited=$((waited + 2))
 done
+
+if [ "$model_choice" = local ]; then
+  say 'Checking that your agents can reach the local model…'
+  link_started=$SECONDS
+  until compose exec -T atlas-worker-link node /opt/atlas/worker-link.mjs --health >/dev/null 2>&1; do
+    [ $((SECONDS - link_started)) -lt "$timeout_seconds" ] || fail 4 'The dashboard is running, but agents cannot reach the local model. Reopen the launcher to retry the connection.'
+    sleep 2
+  done
+fi
+
+if [ -n "$model_choice" ] && [ "$model_choice" != "$saved_model" ]; then
+  if [ -z "$preference_file" ] || ! (umask 077; mkdir -p "$(dirname "$preference_file")" &&
+    printf '%s\n' "$model_choice" > "$preference_file.$$.tmp" && mv -f "$preference_file.$$.tmp" "$preference_file"); then
+    warn 'This launch succeeded. Open Harness could not remember the model choice for the next launch.'
+  fi
+fi
 
 # --------------------------------------------------------------- pairing ----
 # The dashboard hands out its operator token only to a browser that presents a
@@ -243,7 +333,7 @@ open_url() {
 
 if [ "$open_browser" = "0" ]; then
   say "Open Harness is running at $app_url"
-  say "No browser was opened (--no-open). To pair one, mint a code with: docker compose -f $compose_file exec -T open-harness node /opt/open-harness/runtime/browser-pair.mjs — then open $app_url/#pair=<code>."
+  say "No browser was opened (--no-open). To pair one, mint a code with: docker compose -f $compose_file exec -T open-harness node /opt/open-harness/runtime/browser-pair.mjs — then open $app_url/${setup_query}#pair=<code>."
   pause_if_wrapped; exit 0
 fi
 
@@ -263,7 +353,7 @@ case "$pair_code" in
   *[!A-Za-z0-9_-]*) mint_failed "the pairing helper printed a code in an unexpected form" ;;
 esac
 [ "${#pair_code}" -ge 32 ] && [ "${#pair_code}" -le 128 ] || mint_failed "the pairing helper printed a code of unexpected length"
-target="$app_url/#pair=$(urlencode "$pair_code")"
+target="$app_url/${setup_query}#pair=$(urlencode "$pair_code")"
 if open_url "$target"; then
   say "Open Harness is running at $app_url — a paired browser window is opening."
 else

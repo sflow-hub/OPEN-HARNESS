@@ -23,6 +23,40 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+  atlas-model:
+    profiles: [atlas-model]
+    image: ${OPEN_HARNESS_MODEL_IMAGE:-open-harness-atlas-model:local}
+    build: ./runtime/local-model
+    networks: [default, runtime]
+    volumes:
+      - atlas-weights:/models
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+  # The nested engine strips the outer Compose DNS from its default bridge.
+  # Forward only the model port from that bridge, without exposing the coordinator.
+  atlas-worker-link:
+    profiles: [atlas-model]
+    image: ${OPEN_HARNESS_MODEL_IMAGE:-open-harness-atlas-model:local}
+    pull_policy: never
+    entrypoint: ["node", "/opt/atlas/worker-link.mjs"]
+    network_mode: service:docker
+    depends_on:
+      docker: {condition: service_healthy}
+      atlas-model: {condition: service_started}
+    healthcheck:
+      test: ["CMD", "node", "/opt/atlas/worker-link.mjs", "--health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
   open-harness:
     init: true
     image: ${OPEN_HARNESS_COORDINATOR_IMAGE:-open-harness-coordinator:local}
@@ -39,13 +73,14 @@ services:
       OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD: ${OPEN_HARNESS_ALLOW_REMOTE_DASHBOARD:-0}
       OPEN_HARNESS_REQUIRE_BROWSER_PAIRING: "1"
       OPEN_HARNESS_DEPLOYMENT: compose
+      OPEN_HARNESS_BUNDLED_MODEL: ${OPEN_HARNESS_BUNDLED_MODEL:-0}
       OPEN_HARNESS_HERMES_IMAGE: ${OPEN_HARNESS_HERMES_IMAGE:-open-harness-hermes:2026.9.11}
       OPEN_HARNESS_HERMES_PULL: ${OPEN_HARNESS_HERMES_PULL:-0}
     volumes:
       - harness-data:/data
       - harness-control:/run/open-harness-docker
     ports:
-      - "${OPEN_HARNESS_LISTEN_ADDRESS:-127.0.0.1}:3000:3000"
+      - "${OPEN_HARNESS_LISTEN_ADDRESS:-127.0.0.1}:${OPEN_HARNESS_DASHBOARD_PORT:-3000}:3000"
     cap_drop:
       - ALL
     security_opt:
@@ -61,6 +96,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  atlas-weights:
   harness-data:
   harness-docker:
   harness-control:

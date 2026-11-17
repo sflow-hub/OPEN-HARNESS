@@ -30,6 +30,7 @@ import { MachineError, Machines } from "./machines";
 import { encryptRunnerSecret, generateRunnerKeyPair } from "../lib/runner-crypto";
 import { exportAgentTransfer, importAgentTransfer, AGENT_TRANSFER_WIRE_LIMIT } from './transfer-files';
 import { sealAgentTransfer, openAgentTransfer, validateSealedTransfer, type TransferBinding } from './transfer-crypto';
+import { bundledModelEnabled } from './model-validation';
 import { onboardingAction, onboardingStatusAsync } from './readiness';
 import { APP_VERSION } from '../lib/version';
 import { HERMES_COMMIT, HERMES_RELEASE } from '../lib/hermes-pin';
@@ -1362,7 +1363,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       recentRuns: store.listRuns(25).map(run => ({ id: run.id, agentId: run.agent_id, state: run.state, createdAt: run.created_at, updatedAt: run.updated_at, error: run.error })),
       credentials: credentials.rows().map(row => ({ ref: row.ref, label: row.label, provider: row.provider, present: credentials.present(row.ref), createdAt: row.created_at, updatedAt: row.updated_at, lastUsedAt: row.last_used_at })), secretStorage: secrets.backend, note: 'Secret values, prompts, messages, results, file contents, and model responses are excluded.',
     });
-    if (req.method === 'GET' && ['/v1/onboarding/status', '/v1/readiness'].includes(url.pathname)) return json(res, 200, { ...await onboardingStatusAsync(secrets.names(), root), taskVerified: setupJobs.verified(), setupJobs: setupJobs.list() });
+    if (req.method === 'GET' && ['/v1/onboarding/status', '/v1/readiness'].includes(url.pathname)) return json(res, 200, { ...await onboardingStatusAsync(secrets.names(), root), bundledModelAvailable: bundledModelEnabled(), taskVerified: setupJobs.verified(), setupJobs: setupJobs.list() });
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action, secrets.names())); }
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/model-test') {
       const input = await body(req), model = validateModel(input.model);
@@ -1518,7 +1519,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     }
     if (req.method === "POST" && url.pathname === "/v1/workspace/model/import") {
       const input = await body(req);
-      if (profiles.defaults().revision) return json(res, 200, profiles.defaults());
+      const defaults = profiles.defaults();
+      if (defaults.revision || bundledModelEnabled()) return json(res, 200, defaults);
       const result = profiles.setDefaults(input.model, 0); audit.record({ actorKind: 'operator', action: 'workspace.model.update' }); return json(res, 200, result);
     }
     if (url.pathname === '/v1/workspace/security') {

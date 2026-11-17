@@ -81,3 +81,17 @@ test('native and remote-runner validation still supports an explicitly configure
   assert.equal((await testModelConnection(model(`http://127.0.0.1:${address.port}/v1`), '')).ok, true);
   assert.deepEqual(requests, ['GET /v1/models', 'POST /v1/chat/completions']);
 });
+
+test('only the launcher-managed endpoint uses the nested worker link', t => {
+  environment(t, 'compose');
+  const prior = process.env.OPEN_HARNESS_BUNDLED_MODEL;
+  t.after(() => { if (prior === undefined) delete process.env.OPEN_HARNESS_BUNDLED_MODEL; else process.env.OPEN_HARNESS_BUNDLED_MODEL = prior; });
+  const endpoint = 'http://atlas-model:8080/v1';
+  delete process.env.OPEN_HARNESS_BUNDLED_MODEL;
+  assert.throws(() => containerBaseUrl(endpoint), /on-device model is turned off/);
+  process.env.OPEN_HARNESS_BUNDLED_MODEL = '1';
+  assert.equal(containerBaseUrl(endpoint + '/'), 'http://host.docker.internal:17572/v1');
+  assert.equal(containerBaseUrl('http://atlas-model:8081/v1'), 'http://atlas-model:8081/v1');
+  assert.equal(containerBaseUrl('https://other.example/v1'), 'https://other.example/v1');
+  assert.throws(() => containerBaseUrl('http://host.docker.internal:17572/v1'), { message: COMPOSE_LOCAL_MODEL_MESSAGE });
+});
