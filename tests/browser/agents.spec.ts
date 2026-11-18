@@ -1,3 +1,4 @@
+import { openNavigation, closeNavigation } from './navigation';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 
@@ -70,8 +71,7 @@ test('creating an agent uses the coordinator and survives a reload', async ({ pa
   await expect.poll(() => storedAgentIds(page)).toContain(id);
 });
 
-test('a new agent starts with an empty conversation', async ({ page, request }, testInfo) => {
-  const mobile = testInfo.project.name === 'mobile';
+test('a new agent starts with an empty conversation', async ({ page, request }) => {
   await page.addInitScript(({ workspace }) => {
     localStorage.setItem('open-harness.workspace.v2', JSON.stringify({
       ...workspace,
@@ -83,7 +83,7 @@ test('a new agent starts with an empty conversation', async ({ page, request }, 
   await expect(page.getByText('Earlier work here')).toBeVisible();
   await page.getByPlaceholder('Message Atlas…').fill('A half-written request');
 
-  if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNavigation(page);
   const created = createResponse(page);
   await page.getByRole('button', { name: 'New agent', exact: true }).click();
   const id = (await (await created).json()).agent.id as string;
@@ -91,7 +91,7 @@ test('a new agent starts with an empty conversation', async ({ page, request }, 
   const dialog = page.getByRole('dialog', { name: 'Agent settings' });
   await dialog.getByRole('button', { name: 'Close agent settings' }).click();
   await expect(dialog).toBeHidden();
-  if (mobile) await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click');
+  await closeNavigation(page);
 
   await expect(page.locator('.chat-toolbar strong')).toHaveText('New agent');
   await expect(page.getByText('Earlier work here')).toHaveCount(0);

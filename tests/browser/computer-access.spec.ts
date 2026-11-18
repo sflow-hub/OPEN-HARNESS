@@ -1,3 +1,4 @@
+import { openNavigation } from './navigation';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 import { draftProfile, type AgentProfile, type MachineInfo } from '../../lib/agent-profile';
@@ -156,7 +157,7 @@ test('a legacy direct-access profile is blocked until it is moved into a contain
   expect(saved.profile.computer).toMatchObject({ access: 'folders', desktop: local.capabilities.virtualDesktop ? 'virtual' : 'none', folders: [{ path: '/tmp/open-harness-kept', mode: 'read' }] });
 });
 
-test('a conversation with a legacy agent says so and opens its Computer settings', async ({ page }, testInfo) => {
+test('a conversation with a legacy agent says so and opens its Computer settings', async ({ page }) => {
   await legacy({ access: 'direct', desktop: 'none' })(page);
   // The workspace learns each agent's saved computer settings from the sync reply.
   await page.route(`${control}/v1/agents/sync`, async route => {
@@ -167,7 +168,7 @@ test('a conversation with a legacy agent says so and opens its Computer settings
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
   await expect(page.locator('.agent-card').filter({ hasText: 'Atlas' })).toContainText('Needs new computer settings');
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNavigation(page);
   await page.locator('aside.sidebar .agent-row', { hasText: 'Atlas' }).click();
   const banner = page.getByRole('alert').filter({ hasText: 'Atlas needs new computer settings' });
   await expect(banner).toContainText('no longer available because it ran outside the sandbox');

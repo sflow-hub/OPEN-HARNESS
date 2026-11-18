@@ -1,4 +1,5 @@
-import { test, expect, type Page, type TestInfo } from "@playwright/test";
+import { openWorkspaceSettings } from './navigation';
+import { test, expect, type Page } from "@playwright/test";
 import { initialWorkspace } from "../../lib/types";
 
 // The runtime routes are mocked here so the screen is covered before and independently of
@@ -22,21 +23,20 @@ function fixture() {
     probes: [{ id: "p-1", linkId: "l-run", kind: "coordinator-runner", state: "failing", latencyMs: null, detail: "Connection timed out after 5 s.", startedBy: { type: "agent", agentId: "rex", runId: "run-1" }, createdAt: stamp }],
   };
 }
-async function openSettings(page: Page, testInfo: TestInfo, request: import("@playwright/test").APIRequestContext) {
+async function openSettings(page: Page, request: import("@playwright/test").APIRequestContext) {
   const { token } = await (await request.get(`${control}/v1/bootstrap`)).json();
   await request.post(`${control}/v1/agents/sync`, { headers: { Authorization: `Bearer ${token}` }, data: { agents: initialWorkspace.agents } });
   await page.addInitScript(() => localStorage.setItem("open-harness.onboarding.v1", "done"));
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
-  if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "Open navigation" }).click();
-  await page.getByRole("button", { name: /Settings/ }).first().click();
+  await openWorkspaceSettings(page);
   return page.getByRole("region", { name: "Network tools" });
 }
 
-test("network tools start off, turn on from settings and show every computer's connections", async ({ page, request }, testInfo) => {
+test("network tools start off, turn on from settings and show every computer's connections", async ({ page, request }) => {
   const state = fixture(), writes: unknown[] = [];
   await page.route("**/v1/network", route => route.fulfill({ json: state }));
   await page.route("**/v1/network/settings", route => { const input = route.request().postDataJSON(); writes.push(input); state.enabled = input.enabled; return route.fulfill({ json: { enabled: state.enabled, updatedAt: stamp } }); });
-  const panel = await openSettings(page, testInfo, request);
+  const panel = await openSettings(page, request);
   const toggle = panel.getByRole("checkbox", { name: /Let agents test and change network connections/ });
   await expect(toggle).not.toBeChecked();
   await expect(panel.getByText(/Agents can’t run network tests/)).toBeVisible();
@@ -56,12 +56,12 @@ test("network tools start off, turn on from settings and show every computer's c
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width + 1);
 });
 
-test("a proposed change shows before and after with its evidence and is approved with its exact digest", async ({ page, request }, testInfo) => {
+test("a proposed change shows before and after with its evidence and is approved with its exact digest", async ({ page, request }) => {
   const state = fixture(); let decision: unknown = null;
   state.enabled = true;
   await page.route("**/v1/network", route => route.fulfill({ json: state }));
   await page.route("**/v1/network/changes/c-1/decision", route => { decision = route.request().postDataJSON(); const change = { ...state.pending[0], state: "verifying" }; state.pending = []; state.history = [change, ...state.history] as typeof state.history; return route.fulfill({ json: change }); });
-  const panel = await openSettings(page, testInfo, request);
+  const panel = await openSettings(page, request);
   const card = panel.getByRole("article", { name: "Coordinator address on Build box" });
   await expect(card.getByText(/Rex suggests changing/)).toBeVisible();
   await expect(card.getByText("http://10.0.0.4:4317")).toBeVisible();
@@ -75,7 +75,7 @@ test("a proposed change shows before and after with its evidence and is approved
   await expect(panel.getByText("Checking the new setting…", { exact: false })).toBeVisible();
 });
 
-test("tests, denials and reverts report plain results and keep the screen usable after a failure", async ({ page, request }, testInfo) => {
+test("tests, denials and reverts report plain results and keep the screen usable after a failure", async ({ page, request }) => {
   const state = fixture(); let reverts = 0, failDecision = true;
   state.enabled = true;
   await page.route("**/v1/network", route => route.fulfill({ json: state }));
@@ -83,7 +83,7 @@ test("tests, denials and reverts report plain results and keep the screen usable
   await page.route("**/v1/network/changes/c-1/decision", route => failDecision ? route.fulfill({ status: 409, json: { error: "This change was updated. Review it again before deciding." } }) : route.fulfill({ json: { ...state.pending[0], state: "denied" } }));
   await page.route("**/v1/network/settings", route => route.fulfill({ status: 503, json: { error: "The coordinator is restarting. Try again in a moment." } }));
   await page.route("**/v1/network/changes/c-0/revert", route => { reverts++; return route.fulfill({ json: { ...state.history[0], id: "c-2", revertOf: "c-0", state: "verifying" } }); });
-  const panel = await openSettings(page, testInfo, request);
+  const panel = await openSettings(page, request);
   const toggle = panel.getByRole("checkbox", { name: /Let agents test and change network connections/ });
   await expect(toggle).toBeChecked();
   await toggle.click();
@@ -104,9 +104,9 @@ test("tests, denials and reverts report plain results and keep the screen usable
   expect(reverts).toBe(1);
 });
 
-test("an older coordinator without network tools shows a quiet note instead of an error", async ({ page, request }, testInfo) => {
+test("an older coordinator without network tools shows a quiet note instead of an error", async ({ page, request }) => {
   await page.route("**/v1/network", route => route.fulfill({ status: 404, json: { error: "Not found" } }));
-  const panel = await openSettings(page, testInfo, request);
+  const panel = await openSettings(page, request);
   await expect(panel.getByText(/aren’t available from this coordinator yet/)).toBeVisible();
   await expect(panel.getByRole("alert")).toHaveCount(0);
   await expect(panel.getByRole("checkbox")).toBeDisabled();

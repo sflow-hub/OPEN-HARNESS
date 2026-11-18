@@ -1,3 +1,4 @@
+import { openNavigation, closeNavigation } from './navigation';
 import { test, expect, type Page } from '@playwright/test';
 import { initialWorkspace, type Workspace } from '../../lib/types';
 import type { PersistentRun, RemoteConversation } from '../../lib/control-client';
@@ -55,8 +56,8 @@ async function fixture(page: Page, workspace: Workspace = initialWorkspace) {
   return state;
 }
 
-async function openAgent(page: Page, name: string, isMobile: boolean) {
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+async function openAgent(page: Page, name: string) {
+  await openNavigation(page);
   await page.locator('aside.sidebar .agent-row', { hasText: name }).click();
   await expect(page.getByRole('textbox', { name: `Message ${name}` })).toBeVisible();
 }
@@ -70,21 +71,21 @@ async function delayedScribeHistory(page: Page) {
   return { pending, state };
 }
 
-test('shows connecting while cached conversations remain usable', async ({ page, isMobile }) => {
+test('shows connecting while cached conversations remain usable', async ({ page }) => {
   const pending = gate();
   const state = await fixture(page, { ...initialWorkspace, conversations: [{ id: 'cached', agentId: 'atlas', title: 'Saved notes', updatedAt: new Date().toISOString(), messages: [{ id: 'saved', role: 'assistant', content: 'Your saved work is still here.', settled: true }] }] });
   state.before = async path => { if (path === '/v1/bootstrap') await pending.promise; };
   try {
     await page.goto(`/?controlPort=${port}`);
-    await expect(page.locator('.sidebar-bottom')).toContainText('Connecting…');
-    await expect(page.locator('.sidebar-bottom')).not.toContainText('needs setup');
-    await openAgent(page, 'Atlas', isMobile);
+    await expect(page.getByRole('img', { name: 'Connecting…' })).toBeVisible();
+    await expect(page.getByRole('img', { name: /needs setup/i })).toHaveCount(0);
+    await openAgent(page, 'Atlas');
     await expect(page.locator('.transcript')).toContainText('Your saved work is still here.');
   } finally { pending.release(); }
-  await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
+  await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
 });
 
-test('loads history before slow settings and credentials finish', async ({ page, isMobile }) => {
+test('loads history before slow settings and credentials finish', async ({ page }) => {
   const pending = gate();
   const state = await fixture(page);
   const run: PersistentRun = { id: 'remembered-run', agent_id: 'atlas', conversation_id: 'remembered', prompt: 'Remembered task', state: 'completed', result: 'History arrived independently.' };
@@ -92,35 +93,36 @@ test('loads history before slow settings and credentials finish', async ({ page,
   state.before = async path => { if (['/v1/workspace/model/import', '/v1/credentials', '/v1/teams'].includes(path)) await pending.promise; };
   try {
     await page.goto(`/?controlPort=${port}`);
-    if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+    await openNavigation(page);
     await page.locator('aside.sidebar .recent', { hasText: 'Remembered task' }).click();
     await expect(page.locator('.transcript')).toContainText('History arrived independently.');
     await expect(page.getByText('Refreshing conversations…')).toHaveCount(0);
   } finally { pending.release(); }
 });
 
-test('late recovery attaches active work without changing the selected conversation', async ({ page, isMobile }) => {
+test('late recovery attaches active work without changing the selected conversation', async ({ page }) => {
   const pending = gate();
   const state = await fixture(page);
   state.runs = [{ id: 'other-run', agent_id: 'atlas', conversation_id: 'other-chat', prompt: 'Work from another client', state: 'running', pendingInputs: [], pendingApprovals: [] }];
   state.before = async path => { if (path === '/v1/runs' || path === '/v1/conversations') await pending.promise; };
   try {
     await page.goto(`/?controlPort=${port}`);
-    await openAgent(page, 'Scout', isMobile);
+    await openAgent(page, 'Scout');
   } finally { pending.release(); }
   await expect(page.getByText('Refreshing conversations…')).toHaveCount(0);
   await expect(page.getByRole('textbox', { name: 'Message Scout' })).toBeVisible();
-  await expect(page.locator('aside.sidebar').getByLabel('Atlas is working')).toHaveCount(1);
+  await openNavigation(page);
+  await expect(page.locator('aside.sidebar').getByLabel('Atlas is working')).toBeVisible();
 });
 
-test('opening an agent before history arrives restores its latest conversation and keeps the draft', async ({ page, isMobile }) => {
+test('opening an agent before history arrives restores its latest conversation and keeps the draft', async ({ page }) => {
   const pending = gate(), state = await fixture(page);
   const run: PersistentRun = { id: 'remembered-scribe', agent_id: 'scribe', conversation_id: 'scribe-history', prompt: 'Earlier writing task', state: 'completed', result: 'The writing is ready.' };
   state.history = [{ id: run.conversation_id, agentId: 'scribe', title: run.prompt, updatedAt: new Date().toISOString(), runs: [run] }];
   state.before = async path => { if (path === '/v1/conversations') await pending.promise; };
   try {
     await page.goto(`/?controlPort=${port}`);
-    await openAgent(page, 'Scribe', isMobile);
+    await openAgent(page, 'Scribe');
     await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Continue editing the introduction.');
     await expect(page.locator('.transcript .message')).toHaveCount(0);
   } finally { pending.release(); }
@@ -128,15 +130,15 @@ test('opening an agent before history arrives restores its latest conversation a
   await expect(page.getByRole('textbox', { name: 'Message Scribe' })).toHaveValue('Continue editing the introduction.');
 });
 
-test('choosing a new conversation cancels pending restoration of an agent history', async ({ page, isMobile }) => {
+test('choosing a new conversation cancels pending restoration of an agent history', async ({ page }) => {
   const pending = gate(), state = await fixture(page);
   const run: PersistentRun = { id: 'remembered-scribe', agent_id: 'scribe', conversation_id: 'scribe-history', prompt: 'Earlier writing task', state: 'completed', result: 'The writing is ready.' };
   state.history = [{ id: run.conversation_id, agentId: 'scribe', title: run.prompt, updatedAt: new Date().toISOString(), runs: [run] }];
   state.before = async path => { if (path === '/v1/conversations') await pending.promise; };
   try {
     await page.goto(`/?controlPort=${port}`);
-    await openAgent(page, 'Scribe', isMobile);
-    await page.getByRole('button', { name: 'New conversation' }).click();
+    await openAgent(page, 'Scribe');
+    await page.getByRole('button', { name: 'New conversation', exact: true }).click();
     await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Start a separate writing task.');
   } finally { pending.release(); }
   await expect(page.getByText('Refreshing conversations…')).toHaveCount(0);
@@ -144,11 +146,11 @@ test('choosing a new conversation cancels pending restoration of an agent histor
   await expect(page.getByRole('textbox', { name: 'Message Scribe' })).toHaveValue('Start a separate writing task.');
 });
 
-test('opening an agent refreshes its cached latest conversation without discarding the draft', async ({ page, isMobile }) => {
+test('opening an agent refreshes its cached latest conversation without discarding the draft', async ({ page }) => {
   const { pending } = await delayedScribeHistory(page);
   try {
     await page.goto(`/?controlPort=${port}`);
-    await openAgent(page, 'Scribe', isMobile);
+    await openAgent(page, 'Scribe');
     await expect(page.locator('.transcript')).toContainText('Earlier saved writing.');
     await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Continue editing the introduction.');
   } finally { pending.release(); }
@@ -156,19 +158,19 @@ test('opening an agent refreshes its cached latest conversation without discardi
   await expect(page.getByRole('textbox', { name: 'Message Scribe' })).toHaveValue('Continue editing the introduction.');
 });
 
-test('an agent refresh follows coordinator history order when a cached chat has newer remote activity', async ({ page, isMobile }) => {
+test('an agent refresh follows coordinator history order when a cached chat has newer remote activity', async ({ page }) => {
   const { pending, state } = await delayedScribeHistory(page);
   const resumed: PersistentRun = { id: 'resumed-scribe-run', agent_id: 'scribe', conversation_id: 'cached-scribe', prompt: 'Resume the earlier writing', state: 'completed', result: 'The earlier chat now has the latest result.' };
   state.history.unshift({ id: resumed.conversation_id, agentId: 'scribe', title: 'Saved writing task', updatedAt: '2026-03-01T00:00:00.000Z', runs: [resumed] });
   try {
     await page.goto(`/?controlPort=${port}`);
-    await openAgent(page, 'Scribe', isMobile);
+    await openAgent(page, 'Scribe');
   } finally { pending.release(); }
   await expect(page.locator('.transcript')).toContainText('The earlier chat now has the latest result.');
   await expect(page.locator('.transcript')).not.toContainText('The latest writing is ready.');
 });
 
-test('an agent keeps its pending history selection through a failed request and retry', async ({ page, isMobile }) => {
+test('an agent keeps its pending history selection through a failed request and retry', async ({ page }) => {
   const { pending } = await delayedScribeHistory(page), failure = gate();
   let attempts = 0;
   await page.route(`${control}/v1/conversations`, async route => {
@@ -178,7 +180,7 @@ test('an agent keeps its pending history selection through a failed request and 
   });
   try {
     await page.goto(`/?controlPort=${port}`);
-    await openAgent(page, 'Scribe', isMobile);
+    await openAgent(page, 'Scribe');
     await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Keep this draft through reconnection.');
     failure.release();
     await expect(page.getByText('History is temporarily unavailable.', { exact: false }).first()).toBeVisible();
@@ -188,12 +190,12 @@ test('an agent keeps its pending history selection through a failed request and 
   await expect(page.getByRole('textbox', { name: 'Message Scribe' })).toHaveValue('Keep this draft through reconnection.');
 });
 
-test('explicitly selecting the cached conversation cancels a pending latest-chat refresh', async ({ page, isMobile }) => {
+test('explicitly selecting the cached conversation cancels a pending latest-chat refresh', async ({ page }) => {
   const { pending } = await delayedScribeHistory(page);
   try {
     await page.goto(`/?controlPort=${port}`);
-    await openAgent(page, 'Scribe', isMobile);
-    if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+    await openAgent(page, 'Scribe');
+    await openNavigation(page);
     await page.locator('aside.sidebar .recent', { hasText: 'Saved writing task' }).click();
     await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Keep working in this saved chat.');
   } finally { pending.release(); }
@@ -203,12 +205,12 @@ test('explicitly selecting the cached conversation cancels a pending latest-chat
   await expect(page.getByRole('textbox', { name: 'Message Scribe' })).toHaveValue('Keep working in this saved chat.');
 });
 
-test('sending in the cached conversation cancels a pending latest-chat refresh', async ({ page, isMobile }) => {
+test('sending in the cached conversation cancels a pending latest-chat refresh', async ({ page }) => {
   const { pending, state } = await delayedScribeHistory(page);
   try {
     await page.goto(`/?controlPort=${port}`);
-    await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
-    await openAgent(page, 'Scribe', isMobile);
+    await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
+    await openAgent(page, 'Scribe');
     await page.getByRole('textbox', { name: 'Message Scribe' }).fill('Continue this saved writing task.');
     await page.getByRole('button', { name: 'Send message' }).click();
     await expect.poll(() => state.submissions).toBe(1);
@@ -220,12 +222,12 @@ test('sending in the cached conversation cancels a pending latest-chat refresh',
   await expect(page.locator('.transcript')).not.toContainText('The latest writing is ready.');
 });
 
-test('selecting another agent supersedes a pending cached-history refresh', async ({ page, isMobile }) => {
+test('selecting another agent supersedes a pending cached-history refresh', async ({ page }) => {
   const { pending } = await delayedScribeHistory(page);
   try {
     await page.goto(`/?controlPort=${port}`);
-    await openAgent(page, 'Scribe', isMobile);
-    await openAgent(page, 'Scout', isMobile);
+    await openAgent(page, 'Scribe');
+    await openAgent(page, 'Scout');
     await page.getByRole('textbox', { name: 'Message Scout' }).fill('Keep this research draft.');
   } finally { pending.release(); }
   await expect(page.getByText('Refreshing conversations…')).toHaveCount(0);
@@ -233,13 +235,13 @@ test('selecting another agent supersedes a pending cached-history refresh', asyn
   await expect(page.getByRole('textbox', { name: 'Message Scout' })).toHaveValue('Keep this research draft.');
 });
 
-test('shows sending before acceptance, prevents duplicates, and preserves a newer draft', async ({ page, isMobile }) => {
+test('shows sending before acceptance, prevents duplicates, and preserves a newer draft', async ({ page }) => {
   const pending = gate();
   const state = await fixture(page);
   state.before = async (path, method) => { if (path === '/v1/runs' && method === 'POST') await pending.promise; };
   await page.goto(`/?controlPort=${port}`);
-  await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
-  await openAgent(page, 'Atlas', isMobile);
+  await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
+  await openAgent(page, 'Atlas');
   const input = page.getByRole('textbox', { name: 'Message Atlas' });
   try {
     await input.fill('Start this task');
@@ -257,11 +259,11 @@ test('shows sending before acceptance, prevents duplicates, and preserves a newe
   expect(state.submissions).toBe(1);
 });
 
-test('failed submission keeps the draft and clears the sending indicator', async ({ page, isMobile }) => {
+test('failed submission keeps the draft and clears the sending indicator', async ({ page }) => {
   const state = await fixture(page); state.reject = true;
   await page.goto(`/?controlPort=${port}`);
-  await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
-  await openAgent(page, 'Atlas', isMobile);
+  await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
+  await openAgent(page, 'Atlas');
   const input = page.getByRole('textbox', { name: 'Message Atlas' });
   await input.fill('Keep my task for retry');
   await page.getByRole('button', { name: 'Send message' }).click();
@@ -271,13 +273,13 @@ test('failed submission keeps the draft and clears the sending indicator', async
   await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
 });
 
-test('chat progress follows real phases, respects reduced motion, and stops at completion', async ({ page, isMobile }, testInfo) => {
+test('chat progress follows real phases, respects reduced motion, and stops at completion', async ({ page }, testInfo) => {
   const state = await fixture(page);
   let seq = 0;
   const emit = (type: string, payload: Record<string, unknown> = {}) => state.events.push({ seq: ++seq, id: `progress-${seq}`, type, payload });
   await page.goto(`/?controlPort=${port}`);
-  await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
-  await openAgent(page, 'Atlas', isMobile);
+  await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
+  await openAgent(page, 'Atlas');
   const input = page.getByRole('textbox', { name: 'Message Atlas' });
   await input.fill('Check a file and report what you found.');
   await page.getByRole('button', { name: 'Send message' }).click();
@@ -325,9 +327,9 @@ test('chat progress follows real phases, respects reduced motion, and stops at c
   await expect(page.getByRole('button', { name: 'Stop run' })).toHaveCount(0);
 });
 
-test('reply-only is an explicit per-message choice and stays fixed while its task runs', async ({ page, isMobile }, testInfo) => {
+test('reply-only is an explicit per-message choice and stays fixed while its task runs', async ({ page }, testInfo) => {
   const state=await fixture(page);await page.goto(`/?controlPort=${port}`);
-  await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');await openAgent(page,'Atlas',isMobile);
+  await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();await openAgent(page,'Atlas');
   const mode=page.getByRole('checkbox',{name:/Reply only/});await expect(mode).not.toBeChecked();await mode.check();
   await page.getByRole('textbox',{name:'Message Atlas'}).fill('Answer directly from this conversation.');
   const sent=page.waitForRequest(request=>request.url().endsWith('/v1/runs')&&request.method()==='POST');
@@ -340,34 +342,36 @@ test('reply-only is an explicit per-message choice and stays fixed while its tas
   await page.getByRole('button',{name:'Send message'}).click();expect((await ordinary).postDataJSON().replyOnly).toBeUndefined();
 });
 
-test('a pending request stays with its conversation when switching agents', async ({ page, isMobile }) => {
+test('a pending request stays with its conversation when switching agents', async ({ page }) => {
   const pending = gate();
   const state = await fixture(page);
   state.before = async (path, method) => { if (path === '/v1/runs' && method === 'POST') await pending.promise; };
   await page.goto(`/?controlPort=${port}`);
-  await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
-  await openAgent(page, 'Atlas', isMobile);
+  await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
+  await openAgent(page, 'Atlas');
   try {
     await page.getByRole('textbox', { name: 'Message Atlas' }).fill('Same words, different conversation');
     await page.getByRole('button', { name: 'Send message' }).click();
     await expect(page.locator('.transcript .working')).toHaveText('Sending…');
-    await openAgent(page, 'Scout', isMobile);
+    await openAgent(page, 'Scout');
     await page.getByRole('textbox', { name: 'Message Scout' }).fill('Same words, different conversation');
     await expect(page.locator('.transcript .working')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
   } finally { pending.release(); }
-  await expect(page.locator('aside.sidebar').getByLabel('Atlas is working')).toHaveCount(1);
+  await openNavigation(page);
+  await expect(page.locator('aside.sidebar').getByLabel('Atlas is working')).toBeVisible();
+  await closeNavigation(page);
   await expect(page.getByRole('textbox', { name: 'Message Scout' })).toHaveValue('Same words, different conversation');
   await expect(page.locator('.transcript .message')).toHaveCount(0);
 });
 
-test('completion releases the composer before deliverables finish loading', async ({ page, isMobile }) => {
+test('completion releases the composer before deliverables finish loading', async ({ page }) => {
   const pending = gate();
   const state = await fixture(page);
   state.before = async path => { if (path === '/v1/files') await pending.promise; };
   await page.goto(`/?controlPort=${port}`);
-  await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
-  await openAgent(page, 'Atlas', isMobile);
+  await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
+  await openAgent(page, 'Atlas');
   try {
     await page.getByRole('textbox', { name: 'Message Atlas' }).fill('Finish while files load');
     await page.getByRole('button', { name: 'Send message' }).click();
@@ -400,7 +404,8 @@ test('a stale startup response cannot overwrite a successful retry', async ({ pa
   });
   try {
     await page.goto(`/?controlPort=${port}`);
-    await expect(page.getByRole('button', { name: 'New team name', exact: true })).toBeVisible({ timeout: 10_000 });
+    await page.getByText('Filter by team', { exact: true }).click({ timeout: 10_000 });
+    await expect(page.getByRole('button', { name: 'New team name', exact: true })).toBeVisible();
     const stale = page.waitForResponse(response => response.url().includes('/v1/teams?includeRetired=1'));
     pending.release();
     await (await stale).finished();
@@ -410,18 +415,18 @@ test('a stale startup response cannot overwrite a successful retry', async ({ pa
   } finally { pending.release(); }
 });
 
-test('a pending first message does not silently block a different new conversation', async ({ page, isMobile }) => {
+test('a pending first message does not silently block a different new conversation', async ({ page }) => {
   const pending = gate();
   const state = await fixture(page);
   state.before = async (path, method) => { if (path === '/v1/runs' && method === 'POST') await pending.promise; };
   await page.goto(`/?controlPort=${port}`);
-  await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
-  await openAgent(page, 'Atlas', isMobile);
+  await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
+  await openAgent(page, 'Atlas');
   try {
     await page.getByRole('textbox', { name: 'Message Atlas' }).fill('First conversation');
     await page.getByRole('button', { name: 'Send message' }).click();
     await expect(page.locator('.transcript .working')).toHaveText('Sending…');
-    await page.getByRole('button', { name: 'New conversation' }).click();
+    await page.getByRole('button', { name: 'New conversation', exact: true }).click();
     await page.getByRole('textbox', { name: 'Message Atlas' }).fill('Second conversation');
     await page.getByRole('button', { name: 'Send message' }).click();
     await expect(page.locator('.transcript .message.user')).toHaveText(/Second conversation/);
@@ -429,7 +434,7 @@ test('a pending first message does not silently block a different new conversati
   } finally { pending.release(); }
 });
 
-test('a recovered task refreshes its deliverables when it finishes', async ({ page, isMobile }) => {
+test('a recovered task refreshes its deliverables when it finishes', async ({ page }) => {
   const state = await fixture(page);
   state.runs = [{ id: 'recovered', agent_id: 'atlas', conversation_id: 'recovered-chat', prompt: 'Finish this report', state: 'running' }];
   await page.route(`${control}/v1/files?*`, async route => {
@@ -441,19 +446,19 @@ test('a recovered task refreshes its deliverables when it finishes', async ({ pa
   await expect(page.getByRole('button', { name: 'Stop run' })).toBeVisible();
   state.runs[0] = { ...state.runs[0], state: 'completed', result: 'Report ready.' };
   await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible();
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNavigation(page);
   await page.locator('aside.sidebar .nav-item', { hasText: 'Files' }).click();
   await expect(page.getByRole('button', { name: 'Download report.txt' })).toBeVisible();
 });
 
-test('a background file refresh preserves a file uploaded while it was loading', async ({ page, isMobile }) => {
+test('a background file refresh preserves a file uploaded while it was loading', async ({ page }) => {
   const pending = gate();
   const state = await fixture(page);
   let fileReads = 0;
   state.before = async (path, method) => { if (path === '/v1/files' && method === 'GET') { fileReads++; await pending.promise; } };
   await page.goto(`/?controlPort=${port}`);
-  await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
-  await openAgent(page, 'Atlas', isMobile);
+  await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
+  await openAgent(page, 'Atlas');
   try {
     await page.getByRole('textbox', { name: 'Message Atlas' }).fill('Finish before the upload');
     await page.getByRole('button', { name: 'Send message' }).click();
@@ -462,7 +467,7 @@ test('a background file refresh preserves a file uploaded while it was loading',
     await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible();
     await expect.poll(() => fileReads).toBe(1);
     await page.locator('input[type="file"][multiple]').setInputFiles({ name: 'draft.txt', mimeType: 'text/plain', buffer: Buffer.from('Keep my upload') });
-    if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+    await openNavigation(page);
     await page.locator('aside.sidebar .nav-item', { hasText: 'Files' }).click();
     await expect(page.getByRole('button', { name: 'Download draft.txt' })).toBeVisible();
     const stale = page.waitForResponse(response => response.url().includes('/v1/files?') && response.request().method() === 'GET');
@@ -509,7 +514,7 @@ test('recovery during follow-up acceptance does not add the same messages twice'
   } finally { failFirstRead.release(); acceptFollowup.release(); }
 });
 
-test('overlapping completed tasks keep the newest deliverable refresh', async ({ page, isMobile }) => {
+test('overlapping completed tasks keep the newest deliverable refresh', async ({ page }) => {
   const state = await fixture(page), older = gate(), newer = gate();
   let fileReads = 0;
   await page.route(`${control}/v1/files?*`, async route => {
@@ -522,9 +527,9 @@ test('overlapping completed tasks keep the newest deliverable refresh', async ({
   });
   try {
     await page.goto(`/?controlPort=${port}`);
-    await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
+    await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
     for (const name of ['Atlas', 'Scout']) {
-      await openAgent(page, name, isMobile);
+      await openAgent(page, name);
       await page.getByRole('textbox', { name: `Message ${name}` }).fill(`Finish ${name}'s task`);
       await page.getByRole('button', { name: 'Send message' }).click();
       await expect(page.getByRole('button', { name: 'Stop run' })).toBeVisible();
@@ -538,18 +543,18 @@ test('overlapping completed tasks keep the newest deliverable refresh', async ({
     await (await oldResponse).finished();
     await rendered(page);
     newer.release();
-    if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+    await openNavigation(page);
     await page.locator('aside.sidebar .nav-item', { hasText: 'Files' }).click();
     await expect(page.getByRole('button', { name: 'Download new.txt' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Download old.txt' })).toHaveCount(0);
   } finally { older.release(); newer.release(); }
 });
 
-test('starts the agent runtime once when someone begins a message, and only if the coordinator offers it', async ({ page, isMobile }) => {
+test('starts the agent runtime once when someone begins a message, and only if the coordinator offers it', async ({ page }) => {
   const state = await fixture(page);
   await page.goto(`/?controlPort=${port}`);
-  await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
-  await openAgent(page, 'Atlas', isMobile);
+  await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
+  await openAgent(page, 'Atlas');
   const input = page.getByRole('textbox', { name: 'Message Atlas' });
   await input.fill('An older coordinator gets no preparation request');
   await page.waitForTimeout(300);
@@ -557,8 +562,8 @@ test('starts the agent runtime once when someone begins a message, and only if t
 
   state.features = ['reply-only', 'agent-prepare'];
   await page.reload();
-  await expect(page.locator('.sidebar-bottom')).toContainText('Agent runtime ready');
-  await openAgent(page, 'Atlas', isMobile);
+  await expect(page.getByRole('img', { name: 'Agent runtime ready' })).toBeVisible();
+  await openAgent(page, 'Atlas');
   await input.fill('Plan');
   await input.fill('Plan my week');
   await input.blur(); await input.focus();

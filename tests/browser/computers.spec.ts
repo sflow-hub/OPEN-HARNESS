@@ -1,3 +1,4 @@
+import { openNavigation } from './navigation';
 import { test, expect, type APIRequestContext } from '@playwright/test';
 const control = `http://127.0.0.1:${process.env.OPEN_HARNESS_TEST_PORT || 4317}`;
 async function headers(request: APIRequestContext) { const { token } = await (await request.get(control + '/v1/bootstrap')).json(); return { Authorization: `Bearer ${token}` }; }
@@ -13,7 +14,7 @@ test.beforeEach(async ({ page }) => { await page.addInitScript(() => { localStor
 test('lists computers and revokes a paired one after confirmation', async ({ page, request }, testInfo) => {
   const name = `Build server ${testInfo.project.name}`, runner = await pairRunner(request, name);
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNavigation(page);
   await page.locator('.nav-item', { hasText: 'Computers' }).click();
   await expect(page.getByRole('heading', { name: 'Computers', level: 1 })).toBeVisible();
 
@@ -54,7 +55,7 @@ test('a failed revoke stays reported after the list refreshes', async ({ page, r
   try {
     await page.route('**/v1/machines/*/revoke', route => route.fulfill({ status: 500, json: { error: 'The coordinator could not revoke it.' } }));
     await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
-    if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+    await openNavigation(page);
     await page.locator('.nav-item', { hasText: 'Computers' }).click();
     const paired = page.getByRole('article', { name });
     await expect(paired).toContainText('Online');

@@ -61,6 +61,7 @@
     "lib/chat-stream.ts",
     "lib/cloud-client.ts",
     "lib/codex.ts",
+    "lib/composer-drafts.ts",
     "lib/control-client.ts",
     "lib/conversation.ts",
     "lib/credentials.ts",

@@ -1,3 +1,4 @@
+import { openWorkspaceSettings } from './navigation';
 import { test, expect } from '@playwright/test';
 
 test.beforeEach(async ({ page }) => {
@@ -13,12 +14,11 @@ test.beforeEach(async ({ page }) => {
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
 });
 
-test('phone setup explains HTTPS and Home Screen installation and allows enabling, testing and revoking push', async ({ page }, testInfo) => {
+test('phone setup explains HTTPS and Home Screen installation and allows enabling, testing and revoking push', async ({ page }) => {
   const requests: Array<{ method: string; body: unknown }> = [];
   await page.route('**/v1/delivery/subscriptions', route => { requests.push({ method: route.request().method(), body: route.request().postDataJSON() }); return route.fulfill({ json: { ok: true, id: 'fixture' } }); });
   await page.route('**/v1/delivery/test', route => route.fulfill({ json: { sent: 1, failed: 0 } }));
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await openWorkspaceSettings(page);
   const settings = page.getByRole('region', { name: 'Phone and notifications' });
   await expect(settings).toContainText('authenticated HTTPS');
   await expect(settings).toContainText('Add to Home Screen');
@@ -32,11 +32,10 @@ test('phone setup explains HTTPS and Home Screen installation and allows enablin
   expect(requests[1].body).toEqual({ endpoint: 'https://fcm.googleapis.com/fcm/send/browser-fixture' });
 });
 
-test('a failed subscription save stays retryable', async ({ page }, testInfo) => {
+test('a failed subscription save stays retryable', async ({ page }) => {
   let attempts = 0;
   await page.route('**/v1/delivery/subscriptions', route => { attempts++; return route.fulfill(attempts === 1 ? { status: 503, json: { error: 'Notification settings could not be saved. Try again.' } } : { json: { id: 'fixture' } }); });
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await openWorkspaceSettings(page);
   const settings = page.getByRole('region', { name: 'Phone and notifications' });
   await settings.getByRole('button', { name: 'Enable on this device' }).click();
   await expect(settings.getByRole('status')).toContainText('could not be saved');

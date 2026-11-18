@@ -1,3 +1,4 @@
+import { openNavigation, openWorkspaceSettings } from './navigation';
 import {setupFixture} from './setup-fixture';
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
@@ -22,22 +23,22 @@ async function seed(request: APIRequestContext) {
 }
 
 type Page = import('@playwright/test').Page;
-const openManager = async (page: Page, project: string) => {
-  if (project === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+const openManager = async (page: Page) => {
+  const closePanel = page.getByRole('button', { name: 'Close workspace panel' });
+  if (await closePanel.isVisible()) await closePanel.click();
+  await openWorkspaceSettings(page);
   await page.getByRole('button', { name: 'Saved credentials' }).click();
   return page.getByRole('dialog', { name: 'Saved credentials' });
 };
-// On phones the drawer stays open behind the modal and would swallow later clicks.
-const closeSettings = async (page: Page, project: string) => {
+const closeSettings = async (page: Page) => {
   await page.getByRole('button', { name: 'Close settings' }).click();
-  if (project === 'mobile') await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click');
 };
-// The card and the conversation header render the same switcher. On phones the workspace
-// panel overlays the chat header (as it already does the toolbar buttons), so the card is
-// the reachable surface there.
-const openSwitcher = async (page: Page, project: string) => {
-  if (project !== 'mobile') await page.getByRole('button', { name: 'Meet Atlas' }).click();
+async function openAtlasPanel(page: Page) {
+  await page.getByRole('button', { name: 'Meet Atlas' }).click();
+  await page.getByRole('button', { name: 'Toggle workspace panel' }).click();
+}
+const openSwitcher = async (page: Page) => {
+  await openAtlasPanel(page);
   await page.getByRole('button', { name: 'Credential for Atlas' }).click();
 };
 async function addCredential(page: Page, label: string, value: string) {
@@ -58,13 +59,13 @@ test.beforeEach(async ({ request, page }) => {
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
 });
 
-test('opens the credentials tab from navigation without advanced features', async ({ page, isMobile }) => {
+test('opens the credentials tab from navigation without advanced features', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('open-harness.advanced.v1', 'off'));
   await page.reload();
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
   const sidebar = page.locator('aside.sidebar');
   const open = async () => {
-    if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+    await openNavigation(page);
     await sidebar.getByRole('button', { name: 'Credentials', exact: true }).click();
   };
   await open();
@@ -110,8 +111,8 @@ test('opens the credentials tab from navigation without advanced features', asyn
   await expect(repo.getByText('Renamed sidebar key', { exact: true })).toBeVisible();
 });
 
-test('stores several credentials without ever exposing a value', async ({ page }, testInfo) => {
-  const dialog = await openManager(page, testInfo.project.name);
+test('stores several credentials without ever exposing a value', async ({ page }) => {
+  const dialog = await openManager(page);
   await expect(dialog.getByText('No saved credentials yet.')).toBeVisible();
   await addCredential(page, 'Work key', WORK_KEY);
   await addCredential(page, 'Personal key', PERSONAL_KEY);
@@ -122,20 +123,21 @@ test('stores several credentials without ever exposing a value', async ({ page }
   expect(rendered).not.toContain(PERSONAL_KEY);
 });
 
-test('switches an agent between credentials from the quick switcher', async ({ page }, testInfo) => {
-  await openManager(page, testInfo.project.name);
+test('switches an agent between credentials from the quick switcher', async ({ page }) => {
+  await openManager(page);
   await addCredential(page, 'Work key', WORK_KEY);
   await addCredential(page, 'Personal key', PERSONAL_KEY);
   await page.getByRole('button', { name: 'Close saved credentials' }).click();
-  await closeSettings(page, testInfo.project.name);
+  await closeSettings(page);
 
-  await openSwitcher(page, testInfo.project.name);
+  await openSwitcher(page);
   await page.getByLabel('Saved credential').selectOption({ label: 'Work key' });
   await page.getByRole('button', { name: 'Apply model and credential' }).click();
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Work key');
 
   // The choice is a profile edit, so it must survive a reload.
   await page.reload();
+  await openAtlasPanel(page);
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Work key');
 
   await page.getByRole('button', { name: 'Credential for Atlas' }).click();
@@ -144,18 +146,18 @@ test('switches an agent between credentials from the quick switcher', async ({ p
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Personal key');
 });
 
-test('names the agents using a credential before deleting it', async ({ page }, testInfo) => {
-  await openManager(page, testInfo.project.name);
+test('names the agents using a credential before deleting it', async ({ page }) => {
+  await openManager(page);
   await addCredential(page, 'Work key', WORK_KEY);
   await addCredential(page, 'Personal key', PERSONAL_KEY);
   await page.getByRole('button', { name: 'Close saved credentials' }).click();
-  await closeSettings(page, testInfo.project.name);
-  await openSwitcher(page, testInfo.project.name);
+  await closeSettings(page);
+  await openSwitcher(page);
   await page.getByLabel('Saved credential').selectOption({ label: 'Work key' });
   await page.getByRole('button', { name: 'Apply model and credential' }).click();
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Work key');
 
-  const dialog = await openManager(page, testInfo.project.name);
+  const dialog = await openManager(page);
   await expect(dialog.getByText('Used by 1 agent')).toBeVisible();
   await dialog.getByRole('button', { name: 'Delete Work key' }).click();
   const confirm = page.getByRole('alertdialog', { name: 'Delete Work key' });
@@ -171,8 +173,8 @@ test('names the agents using a credential before deleting it', async ({ page }, 
   await expect(dialog.getByText('Spare key', { exact: true })).toHaveCount(0);
 });
 
-test('asks before deleting a credential that only a running task still holds', async ({ page }, testInfo) => {
-  const dialog = await openManager(page, testInfo.project.name);
+test('asks before deleting a credential that only a running task still holds', async ({ page }) => {
+  const dialog = await openManager(page);
   await addCredential(page, 'Busy key', 'browser-busy-key-value');
   // The list says "Not in use"; only the coordinator's 409 knows a task still reads it.
   let forced = false;
@@ -192,8 +194,8 @@ test('asks before deleting a credential that only a running task still holds', a
   expect(await page.content()).not.toContain('browser-busy-key-value');
 });
 
-test('uses the coordinator\'s fresh usage when a delete is refused', async ({ page }, testInfo) => {
-  const dialog = await openManager(page, testInfo.project.name);
+test('uses the coordinator\'s fresh usage when a delete is refused', async ({ page }) => {
+  const dialog = await openManager(page);
   await addCredential(page, 'Stale key', 'browser-stale-key-value');
   await expect(dialog.getByText('Not in use').first()).toBeVisible();
   // The list snapshot predates an agent picking this credential up.
@@ -209,12 +211,12 @@ test('uses the coordinator\'s fresh usage when a delete is refused', async ({ pa
   await expect(dialog.getByText('Stale key', { exact: true })).toBeVisible();
 });
 
-test('captures the credentials tab for visual review', async ({ page, isMobile }, testInfo) => {
+test('captures the credentials tab for visual review', async ({ page }, testInfo) => {
   const { token } = await (await page.request.get(control + '/v1/bootstrap')).json();
   const headers = { Authorization: `Bearer ${token}` };
   await page.request.post(control + '/v1/credentials', { headers, data: { label: 'Work xAI key', provider: 'xai', value: 'visual-xai-value' } });
   await page.request.post(control + '/v1/credentials', { headers, data: { label: 'GitHub token', provider: '', value: 'visual-github-value' } });
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNavigation(page);
   await page.locator('aside.sidebar').getByRole('button', { name: 'Credentials', exact: true }).click();
   const repo = page.getByRole('region', { name: 'Credentials' });
   await expect(repo.getByText('Work xAI key', { exact: true })).toBeVisible();
@@ -238,12 +240,12 @@ test('captures the credentials tab for visual review', async ({ page, isMobile }
   expect(rendered).not.toContain('visual-github-value');
 });
 
-test('offers saved credentials in agent settings and workspace settings', async ({ page }, testInfo) => {
-  await openManager(page, testInfo.project.name);
+test('offers saved credentials in agent settings and workspace settings', async ({ page }) => {
+  await openManager(page);
   await addCredential(page, 'Work key', WORK_KEY);
   await page.getByRole('button', { name: 'Close saved credentials' }).click();
   await expect(page.getByRole('combobox', { name: /^Credential/ })).toContainText('Work key');
-  await closeSettings(page, testInfo.project.name);
+  await closeSettings(page);
 
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
   await page.getByRole('tab', { name: 'Model' }).click();
@@ -255,8 +257,8 @@ test('offers saved credentials in agent settings and workspace settings', async 
 });
 
 
-test('selects models when adding a key and switches providers independently per agent', async ({ page, request }, testInfo) => {
-  const dialog = await openManager(page, testInfo.project.name);
+test('selects models when adding a key and switches providers independently per agent', async ({ page, request }) => {
+  const dialog = await openManager(page);
   await dialog.getByRole('button', { name: 'Add credential', exact: true }).click();
   await dialog.getByRole('option', { name: /OpenRouter/ }).click();
   await dialog.getByRole('button', { name: 'Continue' }).click();
@@ -268,8 +270,8 @@ test('selects models when adding a key and switches providers independently per 
   await expect(dialog.getByText('Router key', { exact: true })).toBeVisible();
   await expect(dialog.getByText('mock-scout', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Close saved credentials' }).click();
-  await closeSettings(page, testInfo.project.name);
-  await openSwitcher(page, testInfo.project.name);
+  await closeSettings(page);
+  await openSwitcher(page);
   const picker = page.getByRole('dialog', { name: 'Model and credential for Atlas' });
   await picker.getByLabel('Saved credential').selectOption({ label: 'Router key' });
   await expect(picker.getByLabel('Provider', { exact: true })).toHaveValue('openrouter');
@@ -278,6 +280,7 @@ test('selects models when adding a key and switches providers independently per 
   await picker.getByRole('button', { name: 'Apply model and credential' }).click();
   await expect(picker).not.toBeVisible();
   await page.reload();
+  await openAtlasPanel(page);
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Router key · mock-atlas');
   const { token } = await (await request.get(control + '/v1/bootstrap')).json();
   const headers = { Authorization: `Bearer ${token}` };
@@ -308,12 +311,11 @@ test('new credentials become selectable without discarding an agent draft', asyn
   await expect(editor.getByText(/^Saved[.—]/)).toBeVisible();
 });
 
-test('first-run setup discovers models with a pasted key before saving it', async ({ page }, testInfo) => {
+test('first-run setup discovers models with a pasted key before saving it', async ({ page }) => {
   await setupFixture(page);
   // Mock mode never claims a key works, so the provider's acceptance is a fixture here.
   await page.route('**/v1/onboarding/model-test', route => { const input = route.request().postDataJSON(); return route.fulfill({ json: { ok: true, message: 'Fixture provider accepted the model.', model: input.model, revision: input.revision + 1 } }); });
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await openWorkspaceSettings(page);
   await page.getByRole('button', { name: 'Run setup again' }).click();
   await page.getByRole('button', { name: /Use this computer/ }).click();
   await page.getByRole('button', { name: 'Continue' }).click();

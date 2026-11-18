@@ -129,6 +129,8 @@ function storeToken(token: string) { try { if (token) localStorage.setItem(pairK
 
 export class ControlClient {
   readonly managed=process.env.NEXT_PUBLIC_OPEN_HARNESS_CLOUD==='1';
+  private managedDraftScope: string | null = null;
+  get draftScope() { return this.managed ? this.managedDraftScope : base(); }
   desktopEndpoint(agentId:string,action:string){return `/v1/agents/${encodeURIComponent(agentId)}/desktop/${action}`;}
   desktopStatus(agentId:string){return this.request<DesktopStatus>(this.desktopEndpoint(agentId,'status'));}
   desktopInput(agentId:string,leaseId:string,input:DesktopInputAction){return this.request<{ok:boolean;steps:number}>(this.desktopEndpoint(agentId,'input'),{method:'POST',body:JSON.stringify({leaseId,input})});}
@@ -160,11 +162,14 @@ export class ControlClient {
   async bootstrap() {
     if(this.managed){
       const response=await fetch('/cloud/v1/me',{credentials:'include',signal:AbortSignal.timeout(REQUEST_TIMEOUT_MS)});if(!response.ok)throw new Error('Sign in to your managed workspace to continue.');
-      const identity=await response.json() as {workspaces:Array<{id:string}>},url=new URL(window.location.href);let selected=url.searchParams.get('workspace')||localStorage.getItem('open-harness.cloud-workspace')||'';
+      const identity=await response.json() as {accountId?:string;workspaces:Array<{id:string}>},url=new URL(window.location.href);let selected=url.searchParams.get('workspace')||localStorage.getItem('open-harness.cloud-workspace')||'';
       if(!identity.workspaces.some(workspace=>workspace.id===selected))selected=identity.workspaces[0]?.id||'';if(!selected)throw new Error('Create a workspace from Account to continue.');
       // The URL takes precedence over storage, so a stale workspace link must follow the fallback too.
       if(url.searchParams.has('workspace')&&url.searchParams.get('workspace')!==selected){url.searchParams.set('workspace',selected);window.history.replaceState(null,'',url.href);}
-      localStorage.setItem('open-harness.cloud-workspace',selected);this.token='';return this.request<RuntimeStatus>('/v1/client-status');
+      localStorage.setItem('open-harness.cloud-workspace',selected);this.token='';
+      const status = await this.request<RuntimeStatus>('/v1/client-status');
+      this.managedDraftScope = identity.accountId ? JSON.stringify([identity.accountId, selected]) : null;
+      return status;
     }
     // A paired browser identifies itself; a plain source/dev dashboard has nothing stored and
     // bootstraps exactly as before.

@@ -116,10 +116,15 @@ test("authenticates local clients, migrates once, and protects its secret file",
   await assert.rejects(request('/v1/migrate', { method: 'POST', body: JSON.stringify(workspace) }), /symbolic links/);
   assert.equal(readFileSync(sentinel, 'utf8'), 'Host data');
   unlinkSync(join(stateDir, 'shared', 'notes.md'));
+  writeFileSync(join(stateDir, 'shared', 'current.md'), 'Newer coordinator copy');
+  workspace.files.push({ name: 'current.md', content: 'Older browser copy' });
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).migrated, true);
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).reason, "already_migrated");
   assert.equal(readFileSync(join(stateDir, "shared", "notes.md"), "utf8"), "Shared context");
+  assert.equal(readFileSync(join(stateDir, 'shared', 'current.md'), 'utf8'), 'Newer coordinator copy');
+  assert.deepEqual(JSON.parse(readFileSync(join(stateDir, 'browser-v1-backup.json'), 'utf8')).files, workspace.files);
   assert.match(readFileSync(join(stateDir, "agents", "atlas", "profile", "memories", "MEMORY.md"), "utf8"), /concise reports/);
+  assert.equal(readFileSync(join(stateDir, "secrets.backend"), "utf8"), "file");
   if (process.platform !== "win32") assert.equal(statSync(join(stateDir, "secrets.json")).mode & 0o777, 0o600);
 });
 

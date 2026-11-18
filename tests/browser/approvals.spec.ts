@@ -1,3 +1,4 @@
+import { openNavigation } from './navigation';
 import { test, expect, type APIRequestContext, type Locator, type Page, type Route } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 
@@ -27,7 +28,6 @@ const expectBadgeMatchesGlobal = (nav: Locator, request: APIRequestContext) => e
   const count = await globalPendingCount(request);
   await expect(nav).toHaveAccessibleName(count ? `Approvals ${count}` : 'Approvals');
 }).toPass();
-const openNav = async (page: Page, mobile: boolean) => { if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click(); };
 
 test.beforeEach(async ({ request, page }, testInfo) => {
   const headers = await auth(request);
@@ -53,14 +53,13 @@ test.afterEach(async ({ request }) => {
 });
 
 test('lists a pending approval with a badge and moves it to history once approved', async ({ page, request }, testInfo) => {
-  const mobile = testInfo.project.name === 'mobile';
   await goLive(page);
   await page.locator('.agent-card').filter({ hasText: agent.name }).click();
   await page.getByLabel(`Message ${agent.name}`).fill(`MOCK_APPROVAL inbox ${testInfo.project.name}`);
   await page.getByLabel(`Message ${agent.name}`).press('Enter');
   await expect(page.getByRole('alert').filter({ hasText: `${agent.name} needs approval` })).toBeVisible();
 
-  await openNav(page, mobile);
+  await openNavigation(page);
   const nav = page.getByRole('button', { name: /^Approvals/ });
   // This agent owns exactly one pending request; the badge counts every agent's, so just check it tracks the API.
   await expect.poll(() => pendingCount(request)).toBe(1);
@@ -84,12 +83,11 @@ test('lists a pending approval with a badge and moves it to history once approve
   await expect(answered).toContainText('publish mock result');
   await expect(answered).toContainText('Approved');
 
-  await openNav(page, mobile);
+  await openNavigation(page);
   await expectBadgeMatchesGlobal(nav, request);
 });
 
 test('a badge poll that lands after the inbox reports a newer count does not restore the old count', async ({ page, request }, testInfo) => {
-  const mobile = testInfo.project.name === 'mobile';
   await startRun(request, `MOCK_APPROVAL late badge ${testInfo.project.name}`);
   await expect.poll(() => pendingCount(request)).toBe(1);
 
@@ -121,7 +119,7 @@ test('a badge poll that lands after the inbox reports a newer count does not res
   await page.reload();
   const poll = await sent;
 
-  await openNav(page, mobile);
+  await openNavigation(page);
   const nav = page.getByRole('button', { name: /^Approvals/ });
   await nav.click();
   const item = page.getByRole('list', { name: 'Pending approvals' }).getByRole('listitem', { name: label() });
@@ -133,7 +131,7 @@ test('a badge poll that lands after the inbox reports a newer count does not res
   // The item only leaves the list on the post-decision refresh, which reports the new count with it.
   await expect(item).toHaveCount(0);
   await expect.poll(() => pendingCount(request)).toBe(0);
-  await openNav(page, mobile);
+  await openNavigation(page);
   await expectBadgeMatchesGlobal(nav, request);
 
   holdInbox = true;
@@ -153,14 +151,13 @@ test('a badge poll that lands after the inbox reports a newer count does not res
   await page.unroute(isBadgePoll);
 });
 
-test('an approval answered elsewhere is reported as no longer pending', async ({ page, request }, testInfo) => {
-  const mobile = testInfo.project.name === 'mobile';
+test('an approval answered elsewhere is reported as no longer pending', async ({ page, request }) => {
   await startRun(request, 'MOCK_APPROVAL stale inbox item');
   await expect.poll(() => pendingCount(request)).toBe(1);
   page.on('dialog', dialog => void dialog.accept());
   await goLive(page);
 
-  await openNav(page, mobile);
+  await openNavigation(page);
   const nav = page.getByRole('button', { name: /^Approvals/ });
   expect(await globalPendingCount(request)).toBeGreaterThanOrEqual(1);
   await expectBadgeMatchesGlobal(nav, request);
@@ -184,12 +181,11 @@ test('an approval answered elsewhere is reported as no longer pending', async ({
 });
 
 test('a decision error that lands after switching views is not shown', async ({ page, request }, testInfo) => {
-  const mobile = testInfo.project.name === 'mobile';
   await startRun(request, `MOCK_APPROVAL late conflict ${testInfo.project.name}`);
   await expect.poll(() => pendingCount(request)).toBe(1);
   await goLive(page);
 
-  await openNav(page, mobile);
+  await openNavigation(page);
   await page.getByRole('button', { name: /^Approvals/ }).click();
   const item = page.getByRole('list', { name: 'Pending approvals' }).getByRole('listitem', { name: label() });
   await expect(item).toHaveCount(1);
@@ -223,12 +219,11 @@ test('a decision error that lands after switching views is not shown', async ({ 
   await expect(conflict).toHaveCount(0);
 });
 
-test('a failed approvals load is cleared once a later refresh succeeds', async ({ page }, testInfo) => {
-  const mobile = testInfo.project.name === 'mobile';
+test('a failed approvals load is cleared once a later refresh succeeds', async ({ page }) => {
   // limit=100 is the inbox's own list; the nav badge polls with limit=1 and must not consume the failure.
   const isInboxList = (url: URL) => url.pathname === '/v1/approvals' && url.searchParams.get('limit') === '100';
   await page.route(isInboxList, route => route.fulfill({ status: 500, json: { error: 'Approvals are briefly unavailable.' } }), { times: 1 });
-  await openNav(page, mobile);
+  await openNavigation(page);
   await page.getByRole('button', { name: /^Approvals/ }).click();
   const failure = page.getByRole('alert').filter({ hasText: 'Approvals are briefly unavailable.' });
   await expect(failure).toBeVisible();
@@ -240,12 +235,11 @@ test('a failed approvals load is cleared once a later refresh succeeds', async (
 });
 
 test('a denied approval moves to history and a slow history load never replaces the pending view', async ({ page, request }, testInfo) => {
-  const mobile = testInfo.project.name === 'mobile';
   await startRun(request, `MOCK_APPROVAL deny ${testInfo.project.name}`);
   await expect.poll(() => pendingCount(request)).toBe(1);
   await goLive(page);
 
-  await openNav(page, mobile);
+  await openNavigation(page);
   await page.getByRole('button', { name: /^Approvals/ }).click();
   const pending = page.getByRole('list', { name: 'Pending approvals' });
   const denyItem = pending.getByRole('listitem', { name: label() });
@@ -289,7 +283,7 @@ test('a denied approval moves to history and a slow history load never replaces 
   await expect(denied.getByRole('button')).toHaveCount(0);
 });
 
-test('an older inbox count cannot replace a newer badge poll', async ({ page }, testInfo) => {
+test('an older inbox count cannot replace a newer badge poll', async ({ page }) => {
   await page.clock.install();
   let holdInbox = false, currentCount = 7, release!: () => void, captured!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
@@ -305,12 +299,12 @@ test('an older inbox count cannot replace a newer badge poll', async ({ page }, 
   await page.reload();
   await expect(page.getByRole('button', { name: `Edit ${agent.name} profile` })).toBeVisible();
   await page.clock.pauseAt(new Date(Date.now() + 1_000));
-  await openNav(page, testInfo.project.name === 'mobile');
+  await openNavigation(page);
   const nav = page.getByRole('button', { name: /^Approvals/ });
   await expect(nav).toHaveAccessibleName('Approvals 7');
   await nav.click();
   await expect(page.getByRole('heading', { name: 'Nothing is waiting for you.' })).toBeVisible();
-  await openNav(page, testInfo.project.name === 'mobile');
+  await openNavigation(page);
   try {
     holdInbox = true;
     // The inbox refresh begins at ten seconds; the later badge poll begins at fifteen.
@@ -330,17 +324,17 @@ test('an older inbox count cannot replace a newer badge poll', async ({ page }, 
   } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
 });
 
-test('submitted decisions stay outstanding without offering a second decision', async ({ page }, testInfo) => {
+test('submitted decisions stay outstanding without offering a second decision', async ({ page }) => {
   await page.route(url => url.pathname === '/v1/approvals', route => route.fulfill({
     headers: { 'Access-Control-Allow-Origin': '*' },
     json: { pendingCount: 2, approvals: ['submitting', 'submitted'].map((state, index) => ({ id: `inflight-${index}`, runId: 'run-inflight', agentId: agent.id, agentName: agent.name, conversationId: 'conversation-inflight', runState: 'waiting_approval', runCreatedAt: new Date().toISOString(), state, decision: null, createdAt: new Date().toISOString(), resolvedAt: null, ageMs: 0, summary: { toolName: `Tool ${index}`, description: 'The computer has not acknowledged the decision.' } })) },
   }));
-  await openNav(page, testInfo.project.name === 'mobile');
+  await openNavigation(page);
   await page.getByRole('button', { name: /^Approvals/ }).click();
   const list = page.getByRole('list', { name: 'Pending approvals' });
   await expect(list.locator('.run-pill').filter({ hasText: 'Sending decision…' })).toHaveCount(1);
   await expect(list.locator('.run-pill').filter({ hasText: 'Waiting for computer confirmation' })).toHaveCount(1);
   await expect(list.getByRole('button', { name: /Approve|Deny/ })).toHaveCount(0);
-  await openNav(page, testInfo.project.name === 'mobile');
+  await openNavigation(page);
   await expect(page.getByRole('button', { name: /^Approvals/ })).toHaveAccessibleName('Approvals 2');
 });

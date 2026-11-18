@@ -750,7 +750,8 @@ class GateBoundsAndCleanup(GateCase):
 
     def test_cancellation_records_failure_and_removes_only_this_probe(self):
         fixture = self.fixture()
-        fixture.scenario({'probe-bind': 'hang'})
+        # Deliver CI's second signal from the cleanup subprocess, while the gate is still handling the first.
+        fixture.scenario({'probe-bind': 'hang', 'cleanup': 'repeat-cancellation'})
         command = [sys.executable, '-I', '-B', str(fixture.repo / 'scripts/debian-origin-gate.py'), *fixture.argv()]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=fixture.dir,
                                    env={'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LANG': 'C.UTF-8'})
@@ -761,8 +762,6 @@ class GateBoundsAndCleanup(GateCase):
                 self.assertLess(time.monotonic(), deadline, 'the hung probe never started')
                 time.sleep(0.1)
             process.send_signal(signal.SIGINT)
-            time.sleep(0.2)
-            process.send_signal(signal.SIGTERM)  # as a cancelled CI step does next; it must not cut cleanup short
             _, stderr = process.communicate(timeout=60)
         finally:
             if process.poll() is None:

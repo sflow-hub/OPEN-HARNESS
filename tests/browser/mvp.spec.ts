@@ -1,3 +1,4 @@
+import { openNavigation, closeNavigation, openWorkspaceSettings } from './navigation';
 import {setupFixture} from './setup-fixture';
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { readFileSync } from 'node:fs';
@@ -27,24 +28,22 @@ test.afterEach(async ({ request }) => {
   await request.post(control + '/v1/runs/stop-all', { headers: { Authorization: `Bearer ${token}` } });
 });
 
-test('offers a focused workspace when advanced features are turned off, and restores them', async ({ page }, testInfo) => {
+test('offers a focused workspace when advanced features are turned off, and restores them', async ({ page }) => {
   // Teams, boards and remote computers ship on, so turning them off is what produces the
   // focused workspace. Routines stay reachable either way: the coordinator runs them whether
   // or not the view is shown, and hiding the only place to pause one would strand them.
-  const mobile = testInfo.project.name === 'mobile';
-  const openNav = async () => { if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click(); };
-  const closeNav = async () => { if (mobile) await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click'); };
 
-  await openNav();
+  await openNavigation(page);
   await expect(page.getByRole('button', { name: /Teams/ }).first()).toBeVisible();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await openWorkspaceSettings(page);
   await page.getByLabel('Advanced features').uncheck();
   await page.getByRole('button', { name: 'Close settings' }).click();
+  await openNavigation(page);
   await expect(page.getByRole('button', { name: /Routines/ }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: /Teams/ })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Tasks', exact: true })).toHaveCount(0);
 
-  await closeNav();
+  await closeNavigation(page);
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
   // Where an agent works is not an advanced setting: every agent gets a container.
   await expect(page.getByRole('tab', { name: 'Computer' })).toBeVisible();
@@ -52,22 +51,20 @@ test('offers a focused workspace when advanced features are turned off, and rest
   await expect(page.getByRole('heading', { name: 'MCP connections' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Close agent settings' }).click();
 
-  await openNav();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await openWorkspaceSettings(page);
   await page.getByLabel('Advanced features').check();
   await page.getByRole('button', { name: 'Close settings' }).click();
+  await openNavigation(page);
   await expect(page.getByRole('button', { name: /Teams/ }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: /Routines/ }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tasks', exact: true })).toBeVisible();
 });
 
-test('Computer settings stay available without Advanced features and offer only contained access', async ({ page }, testInfo) => {
-  const mobile = testInfo.project.name === 'mobile';
-  if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+test('Computer settings stay available without Advanced features and offer only contained access', async ({ page }) => {
+  await openWorkspaceSettings(page);
   await page.getByLabel('Advanced features').uncheck();
   await page.getByRole('button', { name: 'Close settings' }).click();
-  if (mobile) await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click');
+  await closeNavigation(page);
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
   const panel = page.getByRole('dialog', { name: 'Agent settings' });
   await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
@@ -84,7 +81,7 @@ test('Computer settings stay available without Advanced features and offer only 
   await expect(panel.getByLabel('CPU cores')).toHaveCount(0);
 });
 
-test('does not mark setup complete after a failed model check and supports retry', async ({ page }, testInfo) => {
+test('does not mark setup complete after a failed model check and supports retry', async ({ page }) => {
   await setupFixture(page);
   await page.route('**/v1/onboarding/model-test', route => {
     const input = route.request().postDataJSON();
@@ -96,8 +93,7 @@ test('does not mark setup complete after a failed model check and supports retry
     if (attempts === 1) await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: false, message: 'The API key was rejected.' }) });
     else await route.fallback();
   });
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await openWorkspaceSettings(page);
   await page.getByRole('button', { name: 'Run setup again' }).click();
   await page.getByRole('button', { name: /Use this computer/ }).click();
   await page.getByRole('button', { name: 'Continue' }).click();
@@ -148,22 +144,23 @@ test('submits work and restores a pending approval after reconnect', async ({ pa
 });
 
 test('downloads the exact contents of a workspace file', async ({ page }, testInfo) => {
+  const name = `launch-smoke-${testInfo.project.name}.md`;
   const contents = '# Launch smoke\n\nExact browser download contents.\n';
   await page.locator('input[type="file"][multiple]').setInputFiles({
-    name: 'launch-smoke.md',
+    name,
     mimeType: 'text/markdown',
     buffer: Buffer.from(contents),
   });
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNavigation(page);
   await page.getByRole('button', { name: /Files/ }).first().click();
   const downloadPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Download launch-smoke.md' }).click();
+  await page.getByRole('button', { name: `Download ${name}` }).click();
   const saved = await downloadPromise;
-  expect(saved.suggestedFilename()).toBe('launch-smoke.md');
+  expect(saved.suggestedFilename()).toBe(name);
   expect(readFileSync(await saved.path(), 'utf8')).toBe(contents);
 });
 
-test('a coordinator that cannot be reached is stated plainly and recovered from', async ({ page }, testInfo) => {
+test('a coordinator that cannot be reached is stated plainly and recovered from', async ({ page }) => {
   // The failure used to be a toast that cleared itself after a few seconds, leaving the app
   // looking healthy beside a status dot that was always green.
   let reachable = false;
@@ -175,9 +172,8 @@ test('a coordinator that cannot be reached is stated plainly and recovered from'
 
   const banner = page.getByRole('alert').filter({ hasText: 'cannot reach its control service' });
   await expect(banner).toBeVisible();
-  const dot = page.locator('.status-dot.offline');
-  await expect(dot).toHaveCount(1);
-  if (testInfo.project.name === 'desktop') await expect(dot).toBeVisible();
+  const dot = page.getByRole('navigation', { name: 'Workspace shortcuts' }).locator('.status-dot.offline');
+  await expect(dot).toBeVisible();
   // It has to still be there well after the old toast would have cleared.
   await page.waitForTimeout(7000);
   await expect(banner).toBeVisible();
@@ -185,7 +181,7 @@ test('a coordinator that cannot be reached is stated plainly and recovered from'
   reachable = true;
   await banner.getByRole('button', { name: 'Try again' }).click();
   await expect(banner).toBeHidden();
-  await expect(page.locator('.status-dot.offline')).toHaveCount(0);
+  await expect(dot).toHaveCount(0);
 });
 
 test('reopening a task run streams the work into the conversation it belongs to', async ({ page, request }) => {
@@ -228,8 +224,7 @@ test('reopening a task run streams the work into the conversation it belongs to'
 // A single global "running" flag disabled every other agent in the sidebar, so a workspace built
 // around several named agents could only be used one agent at a time. Runs are tracked per agent
 // now: the one that is working shows a spinner, and the rest stay open for a new task.
-test('a second agent stays available while the first one is working', async ({ page, request }, testInfo) => {
-  const mobile = testInfo.project.name === 'mobile';
+test('a second agent stays available while the first one is working', async ({ page, request }) => {
   const { token } = await (await request.get(control + '/v1/bootstrap')).json();
   const headers = { Authorization: `Bearer ${token}` };
   // MOCK_APPROVAL parks the run until someone answers, so it is reliably still active below.
@@ -237,7 +232,7 @@ test('a second agent stays available while the first one is working', async ({ p
   expect(created.ok()).toBeTruthy();
   const held = await created.json();
   await page.reload();
-  if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNavigation(page);
 
   const atlasRow = page.locator('.agent-row', { hasText: 'Atlas' });
   const scoutRow = page.locator('.agent-row', { hasText: 'Scout' });
@@ -248,12 +243,12 @@ test('a second agent stays available while the first one is working', async ({ p
   await expect(scoutRow.locator('.spin')).toHaveCount(0);
 
   await scoutRow.click();
+  await openNavigation(page);
   await expect(page.locator('.agent-row.selected')).toContainText('Scout');
-  // Switching away does not abandon the first agent: it is still marked as working. On a phone
-  // selecting an agent closes the drawer over the list, so only its presence can be asserted.
-  await expect(atlasRow.locator('.spin')).toHaveCount(1);
-  if (!mobile) await expect(atlasRow.locator('.spin')).toBeVisible();
+  // Switching away leaves Atlas marked as working.
+  await expect(atlasRow.locator('.spin')).toBeVisible();
   await expect(atlasRow).not.toHaveClass(/selected/);
+  await closeNavigation(page);
 
   // This test is the only one that deliberately parks a run, and every spec here shares one
   // coordinator, so it clears it rather than leaving the next file to inherit a busy agent.
