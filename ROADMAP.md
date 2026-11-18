@@ -26,12 +26,11 @@ maturity and what's outstanding before a 1.0, not a scheduled feature list.
 The supported install is a local browser dashboard on Linux, run from source or through
 Docker Compose. These are understood but deliberately not part of the beta:
 
-- **macOS and Windows.** Three known blockers, none of them small: Node has no AF_UNIX on
-  Windows, so the agent coordination socket needs a named pipe or the HTTP control path;
-  Docker Desktop does not forward a Unix socket through a bind mount, so container agents on
-  either platform cannot reach the coordinator that way; and the test harness reaches for the
-  real Keychain on macOS. `.github/workflows/ci.yml` still builds all three so the breakage
-  stays visible, but only the Linux job is a gate on the beta.
+- **macOS and Windows.** Long Unix socket paths use a directory descriptor on Linux and a
+  private short path on macOS. Windows would need a named pipe or the HTTP control path.
+  Docker Desktop cannot forward a Unix socket through a bind mount, so container coordination
+  there needs the HTTP fallback. `.github/workflows/ci.yml` runs checks on all three platforms.
+  The beta supports Linux.
 - **Desktop installers and signed updates.** No code-signing, notarization, or updater keys
   exist. `desktop-release.yml` is `workflow_dispatch`-only and unverified.
 - **Approvals decided by a guardian model.** `approvals.mode` is `smart`, so Hermes asks an
