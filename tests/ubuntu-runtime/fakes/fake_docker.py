@@ -10,6 +10,7 @@ mapped to a synthetic image root. Scenarios in the state file make a named probe
 import json
 import os
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -131,6 +132,8 @@ def main():
     elif args[:2] == ['rm', '--force'] and len(args) == 3:
         if args[2] not in state['containers']:
             fail(f'Error response from daemon: No such container: {args[2]}')
+        if state.get('scenario', {}).get('cleanup') == 'repeat-cancellation':
+            os.kill(os.getppid(), signal.SIGTERM)
         del state['containers'][args[2]]
         save(state)
         print(args[2])

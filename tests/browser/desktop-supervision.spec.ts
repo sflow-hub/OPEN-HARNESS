@@ -15,6 +15,7 @@ async function openDesktop(page: Page) {
   // Mobile layout can enlarge innerWidth to fit an overflowing toolbar, so compare with
   // the actual viewport before a modal obscures the chat and its desktop action buttons.
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width + 1);
+  await page.getByRole('button', { name: 'Toggle workspace panel' }).click();
   await page.getByRole('button', { name: 'Open agent computer' }).click();
   return page.getByRole('dialog', { name: 'Atlas’s computer' });
 }

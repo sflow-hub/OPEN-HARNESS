@@ -1,3 +1,4 @@
+import { openNavigation } from './navigation';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 
@@ -73,8 +74,8 @@ async function mockConversations(page: Page, options: { chats?: Row[]; failList?
   return { calls, bodies, chats };
 }
 
-async function openGroupChats(page: Page, project: string) {
-  if (project === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+async function openGroupChats(page: Page) {
+  await openNavigation(page);
   await page.getByRole('button', { name: 'Groups', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Group chats', level: 1 })).toBeVisible();
 }
@@ -90,10 +91,10 @@ async function load(page: Page) {
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
 }
 
-test('shows an empty state and creates a group with two agents', async ({ page }, testInfo) => {
+test('shows an empty state and creates a group with two agents', async ({ page }) => {
   const mock = await mockConversations(page);
   await load(page);
-  await openGroupChats(page, testInfo.project.name);
+  await openGroupChats(page);
   await expect(page.getByRole('heading', { name: 'No group chats yet.' })).toBeVisible();
   await page.getByRole('button', { name: 'New group chat' }).click();
   const dialog = page.getByRole('dialog', { name: 'New group chat' });
@@ -111,7 +112,7 @@ test('shows an empty state and creates a group with two agents', async ({ page }
 test('sends an @mention once and shows the agent reply from polling', async ({ page }, testInfo) => {
   const mock = await mockConversations(page, { chats: [chat('c-1', 'Launch planning', ['atlas', 'scout'])] });
   await load(page);
-  await openGroupChats(page, testInfo.project.name);
+  await openGroupChats(page);
   await page.getByRole('button', { name: 'Open Launch planning' }).click();
   await expect(page.getByRole('heading', { name: 'No messages yet.' })).toBeVisible();
   const composer = page.getByRole('textbox', { name: 'Message the group' });
@@ -142,10 +143,10 @@ test('sends an @mention once and shows the agent reply from polling', async ({ p
   await expect.poll(() => mock.calls.some(call => call.startsWith('GET /v1/conversations/c-1/messages?after=2'))).toBe(true);
 });
 
-test('a send response never moves polling past agent messages it has not fetched', async ({ page }, testInfo) => {
+test('a send response never moves polling past agent messages it has not fetched', async ({ page }) => {
   const mock = await mockConversations(page, { chats: [chat('c-1', 'Launch planning', ['atlas', 'scout'])], interject: { agentId: 'scout', body: 'I already drafted the notes.' }, noScheduledRuns: true });
   await load(page);
-  await openGroupChats(page, testInfo.project.name);
+  await openGroupChats(page);
   await page.getByRole('button', { name: 'Open Launch planning' }).click();
   const composer = page.getByRole('textbox', { name: 'Message the group' });
   await composer.fill('@Atlas thanks, can you review them?');
@@ -156,12 +157,12 @@ test('a send response never moves polling past agent messages it has not fetched
   await expect(page.getByText('will reply shortly')).toHaveCount(0);
 });
 
-test('the composer cannot be edited while a send is pending, so no typed text is lost', async ({ page }, testInfo) => {
+test('the composer cannot be edited while a send is pending, so no typed text is lost', async ({ page }) => {
   let release = () => {};
   const holdSend = new Promise<void>(resolve => { release = resolve; });
   const mock = await mockConversations(page, { chats: [chat('c-1', 'Launch planning', ['atlas'])], holdSend });
   await load(page);
-  await openGroupChats(page, testInfo.project.name);
+  await openGroupChats(page);
   await page.getByRole('button', { name: 'Open Launch planning' }).click();
   const composer = page.getByRole('textbox', { name: 'Message the group' });
   await composer.fill('First thought');
@@ -178,10 +179,10 @@ test('the composer cannot be edited while a send is pending, so no typed text is
   expect(mock.calls.filter(call => call === 'POST /v1/conversations/c-1/messages')).toHaveLength(1);
 });
 
-test('dialogs close on Escape, keep focus inside, and return it to their opener', async ({ page }, testInfo) => {
+test('dialogs close on Escape, keep focus inside, and return it to their opener', async ({ page }) => {
   await mockConversations(page, { chats: [chat('c-1', 'Launch planning', ['atlas', 'scout'])] });
   await load(page);
-  await openGroupChats(page, testInfo.project.name);
+  await openGroupChats(page);
   const newChat = page.getByRole('button', { name: 'New group chat' });
   await newChat.click();
   const create = page.getByRole('dialog', { name: 'New group chat' });
@@ -207,10 +208,10 @@ test('dialogs close on Escape, keep focus inside, and return it to their opener'
   await expect(membersButton).toBeFocused();
 });
 
-test('adds and removes members', async ({ page }, testInfo) => {
+test('adds and removes members', async ({ page }) => {
   const mock = await mockConversations(page, { chats: [chat('c-1', 'Launch planning', ['atlas', 'scout'])] });
   await load(page);
-  await openGroupChats(page, testInfo.project.name);
+  await openGroupChats(page);
   await page.getByRole('button', { name: 'Open Launch planning' }).click();
   await page.getByRole('button', { name: 'Members', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Members', exact: true });
@@ -225,10 +226,10 @@ test('adds and removes members', async ({ page }, testInfo) => {
   expect(mock.calls).toContain('DELETE /v1/conversations/c-1/members/scout');
 });
 
-test('Stop halts the chat and Resume restarts it', async ({ page }, testInfo) => {
+test('Stop halts the chat and Resume restarts it', async ({ page }) => {
   const mock = await mockConversations(page, { chats: [chat('c-1', 'Launch planning', ['atlas'])] });
   await load(page);
-  await openGroupChats(page, testInfo.project.name);
+  await openGroupChats(page);
   await page.getByRole('button', { name: 'Open Launch planning' }).click();
   await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible();
@@ -238,29 +239,29 @@ test('Stop halts the chat and Resume restarts it', async ({ page }, testInfo) =>
   expect(mock.calls).toContain('POST /v1/conversations/c-1/resume');
 });
 
-test('hides Stop when the coordinator has no halt route', async ({ page }, testInfo) => {
+test('hides Stop when the coordinator has no halt route', async ({ page }) => {
   await mockConversations(page, { chats: [chat('c-1', 'Launch planning', ['atlas'])], noHalt: true });
   await load(page);
-  await openGroupChats(page, testInfo.project.name);
+  await openGroupChats(page);
   await page.getByRole('button', { name: 'Open Launch planning' }).click();
   await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.getByText('cannot pause group chats yet')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
 });
 
-test('a list that fails to load can be retried', async ({ page }, testInfo) => {
+test('a list that fails to load can be retried', async ({ page }) => {
   await mockConversations(page, { failList: 1 });
   await load(page);
-  await openGroupChats(page, testInfo.project.name);
+  await openGroupChats(page);
   await expect(page.getByRole('alert').filter({ hasText: 'Group chats are unavailable right now.' })).toBeVisible();
   await page.getByRole('button', { name: 'Try again' }).click();
   await expect(page.getByRole('heading', { name: 'No group chats yet.' })).toBeVisible();
 });
 
-test('choosing a mention after an interrupted send creates a new message key', async ({ page }, testInfo) => {
+test('choosing a mention after an interrupted send creates a new message key', async ({ page }) => {
   const mock = await mockConversations(page, { chats: [chat('c-1', 'Retry mention', ['atlas', 'scout'])], failSend: 1 });
   await load(page);
-  await openGroupChats(page, testInfo.project.name);
+  await openGroupChats(page);
   await page.getByRole('button', { name: 'Open Retry mention' }).click();
   const composer = page.getByRole('textbox', { name: 'Message the group' });
   await composer.fill('Please ask @Sc');

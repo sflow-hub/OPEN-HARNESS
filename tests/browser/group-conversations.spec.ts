@@ -1,3 +1,4 @@
+import { openNavigation } from './navigation';
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 import { draftProfile } from '../../lib/agent-profile';
@@ -15,8 +16,8 @@ async function seed(request: APIRequestContext) {
   expect(response.ok()).toBeTruthy();
   return { team: await response.json() as { id: string; name: string }, headers };
 }
-async function openGroups(page: Page, mobile: boolean) {
-  if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+async function openGroups(page: Page) {
+  await openNavigation(page);
   await page.getByRole('button', { name: 'Groups', exact: true }).click();
   await page.getByRole('button', { name: 'Team conversations', exact: true }).click();
   return page.getByRole('region', { name: 'Group conversations', exact: true });
@@ -28,7 +29,7 @@ test.beforeEach(async ({ page }) => {
 test('creates a group, dispatches two replies and keeps the transcript after reload', async ({ page, request }, testInfo) => {
   const { team, headers } = await seed(request), title = `Launch discussion ${testInfo.project.name}`;
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
-  let groups = await openGroups(page, testInfo.project.name === 'mobile');
+  let groups = await openGroups(page);
   await groups.getByLabel('Team', { exact: true }).selectOption(team.id);
   await groups.getByLabel('Conversation name').fill(title);
   const participants = groups.getByRole('group', { name: 'Participants' });
@@ -44,7 +45,7 @@ test('creates a group, dispatches two replies and keeps the transcript after rel
   const detail = await (await request.get(control + `/v1/groups/${groupId}`, { headers })).json();
   expect(detail.messages).toHaveLength(3); expect(detail.runs).toHaveLength(2);
   expect(detail.runs.map((run: { agent_id: string }) => run.agent_id).sort()).toEqual(['atlas', 'scout']);
-  await page.reload(); groups = await openGroups(page, testInfo.project.name === 'mobile');
+  await page.reload(); groups = await openGroups(page);
   await groups.getByRole('button', { name: title, exact: true }).click();
   await expect(groups.getByText('Prepare your own section of the launch brief.', { exact: true })).toBeVisible();
   await expect(groups.getByText('Hermes mock completed the task.', { exact: true })).toHaveCount(2);
@@ -55,7 +56,7 @@ test('failed group send retains the draft and retry ID and posting without recip
   const created = await request.post(control + '/v1/groups', { headers, data: { teamId: team.id, title, memberAgentIds: ['atlas','scout'] } });
   const group = await created.json();
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
-  const groups = await openGroups(page, testInfo.project.name === 'mobile');
+  const groups = await openGroups(page);
   await groups.getByRole('button', { name: title, exact: true }).click();
   const recipients = groups.getByRole('group', { name: 'Ask for a reply (up to four)' });
   await recipients.getByRole('checkbox', { name: 'Atlas', exact: true }).uncheck();

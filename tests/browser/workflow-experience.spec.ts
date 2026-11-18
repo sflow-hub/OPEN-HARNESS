@@ -1,3 +1,4 @@
+import { openNavigation } from './navigation';
 import { test, expect, type APIRequestContext } from "@playwright/test";
 import { initialWorkspace } from "../../lib/types";
 import type { Workflow } from "../../lib/workflows";
@@ -18,7 +19,7 @@ test("reviewed conversation becomes a tested calendar routine and a managed skil
   const { run, headers } = await completedRun(request, name);
   await page.addInitScript(() => { localStorage.setItem("open-harness.onboarding.v1", "done"); localStorage.setItem("open-harness.advanced.v1", "on"); });
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
-  if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "Open navigation" }).click();
+  await openNavigation(page);
   await page.getByRole("button", { name: "Routines", exact: true }).first().click();
   const panel = page.getByRole("region", { name: "Reusable workflows" });
   await panel.getByLabel("Completed conversation").selectOption(run.id);
@@ -55,7 +56,7 @@ test("conflicting workflow saves preserve the local draft and name the saved rev
   const workflow = await (await request.post(`${control}/v1/workflows`, { headers, data: { sourceRunId: run.id } })).json() as Workflow;
   await page.addInitScript(() => { localStorage.setItem("open-harness.onboarding.v1", "done"); localStorage.setItem("open-harness.advanced.v1", "on"); });
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
-  if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "Open navigation" }).click();
+  await openNavigation(page);
   await page.getByRole("button", { name: "Routines", exact: true }).first().click();
   const panel = page.getByRole("region", { name: "Reusable workflows" });
   await panel.getByRole("navigation", { name: "Saved workflows" }).getByRole("button", { name: new RegExp(name) }).click();

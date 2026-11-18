@@ -1,3 +1,4 @@
+import { openNavigation } from './navigation';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 
@@ -48,8 +49,8 @@ async function mockRoutines(page: Page, options: { failHistory?: number } = {}) 
   return Object.assign(calls, { bodies });
 }
 
-async function openRoutines(page: Page, project: string) {
-  if (project === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+async function openRoutines(page: Page) {
+  await openNavigation(page);
   await page.getByRole('button', { name: /Routines/ }).first().click();
   await expect(page.getByRole('heading', { name: 'Routines', level: 1 })).toBeVisible();
 }
@@ -65,10 +66,10 @@ async function load(page: Page) {
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
 }
 
-test('lists interval and cron routines with their schedules', async ({ page }, testInfo) => {
+test('lists interval and cron routines with their schedules', async ({ page }) => {
   await mockRoutines(page);
   await load(page);
-  await openRoutines(page, testInfo.project.name);
+  await openRoutines(page);
   await expect(row(page, 'Daily digest')).toContainText('every day');
   await expect(row(page, 'Daily digest')).toContainText('Enabled');
   await expect(row(page, 'Daily digest')).toContainText('Has not run yet');
@@ -77,10 +78,10 @@ test('lists interval and cron routines with their schedules', async ({ page }, t
   await expect(row(page, 'Weekday standup')).toContainText('Paused');
 });
 
-test('opens a routine history drawer listing runs and their states', async ({ page }, testInfo) => {
+test('opens a routine history drawer listing runs and their states', async ({ page }) => {
   const calls = await mockRoutines(page);
   await load(page);
-  await openRoutines(page, testInfo.project.name);
+  await openRoutines(page);
   await page.getByRole('button', { name: 'History for Daily digest' }).click();
   const drawer = page.getByRole('dialog', { name: 'History for Daily digest' });
   await expect(drawer.locator('.run-history')).toHaveCount(2);
@@ -93,10 +94,10 @@ test('opens a routine history drawer listing runs and their states', async ({ pa
   await expect(drawer).toBeHidden();
 });
 
-test('keeps keyboard focus inside the history drawer and returns it on Escape', async ({ page }, testInfo) => {
+test('keeps keyboard focus inside the history drawer and returns it on Escape', async ({ page }) => {
   await mockRoutines(page);
   await load(page);
-  await openRoutines(page, testInfo.project.name);
+  await openRoutines(page);
   const trigger = page.getByRole('button', { name: 'History for Weekday standup' });
   await trigger.click();
   const drawer = page.getByRole('dialog', { name: 'History for Weekday standup' });
@@ -115,10 +116,10 @@ test('keeps keyboard focus inside the history drawer and returns it on Escape', 
   await expect(trigger).toBeFocused();
 });
 
-test('wraps focus between the drawer controls when there are several', async ({ page }, testInfo) => {
+test('wraps focus between the drawer controls when there are several', async ({ page }) => {
   await mockRoutines(page, { failHistory: 1 });
   await load(page);
-  await openRoutines(page, testInfo.project.name);
+  await openRoutines(page);
   await page.getByRole('button', { name: 'History for Daily digest' }).click();
   const drawer = page.getByRole('dialog', { name: 'History for Daily digest' });
   const close = drawer.getByRole('button', { name: 'Close history' }), retry = drawer.getByRole('button', { name: 'Try again' });
@@ -135,10 +136,10 @@ test('wraps focus between the drawer controls when there are several', async ({ 
   await expect(page.getByRole('button', { name: 'History for Daily digest' })).toBeFocused();
 });
 
-test('editing a cron routine keeps its schedule and timezone', async ({ page }, testInfo) => {
+test('editing a cron routine keeps its schedule and timezone', async ({ page }) => {
   const calls = await mockRoutines(page);
   await load(page);
-  await openRoutines(page, testInfo.project.name);
+  await openRoutines(page);
   await row(page, 'Weekday standup').getByRole('button', { name: 'Edit' }).click();
   const dialog = page.getByRole('dialog', { name: 'Edit routine' });
   await expect(dialog).toContainText('0 9 * * 1-5 (America/Denver)');
@@ -152,20 +153,20 @@ test('editing a cron routine keeps its schedule and timezone', async ({ page }, 
   expect(sent).not.toHaveProperty('scheduleKind');
 });
 
-test('says so when a routine has never run', async ({ page }, testInfo) => {
+test('says so when a routine has never run', async ({ page }) => {
   await mockRoutines(page);
   await load(page);
-  await openRoutines(page, testInfo.project.name);
+  await openRoutines(page);
   await page.getByRole('button', { name: 'History for Weekday standup' }).click();
   const drawer = page.getByRole('dialog', { name: 'History for Weekday standup' });
   await expect(drawer.getByRole('heading', { name: 'No runs yet.' })).toBeVisible();
   await expect(drawer.locator('.run-history')).toHaveCount(0);
 });
 
-test('a history that fails to load can be retried', async ({ page }, testInfo) => {
+test('a history that fails to load can be retried', async ({ page }) => {
   await mockRoutines(page, { failHistory: 1 });
   await load(page);
-  await openRoutines(page, testInfo.project.name);
+  await openRoutines(page);
   await page.getByRole('button', { name: 'History for Daily digest' }).click();
   const drawer = page.getByRole('dialog', { name: 'History for Daily digest' });
   await expect(drawer.getByRole('alert')).toContainText('History is unavailable right now.');
@@ -173,10 +174,10 @@ test('a history that fails to load can be retried', async ({ page }, testInfo) =
   await expect(drawer.locator('.run-history')).toHaveCount(2);
 });
 
-test('pause and run now call the routine endpoints', async ({ page }, testInfo) => {
+test('pause and run now call the routine endpoints', async ({ page }) => {
   const calls = await mockRoutines(page);
   await load(page);
-  await openRoutines(page, testInfo.project.name);
+  await openRoutines(page);
   await row(page, 'Daily digest').getByRole('button', { name: 'Pause' }).click();
   await expect(row(page, 'Daily digest').getByRole('button', { name: 'Enable' })).toBeVisible();
   expect(calls).toContain('POST /v1/routines/r-interval/toggle');

@@ -57,9 +57,10 @@ export default function ConversationTranscript({ conversationId, messages, rende
   // start null follows the newest batch. A number pins the first mounted message, so new
   // messages can't slide the window out from under someone reading or after Load earlier.
   const [view, setView] = useState<{ conversationId: string; start: number | null }>({ conversationId, start: null });
+  const [showJump, setShowJump] = useState(false);
   // Another conversation starts over on its newest batch; the old pin must not come back
   // when switching back, so it is dropped rather than kept per conversation.
-  if (view.conversationId !== conversationId) setView({ conversationId, start: null });
+  if (view.conversationId !== conversationId) { setView({ conversationId, start: null }); setShowJump(false); }
   const pinned = view.conversationId === conversationId ? view.start : null;
   const start = pinned === null ? Math.max(0, messages.length - BATCH) : Math.min(pinned, messages.length);
   const following = useRef(true);
@@ -97,6 +98,8 @@ export default function ConversationTranscript({ conversationId, messages, rende
       // end arrives. Recognize that move before restoring the previous reading position.
       if (returnedToEnd(el, bounds.current, lastTop.current)) following.current = true;
       hold(el, following.current, reading.current);
+      if (el.scrollHeight - el.clientHeight - el.scrollTop <= FOLLOW_SLACK) following.current = true;
+      setShowJump(!following.current);
       lastTop.current = el.scrollTop;
       bounds.current = { width: el.clientWidth, height: el.clientHeight, end: el.scrollHeight - el.clientHeight };
     });
@@ -114,6 +117,7 @@ export default function ConversationTranscript({ conversationId, messages, rende
     if (el.scrollHeight - top - el.clientHeight <= FOLLOW_SLACK || returnedToEnd(el, bounds.current, lastTop.current)) following.current = true;
     else if (top < lastTop.current) following.current = false;
     lastTop.current = top;
+    setShowJump(!following.current);
     if (following.current) return;
     reading.current = capture(el);
     if (pinned === null) setView({ conversationId, start });
@@ -127,8 +131,17 @@ export default function ConversationTranscript({ conversationId, messages, rende
     refocus.current = start <= BATCH;
     setView({ conversationId, start: Math.max(0, start - BATCH) });
   }
+  function jumpToLatest() {
+    const el = ref.current;
+    if (!el) return;
+    following.current = true;
+    el.focus({ preventScroll: true });
+    jump(el, el.scrollHeight);
+    lastTop.current = el.scrollTop;
+    setShowJump(false);
+  }
 
-  return <div className="transcript" aria-live="polite" ref={ref} onScroll={onScroll} tabIndex={-1} style={{ scrollBehavior: 'auto' }}>
+  return <><div className="transcript" aria-live="polite" ref={ref} onScroll={onScroll} tabIndex={-1} style={{ scrollBehavior: 'auto' }}>
     <div ref={content}>{!messages.length ? empty : <>
       {start > 0 && <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, margin: '4px auto 18px' }}>
         <button type="button" className="subtle-button" onClick={loadEarlier}>Load earlier messages</button>
@@ -137,5 +150,8 @@ export default function ConversationTranscript({ conversationId, messages, rende
       {messages.slice(start).map(message => <div key={message.id} data-message-id={message.id}><Row message={message} render={renderMessage} /></div>)}
     </>}
     {footer}</div>
-  </div>;
+  </div>
+  {showJump && <div style={{ position: 'relative', flex: 'none', height: 0, zIndex: 1 }}>
+    <button type="button" className="subtle-button" style={{ position: 'absolute', bottom: 8, left: '50%', transform: 'translateX(-50%)', background: 'var(--panel)' }} onClick={jumpToLatest}>Jump to latest</button>
+  </div>}</>;
 }

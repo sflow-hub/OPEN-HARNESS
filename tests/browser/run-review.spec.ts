@@ -8,6 +8,7 @@ test('notification opens the completed task for an evidence-backed operator revi
   await expect.poll(async () => (await (await request.get(`${control}/v1/runs/${run.id}`, { headers })).json()).state).toBe('completed');
   await page.addInitScript(() => { localStorage.setItem('open-harness.onboarding.v1', 'done'); });
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}&run=${run.id}`);
+  await page.getByRole('button', { name: 'Toggle workspace panel' }).click();
   await page.getByRole('button', { name: 'Review task result', exact: true }).click();
   const review = page.getByRole('dialog', { name: 'Review task result' });
   await expect(review.getByRole('button', { name: 'Accept result' })).toBeDisabled();
