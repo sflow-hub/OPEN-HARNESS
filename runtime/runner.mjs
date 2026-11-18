@@ -1,9 +1,9 @@
 import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);
 
 // runtime/runner.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync5, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync5, chmodSync as chmodSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2 } from "node:fs";
 import { homedir, hostname, platform as platform2, arch } from "node:os";
-import { join as join4, resolve as resolve3 } from "node:path";
+import { join as join5, resolve as resolve4 } from "node:path";
 import { spawn as spawn4, spawnSync as spawnSync5 } from "node:child_process";
 
 // runtime/hermes.ts
@@ -11,8 +11,8 @@ import { spawn as spawn2, spawnSync as spawnSync2 } from "node:child_process";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { existsSync as existsSync2, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { isAbsolute, join as join2, resolve as resolve2 } from "node:path";
 
 // runtime/readiness.ts
 import { spawn, spawnSync } from "node:child_process";
@@ -20,6 +20,13 @@ import { spawn, spawnSync } from "node:child_process";
 // lib/hermes-pin.ts
 var HERMES_RELEASE = "v2026.9.11";
 var HERMES_IMAGE_TAG = HERMES_RELEASE.replace(/^v/, "");
+
+// runtime/readiness.ts
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+
+// lib/onboarding.ts
+var SETUP_ACTIONS = ["start-container-engine", "prepare-runtime"];
 
 // runtime/readiness.ts
 var HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`;
@@ -33,9 +40,136 @@ function imageContract(run2 = command) {
   return classifyContract(run2("docker", ["image", "inspect", "-f", `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE]));
 }
 var platform = ["linux", "darwin", "win32"].includes(process.platform) ? process.platform : "unknown";
+var labels = { linux: "Linux", darwin: "macOS", win32: "Windows", unknown: "this operating system" };
 function command(name, args2, timeout = 7e3) {
   return spawnSync(name, args2, { encoding: "utf8", timeout });
 }
+function commandAsync(name, args2, timeout = 7e3) {
+  return new Promise((resolve5) => {
+    let stdout = "", stderr = "", done = false;
+    const finish2 = (status) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve5({ status, stdout, stderr });
+    };
+    const child = spawn(name, args2, { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    child.stdout.on("data", (chunk) => {
+      stdout = (stdout + String(chunk)).slice(-16e3);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = (stderr + String(chunk)).slice(-8e3);
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish2(null);
+    }, timeout);
+    timer.unref();
+    child.once("error", () => finish2(null));
+    child.once("close", (code) => finish2(code));
+  });
+}
+var readinessChecks = /* @__PURE__ */ new Map();
+async function startDocker() {
+  if (platform === "darwin") return commandAsync("open", ["-gja", "Docker"], 15e3);
+  if (platform === "win32") return commandAsync("powershell.exe", ["-NoProfile", "-Command", 'Start-Process "$Env:ProgramFiles\\Docker\\Docker\\Docker Desktop.exe"'], 15e3);
+  const context = (await commandAsync("docker", ["context", "show"])).stdout.trim();
+  if (context.startsWith("desktop")) return commandAsync("systemctl", ["--user", "start", "docker-desktop.service"], 15e3);
+  return commandAsync("systemctl", ["start", "--no-block", "docker.service"], 15e3);
+}
+var dockerUp = async () => (await commandAsync("docker", ["version", "--format", "{{.Server.Version}}"], 5e3)).status === 0;
+async function waitForDocker(timeout = 12e4) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await dockerUp()) return;
+    await new Promise((resolve5) => setTimeout(resolve5, 1e3));
+  }
+  throw new Error("Docker did not become ready. Open Docker Desktop, wait for it to finish starting, then try again.");
+}
+function runStreaming(name, args2, cwd, timeoutMs = 45 * 6e4) {
+  return new Promise((resolve5, reject) => {
+    const child = spawn(name, args2, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    let error = "";
+    child.stdout.resume();
+    child.stderr.on("data", (chunk) => {
+      error = (error + String(chunk)).slice(-8e3);
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`${name} did not finish within ${Math.round(timeoutMs / 6e4)} minutes. Check that Docker has disk space and network access, then try again.`));
+    }, timeoutMs);
+    timer.unref();
+    child.once("error", (failure) => {
+      clearTimeout(timer);
+      reject(failure);
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve5();
+      else reject(new Error(error.trim() || `${name} exited with code ${code ?? "unknown"}.`));
+    });
+  });
+}
+var realTasks = {
+  async "start-container-engine"() {
+    if ((await commandAsync("docker", ["--version"])).status !== 0) throw new Error(`Docker is not installed. Use the installation guide for ${labels[platform]}, then try again.`);
+    if (await dockerUp()) return;
+    const started = await startDocker();
+    if (started.status !== 0) throw new Error((started.stderr || started.stdout || "").trim() || "Open Harness could not start Docker. Start it from your applications, then try again.");
+    await waitForDocker();
+  },
+  async "prepare-runtime"() {
+    await waitForDocker(1e4);
+    const runtimeRoot = import.meta.dirname;
+    const projectRoot = join(runtimeRoot, "..");
+    const dockerfile = join(runtimeRoot, "hermes", "Dockerfile");
+    if (!existsSync(dockerfile)) throw new Error("The bundled agent runtime files are missing. Reinstall Open Harness.");
+    await runStreaming("docker", ["build", "-f", dockerfile, "-t", HERMES_IMAGE, projectRoot], projectRoot);
+  }
+};
+var mockTasks = {
+  "start-container-engine": () => new Promise((resolve5) => setTimeout(resolve5, 150)),
+  "prepare-runtime": () => new Promise((resolve5) => setTimeout(resolve5, 150))
+};
+var RUNNING = {
+  "start-container-engine": "Starting Docker. This can take a minute.",
+  "prepare-runtime": "Setting up the agent runtime. The first time can take several minutes."
+};
+var SUCCEEDED = {
+  "start-container-engine": "Docker is running.",
+  "prepare-runtime": "The agent runtime is ready."
+};
+var isSetupAction = (value) => SETUP_ACTIONS.includes(value);
+function createSetupJobs(tasks) {
+  let job = null;
+  let settled = Promise.resolve();
+  return {
+    current: () => job ? { ...job } : void 0,
+    start(action) {
+      if (!isSetupAction(action)) throw new Error("Unknown setup action.");
+      if (job?.state === "running") return { job: { ...job }, accepted: job.action === action };
+      const current = { action, state: "running", message: RUNNING[action] };
+      job = current;
+      settled = Promise.resolve().then(tasks[action]).then(
+        () => {
+          current.state = "succeeded";
+          current.message = SUCCEEDED[action];
+        },
+        (error) => {
+          current.state = "failed";
+          current.message = error instanceof Error && error.message.trim() || "Setup did not finish. Try again.";
+        }
+      ).finally(() => {
+        readinessChecks.clear();
+        resetSharingChecks();
+      });
+      return { job: { ...current }, accepted: true };
+    },
+    /** Resolves once the current job has finished; for tests and shutdown. */
+    settled: () => settled
+  };
+}
+var setupJobs = createSetupJobs(process.env.OPEN_HARNESS_MOCK === "1" ? mockTasks : realTasks);
 
 // runtime/hermes.ts
 var FIRST_SETUP_MESSAGE = "Docker is ready, but the pinned Hermes runtime still needs its first-time setup.";
@@ -102,13 +236,13 @@ var HermesGateway = class extends EventEmitter {
       this.child = null;
       this.emit("exit", error);
     });
-    await new Promise((resolve4, reject) => {
+    await new Promise((resolve5, reject) => {
       const timer = setTimeout(() => reject(new Error("Hermes gateway did not become ready.")), 3e4);
       const ready = (event) => {
         if (event?.type === "gateway.ready") {
           clearTimeout(timer);
           this.off("event", ready);
-          resolve4();
+          resolve5();
         }
       };
       this.on("event", ready);
@@ -122,17 +256,17 @@ var HermesGateway = class extends EventEmitter {
     if (process.env.OPEN_HARNESS_MOCK === "1") return this.mockRequest(method, params);
     if (!this.child) return Promise.reject(new Error("Hermes gateway is not running."));
     const id = String(++this.requestId);
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve5, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out.`));
       }, timeout);
-      this.pending.set(id, { resolve: resolve4, reject, timer });
+      this.pending.set(id, { resolve: resolve5, reject, timer });
       this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     });
   }
   submitPrompt(sessionId, text, timeout = 24 * 60 * 60 * 1e3) {
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve5, reject) => {
       const cleanup = () => {
         clearTimeout(timer);
         this.off("event", onEvent);
@@ -150,7 +284,7 @@ var HermesGateway = class extends EventEmitter {
           if (payload.status === "error" || payload.status === "interrupted") onExit(Object.assign(new Error(payload.error || payload.text || "Hermes execution was interrupted."), { interrupted: payload.status === "interrupted" }));
           else {
             cleanup();
-            resolve4(payload);
+            resolve5(payload);
           }
         }
       };
@@ -160,7 +294,7 @@ var HermesGateway = class extends EventEmitter {
       this.request("prompt.submit", { session_id: sessionId, text }, timeout).then((result) => {
         if (result?.status !== "streaming") {
           cleanup();
-          resolve4(result);
+          resolve5(result);
         }
       }, onExit);
     });
@@ -175,11 +309,11 @@ var HermesGateway = class extends EventEmitter {
       }
       const canUseTerminal = this.allowedTools === null || this.allowedTools.includes("terminal");
       if (canUseTerminal) this.emit("event", { type: "tool.start", payload: { id: "mock-tool", name: "terminal", preview: "python task.py" } });
-      if (prompt.includes("MOCK_SLOW")) await new Promise((resolve4) => setTimeout(resolve4, 800));
+      if (prompt.includes("MOCK_SLOW")) await new Promise((resolve5) => setTimeout(resolve5, 800));
       if (prompt.includes("MOCK_APPROVAL")) {
         this.emit("event", { type: "approval.request", payload: { request_id: "mock-approval", command: "publish mock result" } });
-        const decision = await new Promise((resolve4) => {
-          this.mockApproval = resolve4;
+        const decision = await new Promise((resolve5) => {
+          this.mockApproval = resolve5;
         });
         if (decision === "deny") throw new Error("Mock action was denied.");
       }
@@ -196,10 +330,10 @@ var HermesGateway = class extends EventEmitter {
     return { ok: true };
   }
   async stop() {
-    if (process.env.OPEN_HARNESS_MOCK !== "1" && !this.native) await new Promise((resolve4, reject) => {
+    if (process.env.OPEN_HARNESS_MOCK !== "1" && !this.native) await new Promise((resolve5, reject) => {
       const child = spawn2("docker", ["stop", "--time", "2", this.container], { stdio: "ignore" });
       child.once("error", () => reject(new Error("Could not stop the agent container. Check Docker.")));
-      child.once("exit", (code) => code === 0 ? resolve4() : reject(new Error("Docker could not confirm the agent container stopped.")));
+      child.once("exit", (code) => code === 0 ? resolve5() : reject(new Error("Docker could not confirm the agent container stopped.")));
     });
     if (process.env.OPEN_HARNESS_MOCK !== "1" && this.native && this.child?.pid) {
       if (process.platform === "win32") spawnSync2("taskkill", ["/PID", String(this.child.pid), "/T", "/F"], { stdio: "ignore" });
@@ -218,37 +352,44 @@ var HermesGateway = class extends EventEmitter {
     this.emit("exit", Object.assign(new Error("Agent runtime stopped."), { interrupted: true }));
   }
 };
-var sharingCache = null;
+var verifiedSharing = /* @__PURE__ */ new Map();
+var pendingSharing = /* @__PURE__ */ new Map();
+function resetSharingChecks() {
+  verifiedSharing.clear();
+  pendingSharing.clear();
+}
+var mockSharing = { ok: true, detail: "Deterministic test runtime shares state directly." };
+var unverifiedSharing = (root) => ({ ok: false, detail: `Open Harness could not verify that Docker can read its data folder at ${root}.` });
+function sharingCanary(root) {
+  const dir = join2(root, ".mount-probe"), token = randomUUID(), file = join2(dir, token);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(file, token, { mode: 420 });
+  return {
+    args: ["run", "--rm", "--user", `${process.getuid?.() ?? 1e3}:${process.getgid?.() ?? 1e3}`, "-v", `${dir}:/probe:ro`, HERMES_IMAGE, "cat", `/probe/${token}`],
+    result: (code, output2) => code === 0 && output2.trim() === token ? { ok: true, detail: "Docker can read the Open Harness data folder." } : { ok: false, detail: `Docker cannot read the Open Harness data folder at ${root}, so agent containers would start with an empty profile and never receive your model credential. Add this folder to Docker Desktop \u2192 Settings \u2192 Resources \u2192 File sharing, or set OPEN_HARNESS_STATE_DIR to a folder inside your home directory.` },
+    remove: () => rmSync(file, { force: true })
+  };
+}
 function stateSharing(stateRoot2) {
-  if (process.env.OPEN_HARNESS_MOCK === "1") return { ok: true, detail: "Deterministic test runtime shares state directly." };
-  const root = resolve(stateRoot2);
-  if (sharingCache?.root === root) return sharingCache.value;
-  let value;
+  if (process.env.OPEN_HARNESS_MOCK === "1") return mockSharing;
+  const root = resolve2(stateRoot2), cached = verifiedSharing.get(root);
+  if (cached) return cached;
   try {
-    const dir = join(root, ".mount-probe");
-    mkdirSync(dir, { recursive: true });
-    const token = randomUUID();
-    writeFileSync(join(dir, "canary"), token, { mode: 420 });
-    const result = spawnSync2("docker", [
-      "run",
-      "--rm",
-      "--user",
-      `${process.getuid?.() ?? 1e3}:${process.getgid?.() ?? 1e3}`,
-      "-v",
-      `${dir}:/probe:ro`,
-      HERMES_IMAGE,
-      "cat",
-      "/probe/canary"
-    ], { encoding: "utf8", timeout: 6e4 });
-    value = result.stdout.trim() === token ? { ok: true, detail: "Docker can read the Open Harness data folder." } : { ok: false, detail: `Docker cannot read the Open Harness data folder at ${root}, so agent containers would start with an empty profile and never receive your model credential. Add this folder to Docker Desktop \u2192 Settings \u2192 Resources \u2192 File sharing, or set OPEN_HARNESS_STATE_DIR to a folder inside your home directory.` };
+    const canary = sharingCanary(root);
+    try {
+      const result = spawnSync2("docker", canary.args, { encoding: "utf8", timeout: 6e4 });
+      const value = canary.result(result.status, result.stdout || "");
+      if (value.ok) verifiedSharing.set(root, value);
+      return value;
+    } finally {
+      canary.remove();
+    }
   } catch {
-    value = { ok: false, detail: `Open Harness could not verify that Docker can read its data folder at ${root}.` };
+    return unverifiedSharing(root);
   }
-  sharingCache = { root, value };
-  return value;
 }
 function containerSignature(selected, imageId, stateRoot2 = "") {
-  return createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, imageId, stateRoot: stateRoot2 && resolve(stateRoot2) })).digest("hex").slice(0, 24);
+  return createHash("sha256").update(JSON.stringify({ access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, imageId, stateRoot: stateRoot2 && resolve2(stateRoot2) })).digest("hex").slice(0, 24);
 }
 var imageIdCache = null;
 function currentImageId() {
@@ -284,8 +425,8 @@ function ensureContainer(agentId, stateRoot2, computer) {
   const profile = `${stateRoot2}/agents/${safe}/profile`, privateDir = `${stateRoot2}/agents/${safe}/private`, shared = `${stateRoot2}/shared`;
   const mounts = [];
   if (selected.access === "folders") selected.folders.forEach((folder, index) => {
-    const source = isAbsolute(folder.path) ? folder.path : resolve(folder.path);
-    if (!existsSync(source)) throw new Error(`Shared folder does not exist on this computer: ${folder.path}`);
+    const source = isAbsolute(folder.path) ? folder.path : resolve2(folder.path);
+    if (!existsSync2(source)) throw new Error(`Shared folder does not exist on this computer: ${folder.path}`);
     mounts.push("-v", `${source}:/workspace/mounts/folder-${index + 1}${folder.mode === "read" ? ":ro" : ""}`);
   });
   const run2 = spawnSync2("docker", [
@@ -334,7 +475,7 @@ function ensureContainer(agentId, stateRoot2, computer) {
 // runtime/profile-runtime.ts
 import { spawn as spawn3, spawnSync as spawnSync3 } from "node:child_process";
 import { copyFileSync, mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, renameSync, chmodSync } from "node:fs";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 
 // lib/agent-profile.ts
 var MCP_PREFIX = "mcp__";
@@ -374,7 +515,7 @@ function groupTool(tool) {
   return { ...tool, group };
 }
 function runtimeProbe(container, input) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = spawn3("docker", ["exec", "-i", container, "python", "/opt/open-harness/inspect_runtime.py"], { stdio: ["pipe", "pipe", "pipe"] });
     let output2 = "";
     const timer = setTimeout(() => {
@@ -395,7 +536,7 @@ function runtimeProbe(container, input) {
       try {
         const value = JSON.parse(output2.trim());
         if (code || value.error) reject(new Error(value.error || "Runtime check failed."));
-        else resolve4(value);
+        else resolve5(value);
       } catch {
         reject(new Error("Runtime check returned an invalid response. Rebuild the Hermes image."));
       }
@@ -406,7 +547,7 @@ function runtimeProbe(container, input) {
 function nativeRuntimeProbe(profileHome, input) {
   const executable = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean).find((name) => spawnSync3(name, ["-c", "import hermes_cli, open_harness_policy"], { stdio: "ignore", timeout: 8e3 }).status === 0);
   if (!executable) throw new Error("Direct access needs the Hermes host runtime. Finish the direct-access setup on this computer.");
-  const result = spawnSync3(executable, [join2(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(input) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: profileHome }, maxBuffer: 5e6, timeout: 25e3 });
+  const result = spawnSync3(executable, [join3(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(input) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: profileHome }, maxBuffer: 5e6, timeout: 25e3 });
   if (result.status || !result.stdout) throw new Error(result.stderr || "Direct computer access check failed.");
   const value = JSON.parse(result.stdout);
   if (value.error) throw new Error(String(value.error));
@@ -418,11 +559,11 @@ function atomic(path, data) {
   chmodSync(path, 384);
 }
 function prepareProfile(root, profile, effective, secrets, token, runId, options = {}) {
-  const dir = join2(root, "agents", profile.id), home = join2(dir, "profile"), managed = join2(dir, "managed");
-  for (const path of [home, managed, join2(dir, "private")]) mkdirSync2(path, { recursive: true });
+  const dir = join3(root, "agents", profile.id), home = join3(dir, "profile"), managed = join3(dir, "managed");
+  for (const path of [home, managed, join3(dir, "private")]) mkdirSync2(path, { recursive: true });
   const mcp = {};
-  const coordination = join2(managed, "coordination.mjs");
-  copyFileSync(join2(import.meta.dirname, "hermes", "coordination.mjs"), coordination);
+  const coordination = join3(managed, "coordination.mjs");
+  copyFileSync(join3(import.meta.dirname, "hermes", "coordination.mjs"), coordination);
   chmodSync(coordination, 384);
   if (profile.allowedTools.some((id) => COORDINATION_TOOLS.some((t) => t.id === id))) mcp.open_harness = { command: "node", args: [options.coordinationCommand || "/run/open-harness/coordination.mjs"], env: { OPEN_HARNESS_AGENT_ID: profile.id, OPEN_HARNESS_AGENT_TOKEN: token, OPEN_HARNESS_RUN_ID: runId, ...options.controlUrl ? { OPEN_HARNESS_CONTROL_URL: options.controlUrl } : {}, ...options.controlSocket ? { OPEN_HARNESS_CONTROL_SOCKET: options.controlSocket } : {} } };
   const env = {};
@@ -444,10 +585,10 @@ function prepareProfile(root, profile, effective, secrets, token, runId, options
     mcp[c.name] = { command: c.command, args: c.args, env: c.secretRef ? { [c.secretRef]: "${" + c.secretRef + "}" } : {} };
   }
   const config = { model: { default: effective.model, provider: hermesProvider, ...effective.baseUrl ? { base_url: effective.baseUrl } : {} }, terminal: { backend: "local", cwd: options.cwd || "/workspace/shared", home_mode: "profile" }, approvals: { mode: "smart", unattended_mode: "deny", cron_mode: "deny" }, computer_use: { permission_mode: "standard", no_overlay: profile.computer.desktop === "virtual" }, cron: { enabled: false }, delegation: { inherit_mcp_toolsets: false }, tools: { tool_search: { enabled: "off" } }, plugins: { enabled: ["open_harness_policy"] }, ...providers ? { providers } : {}, mcp_servers: mcp };
-  atomic(join2(home, "config.yaml"), JSON.stringify(config, null, 2));
-  atomic(join2(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
-  atomic(join2(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
-  atomic(join2(managed, "policy.json"), JSON.stringify({ runId, revision: profile.revision, allowedTools: profile.allowedTools }));
+  atomic(join3(home, "config.yaml"), JSON.stringify(config, null, 2));
+  atomic(join3(home, "SOUL.md"), profile.prompt.enabled ? profile.prompt.text : "");
+  atomic(join3(home, ".env"), Object.entries(env).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n");
+  atomic(join3(managed, "policy.json"), JSON.stringify({ runId, revision: profile.revision, allowedTools: profile.allowedTools }));
 }
 async function discoverModels(gateway) {
   if (process.env.OPEN_HARNESS_MOCK === "1") return { models: [{ id: "mock-atlas", provider: "mock", label: "Mock Atlas" }, { id: "mock-scout", provider: "mock", label: "Mock Scout" }] };
@@ -479,21 +620,21 @@ function normalizeModels(result) {
 
 // runtime/transfer-files.ts
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync2, lstatSync, mkdirSync as mkdirSync3, readdirSync, readFileSync, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname, join as join3, normalize, relative, resolve as resolve2 } from "node:path";
+import { existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync3, readdirSync, readFileSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname, join as join4, normalize, relative, resolve as resolve3 } from "node:path";
 var allowedRoots = ["private", "profile/MEMORY.md", "profile/USER.md", "profile/skills"];
 function digest(data) {
   return createHash2("sha256").update(data).digest("hex");
 }
 function exportAgentFiles(stateRoot2, agentId) {
-  const agentRoot = resolve2(stateRoot2, "agents", agentId), files = [];
+  const agentRoot = resolve3(stateRoot2, "agents", agentId), files = [];
   let total = 0;
   const visit = (path) => {
-    if (!existsSync2(path)) return;
+    if (!existsSync3(path)) return;
     const stat = lstatSync(path);
     if (stat.isSymbolicLink()) return;
     if (stat.isDirectory()) {
-      for (const name of readdirSync(path)) visit(join3(path, name));
+      for (const name of readdirSync(path)) visit(join4(path, name));
       return;
     }
     if (!stat.isFile()) return;
@@ -502,17 +643,17 @@ function exportAgentFiles(stateRoot2, agentId) {
     if (total > 2e7) throw new Error("Managed agent data exceeds the 20 MB transfer limit. Move large project files through an explicitly shared folder.");
     files.push({ path: relative(agentRoot, path).replaceAll("\\", "/"), data: Buffer.from(data).toString("base64"), checksum: digest(data) });
   };
-  for (const path of allowedRoots) visit(join3(agentRoot, path));
+  for (const path of allowedRoots) visit(join4(agentRoot, path));
   files.sort((a, b) => a.path.localeCompare(b.path));
   return { files, checksum: digest(files.map((file) => `${file.path}:${file.checksum}`).join("\n")) };
 }
 function importAgentFiles(stateRoot2, agentId, bundle) {
-  const agentRoot = resolve2(stateRoot2, "agents", agentId);
+  const agentRoot = resolve3(stateRoot2, "agents", agentId);
   let total = 0;
   for (const file of bundle.files) {
     const clean = normalize(file.path).replaceAll("\\", "/");
     if (clean.startsWith("../") || !allowedRoots.some((root) => clean === root || clean.startsWith(root + "/"))) throw new Error("Transfer contains an invalid managed path.");
-    const target = resolve2(agentRoot, clean);
+    const target = resolve3(agentRoot, clean);
     if (!target.startsWith(agentRoot + "/") && target !== agentRoot) throw new Error("Transfer path escaped the agent workspace.");
     const data = Buffer.from(file.data, "base64");
     total += data.length;
@@ -526,7 +667,7 @@ function importAgentFiles(stateRoot2, agentId, bundle) {
 }
 
 // runtime/secrets.ts
-import { chmodSync as chmodSync2, existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname2 } from "node:path";
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
@@ -590,9 +731,9 @@ var SecretStore = class {
     this.backend = "restricted local file";
     mkdirSync4(dirname2(path), { recursive: true });
     this.markerPath = `${path.replace(/\.json$/, "")}.backend`;
-    const recorded = existsSync3(this.markerPath) ? readFileSync2(this.markerPath, "utf8").trim() : "";
+    const recorded = existsSync4(this.markerPath) ? readFileSync2(this.markerPath, "utf8").trim() : "";
     const vaulted = loadVault(path);
-    const onDisk = existsSync3(path);
+    const onDisk = existsSync4(path);
     if (vaulted.state === "ok") {
       this.values = this.parse(vaulted.value, vaulted.backend);
       this.backend = vaulted.backend;
@@ -611,7 +752,7 @@ Nothing was changed. Delete ${this.markerPath} to start over with an empty crede
       this.values.controlToken = crypto.randomUUID() + crypto.randomUUID();
       this.save();
     } else this.record();
-    if (existsSync3(path)) chmodSync2(path, 384);
+    if (existsSync4(path)) chmodSync2(path, 384);
   }
   get token() {
     return this.values.controlToken;
@@ -666,7 +807,7 @@ Nothing was changed. Delete ${this.markerPath} to start over with an empty crede
       if (confirmed.state === "ok" && confirmed.value.trim() === serialized) {
         this.backend = backend;
         this.record();
-        if (existsSync3(this.path)) unlinkSync(this.path);
+        if (existsSync4(this.path)) unlinkSync(this.path);
         return;
       }
     }
@@ -722,25 +863,25 @@ function validateComputerTarget(profile, capabilities2, requiredSecrets = [], ha
 // runtime/runner.ts
 var args = /* @__PURE__ */ new Map();
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i].startsWith("--")) args.set(process.argv[i].slice(2), process.argv[i + 1]?.startsWith("--") ? "" : process.argv[++i] || "");
-var stateRoot = resolve3(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join4(homedir(), ".open-harness-runner"));
-var credentialPath = join4(stateRoot, "connection.json");
-var spool = join4(stateRoot, "spool");
+var stateRoot = resolve4(process.env.OPEN_HARNESS_RUNNER_STATE_DIR || join5(homedir(), ".open-harness-runner"));
+var credentialPath = join5(stateRoot, "connection.json");
+var spool = join5(stateRoot, "spool");
 mkdirSync5(spool, { recursive: true });
 var runnerSecrets;
 try {
-  runnerSecrets = new SecretStore(join4(stateRoot, "secrets.json"));
+  runnerSecrets = new SecretStore(join5(stateRoot, "secrets.json"));
 } catch (error) {
   console.error(error instanceof Error ? error.message : "The runner could not open its credential store.");
   process.exit(1);
 }
 var pythons = [process.env.HERMES_PYTHON, process.platform === "win32" ? "python" : "python3", "python"].filter(Boolean);
 function exitCode(command3, args2, timeout) {
-  return new Promise((resolve4) => {
+  return new Promise((resolve5) => {
     let done = false;
     const settle = (code) => {
       if (!done) {
         done = true;
-        resolve4(code);
+        resolve5(code);
       }
     };
     const child = spawn4(command3, args2, { stdio: "ignore", timeout, killSignal: "SIGKILL" });
@@ -749,12 +890,12 @@ function exitCode(command3, args2, timeout) {
   });
 }
 function output(command3, args2, timeout) {
-  return new Promise((resolve4) => {
+  return new Promise((resolve5) => {
     let done = false, stdout = "";
     const settle = (status) => {
       if (!done) {
         done = true;
-        resolve4({ status, stdout });
+        resolve5({ status, stdout });
       }
     };
     const child = spawn4(command3, args2, { stdio: ["ignore", "pipe", "ignore"], timeout, killSignal: "SIGKILL" });
@@ -793,7 +934,7 @@ async function pair() {
   chmodSync3(credentialPath, 384);
   return saved;
 }
-var credentials = args.has("pairing-code") ? await pair() : existsSync4(credentialPath) ? JSON.parse(readFileSync3(credentialPath, "utf8")) : await pair();
+var credentials = args.has("pairing-code") ? await pair() : existsSync5(credentialPath) ? JSON.parse(readFileSync3(credentialPath, "utf8")) : await pair();
 if (!credentials.encryptionPrivateKey || !credentials.encryptionPublicKey) {
   const encryption = await generateRunnerKeyPair();
   credentials = { ...credentials, encryptionPublicKey: encryption.publicKey, encryptionPrivateKey: encryption.privateKey };
@@ -817,22 +958,22 @@ async function request(path, init = {}, retry = false) {
       return value;
     } catch (error) {
       if (!retry) throw error;
-      await new Promise((resolve4) => setTimeout(resolve4, 2e3));
+      await new Promise((resolve5) => setTimeout(resolve5, 2e3));
     }
   }
 }
 var active = /* @__PURE__ */ new Map();
 var admittedCommands = /* @__PURE__ */ new Set();
 async function deliver(record) {
-  const file = join4(spool, `${record.id}.json`);
-  if (!existsSync4(file)) writeFileSync5(file, JSON.stringify(record), { mode: 384 });
+  const file = join5(spool, `${record.id}.json`);
+  if (!existsSync5(file)) writeFileSync5(file, JSON.stringify(record), { mode: 384 });
   await request(record.path, { method: "POST", body: JSON.stringify(record.body) }, true);
-  if (existsSync4(file)) unlinkSync2(file);
+  if (existsSync5(file)) unlinkSync2(file);
 }
 async function flushSpool() {
   for (const name of readdirSync2(spool).filter((name2) => name2.endsWith(".json"))) {
     try {
-      await deliver(JSON.parse(readFileSync3(join4(spool, name), "utf8")));
+      await deliver(JSON.parse(readFileSync3(join5(spool, name), "utf8")));
     } catch {
     }
   }
@@ -853,7 +994,7 @@ async function run(command3) {
   const payload = command3.payload;
   const profile = payload.snapshot, direct = profile.computer.access === "direct";
   try {
-    const agentRoot = join4(stateRoot, "agents", profile.id), shared = join4(stateRoot, "shared");
+    const agentRoot = join5(stateRoot, "agents", profile.id), shared = join5(stateRoot, "shared");
     mkdirSync5(shared, { recursive: true });
     const needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean);
     const availableSecrets = { ...runnerSecrets.environment(), ...process.env };
@@ -861,8 +1002,8 @@ async function run(command3) {
     const dispatched = await openDispatchedSecrets(payload.encryptedSecrets);
     const ephemeralSecrets = { environment: () => ({ ...localSecrets, ...dispatched }) };
     const coordinatorForContainer = credentials.coordinator.replace("://localhost", "://host.docker.internal").replace("://127.0.0.1", "://host.docker.internal");
-    prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : { controlUrl: coordinatorForContainer });
-    const gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join4(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile"), HERMES_TUI: "1", HERMES_GATEWAY_SESSION: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join4(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
+    prepareProfile(stateRoot, profile, profile.effectiveModel, ephemeralSecrets, payload.coordinationToken, payload.runId, direct ? { cwd: shared, coordinationCommand: join5(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : { controlUrl: coordinatorForContainer });
+    const gateway = direct ? new HermesGateway(`native-${profile.id}`, profile.allowedTools, { cwd: shared, entry: join5(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join5(agentRoot, "profile"), HERMES_TUI: "1", HERMES_GATEWAY_SESSION: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join5(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), profile.allowedTools);
     gateway.on("event", (event) => void emit(command3, event));
     await gateway.start();
     const session = await gateway.request("session.create", { cwd: direct ? shared : "/workspace/shared", profile: "default" });
@@ -897,17 +1038,17 @@ async function control(command3) {
       const imported = importAgentFiles(stateRoot, command3.agentId, bundle);
       if (profile?.computer.desktop !== "none" && profile) {
         const check = { action: "computer", desktop: profile.computer.desktop };
-        const result = profile.computer.desktop === "existing" ? nativeRuntimeProbe(join4(stateRoot, "agents", profile.id, "profile"), check) : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), check);
+        const result = profile.computer.desktop === "existing" ? nativeRuntimeProbe(join5(stateRoot, "agents", profile.id, "profile"), check) : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), check);
         if (!result.ok) throw new Error(String(result.message || "Desktop control is not ready on the destination computer."));
       }
       await finish(command3, { ...imported, validated: true });
       return;
     }
     if (command3.kind.startsWith("probe-")) {
-      const profile = command3.payload.profile, direct = profile.computer.access === "direct", shared = join4(stateRoot, "shared"), agentRoot = join4(stateRoot, "agents", profile.id);
+      const profile = command3.payload.profile, direct = profile.computer.access === "direct", shared = join5(stateRoot, "shared"), agentRoot = join5(stateRoot, "agents", profile.id);
       mkdirSync5(shared, { recursive: true });
       const availableSecrets = { ...runnerSecrets.environment(), ...process.env }, needed = [profile.effectiveModel.credentialRef, ...profile.connectors.filter((item) => item.enabled).map((item) => item.secretRef)].filter(Boolean), localSecrets = Object.fromEntries(needed.filter((name) => availableSecrets[name]).map((name) => [name, availableSecrets[name]])), dispatched = await openDispatchedSecrets(command3.payload.encryptedSecrets), secretSource = { environment: () => ({ ...localSecrets, ...dispatched }) };
-      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command3.payload.coordinationToken || "", `probe-${command3.id}`, direct ? { cwd: shared, coordinationCommand: join4(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : {});
+      prepareProfile(stateRoot, profile, profile.effectiveModel, secretSource, command3.payload.coordinationToken || "", `probe-${command3.id}`, direct ? { cwd: shared, coordinationCommand: join5(import.meta.dirname, "hermes", "coordination.mjs"), controlUrl: credentials.coordinator } : {});
       if (command3.kind === "probe-runtime") {
         const probeInput = { ...command3.payload.input || {} };
         if (probeInput.action === "computer") probeInput.desktop = profile.computer.desktop;
@@ -916,16 +1057,16 @@ async function control(command3) {
           for (const name of Object.keys(probeInput.env)) if (!probeInput.env[name] && localSecrets[name]) probeInput.env[name] = localSecrets[name];
         }
         if (direct) {
-          const result = spawnSync5(process.env.HERMES_PYTHON || "python3", [join4(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
+          const result = spawnSync5(process.env.HERMES_PYTHON || "python3", [join5(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: JSON.stringify(probeInput) + "\n", encoding: "utf8", env: { ...process.env, HERMES_HOME: join5(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
           if (result.status || !result.stdout) throw new Error(result.stderr || "Native runtime probe failed.");
           await finish(command3, JSON.parse(result.stdout));
         } else await finish(command3, await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), probeInput));
         return;
       }
-      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join4(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile"), HERMES_TUI: "1", HERMES_GATEWAY_SESSION: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join4(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
+      const gateway = direct ? new HermesGateway(`native-${profile.id}`, [], { cwd: shared, entry: join5(import.meta.dirname, "hermes", "managed_entry.py"), env: { ...process.env, HERMES_HOME: join5(agentRoot, "profile"), HERMES_TUI: "1", HERMES_GATEWAY_SESSION: "1", PYTHONUNBUFFERED: "1", OPEN_HARNESS_POLICY_PATH: join5(agentRoot, "managed", "policy.json") } }) : new HermesGateway(ensureContainer(profile.id, stateRoot, profile.computer), []);
       if (command3.kind === "probe-tools") {
         const input = direct ? (() => {
-          const result = spawnSync5(process.env.HERMES_PYTHON || "python3", [join4(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join4(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
+          const result = spawnSync5(process.env.HERMES_PYTHON || "python3", [join5(import.meta.dirname, "hermes", "inspect_runtime.py")], { input: '{"action":"catalog"}\n', encoding: "utf8", env: { ...process.env, HERMES_HOME: join5(agentRoot, "profile") }, maxBuffer: 5e6, timeout: 25e3 });
           if (result.status || !result.stdout) throw new Error(result.stderr || "Tool discovery failed.");
           return JSON.parse(result.stdout);
         })() : await runtimeProbe(ensureContainer(profile.id, stateRoot, profile.computer), { action: "catalog" });
@@ -976,5 +1117,5 @@ for (; ; ) {
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
   }
-  await new Promise((resolve4) => setTimeout(resolve4, 1e3));
+  await new Promise((resolve5) => setTimeout(resolve5, 1e3));
 }

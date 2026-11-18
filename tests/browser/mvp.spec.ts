@@ -26,13 +26,13 @@ test.afterEach(async ({ request }) => {
   await request.post(control + '/v1/runs/stop-all', { headers: { Authorization: `Bearer ${token}` } });
 });
 
-test('offers a focused workspace when advanced features are turned off, and restores them', async ({ page }, testInfo) => {
+test('offers a focused workspace when advanced features are turned off, and restores them', async ({ page }) => {
   // Teams, boards and remote computers ship on, so turning them off is what produces the
   // focused workspace. Routines stay reachable either way: the coordinator runs them whether
   // or not the view is shown, and hiding the only place to pause one would strand them.
-  const mobile = testInfo.project.name === 'mobile';
-  const openNav = async () => { if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click(); };
-  const closeNav = async () => { if (mobile) await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click'); };
+  // Navigation is collapsed on desktop and mobile; open the drawer for workspace items.
+  const openNav = async () => { await page.getByRole('button', { name: 'Open navigation' }).click(); };
+  const closeNav = async () => { await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click'); };
 
   await openNav();
   await expect(page.getByRole('button', { name: /Teams/ }).first()).toBeVisible();
@@ -59,13 +59,11 @@ test('offers a focused workspace when advanced features are turned off, and rest
   await expect(page.getByRole('button', { name: 'Tasks', exact: true })).toBeVisible();
 });
 
-test('a hidden Computer tab never opens a panel with no way back', async ({ page }, testInfo) => {
-  const mobile = testInfo.project.name === 'mobile';
-  if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+test('a hidden Computer tab never opens a panel with no way back', async ({ page }) => {
+  // Header Settings is reachable without opening the drawer.
   await page.getByRole('button', { name: /Settings/ }).first().click();
   await page.getByLabel('Advanced features').uncheck();
   await page.getByRole('button', { name: 'Close settings' }).click();
-  if (mobile) await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click');
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
   await expect(page.getByRole('tab', { name: 'Computer' })).toHaveCount(0);
   // Whatever panel opens has to belong to a tab the tablist actually offers.
@@ -74,14 +72,13 @@ test('a hidden Computer tab never opens a panel with no way back', async ({ page
   await expect(selected).toHaveAccessibleName('Profile');
 });
 
-test('does not mark setup complete after a failed model check and supports retry', async ({ page }, testInfo) => {
+test('does not mark setup complete after a failed model check and supports retry', async ({ page }) => {
   let attempts = 0;
   await page.route('**/v1/onboarding/model-test', async route => {
     attempts += 1;
     if (attempts === 1) await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: false, message: 'The API key was rejected.' }) });
     else await route.continue();
   });
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Settings/ }).first().click();
   await page.getByRole('button', { name: 'Run setup again' }).click();
   await page.getByRole('button', { name: /Use this computer/ }).click();
@@ -129,18 +126,19 @@ test('submits work and restores a pending approval after reconnect', async ({ pa
 });
 
 test('downloads the exact contents of a workspace file', async ({ page }, testInfo) => {
+  const name = `launch-smoke-${testInfo.project.name}.md`;
   const contents = '# Launch smoke\n\nExact browser download contents.\n';
   await page.locator('input[type="file"][multiple]').setInputFiles({
-    name: 'launch-smoke.md',
+    name,
     mimeType: 'text/markdown',
     buffer: Buffer.from(contents),
   });
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Files/ }).first().click();
   const downloadPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Download launch-smoke.md' }).click();
+  await page.getByRole('button', { name: `Download ${name}` }).click();
   const saved = await downloadPromise;
-  expect(saved.suggestedFilename()).toBe('launch-smoke.md');
+  expect(saved.suggestedFilename()).toBe(name);
   expect(readFileSync(await saved.path(), 'utf8')).toBe(contents);
 });
 
@@ -156,7 +154,7 @@ test('a coordinator that cannot be reached is stated plainly and recovered from'
 
   const banner = page.getByRole('alert').filter({ hasText: 'cannot reach its control service' });
   await expect(banner).toBeVisible();
-  const dot = page.locator('.status-dot.offline');
+  const dot = page.locator('.sidebar-rail .status-dot.offline');
   await expect(dot).toHaveCount(1);
   if (testInfo.project.name === 'desktop') await expect(dot).toBeVisible();
   // It has to still be there well after the old toast would have cleared.

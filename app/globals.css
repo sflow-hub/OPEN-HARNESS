@@ -1,11 +1,11 @@
 @import "tailwindcss";
 :root {
   color-scheme: dark;
-  --bg: #111214;
-  --panel: #191a1d;
-  --line: #2b2d31;
-  --muted: #96999f;
-  --accent: #d3f4b2;
+  --bg: #0a0a0a;
+  --panel: #121212;
+  --line: #232323;
+  --muted: #8a8a8a;
+  --accent: #ececec;
 }
 * {
   box-sizing: border-box;
@@ -875,8 +875,26 @@ h1 span {
   overflow-y: auto;
   flex: 1;
   padding: 20px 36px;
-  scroll-behavior: smooth;
 }
+.transcript-jump { position: relative; z-index: 1; flex: 0 0 0; }
+.transcript-jump button {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 4px 14px;
+  border: 1px solid #484848;
+  border-radius: 999px;
+  background: #242424;
+  color: var(--ink);
+  font-size: 13px;
+  white-space: nowrap;
+}
+@media (pointer: coarse) { .transcript-jump button { min-height: 44px; } }
 .chat-welcome {
   max-width: 530px;
   margin: 65px auto 45px;
@@ -1464,7 +1482,7 @@ h1 span {
   inset: 0;
   background: #080a0cbe;
   backdrop-filter: blur(5px);
-  z-index: 40;
+  z-index: 90;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2167,4 +2185,200 @@ h1 span {
 @media (max-width: 720px) {
   .teams-content { padding: 34px 18px 70px; }.teams-heading { align-items: flex-start; flex-direction: column; }.teams-heading .light-button { width: 100%; justify-content: center; }
   .team-member-list { grid-template-columns: 1fr; }.team-members-head { align-items: stretch; flex-direction: column; }.team-members-head .search-box { width: 100%; }
+}
+
+/* Minimal shell: an icon rail, with the full sidebar as a click-open overlay at every width.
+   Rules are prefixed with .app-shell so they outrank the older unscoped layout above. */
+.app-shell {
+  --rail: 56px;
+  --bar: 56px;
+  --ink: #ededed;
+  --soft: #161616;
+  --hover: #1b1b1b;
+  background: var(--bg);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+.app-shell input:focus, .app-shell textarea:focus, .app-shell select:focus { border-color: #4a4a4a; }
+.app-shell .light-button { background: var(--ink); color: #0a0a0a; }
+.app-shell .subtle-button { border-color: #2c2c2c; color: #cfcfcf; }
+.app-shell .eyebrow { color: #7a7a7a; }
+.app-shell .nav-item.active { color: var(--ink); background: var(--hover); }
+.app-shell .send-button { background: var(--ink); color: #0a0a0a; border-radius: 50%; }
+.app-shell .send-button.stop { background: #bdbdbd; }
+
+.app-shell .sidebar-rail {
+  position: fixed; inset: 0 auto 0 0; z-index: 40; width: var(--rail);
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 10px 0 max(12px, env(safe-area-inset-bottom));
+  background: var(--bg); border-right: 1px solid #161616;
+}
+.rail-brand {
+  display: grid; place-items: center; width: 40px; height: 40px; margin-bottom: 12px; padding: 0 2px 2px 0; border-radius: 10px;
+  font-family: Georgia, "Times New Roman", serif; font-style: italic; font-weight: 400; font-size: 25px; line-height: 1; color: #cfcfcf;
+}
+.rail-brand:hover { background: var(--hover); color: #fff; filter: none; }
+.rail-action, .header-settings {
+  display: grid; place-items: center; flex-shrink: 0; width: 40px; height: 40px; padding: 0;
+  border-radius: 10px; color: #8d8d8d; transition: background .15s, color .15s;
+}
+.rail-action:hover:not(:disabled), .header-settings:hover { background: var(--hover); color: var(--ink); filter: none; }
+.rail-action[aria-expanded="true"] { background: var(--soft); color: var(--ink); }
+.rail-bottom { margin-top: auto; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.rail-bottom .status-dot { width: 6px; height: 6px; margin: 0 0 8px; }
+
+/* Expanded navigation: the existing sidebar, opened on click, over the rail and content. */
+.app-shell .sidebar { display: none; }
+.sidebar-close { position: absolute; top: 18px; right: 12px; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; color: #8d8d8d; }
+.sidebar-close:hover { background: var(--hover); color: var(--ink); }
+.app-shell .sidebar.open {
+  display: flex; z-index: 60; width: min(284px, 86vw); padding: 18px 14px max(18px, env(safe-area-inset-bottom));
+  background: #0f0f0f; border-right: 1px solid #1f1f1f; box-shadow: 24px 0 60px #000a;
+  animation: oh-slide-in .16s ease-out;
+}
+.app-shell .mobile-overlay { display: block; position: fixed; inset: 0; z-index: 55; padding: 0; background: #0009; }
+.app-shell .mobile-overlay:hover { filter: none; }
+.app-shell .brand { margin: 4px 30px 22px 6px; font-size: 15px; }
+.app-shell .brand-mark { background: var(--ink); color: #0a0a0a; }
+.app-shell .new-button { background: var(--soft); border-color: #262626; border-radius: 10px; padding: 10px 12px; }
+.app-shell .nav-item { padding: 9px 10px; border-radius: 9px; color: #a8a8a8; }
+.app-shell .nav-item:hover, .app-shell .agent-row:hover, .app-shell .recent:hover { background: var(--hover); filter: none; }
+.app-shell .nav-label { margin: 22px 10px 8px; color: #5f5f5f; }
+.app-shell .agent-row.selected, .app-shell .recent.selected { background: var(--soft); color: var(--ink); }
+@keyframes oh-slide-in { from { transform: translateX(-12px); opacity: 0; } }
+
+.app-shell .main { margin-left: var(--rail); }
+.app-shell .main > header { height: var(--bar); gap: 8px; padding: 0 12px 0 20px; border-bottom: 0; }
+.header-title { display: block; min-width: 0; overflow: hidden; color: #7a7a7a; font-size: 13px; white-space: nowrap; text-overflow: ellipsis; }
+.header-settings { margin-left: auto; }
+
+/* Credentials now appear only inside the workspace dialog and settings; keep them monochrome. */
+.app-shell .credential-chip { border-color: #2a2a2a; background: var(--soft); color: #cfcfcf; }
+.app-shell .credential-chip:hover { border-color: #3a3a3a; color: #fff; }
+.app-shell .credential-menu { border-color: #262626; background: #121212; }
+.app-shell .credential-menu button { color: #d6d6d6; }
+.app-shell .credential-menu button:hover { background: var(--hover); }
+.app-shell .credential-menu button small, .app-shell .credential-menu p { color: #8a8a8a; }
+.app-shell .credential-menu hr { border-top-color: #232323; }
+
+/* Home: title and composer sit centred in open space; agents follow as small rows. */
+.app-shell .minimal-home { max-width: calc(760px + 48px); padding: clamp(56px, 22vh, 240px) 24px 72px; }
+.home-heading { text-align: center; }
+.home-heading h1 { margin: 0 0 28px; font-size: clamp(30px, 3.4vw, 34px); font-weight: 400; letter-spacing: -0.8px; line-height: 1.2; color: var(--ink); }
+.composer-agent-picker {
+  appearance: none; flex-shrink: 1; min-width: 0; max-width: 45%; height: 30px; padding: 0 24px 0 10px;
+  overflow: hidden; border: 0; border-radius: 999px; color: #9a9a9a; font-size: 12px; white-space: nowrap; text-overflow: ellipsis; cursor: pointer;
+  background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%238d8d8d' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 9px center;
+}
+.composer-agent-picker:hover:not(:disabled) { background-color: var(--hover); color: var(--ink); }
+.composer-agent-picker:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer-agent-picker:disabled { opacity: .45; cursor: not-allowed; }
+.composer-agent-picker option { background: #121212; color: var(--ink); }
+.app-shell .minimal-home .section-heading { margin: 56px 4px 6px; }
+.minimal-home .section-heading h2 { font-size: 12px; font-weight: 500; color: #6f6f6f; letter-spacing: .2px; }
+.app-shell .home-create-agent { gap: 6px; padding: 6px 10px; border-radius: 999px; color: #8d8d8d; font-size: 12px; }
+.app-shell .home-create-agent:hover:not(:disabled) { background: var(--hover); color: var(--ink); filter: none; }
+.home-team-filter { margin: 0 4px 6px; }
+.home-team-filter summary { width: fit-content; padding: 4px 0; color: #6f6f6f; font-size: 11px; cursor: pointer; list-style: none; }
+.home-team-filter summary::-webkit-details-marker { display: none; }
+.home-team-filter summary:hover { color: var(--ink); }
+.home-team-filter .agent-team-filters { margin: 6px 0 4px; }
+.app-shell .agent-team-filters button { border-color: #262626; color: #8d8d8d; }
+.app-shell .agent-team-filters button.active { border-color: #4a4a4a; background: var(--soft); color: var(--ink); }
+.home-agent-list { display: flex; flex-direction: column; gap: 2px; }
+.home-agent-row { display: flex; align-items: center; gap: 4px; min-width: 0; padding-right: 6px; border-radius: 12px; transition: background .15s; }
+.home-agent-row:hover, .home-agent-row:focus-within { background: #131313; }
+.home-agent-start {
+  display: flex; flex: 1; align-items: center; gap: 12px; min-width: 0; padding: 9px 10px;
+  border: 0; border-radius: 12px; background: transparent; color: inherit; text-align: left;
+}
+.home-agent-start:hover { filter: none; }
+.home-agent-start:focus-visible { outline-offset: -2px; }
+.home-agent-start > div:not(.avatar) { flex: 1; min-width: 0; }
+.home-agent-start .avatar { width: 32px; height: 32px; border-radius: 9px; font-size: 17px; }
+.home-agent-start h3 { margin: 0; overflow: hidden; font-size: 14px; font-weight: 500; letter-spacing: -0.1px; color: var(--ink); white-space: nowrap; text-overflow: ellipsis; }
+.home-agent-description { display: block; margin-top: 2px; overflow: hidden; color: #767676; font-size: 12px; line-height: 1.4; white-space: nowrap; text-overflow: ellipsis; }
+.home-agent-start .spin { flex-shrink: 0; color: #8d8d8d; }
+.app-shell .home-agent-start .agent-team-badges { flex-shrink: 0; flex-wrap: nowrap; min-height: 0; margin: 0; }
+.app-shell .home-agent-start .agent-team-badges:empty { display: none; }
+.home-agent-settings { display: grid; flex-shrink: 0; place-items: center; width: 32px; height: 32px; padding: 0; border-radius: 9px; color: #8d8d8d; opacity: .5; transition: opacity .15s, background .15s; }
+.home-agent-row:hover .home-agent-settings, .home-agent-row:focus-within .home-agent-settings { opacity: 1; }
+.home-agent-settings:hover { background: var(--hover); color: var(--ink); filter: none; }
+@media (hover: none) { .home-agent-settings { opacity: 1; } }
+
+/* Chat: centred welcome and composer, discreet prompts, inspector as a right overlay. */
+.app-shell .chat-layout { height: calc(100dvh - var(--bar)); grid-template-columns: minmax(0, 1fr); }
+.app-shell .chat-toolbar { gap: 10px; padding: 8px 24px; border-bottom: 0; }
+.app-shell .chat-toolbar .avatar { width: 28px; height: 28px; border-radius: 8px; font-size: 15px; }
+.app-shell .toolbar-actions { gap: 2px; color: #8d8d8d; }
+.app-shell .toolbar-actions button { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border-radius: 10px; }
+.app-shell .toolbar-actions button:hover { background: var(--hover); color: var(--ink); filter: none; }
+.app-shell .transcript { padding: 16px 24px; }
+/* Auto margins after the toolbar and after the composer centre the welcome + composer pair. */
+.chat-layout.empty-chat .chat-toolbar { margin-bottom: auto; }
+.app-shell .chat-layout.empty-chat .transcript { flex: 0 1 auto; min-height: 0; padding-top: 0; padding-bottom: 0; }
+.app-shell .chat-layout.empty-chat .composer-wrap { margin: 0 auto auto; padding-bottom: 12vh; }
+.app-shell .chat-welcome { max-width: 560px; margin: 0 auto 24px; }
+.app-shell .chat-welcome > .avatar { width: 40px; height: 40px; margin-bottom: 18px; border-radius: 11px; font-size: 22px; }
+.app-shell .chat-welcome .eyebrow { display: none; }
+.app-shell .chat-welcome h2 { margin: 0 0 8px; font-size: clamp(24px, 3vw, 30px); letter-spacing: -0.7px; color: var(--ink); }
+.app-shell .chat-welcome > p { max-width: 440px; color: #7a7a7a; font-size: 13px; line-height: 1.6; }
+.app-shell .prompt-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 26px 0 0; }
+.app-shell .prompt-grid button { gap: 0; padding: 7px 13px; border: 1px solid #222; border-radius: 999px; background: transparent; color: #9a9a9a; font-size: 12px; line-height: 1.4; }
+.app-shell .prompt-grid button:hover { border-color: #3a3a3a; color: var(--ink); filter: none; }
+.app-shell .prompt-grid svg { display: none; }
+.app-shell .message { max-width: 760px; }
+.app-shell .composer-wrap { max-width: calc(760px + 48px); padding: 8px 24px 16px; }
+/* The same form renders on home and in chat. */
+.app-shell .composer { width: 100%; max-width: 760px; margin: 0 auto; padding: 14px 14px 10px 18px; border: 1px solid #262626; border-radius: 24px; background: #121212; box-shadow: 0 8px 30px #0006; transition: border-color .15s; }
+.app-shell .composer:focus-within { border-color: #3a3a3a; }
+.upload-status { margin: 6px 4px 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.app-shell .composer textarea { min-height: 48px; max-height: 40dvh; font-size: 15px; line-height: 1.55; field-sizing: content; overflow-y: auto; }
+.app-shell .composer-bottom { gap: 8px; margin-top: 6px; color: #8d8d8d; }
+.app-shell .composer-bottom > button:not(.send-button):not(.model-choice):not(.run-mode) { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; }
+.app-shell .composer-bottom > button:hover:not(:disabled) { background: var(--hover); filter: none; }
+.app-shell .send-button { width: 34px; height: 34px; }
+.app-shell .send-button:hover:not(:disabled) { background: #fff; }
+.app-shell .model-choice { height: 30px; padding: 0 10px; border-radius: 999px; font-size: 12px; color: #9a9a9a; }
+.app-shell .run-mode { padding: 6px 10px; border-color: #2a2a2a; border-radius: 999px; color: #8d8d8d; font-size: 11px; }
+.app-shell .run-mode.active { border-color: #4a4a4a; background: var(--soft); color: var(--ink); }
+.app-shell .composer-note { margin-top: 10px; color: #555; font-size: 11px; }
+.app-shell .approval-banner { margin: 10px 0 0; border-radius: 16px; }
+
+.app-shell .inspector {
+  position: fixed; inset: 0 0 0 auto; z-index: 50; width: min(340px, 100vw); padding: 18px 20px max(20px, env(safe-area-inset-bottom));
+  overflow-y: auto; overscroll-behavior: contain; border-left: 1px solid #1f1f1f; background: #0f0f0f;
+  box-shadow: -24px 0 60px #000a; animation: oh-slide-in-right .16s ease-out;
+}
+.app-shell .inspector-heading { margin-bottom: 22px; font-size: 13px; color: var(--ink); }
+.app-shell .inspector-heading button { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; color: #8d8d8d; }
+.app-shell .inspector-heading button:hover { background: var(--hover); color: var(--ink); filter: none; }
+.app-shell .inspector-label { margin: 24px 0 10px; color: #6a6a6a; }
+.app-shell .inspector .credential-chip { max-width: 100%; }
+.app-shell .inspector .credential-switch { display: flex; width: 100%; }
+.app-shell .inspector .credential-menu { left: 0; right: 0; min-width: 0; width: 100%; }
+.inspector-overlay { position: fixed; inset: 0; z-index: 45; padding: 0; background: #0007; }
+.inspector-overlay:hover { filter: none; }
+@keyframes oh-slide-in-right { from { transform: translateX(12px); opacity: 0; } }
+
+@media (max-width: 760px) {
+  /* The rail holds the only navigation toggle, so phones keep a narrower rail, not none. */
+  .app-shell { --rail: 48px; --bar: 52px; }
+  .app-shell .sidebar-rail { padding-top: 6px; }
+  .rail-brand { margin-bottom: 6px; }
+  .app-shell .main > header { padding: 0 6px 0 14px; }
+  .app-shell .chat-toolbar { padding: 6px 12px; }
+  .app-shell .transcript { padding: 12px 14px; }
+  .app-shell .composer-wrap { padding: 6px 10px max(12px, env(safe-area-inset-bottom)); }
+  .app-shell .chat-layout.empty-chat .composer-wrap { padding-bottom: max(6vh, env(safe-area-inset-bottom)); }
+  .app-shell .composer { padding: 12px 10px 8px 14px; border-radius: 20px; }
+  /* 16px stops iOS zooming into the field on focus. */
+  .app-shell .composer textarea { font-size: 16px; }
+  .app-shell .composer-bottom { flex-wrap: wrap; row-gap: 6px; }
+  .composer-agent-picker { max-width: 55%; }
+  .app-shell .inspector { width: 100vw; border-left: 0; }
+  .app-shell .minimal-home { padding: clamp(40px, 14vh, 120px) 12px 48px; }
+  .home-heading h1 { margin-bottom: 22px; font-size: 28px; }
+  .app-shell .minimal-home .section-heading { margin-top: 40px; }
+  .home-agent-start { gap: 10px; padding: 8px; }
+  .app-shell .home-agent-start .agent-team-badges { display: none; }
 }

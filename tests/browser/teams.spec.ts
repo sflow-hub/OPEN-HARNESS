@@ -16,7 +16,7 @@ test.beforeEach(async ({ request, page }) => {
 
 test('creates a visual team with multiple members and filters agents', async ({ page }, testInfo) => {
   const teamName = `Launch crew ${testInfo.project.name}`;
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Teams/ }).first().click();
   await page.getByRole('button', { name: 'Create team' }).click();
   const dialog = page.getByRole('dialog', { name: 'Create team' });
@@ -31,8 +31,9 @@ test('creates a visual team with multiple members and filters agents', async ({ 
   await expect(teamCard).toBeVisible();
   await expect(teamCard.getByText('2 members')).toBeVisible();
 
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: /Agents/ }).first().click();
+  await page.locator('summary', { hasText: 'Filter by team' }).click();
   await page.getByRole('button', { name: teamName, exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Atlas' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Scout' })).toBeVisible();
@@ -45,6 +46,7 @@ test('scopes task assignment choices to the selected team', async ({ page, reque
   const teamName = `Task crew ${Date.now()}`;
   await request.post(control + '/v1/teams', { headers, data: { name: teamName, description: '', color: 'sage', icon: 'people', memberAgentIds: ['atlas', 'scout'] } });
   await page.reload();
+  await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: 'Tasks' }).click();
   await page.getByRole('button', { name: 'New task' }).click();
   const drawer = page.locator('.task-drawer');

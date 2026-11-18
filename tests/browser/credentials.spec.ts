@@ -19,22 +19,21 @@ async function seed(request: APIRequestContext) {
 }
 
 type Page = import('@playwright/test').Page;
-const openManager = async (page: Page, project: string) => {
-  if (project === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+const openManager = async (page: Page) => {
+  // Close the workspace drawer before opening global settings.
+  const closeWorkspace = page.getByRole('button', { name: 'Close workspace panel' });
+  if (await closeWorkspace.isVisible()) await closeWorkspace.click();
   await page.getByRole('button', { name: /Settings/ }).first().click();
   await page.getByRole('button', { name: 'Saved credentials' }).click();
   return page.getByRole('dialog', { name: 'Saved credentials' });
 };
-// On phones the drawer stays open behind the modal and would swallow later clicks.
-const closeSettings = async (page: Page, project: string) => {
+const closeSettings = async (page: Page) => {
   await page.getByRole('button', { name: 'Close settings' }).click();
-  if (project === 'mobile') await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click');
 };
-// The card and the conversation header render the same switcher. On phones the workspace
-// panel overlays the chat header (as it already does the toolbar buttons), so the card is
-// the reachable surface there.
-const openSwitcher = async (page: Page, project: string) => {
-  if (project !== 'mobile') await page.getByRole('button', { name: 'Meet Atlas' }).click();
+// Quick switcher lives in the click-open workspace inspector on every viewport.
+const openSwitcher = async (page: Page) => {
+  await page.getByRole('button', { name: 'Meet Atlas' }).click();
+  await page.getByRole('button', { name: 'Toggle workspace panel' }).click();
   await page.getByRole('button', { name: 'Credential for Atlas' }).click();
 };
 async function addCredential(page: Page, label: string, value: string) {
@@ -53,8 +52,8 @@ test.beforeEach(async ({ request, page }) => {
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
 });
 
-test('stores several credentials without ever exposing a value', async ({ page }, testInfo) => {
-  const dialog = await openManager(page, testInfo.project.name);
+test('stores several credentials without ever exposing a value', async ({ page }) => {
+  const dialog = await openManager(page);
   await expect(dialog.getByText('No saved credentials yet.')).toBeVisible();
   await addCredential(page, 'Work key', WORK_KEY);
   await addCredential(page, 'Personal key', PERSONAL_KEY);
@@ -65,19 +64,21 @@ test('stores several credentials without ever exposing a value', async ({ page }
   expect(rendered).not.toContain(PERSONAL_KEY);
 });
 
-test('switches an agent between credentials from the quick switcher', async ({ page }, testInfo) => {
-  await openManager(page, testInfo.project.name);
+test('switches an agent between credentials from the quick switcher', async ({ page }) => {
+  await openManager(page);
   await addCredential(page, 'Work key', WORK_KEY);
   await addCredential(page, 'Personal key', PERSONAL_KEY);
   await page.getByRole('button', { name: 'Close saved credentials' }).click();
-  await closeSettings(page, testInfo.project.name);
+  await closeSettings(page);
 
-  await openSwitcher(page, testInfo.project.name);
+  await openSwitcher(page);
   await page.getByRole('menuitem', { name: /Work key/ }).click();
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Work key');
 
   // The choice is a profile edit, so it must survive a reload.
   await page.reload();
+  await page.getByRole('button', { name: 'Meet Atlas' }).click();
+  await page.getByRole('button', { name: 'Toggle workspace panel' }).click();
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Work key');
 
   await page.getByRole('button', { name: 'Credential for Atlas' }).click();
@@ -85,17 +86,17 @@ test('switches an agent between credentials from the quick switcher', async ({ p
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Personal key');
 });
 
-test('names the agents using a credential before deleting it', async ({ page }, testInfo) => {
-  await openManager(page, testInfo.project.name);
+test('names the agents using a credential before deleting it', async ({ page }) => {
+  await openManager(page);
   await addCredential(page, 'Work key', WORK_KEY);
   await addCredential(page, 'Personal key', PERSONAL_KEY);
   await page.getByRole('button', { name: 'Close saved credentials' }).click();
-  await closeSettings(page, testInfo.project.name);
-  await openSwitcher(page, testInfo.project.name);
+  await closeSettings(page);
+  await openSwitcher(page);
   await page.getByRole('menuitem', { name: /Work key/ }).click();
   await expect(page.getByRole('button', { name: 'Credential for Atlas' })).toContainText('Work key');
 
-  const dialog = await openManager(page, testInfo.project.name);
+  const dialog = await openManager(page);
   await expect(dialog.getByText('Used by 1 agent')).toBeVisible();
   await dialog.getByRole('button', { name: 'Delete Work key' }).click();
   const confirm = page.getByRole('alertdialog', { name: 'Delete Work key' });
@@ -111,12 +112,12 @@ test('names the agents using a credential before deleting it', async ({ page }, 
   await expect(dialog.getByText('Spare key', { exact: true })).toHaveCount(0);
 });
 
-test('offers saved credentials in agent settings and workspace settings', async ({ page }, testInfo) => {
-  await openManager(page, testInfo.project.name);
+test('offers saved credentials in agent settings and workspace settings', async ({ page }) => {
+  await openManager(page);
   await addCredential(page, 'Work key', WORK_KEY);
   await page.getByRole('button', { name: 'Close saved credentials' }).click();
   await expect(page.getByRole('combobox', { name: /^Credential/ })).toContainText('Work key');
-  await closeSettings(page, testInfo.project.name);
+  await closeSettings(page);
 
   await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
   await page.getByRole('tab', { name: 'Model' }).click();

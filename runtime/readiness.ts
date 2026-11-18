@@ -1,9 +1,9 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { HERMES_IMAGE_TAG } from '../lib/hermes-pin';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import type { OnboardingStatus, ReadinessCheck } from '../lib/onboarding';
-import { stateSharing } from './hermes';
+import { join, resolve } from 'node:path';
+import { SETUP_ACTIONS, type OnboardingStatus, type ReadinessCheck, type SetupAction, type SetupJob } from '../lib/onboarding';
+import { resetSharingChecks, stateSharing, stateSharingAsync, type SharingProbe } from './hermes';
 
 export const HERMES_IMAGE = process.env.OPEN_HARNESS_HERMES_IMAGE || `open-harness-hermes:${HERMES_IMAGE_TAG}`;
 
@@ -32,13 +32,35 @@ const installUrls = {
   unknown: 'https://docs.docker.com/get-started/get-docker/',
 } as const;
 
+type Probe = { status: number | null; stdout: string; stderr: string };
+
 function command(name: string, args: string[], timeout = 7_000) {
   return spawnSync(name, args, { encoding: 'utf8', timeout });
 }
 
+// The coordinator serves runs and the dashboard from one event loop, so anything reached
+// from a request or a setup job uses this rather than spawnSync. A hung CLI is killed at
+// the deadline and reported as a failed probe instead of stalling every other request.
+function commandAsync(name: string, args: string[], timeout = 7_000) {
+  return new Promise<Probe>(resolve => {
+    let stdout = '', stderr = '', done = false;
+    const finish = (status: number | null) => { if (done) return; done = true; clearTimeout(timer); resolve({ status, stdout, stderr }); };
+    const child = spawn(name, args, { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', chunk => { stdout = (stdout + String(chunk)).slice(-16_000); });
+    child.stderr.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-8_000); });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); finish(null); }, timeout);
+    timer.unref();
+    child.once('error', () => finish(null));
+    child.once('close', code => finish(code));
+  });
+}
+
+const pythons = () => [...new Set([process.env.HERMES_PYTHON, platform === 'win32' ? 'python' : 'python3', 'python'].filter(Boolean) as string[])];
+const PYTHON_PROBE = ['-c', 'import hermes_cli, open_harness_policy'];
+
 function pythonReady() {
-  for (const executable of [process.env.HERMES_PYTHON, platform === 'win32' ? 'python' : 'python3', 'python'].filter(Boolean) as string[]) {
-    const result = command(executable, ['-c', 'import hermes_cli, open_harness_policy'], 8_000);
+  for (const executable of pythons()) {
+    const result = command(executable, PYTHON_PROBE, 8_000);
     if (result.status === 0) return true;
   }
   return false;
@@ -56,8 +78,58 @@ function desktopCheck(): ReadinessCheck {
   return { id: 'desktop', label: 'Desktop control', state: 'unavailable', detail: 'Desktop control is not supported on this operating system.' };
 }
 
-export function onboardingStatus(credentialNames: string[] = [], stateRoot = process.env.OPEN_HARNESS_STATE_DIR || '.open-harness'): OnboardingStatus {
-  if (process.env.OPEN_HARNESS_MOCK === '1') return {
+type Facts = { installed: boolean; daemon: boolean; contract: ImageContract; native: boolean; sharing: SharingProbe | null };
+const defaultStateRoot = () => process.env.OPEN_HARNESS_STATE_DIR || '.open-harness';
+
+// Synchronous for the CLI. The coordinator uses the asynchronous probes below.
+export function onboardingStatus(credentialNames: string[] = [], stateRoot = defaultStateRoot()): OnboardingStatus {
+  if (process.env.OPEN_HARNESS_MOCK === '1') return mockStatus(credentialNames);
+  const installed = command('docker', ['--version']).status === 0;
+  const daemon = installed && command('docker', ['version', '--format', '{{.Server.Version}}']).status === 0;
+  const contract = daemon ? imageContract() : 'missing';
+  return statusFrom({ installed, daemon, contract, native: pythonReady(), sharing: contract === 'current' ? stateSharing(stateRoot) : null }, credentialNames);
+}
+
+// Each probe has its own deadline and independent ones run together, so the worst case is
+// a few seconds rather than the sum of every timeout. Concurrent callers share one probe.
+const readinessChecks = new Map<string, { last?: Facts; pending?: Promise<Facts> }>();
+async function probeFacts(stateRoot: string): Promise<Facts> {
+  const installed = (await commandAsync('docker', ['--version'])).status === 0;
+  const [server, native] = await Promise.all([
+    installed ? commandAsync('docker', ['version', '--format', '{{.Server.Version}}']) : Promise.resolve(null),
+    Promise.all(pythons().map(executable => commandAsync(executable, PYTHON_PROBE, 8_000))).then(results => results.some(result => result.status === 0)),
+  ]);
+  const daemon = server?.status === 0;
+  const contract = daemon ? classifyContract(await commandAsync('docker', ['image', 'inspect', '-f', `{{index .Config.Labels "${RUNTIME_LABEL}"}}`, HERMES_IMAGE])) : 'missing';
+  return { installed, daemon, contract, native, sharing: contract === 'current' ? await stateSharingAsync(stateRoot) : null };
+}
+
+const coordinatorCheck: ReadinessCheck = { id: 'coordinator', label: 'Open Harness', state: 'ready', detail: 'The coordinator is running and your data folder is writable.' };
+
+export async function onboardingStatusAsync(credentialNames: string[] = [], stateRoot = defaultStateRoot(), jobs = setupJobs): Promise<OnboardingStatus> {
+  const setupJob = jobs.current();
+  if (process.env.OPEN_HARNESS_MOCK === '1') return { ...mockStatus(credentialNames), setupJob };
+  const root = resolve(stateRoot);
+  const check = readinessChecks.get(root) ?? {};
+  if (setupJob?.state === 'running') {
+    // A cold POST or reload must acknowledge the job even when Docker is unresponsive.
+    if (check.last) return { ...statusFrom(check.last, credentialNames), setupJob };
+    return { platform, platformLabel: labels[platform], executionReady: false, recommendedAccess: 'private',
+      credentialMode: 'coordinator', credentialNames, checks: [coordinatorCheck, desktopCheck()], setupJob };
+  }
+  readinessChecks.set(root, check);
+  let facts = await (check.pending ??= probeFacts(root).then(value => check.last = value).finally(() => { delete check.pending; }));
+  // A rebuild completed while this older check was in flight. Use the fresh verification.
+  const latest = readinessChecks.get(root);
+  if (latest !== check) {
+    if (!latest?.last || latest.pending) return onboardingStatusAsync(credentialNames, root, jobs);
+    facts = latest.last;
+  }
+  return { ...statusFrom(facts, credentialNames), setupJob: jobs.current() };
+}
+
+function mockStatus(credentialNames: string[]): OnboardingStatus {
+  return {
     platform,
     platformLabel: labels[platform],
     executionReady: true,
@@ -70,12 +142,10 @@ export function onboardingStatus(credentialNames: string[] = [], stateRoot = pro
       desktopCheck(),
     ],
   };
+}
 
-  const installed = command('docker', ['--version']).status === 0;
-  const daemon = installed && command('docker', ['version', '--format', '{{.Server.Version}}']).status === 0;
-  const contract: ImageContract = daemon ? imageContract() : 'missing';
+function statusFrom({ installed, daemon, contract, native, sharing }: Facts, credentialNames: string[]): OnboardingStatus {
   const image = contract === 'current';
-  const native = pythonReady();
   const container: ReadinessCheck = !installed
     ? { id: 'container-engine', label: 'Private workspaces', state: 'missing', detail: `Install Docker on ${labels[platform]} to give agents isolated workspaces.`, helpUrl: installUrls[platform] }
     : !daemon
@@ -91,8 +161,6 @@ export function onboardingStatus(credentialNames: string[] = [], stateRoot = pro
         ? { id: 'agent-runtime', label: 'Agent runtime', state: 'ready', detail: 'A local Hermes installation is ready for direct computer access.' }
         : { id: 'agent-runtime', label: 'Agent runtime', state: 'missing', detail: 'Start or install Docker to set up the agent runtime.', helpUrl: installUrls[platform] };
 
-  // Only meaningful once the image exists: the probe runs a throwaway container from it.
-  const sharing = image ? stateSharing(stateRoot) : null;
   const sharingCheck: ReadinessCheck | null = sharing && {
     id: 'workspace-sharing', label: 'Agent data sharing',
     state: sharing.ok ? 'ready' : 'action', detail: sharing.detail,
@@ -103,25 +171,27 @@ export function onboardingStatus(credentialNames: string[] = [], stateRoot = pro
     platformLabel: labels[platform],
     // A container runtime that cannot read the profile directory cannot run an agent,
     // so it must not count as ready just because the image is present.
-    executionReady: (image && (!sharing || sharing.ok)) || native,
-    recommendedAccess: image && (!sharing || sharing.ok) ? 'private' : 'direct',
+    executionReady: (image && sharing?.ok === true) || native,
+    recommendedAccess: image && sharing?.ok === true ? 'private' : 'direct',
     credentialMode: 'coordinator', credentialNames,
-    checks: [{ id: 'coordinator', label: 'Open Harness', state: 'ready', detail: 'The coordinator is running and your data folder is writable.' }, container, runtime, ...(sharingCheck ? [sharingCheck] : []), desktopCheck()],
+    checks: [coordinatorCheck, container, runtime, ...(sharingCheck ? [sharingCheck] : []), desktopCheck()],
   };
 }
 
-function startDocker() {
-  if (platform === 'darwin') return command('open', ['-gja', 'Docker'], 15_000);
-  if (platform === 'win32') return command('powershell.exe', ['-NoProfile', '-Command', 'Start-Process "$Env:ProgramFiles\\Docker\\Docker\\Docker Desktop.exe"'], 15_000);
-  const context = command('docker', ['context', 'show']).stdout.trim();
-  if (context.startsWith('desktop')) return command('systemctl', ['--user', 'start', 'docker-desktop.service'], 15_000);
-  return command('systemctl', ['start', '--no-block', 'docker.service'], 15_000);
+async function startDocker() {
+  if (platform === 'darwin') return commandAsync('open', ['-gja', 'Docker'], 15_000);
+  if (platform === 'win32') return commandAsync('powershell.exe', ['-NoProfile', '-Command', 'Start-Process "$Env:ProgramFiles\\Docker\\Docker\\Docker Desktop.exe"'], 15_000);
+  const context = (await commandAsync('docker', ['context', 'show'])).stdout.trim();
+  if (context.startsWith('desktop')) return commandAsync('systemctl', ['--user', 'start', 'docker-desktop.service'], 15_000);
+  return commandAsync('systemctl', ['start', '--no-block', 'docker.service'], 15_000);
 }
+
+const dockerUp = async () => (await commandAsync('docker', ['version', '--format', '{{.Server.Version}}'], 5_000)).status === 0;
 
 async function waitForDocker(timeout = 120_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    if (command('docker', ['version', '--format', '{{.Server.Version}}'], 5_000).status === 0) return;
+    if (await dockerUp()) return;
     await new Promise(resolve => setTimeout(resolve, 1_000));
   }
   throw new Error('Docker did not become ready. Open Docker Desktop, wait for it to finish starting, then try again.');
@@ -142,24 +212,70 @@ function runStreaming(name: string, args: string[], cwd?: string, timeoutMs = 45
   });
 }
 
-export async function onboardingAction(action: unknown, credentialNames: string[] = []) {
-  if (action === 'start-container-engine') {
-    if (command('docker', ['--version']).status !== 0) throw new Error(`Docker is not installed. Use the installation guide for ${labels[platform]}, then try again.`);
-    if (command('docker', ['version', '--format', '{{.Server.Version}}']).status !== 0) {
-      const started = startDocker();
-      if (started.status !== 0) throw new Error((started.stderr || started.stdout || '').trim() || 'Open Harness could not start Docker. Start it from your applications, then try again.');
-      await waitForDocker();
-    }
-    return onboardingStatus(credentialNames);
-  }
-  if (action === 'prepare-runtime') {
+export type SetupTasks = Record<SetupAction, () => Promise<void>>;
+
+const realTasks: SetupTasks = {
+  async 'start-container-engine'() {
+    if ((await commandAsync('docker', ['--version'])).status !== 0) throw new Error(`Docker is not installed. Use the installation guide for ${labels[platform]}, then try again.`);
+    if (await dockerUp()) return;
+    const started = await startDocker();
+    if (started.status !== 0) throw new Error((started.stderr || started.stdout || '').trim() || 'Open Harness could not start Docker. Start it from your applications, then try again.');
+    await waitForDocker();
+  },
+  async 'prepare-runtime'() {
     await waitForDocker(10_000);
     const runtimeRoot = import.meta.dirname;
     const projectRoot = join(runtimeRoot, '..');
     const dockerfile = join(runtimeRoot, 'hermes', 'Dockerfile');
     if (!existsSync(dockerfile)) throw new Error('The bundled agent runtime files are missing. Reinstall Open Harness.');
     await runStreaming('docker', ['build', '-f', dockerfile, '-t', HERMES_IMAGE, projectRoot], projectRoot);
-    return onboardingStatus(credentialNames);
-  }
-  throw new Error('Unknown setup action.');
+  },
+};
+// The deterministic runtime has nothing to start or build; the short delay keeps the
+// running state observable to the dashboard and the tests.
+const mockTasks: SetupTasks = {
+  'start-container-engine': () => new Promise(resolve => setTimeout(resolve, 150)),
+  'prepare-runtime': () => new Promise(resolve => setTimeout(resolve, 150)),
+};
+
+const RUNNING: Record<SetupAction, string> = {
+  'start-container-engine': 'Starting Docker. This can take a minute.',
+  'prepare-runtime': 'Setting up the agent runtime. The first time can take several minutes.',
+};
+const SUCCEEDED: Record<SetupAction, string> = {
+  'start-container-engine': 'Docker is running.',
+  'prepare-runtime': 'The agent runtime is ready.',
+};
+
+export const isSetupAction = (value: unknown): value is SetupAction => SETUP_ACTIONS.includes(value as SetupAction);
+
+/**
+ * At most one setup job runs per coordinator. The job is detached from the request that
+ * started it, so closing the dashboard never cancels a build, and the finished job stays
+ * readable until the next one starts. Asking again for the running action joins it;
+ * asking for a different one while a job runs is refused rather than queued, because the
+ * second step usually depends on the first.
+ */
+export function createSetupJobs(tasks: SetupTasks) {
+  let job: SetupJob | null = null;
+  let settled: Promise<void> = Promise.resolve();
+  return {
+    current: (): SetupJob | undefined => job ? { ...job } : undefined,
+    start(action: unknown): { job: SetupJob; accepted: boolean } {
+      if (!isSetupAction(action)) throw new Error('Unknown setup action.');
+      if (job?.state === 'running') return { job: { ...job }, accepted: job.action === action };
+      const current: SetupJob = { action, state: 'running', message: RUNNING[action] };
+      job = current;
+      settled = Promise.resolve().then(tasks[action]).then(
+        () => { current.state = 'succeeded'; current.message = SUCCEEDED[action]; },
+        (error: unknown) => { current.state = 'failed'; current.message = (error instanceof Error && error.message.trim()) || 'Setup did not finish. Try again.'; },
+      ).finally(() => { readinessChecks.clear(); resetSharingChecks(); });
+      return { job: { ...current }, accepted: true };
+    },
+    /** Resolves once the current job has finished; for tests and shutdown. */
+    settled: () => settled,
+  };
 }
+export type SetupJobs = ReturnType<typeof createSetupJobs>;
+
+export const setupJobs = createSetupJobs(process.env.OPEN_HARNESS_MOCK === '1' ? mockTasks : realTasks);

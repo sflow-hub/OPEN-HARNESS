@@ -64,9 +64,12 @@ test("reports first-run readiness and serves no-checkout runner installers", asy
 test("authenticates local clients, migrates once, and protects its secret file", async () => {
   assert.equal((await fetch(`${base}/v1/health`)).status, 401);
   const workspace = { agents: [{ id: "atlas", name: "Atlas", role: "Generalist", instructions: "Own the result.", memory: ["Prefer concise reports."] }], conversations: [{ id: "c1", agentId: "atlas", title: "Legacy", updatedAt: new Date().toISOString(), messages: [] }], files: [{ name: "notes.md", content: "Shared context" }] };
+  await request("/v1/files", { method: "POST", body: JSON.stringify({ name: "existing.txt", content: "coordinator copy" }) });
+  workspace.files.push({ name: "existing.txt", content: "browser copy" });
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).migrated, true);
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).reason, "already_migrated");
   assert.equal(readFileSync(join(stateDir, "shared", "notes.md"), "utf8"), "Shared context");
+  assert.equal(readFileSync(join(stateDir, "shared", "existing.txt"), "utf8"), "coordinator copy");
   assert.match(readFileSync(join(stateDir, "agents", "atlas", "profile", "MEMORY.md"), "utf8"), /concise reports/);
   assert.equal(statSync(join(stateDir, "secrets.json")).mode & 0o777, 0o600);
 });
@@ -103,6 +106,20 @@ test("separates private workspaces and supports shared files and run-now routine
   const routine = await request("/v1/routines", { method: "POST", body: JSON.stringify({ agentId: "atlas", name: "Daily", prompt: "Make report", intervalMinutes: 1440, timezone: "America/Denver" }) });
   const run = await request(`/v1/routines/${routine.id}/run`, { method: "POST" }); assert.equal((await waitRun(run.id)).state, "completed");
   const history = await request(`/v1/routines/${routine.id}/history`); assert.equal(history.history[0].run_id, run.id);
+});
+
+test("simultaneous uploads with the same name keep the first accepted file", async () => {
+  const path = "/v1/files?scope=shared", name = "concurrent-upload.txt";
+  const contents = ["first version", "other version"];
+  const responses = await Promise.all(contents.map(content => fetch(base + path, {
+    method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name, content, createOnly: true }),
+  })));
+  assert.deepEqual(responses.map(response => response.status).sort(), [201, 409]);
+  const winner = responses.findIndex(response => response.status === 201);
+  assert.equal((await request(path + "&name=" + name)).content, contents[winner]);
+  await request(path, { method: "POST", body: JSON.stringify({ name, content: "intentional update" }) });
+  assert.equal((await request(path + "&name=" + name)).content, "intentional update");
 });
 
 test("inspects, edits, invokes storage for, and removes durable skills", async () => {

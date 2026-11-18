@@ -3,7 +3,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:chil
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { ComputerConfig } from '../lib/agent-profile';
 import { HERMES_IMAGE, RUNTIME_LABEL, classifyContract, imageContract } from './readiness';
@@ -191,7 +191,7 @@ function execDocker(args: string[], timeout: number): Promise<{ code: number | n
     child.stdout.on("data", chunk => stdout += chunk);
     child.stderr.on("data", chunk => stderr += chunk);
     child.on("error", () => settle(null));
-    child.on("exit", code => settle(code));
+    child.on("close", code => settle(code));
   });
 }
 async function probeDockerStatus(): Promise<ReturnType<typeof dockerStatus>> {
@@ -230,28 +230,59 @@ export function dockerStatusCached(): Promise<ReturnType<typeof dockerStatus>> {
 // the misleading "policy extension failed to load". Probe once per state root and say
 // the true cause instead. Reuses the pinned image so the check never pulls anything.
 export type SharingProbe = { ok: boolean; detail: string };
-let sharingCache: { root: string; value: SharingProbe } | null = null;
-export function stateSharing(stateRoot: string): SharingProbe {
-  if (process.env.OPEN_HARNESS_MOCK === "1") return { ok: true, detail: 'Deterministic test runtime shares state directly.' };
-  const root = resolve(stateRoot);
-  if (sharingCache?.root === root) return sharingCache.value;
-  let value: SharingProbe;
-  try {
-    const dir = join(root, '.mount-probe');
-    mkdirSync(dir, { recursive: true });
-    const token = randomUUID();
-    // 0o644 so the container user can read it whether or not it shares our uid.
-    writeFileSync(join(dir, 'canary'), token, { mode: 0o644 });
-    const result = spawnSync("docker", ["run", "--rm", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`,
-      "-v", `${dir}:/probe:ro`, HERMES_IMAGE, "cat", "/probe/canary"], { encoding: "utf8", timeout: 60_000 });
-    value = result.stdout.trim() === token
+const verifiedSharing = new Map<string, SharingProbe>();
+const pendingSharing = new Map<string, Promise<SharingProbe>>();
+export function resetSharingChecks() { verifiedSharing.clear(); pendingSharing.clear(); }
+const mockSharing: SharingProbe = { ok: true, detail: 'Deterministic test runtime shares state directly.' };
+const unverifiedSharing = (root: string): SharingProbe => ({ ok: false, detail: `Open Harness could not verify that Docker can read its data folder at ${root}.` });
+
+function sharingCanary(root: string) {
+  const dir = join(root, '.mount-probe'), token = randomUUID(), file = join(dir, token);
+  mkdirSync(dir, { recursive: true });
+  // A sync agent start can race a dashboard check or a separate CLI process.
+  writeFileSync(file, token, { mode: 0o644 });
+  return {
+    args: ['run', '--rm', '--user', `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, '-v', `${dir}:/probe:ro`, HERMES_IMAGE, 'cat', `/probe/${token}`],
+    result: (code: number | null, output: string): SharingProbe => code === 0 && output.trim() === token
       ? { ok: true, detail: 'Docker can read the Open Harness data folder.' }
-      : { ok: false, detail: `Docker cannot read the Open Harness data folder at ${root}, so agent containers would start with an empty profile and never receive your model credential. Add this folder to Docker Desktop → Settings → Resources → File sharing, or set OPEN_HARNESS_STATE_DIR to a folder inside your home directory.` };
-  } catch {
-    value = { ok: false, detail: `Open Harness could not verify that Docker can read its data folder at ${root}.` };
-  }
-  sharingCache = { root, value };
-  return value;
+      : { ok: false, detail: `Docker cannot read the Open Harness data folder at ${root}, so agent containers would start with an empty profile and never receive your model credential. Add this folder to Docker Desktop → Settings → Resources → File sharing, or set OPEN_HARNESS_STATE_DIR to a folder inside your home directory.` },
+    remove: () => rmSync(file, { force: true }),
+  };
+}
+
+export function stateSharing(stateRoot: string): SharingProbe {
+  if (process.env.OPEN_HARNESS_MOCK === "1") return mockSharing;
+  const root = resolve(stateRoot), cached = verifiedSharing.get(root);
+  if (cached) return cached;
+  try {
+    const canary = sharingCanary(root);
+    try {
+      const result = spawnSync('docker', canary.args, { encoding: 'utf8', timeout: 60_000 });
+      const value = canary.result(result.status, result.stdout || '');
+      if (value.ok) verifiedSharing.set(root, value);
+      return value;
+    } finally { canary.remove(); }
+  } catch { return unverifiedSharing(root); }
+}
+
+export async function stateSharingAsync(stateRoot: string): Promise<SharingProbe> {
+  if (process.env.OPEN_HARNESS_MOCK === "1") return mockSharing;
+  const root = resolve(stateRoot), cached = verifiedSharing.get(root), pending = pendingSharing.get(root);
+  if (cached) return cached;
+  if (pending) return pending;
+  try {
+    const canary = sharingCanary(root);
+    const probe = execDocker(canary.args, 60_000).then(result => canary.result(result.code, result.stdout));
+    pendingSharing.set(root, probe);
+    try {
+      const value = await probe;
+      if (value.ok && pendingSharing.get(root) === probe) verifiedSharing.set(root, value);
+      return value;
+    } finally {
+      if (pendingSharing.get(root) === probe) pendingSharing.delete(root);
+      canary.remove();
+    }
+  } catch { return unverifiedSharing(root); }
 }
 
 // A container is reused by name for as long as this signature matches. The image ID is

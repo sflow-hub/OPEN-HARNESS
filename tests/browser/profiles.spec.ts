@@ -15,15 +15,17 @@ test.beforeEach(async ({ request, page }) => { await seed(request); await page.a
 
 test('never presents deterministic test output as a real agent reply', async ({ page }) => {
   await page.getByRole('button', { name: 'Meet Atlas' }).click();
+  // Status copy lives in the navigation drawer; open it to assert the same wording.
+  await page.getByRole('button', { name: 'Open navigation' }).click();
   await expect(page.getByText('Automated test mode', { exact: true }).first()).toBeVisible();
+  await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click');
   await page.getByLabel('Message Atlas').fill('Run a real task');
   await page.getByLabel('Message Atlas').press('Enter');
   await expect(page.getByRole('status')).toContainText('Agent chat is disabled in automated test mode');
   await expect(page.getByText('Hermes mock completed the task.')).toHaveCount(0);
 });
 
-test('guides first-time users through computer and model readiness', async ({ page }, testInfo) => {
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
+test('guides first-time users through computer and model readiness', async ({ page }) => {
   await page.getByRole('button', { name: /Settings/ }).first().click();
   await page.getByRole('button', { name: 'Run setup again' }).click();
   const setup = page.getByRole('dialog', { name: 'Welcome to Open Harness' });
@@ -210,6 +212,7 @@ test('creates, filters, and moves an agent task across desktop and phone layouts
     data: { name: teamName, description: '', color: 'blue', icon: 'writing', memberAgentIds: ['atlas', 'scout'] },
   });
   await page.reload();
+  await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'New project', exact: true }).click();
@@ -248,6 +251,7 @@ test('creates, renames, duplicates, and deletes a project', async ({ page }, tes
   const name = `Launch plan ${testInfo.project.name}`;
   const renamed = `${name} v2`;
   const cardFor = (project: string) => page.locator('.project-card').filter({ has: page.getByRole('textbox', { name: `Rename ${project}` }) });
+  await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await page.getByRole('button', { name: 'Projects', exact: true }).click();
 

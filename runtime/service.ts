@@ -18,7 +18,7 @@ import { TeamError, TeamStore } from "./teams";
 import { MachineError, Machines } from "./machines";
 import { encryptRunnerSecret } from "../lib/runner-crypto";
 import { exportAgentFiles, importAgentFiles, type TransferBundle } from './transfer-files';
-import { onboardingAction, onboardingStatus } from './readiness';
+import { onboardingStatusAsync, setupJobs } from './readiness';
 import { APP_VERSION } from '../lib/version';
 import { HERMES_COMMIT, HERMES_RELEASE } from '../lib/hermes-pin';
 
@@ -461,13 +461,18 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/v1/health") return json(res, 200, { ok: true, runtime: await dockerStatusCached(), activeRuns: store.activeCount(), queuedRuns: store.listRuns().filter(run => run.state === "queued").length, secrets: secrets.names(), secretStorage: secrets.backend });
     if (req.method === 'GET' && url.pathname === '/v1/support-bundle') return json(res, 200, {
       generatedAt: new Date().toISOString(), version: APP_VERSION, hermes: { release: HERMES_RELEASE, commit: HERMES_COMMIT },
-      platform: { os: process.platform, arch: process.arch, node: process.version }, readiness: onboardingStatus(secrets.names(), root), machines: machines.list(),
+      platform: { os: process.platform, arch: process.arch, node: process.version }, readiness: await onboardingStatusAsync(secrets.names(), root), machines: machines.list(),
       agents: profiles.list().map(profile => ({ id: profile.id, revision: profile.revision, machineId: profile.computer.machineId, access: profile.computer.access, desktop: profile.computer.desktop })),
       recentRuns: store.listRuns(25).map(run => ({ id: run.id, agentId: run.agent_id, state: run.state, createdAt: run.created_at, updatedAt: run.updated_at, error: run.error })),
       credentials: credentials.rows().map(row => ({ ref: row.ref, label: row.label, provider: row.provider, present: credentials.present(row.ref), createdAt: row.created_at, updatedAt: row.updated_at, lastUsedAt: row.last_used_at })), secretStorage: secrets.backend, note: 'Secret values, prompts, messages, results, file contents, and model responses are excluded.',
     });
-    if (req.method === 'GET' && url.pathname === '/v1/onboarding/status') return json(res, 200, onboardingStatus(secrets.names(), root));
-    if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') { const input = await body(req); return json(res, 200, await onboardingAction(input.action, secrets.names())); }
+    if (req.method === 'GET' && url.pathname === '/v1/onboarding/status') return json(res, 200, await onboardingStatusAsync(secrets.names(), root));
+    // Answers at once with the last probe; the job itself runs detached from this request.
+    if (req.method === 'POST' && url.pathname === '/v1/onboarding/action') {
+      const input = await body(req), { accepted, job } = setupJobs.start(input.action), status = await onboardingStatusAsync(secrets.names(), root);
+      if (!accepted) return json(res, 409, { ...status, error: `Wait for the current setup step to finish first (${job.action === 'prepare-runtime' ? 'setting up the agent runtime' : 'starting Docker'}).` });
+      return json(res, status.setupJob?.state === 'running' ? 202 : 200, status);
+    }
     if (req.method === 'POST' && url.pathname === '/v1/onboarding/model-test') {
       const input = await body(req), model = validateModel(input.model);
       if (process.env.OPEN_HARNESS_MOCK === '1') return json(res, 200, { ok: true, message: 'Model connection is ready.' });
@@ -651,7 +656,11 @@ const server = createServer(async (req, res) => {
         if (Array.isArray(agent.memory) && agent.memory.length) writeFileSync(join(profile, "MEMORY.md"), agent.memory.map((item: unknown) => `- ${String(item)}`).join("\n") + "\n", { mode: 0o600 });
       }
       for (const conversation of input.conversations || []) store.db.prepare("INSERT OR IGNORE INTO conversations(id,agent_id,title,legacy_json,created_at,updated_at) VALUES(?,?,?,?,?,?)").run(conversation.id, conversation.agentId, conversation.title, JSON.stringify(conversation), conversation.updatedAt || new Date().toISOString(), conversation.updatedAt || new Date().toISOString());
-      for (const file of input.files || []) { const target = join(root, "shared", String(file.name).replace(/[^a-zA-Z0-9._ -]/g, "_")); writeFileSync(target, String(file.content).slice(0, 1_000_000)); }
+      for (const file of input.files || []) {
+        const target = join(root, "shared", String(file.name).replace(/[^a-zA-Z0-9._ -]/g, "_"));
+        try { writeFileSync(target, String(file.content).slice(0, 1_000_000), { flag: "wx", mode: 0o600 }); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+      }
       writeFileSync(join(root, "browser-v1-backup.json"), JSON.stringify(input, null, 2), { mode: 0o600 });
       return json(res, 200, { migrated: true });
     }
@@ -732,7 +741,29 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true, name: row.ref });
     }
     if (/^\/v1\/agents\/[^/]+\/connectors/.test(url.pathname)) return json(res, 410, { error: 'Connection settings moved into Agent settings. Reload the app.' });
-    if (url.pathname === "/v1/files") { const { scope, dir } = workspaceDir(url); mkdirSync(dir, { recursive: true }); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = safeFile(dir, name); if (!existsSync(target)) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readFileSync(target, encoding), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(dir), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = safeFile(dir, String(input.name || "")); writeFileSync(target, content, { encoding, mode: 0o600 }); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = safeFile(dir, String(url.searchParams.get("name") || "")); if (existsSync(target)) unlinkSync(target); return json(res, 200, { ok: true }); } }
+    if (url.pathname === "/v1/files") {
+      const { scope, dir } = workspaceDir(url);
+      mkdirSync(dir, { recursive: true });
+      if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = safeFile(dir, name); if (!existsSync(target)) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readFileSync(target, encoding), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(dir), scope }); }
+      if (req.method === "POST") {
+        const input = await body(req), name = String(input.name || ""), target = safeFile(dir, name);
+        const content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8";
+        if (Buffer.byteLength(content, encoding) > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." });
+        if (input.createOnly === true && !existsSync(target) && readdirSync(dir, { withFileTypes: true }).filter(entry => entry.isFile()).length >= 40) {
+          return json(res, 409, { error: "The workspace already has 40 files. Remove a file to add another." });
+        }
+        try {
+          writeFileSync(target, content, { encoding, mode: 0o600, flag: input.createOnly === true ? "wx" : "w" });
+        } catch (error) {
+          if (input.createOnly === true && (error as NodeJS.ErrnoException).code === "EEXIST") {
+            return json(res, 409, { error: `A file named ${name} already exists. Rename the upload first.` });
+          }
+          throw error;
+        }
+        return json(res, 201, { name, scope });
+      }
+      if (req.method === "DELETE") { const target = safeFile(dir, String(url.searchParams.get("name") || "")); if (existsSync(target)) unlinkSync(target); return json(res, 200, { ok: true }); }
+    }
     if (req.method === "GET" && url.pathname === "/v1/routines") return json(res, 200, { routines: store.db.prepare("SELECT * FROM schedules ORDER BY created_at DESC").all() });
     if (req.method === "POST" && url.pathname === "/v1/routines") { const input = await body(req), stamp = new Date(), id = crypto.randomUUID(), minutes = Math.max(1, Number(input.intervalMinutes || 60)); const next = new Date(stamp.getTime() + minutes * 60000).toISOString(); store.db.prepare("INSERT INTO schedules(id,agent_id,name,prompt,interval_minutes,timezone,enabled,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, input.agentId, input.name, input.prompt, minutes, input.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone, 1, next, stamp.toISOString(), stamp.toISOString()); return json(res, 201, { id, nextRunAt: next }); }
     // A routine with a typo, a wrong agent, or a runaway interval could previously only
