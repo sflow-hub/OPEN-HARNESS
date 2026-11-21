@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHmac } from 'node:crypto';
+import { promisify } from 'node:util';
 import { DEFAULT_NETWORK, draftProfile, type AgentProfile, type ProfileResponse, type ModelChoice } from '../lib/agent-profile';
 import { DatabaseSync } from 'node:sqlite';
 import { Profiles, ProfileError, validateProfile } from '../runtime/profiles';
@@ -117,9 +118,9 @@ test('missing credentials and invalid endpoint URLs produce actionable errors', 
   const result = await request<{ ok: boolean; message: string }>('/v1/agents/atlas/connection-check', 'POST', { model }); assert.equal(result.ok, false); assert.match(result.message, /MISSING_KEY/);
   await assert.rejects(save({ ...await profile(), model: { ...model, inherit: false, baseUrl: 'https://user:password@example.test' } }), { status: 400 });
 });
-test('managed middleware denies direct and nested dispatch and filters both schema formats', () => {
-  const result = spawnSync('python3', ['tests/policy-extension-test.py'], { cwd: join(import.meta.dirname, '..'), encoding: 'utf8' });
-  assert.equal(result.status, 0, result.stderr || result.stdout);
+test('managed middleware denies direct and nested dispatch and filters both schema formats', async () => {
+  // Keep the event loop processing idle HTTP sockets while Python runs.
+  await promisify(execFile)('python3', ['tests/policy-extension-test.py'], { cwd: join(import.meta.dirname, '..') });
 });
 
 test('MCP inventory survives refresh without claiming a stale handshake is connected', async () => {
