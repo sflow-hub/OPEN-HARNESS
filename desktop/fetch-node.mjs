@@ -28,8 +28,13 @@ const response = await fetch(url);
 if (!response.ok || !response.body) throw new Error(`Could not download ${url}: HTTP ${response.status}`);
 await pipeline(Readable.fromWeb(response.body), createWriteStream(archive));
 function run(program, args) { return new Promise((ok, fail) => { const child = spawn(program, args, { cwd: temp, stdio: "inherit" }); child.once("error", fail); child.once("exit", code => code === 0 ? ok() : fail(new Error(`${program} exited with ${code}`))); }); }
-if (extension === "zip") await run("powershell.exe", ["-NoProfile", "-Command", `Expand-Archive -LiteralPath '${archive.replaceAll("'", "''")}' -DestinationPath '${temp.replaceAll("'", "''")}' -Force`]);
-else await run("tar", [extension === "tar.xz" ? "-xJf" : "-xzf", archive]);
+if (extension === "zip") {
+  const member = `${archiveName.slice(0, -4)}/${relativeBinary}`;
+  if (process.platform === "win32") {
+    const tar = join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
+    await run(tar, ["-xf", archive, member]);
+  } else await run("unzip", ["-q", archive, member]);
+} else await run("tar", [extension === "tar.xz" ? "-xJf" : "-xzf", archive]);
 const extracted = join(temp, archiveName.slice(0, -(extension.length + 1)), relativeBinary);
 const binaries = resolve(import.meta.dirname, "..", "src-tauri", "binaries");
 await mkdir(binaries, { recursive: true });
