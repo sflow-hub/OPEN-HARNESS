@@ -531,7 +531,7 @@ export default function Home() {
       const saved = controlRef.current.managed ? null : localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
       // Hydrate browser-only persistence after the server-rendered first frame.
       if (saved) {
-        const parsed = normalizeWorkspace(JSON.parse(saved));
+        const parsed = normalizeWorkspace(JSON.parse(saved), "cache");
         if (!parsed) throw new Error();
         // The coordinator owns active work. Preserve the last rendered activity until
         // reconnect replays authoritative events instead of implying that closing the
@@ -619,7 +619,7 @@ export default function Home() {
         const reconcileAgents = (current: Workspace): Workspace => ({ ...current,
           agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })),
           conversations: current.conversations.filter(conversation => agentIds.has(conversation.agentId)),
-          teams: current.teams.map(team => ({ ...team, memberAgentIds: team.memberAgentIds.filter(id => agentIds.has(id)) })),
+          teams: teamsForRoster(current.teams, agentIds),
         });
         workspaceRef.current = reconcileAgents(workspaceRef.current);
         setWorkspace(reconcileAgents);
@@ -634,7 +634,7 @@ export default function Home() {
         // or credential response must not hold up history and reattaching active work.
         await Promise.all([
           (async () => {
-            if (!client.managed && workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspaceRef.current.teams }) });
+            if (!client.managed && workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspaceRef.current.teams, onlyMissing: true }) });
             const { teams } = await client.request<{ teams: Team[] }>("/v1/teams?includeRetired=1");
             if (!isCurrent()) return;
             setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) }));
@@ -1427,7 +1427,7 @@ export default function Home() {
     if (!upload) return;
     try {
       if (upload.size > 5000000) throw new Error();
-      const parsed = normalizeWorkspace(JSON.parse(await upload.text()));
+      const parsed = normalizeWorkspace(JSON.parse(await upload.text()), "backup");
       if (!parsed) throw new Error();
       if (
         confirm(
@@ -2898,13 +2898,14 @@ export default function Home() {
   );
 }
 
-function normalizeWorkspace(value: unknown): Workspace | null {
+function normalizeWorkspace(value: unknown, sourceKind: "cache" | "backup"): Workspace | null {
   if (!value || typeof value !== "object") return null;
   const source = value as Record<string, unknown>;
   if (source.version !== 1 && source.version !== 2) return null;
   const files = (Array.isArray(source.files) ? source.files : []).filter(storableFile);
   const normalized = { ...source, version: 2 as const, files, teams: Array.isArray(source.teams) ? source.teams : [] } as unknown as Workspace;
-  return validWorkspace(normalized) ? normalized : null;
+  if (!validWorkspace(normalized, sourceKind)) return null;
+  return sourceKind === "cache" ? storable(normalized) : normalized;
 }
 
 const FILE_CONTENT_LIMIT = 100_000;
@@ -2912,14 +2913,20 @@ function storableFile(file: unknown): file is Artifact {
   const value = file as Artifact | null;
   return Boolean(value && typeof value.id === "string" && typeof value.name === "string" && typeof value.content === "string" && value.content.length <= FILE_CONTENT_LIMIT && typeof value.agentId === "string" && typeof value.updatedAt === "string");
 }
-// What goes to browser storage must be readable back. A runtime file bigger than the limit is
-// left out rather than saved in a shape that would invalidate the whole record on the next load.
-function storable(value: Workspace): Workspace {
-  const files = value.files.filter(storableFile);
-  return files.length === value.files.length ? value : { ...value, files };
+function teamsForRoster(teams: Team[], agentIds: Set<string>): Team[] {
+  return teams.map(team => {
+    const memberAgentIds = team.memberAgentIds.filter(id => agentIds.has(id));
+    return memberAgentIds.length === team.memberAgentIds.length ? team : { ...team, memberAgentIds };
+  });
 }
 
-function validWorkspace(value: unknown): value is Workspace {
+// Team and agent snapshots arrive independently. Keep the cache readable even when a
+// new member hasn't arrived yet, or a runtime file exceeds the browser storage limit.
+function storable(value: Workspace): Workspace {
+  return { ...value, files: value.files.filter(storableFile), teams: teamsForRoster(value.teams, new Set(value.agents.map(agent => agent.id))) };
+}
+
+function validWorkspace(value: unknown, sourceKind: "cache" | "backup"): value is Workspace {
   if (!value || typeof value !== "object") return false;
   const w = value as Workspace;
   return (
@@ -2946,7 +2953,7 @@ function validWorkspace(value: unknown): value is Workspace {
     new Set(w.agents.map((a) => a.id)).size === w.agents.length &&
     Array.isArray(w.teams) &&
     w.teams.length <= 100 &&
-    w.teams.every(team => team && typeof team.id === "string" && typeof team.name === "string" && team.name.trim() && team.name.length <= 60 && typeof team.description === "string" && team.description.length <= 240 && typeof team.color === "string" && typeof team.icon === "string" && Number.isInteger(team.revision) && Array.isArray(team.memberAgentIds) && team.memberAgentIds.every(id => w.agents.some(agent => agent.id === id))) &&
+    w.teams.every(team => team && typeof team.id === "string" && typeof team.name === "string" && team.name.trim() && team.name.length <= 60 && typeof team.description === "string" && team.description.length <= 240 && typeof team.color === "string" && typeof team.icon === "string" && Number.isInteger(team.revision) && Array.isArray(team.memberAgentIds) && team.memberAgentIds.every(id => typeof id === "string" && (sourceKind === "cache" || w.agents.some(agent => agent.id === id)))) &&
     new Set(w.teams.map(team => team.id)).size === w.teams.length &&
     Array.isArray(w.files) &&
     w.files.length <= 40 &&

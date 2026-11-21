@@ -1520,7 +1520,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     }
     if (url.pathname === "/v1/teams/sync" && req.method === "POST") {
       const input = await body(req), saved = [];
-      for (const team of Array.isArray(input.teams) ? input.teams : []) saved.push(teams.import(team));
+      for (const team of Array.isArray(input.teams) ? input.teams : []) saved.push(teams.import(team, input.onlyMissing === true));
       return json(res, 200, { teams: saved });
     }
     const teamMatch = url.pathname.match(/^\/v1\/teams\/([^/]+)$/);

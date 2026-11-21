@@ -30,7 +30,9 @@ test.beforeEach(async ({ context }) => {
       id: `draft-test-${i}`, agentId: 'atlas', title, messages: [], updatedAt: new Date().toISOString(),
     })),
   });
+  // A shared coordinator may have teams belonging to agents outside this fixture.
   await context.route(`${control}/v1/agents/sync`, route => route.fulfill({ json: { agents: initialWorkspace.agents } }));
+  await context.route(`${control}/v1/teams?includeRetired=1`, route => route.fulfill({ json: { teams: initialWorkspace.teams } }));
   await context.route(`${control}/v1/conversations`, route => route.fulfill({ json: { conversations: [] } }));
   await context.route(`${control}/v1/runs`, route => route.request().method() === 'GET' ? route.fulfill({ json: { runs: [] } }) : route.fallback());
 });

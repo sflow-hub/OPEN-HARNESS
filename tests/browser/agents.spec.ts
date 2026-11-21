@@ -154,6 +154,52 @@ test('a deleted agent stays gone after reload, even from a stale cache', async (
   await expectPreservedCache();
 });
 
+test('a missing team member in cached or refreshed data preserves the conversation and its draft', async ({ page }) => {
+  const stamp = '2026-11-20T12:00:00Z';
+  const team = { id: 'notes-team', name: 'Notes team', description: '', color: 'sage', icon: 'writing', revision: 1,
+    memberAgentIds: ['atlas', 'former-agent'], retiredAt: null, createdAt: stamp, updatedAt: stamp };
+  const conversation = { id: 'cached-notes', agentId: 'atlas', title: 'Saved meeting notes', updatedAt: stamp,
+    messages: [{ id: 'cached-reply', role: 'assistant', content: 'The meeting summary is saved.' }] };
+  const backup = JSON.stringify({ ...initialWorkspace, teams: [team], conversations: [conversation] });
+  await page.addInitScript(saved => {
+    localStorage.setItem('open-harness.migrated.v1', 'done');
+    if (!localStorage.getItem('open-harness.workspace.v2')) localStorage.setItem('open-harness.workspace.v2', saved);
+  }, backup);
+  await page.route(`${control}/v1/conversations`, route => route.fulfill({ json: { conversations: [] } }));
+  await page.route(`${control}/v1/runs`, route => route.fulfill({ json: { runs: [] } }));
+  await page.route(`${control}/v1/teams/sync`, route => route.fulfill({ json: { ok: true } }));
+  const refreshed = { ...team, revision: 2, memberAgentIds: ['scout', 'agent-added-after-roster'] };
+  let releaseSnapshot!: () => void;
+  const snapshot = new Promise<void>(resolve => { releaseSnapshot = resolve; });
+  await page.route(`${control}/v1/teams?includeRetired=1`, async route => {
+    await snapshot;
+    await route.fulfill({ json: { teams: [refreshed] } });
+  });
+
+  const storedTeams = () => page.evaluate(() => JSON.parse(localStorage.getItem('open-harness.workspace.v2')!).teams);
+  const recent = page.locator('aside.sidebar').getByRole('button', { name: conversation.title, exact: true });
+  const composer = page.getByRole('textbox', { name: 'Message Atlas' });
+  try {
+    await page.goto(`/?controlPort=${controlPort}`);
+    await openNavigation(page);
+    await expect(recent).toBeVisible();
+    await recent.click();
+    await expect(page.locator('.transcript')).toContainText(conversation.messages[0].content);
+    await composer.fill('Add the action items before sending.');
+    await expect.poll(storedTeams).toEqual([{ ...team, memberAgentIds: ['atlas'] }]);
+  } finally { releaseSnapshot(); }
+  await expect.poll(storedTeams).toEqual([{ ...refreshed, memberAgentIds: ['scout'] }]);
+  await page.reload();
+  await openNavigation(page);
+  await expect(recent).toBeVisible();
+  await recent.click();
+  await expect(page.locator('.transcript')).toContainText(conversation.messages[0].content);
+  await expect(composer).toHaveValue('Add the action items before sending.');
+
+  await page.locator('input[type=file][accept=".json"]').setInputFiles({ name: 'stale-team.json', mimeType: 'application/json', buffer: Buffer.from(backup) });
+  await expect(page.getByRole('status').filter({ hasText: 'not a valid Open Harness backup' })).toBeVisible();
+});
+
 test('a refused delete shows the reason and keeps the agent', async ({ page }) => {
   let deletes = 0;
   await page.route(url => url.port === String(controlPort) && url.pathname === '/v1/agents/atlas', route => {

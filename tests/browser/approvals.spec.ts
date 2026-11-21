@@ -1,5 +1,5 @@
 import { openNavigation } from './navigation';
-import { test, expect, type APIRequestContext, type Locator, type Page, type Route } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Locator, type Page, type Request, type Route } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 
 const control = `http://127.0.0.1:${process.env.OPEN_HARNESS_TEST_PORT || 4317}`;
@@ -94,12 +94,15 @@ test('a badge poll that lands after the inbox reports a newer count does not res
   // The page polls the badge on load and every 15 s. Capture the load's poll while this approval is
   // still pending and hold it; later polls are dropped so only the inbox can correct a stale count.
   const isBadgePoll = (url: URL) => url.pathname === '/v1/approvals' && url.searchParams.get('state') === 'pending' && url.searchParams.get('limit') === '1';
-  let release!: () => void, fetched!: (count: number) => void, holding = false;
+  let release!: () => void, fetched!: (count: number) => void, poll: Request | undefined;
   const held = new Promise<void>(resolve => { release = resolve; });
   const heldCount = new Promise<number>(resolve => { fetched = resolve; });
+  // Reloading the workspace from beforeEach let its own poll reach this route, get held, and then be
+  // cancelled with the old document. Park on a blank document so only the fresh load can be held.
+  await page.goto('about:blank');
   await page.route(isBadgePoll, async route => {
-    if (holding) return route.abort();
-    holding = true;
+    if (poll) return route.abort();
+    poll = route.request();
     const response = await route.fetch();
     fetched((await response.json()).pendingCount);
     await held;
@@ -115,9 +118,7 @@ test('a badge poll that lands after the inbox reports a newer count does not res
     inboxInFlight++;
     try { await route.fulfill({ response: await route.fetch() }); } finally { inboxInFlight--; }
   });
-  const sent = page.waitForRequest(browserRequest => isBadgePoll(new URL(browserRequest.url())));
-  await page.reload();
-  const poll = await sent;
+  await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
 
   await openNavigation(page);
   const nav = page.getByRole('button', { name: /^Approvals/ });

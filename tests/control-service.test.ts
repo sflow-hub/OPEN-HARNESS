@@ -324,6 +324,17 @@ test("blocks named handoffs when agents do not share an active team", async () =
   await waitRun(parent.id);
 });
 
+test("browser cache sync seeds missing teams and preserves existing memberships until an explicit import", async () => {
+  const cached = { id: 'cache-team', name: 'Cache sync team', color: 'sage', icon: 'people', memberAgentIds: ['atlas', 'scout'] };
+  const sync = (team: typeof cached, onlyMissing?: boolean) => request('/v1/teams/sync', { method: 'POST', body: JSON.stringify({ teams: [team], onlyMissing }) });
+  const original = (await sync(cached, true)).teams[0];
+  assert.deepEqual([...original.memberAgentIds].sort(), ['atlas', 'scout']);
+  const partial = { ...cached, memberAgentIds: ['atlas'] };
+  assert.deepEqual((await sync(partial, true)).teams[0], original);
+  assert.deepEqual((await sync({ ...partial, id: 'old-browser-id' }, true)).teams[0], original);
+  assert.deepEqual((await sync(partial)).teams[0].memberAgentIds, ['atlas']);
+});
+
 test("persists boards and tasks, rejects stale edits, and preserves assignments", async () => {
   const snapshot = await request("/v1/tasks");
   assert.equal(snapshot.boards.length, 1);

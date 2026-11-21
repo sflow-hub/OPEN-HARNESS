@@ -95,11 +95,11 @@ export class TeamStore {
     return this.get(id)!;
   }
 
-  import(input: Partial<Team> & Partial<TeamInput>): Team {
-    const existing = input.id ? this.get(input.id) : null;
-    if (existing) return this.update(existing.id, { ...input, revision: existing.revision });
-    const byName = this.list().find(team => team.name.localeCompare(String(input.name || ""), undefined, { sensitivity: "accent" }) === 0);
-    if (byName) return this.update(byName.id, { ...input, revision: byName.revision });
+  import(input: Partial<Team> & Partial<TeamInput>, onlyMissing = false): Team {
+    const existing = (input.id && this.get(input.id)) || this.list().find(team => team.name.localeCompare(String(input.name || ""), undefined, { sensitivity: "accent" }) === 0);
+    // Automatic recovery can seed a missing team from a partial browser snapshot.
+    // Only an explicit import should replace a roster that the coordinator already owns.
+    if (existing) return onlyMissing ? existing : this.update(existing.id, { ...input, revision: existing.revision });
     const value = this.validated(input), teamId = typeof input.id === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(input.id) ? input.id : crypto.randomUUID();
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
