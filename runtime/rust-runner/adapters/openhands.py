@@ -108,7 +108,7 @@ def run(config, prompt, key, emit):
             if isinstance(event.action, FinishAction):
                 finish_reply = event.action.message
             elif event.tool_name in visible_tools:
-                preview = event.action.model_dump_json(exclude_none=True) if event.action else ""
+                preview = event.action.model_dump(mode="json", exclude_none=True) if event.action else {}
                 emit("tool.start", id=event.tool_call_id, name=event.tool_name, preview=preview)
         elif isinstance(event, ObservationBaseEvent) and event.tool_name in visible_tools:
             failed = not isinstance(event, ObservationEvent) or event.observation.is_error
@@ -139,23 +139,40 @@ def run(config, prompt, key, emit):
     return finish_reply or latest_reply
 
 
+def event_fields(fields, key):
+    escaped_key = json.dumps(key, ensure_ascii=False)[1:-1]
+    limits = {"preview": 1000, "result": 4000, "message": 1000, "text": 200_000}
+
+    def redact(value):
+        if isinstance(value, dict):
+            return {redact(name): redact(item) for name, item in value.items()}
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, str):
+            if escaped_key != key:
+                value = value.replace(escaped_key, "[redacted]")
+            return value.replace(key, "[redacted]")
+        return value
+
+    safe = {}
+    for name, value in fields.items():
+        if key:
+            value = redact(value)
+        # Serialize tool arguments only after redacting structured values and keys.
+        if name == "preview" and isinstance(value, dict):
+            value = json.dumps(value, ensure_ascii=False)
+        safe[name] = value[:limits.get(name, 1000)] if isinstance(value, str) else value
+    return safe
+
+
 def main():
     # Keep SDK and shell output on stderr, including writes made to descriptor 1.
     with os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8") as protocol:
         os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
         key = os.environ.pop("OPEN_HARNESS_MODEL_API_KEY", "")
-        escaped_key = json.dumps(key, ensure_ascii=False)[1:-1]
-        limits = {"preview": 1000, "result": 4000, "message": 1000, "text": 200_000}
-
         def emit(event_type, **fields):
-            for name, value in fields.items():
-                if isinstance(value, str):
-                    if key:
-                        if escaped_key != key:
-                            value = value.replace(escaped_key, "[redacted]")
-                        value = value.replace(key, "[redacted]")
-                    fields[name] = value[:limits.get(name, 1000)]
-            print(json.dumps({"type": event_type, **fields}), file=protocol, flush=True)
+            event = {"type": event_type, **event_fields(fields, key)}
+            print(json.dumps(event), file=protocol, flush=True)
 
         try:
             config = json.loads(CONFIG.read_text(encoding="utf-8"))

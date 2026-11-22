@@ -65,7 +65,7 @@ pub async fn run(
         credential.is_some() || (launch.config.is_some() && reference.is_empty()),
         "Save a model credential for this agent before starting work."
     );
-    let stream_key = launch.config.as_ref().and(credential).unwrap_or_default();
+    let stream_key = credential.unwrap_or_default();
     let mut vars = match harness {
         "codex" => vec![("CODEX_API_KEY", credential.unwrap_or_default())],
         "claude-code" => vec![
@@ -122,6 +122,7 @@ pub async fn run(
         "HOME=/home/agent".into(),
     ]);
     if let Some(config_dir) = &config_dir {
+        // Match the non-root --user set by container_flags.
         let uid = unsafe { libc::geteuid() };
         let gid = unsafe { libc::getegid() };
         args.extend([
