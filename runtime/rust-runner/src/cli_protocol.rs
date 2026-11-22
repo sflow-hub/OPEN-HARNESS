@@ -287,6 +287,7 @@ pub fn launch(snapshot: &Value) -> Result<Launch<'_>> {
     }
 
     if legacy_provider.is_none() {
+        // The managed model validator checks the model ID and provider endpoint together.
         let model = additional_cli::Model::from_snapshot(model)?;
         let tools = additional_cli::tool_grants(harness_id, &allowed)?;
         let args = additional_cli::arguments(harness_id, &model, &tools, instructions);
@@ -1165,6 +1166,30 @@ mod tests {
             out.finish(Some(0)).unwrap(),
             json!({ "text": "Final answer" })
         );
+    }
+
+    #[test]
+    fn managed_harnesses_validate_the_model_and_endpoint_before_launch() {
+        for harness in ["opencode", "pi", "openhands"] {
+            let mut profile = snapshot(harness, "custom");
+            set(
+                &mut profile,
+                "/effectiveModel/baseUrl",
+                json!("https://model.example/v1"),
+            );
+            set(&mut profile, "/effectiveModel/model", json!("--invalid"));
+            assert!(rejection(&profile).contains("valid model ID"));
+
+            set(&mut profile, "/effectiveModel/model", json!("valid-model"));
+            set(
+                &mut profile,
+                "/effectiveModel/baseUrl",
+                json!("ftp://model.example/v1"),
+            );
+            assert!(rejection(&profile).contains("Endpoint must be HTTP(S)"));
+            set(&mut profile, "/effectiveModel/baseUrl", json!(""));
+            assert!(rejection(&profile).contains("Enter an OpenAI-compatible endpoint"));
+        }
     }
 
     #[test]

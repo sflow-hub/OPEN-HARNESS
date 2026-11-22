@@ -629,7 +629,7 @@ pub fn recover_inputs(root: &Path) -> Result<()> {
         let item = item?;
         let entry = item.file_name();
         let name = entry.to_str().unwrap_or_default();
-        let kind = item.file_type()?;
+        let kind = item.path().symlink_metadata()?.file_type();
         if kind.is_file() && (name.starts_with("env-") || name.starts_with("prompt-")) {
             fs::remove_file(item.path())?;
         } else if kind.is_dir() && name.starts_with("harness-config-") {

@@ -8,10 +8,10 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 
-import {answer,holdPrompt,key,modelFixture,serve,send} from './provider-fixture.mjs';
+import {answer,key,modelFixture,serve,send} from './provider-fixture.mjs';
 
 test('pinned headless harnesses run against a local model fixture', {skip:process.env.OPEN_HARNESS_RUST_LIVE!=='1',timeout:1_260_000}, async(t)=>{
-  const {seen,base}=await modelFixture(t);
+  const {seen,hold,base}=await modelFixture(t);
   const pending=[],complete=new Map(),events=new Map();
   const machineId='machine-live-'+randomUUID();
   const coordinator=await serve(t,(req,res,body)=>{
@@ -42,7 +42,9 @@ test('pinned headless harnesses run against a local model fixture', {skip:proces
     ...added.map(harness=>[harness,'/v1/chat/completions']),
   ];
   const wait = async (condition, attempts) => {
-    for(let i=0;i<attempts && !condition() && worker.exitCode===null;i++) await delay(200);
+    const running=()=>worker.exitCode===null && !worker.signalCode;
+    for(let i=0;i<attempts && !condition() && running();i++) await delay(200);
+    assert.ok(running(),'The worker exited during its live test. '+log);
     return condition();
   };
   for(const [harness,endpoint] of harnesses) await t.test(harness,{skip:!!selected && harness!==selected},async()=>{
@@ -69,11 +71,11 @@ test('pinned headless harnesses run against a local model fixture', {skip:proces
     assert.ok((seen.get(endpoint)||0)>priorRequests,diagnostic);
     assert.ok(events.get(id)?.some(e=>['message.delta','message.complete'].includes(e.type)),diagnostic);
     if (added.includes(harness)) {
-      const waiting=seen.get('waiting')||0;
+      const request=hold();
       const slowAgent=agentId+'-slow';
-      const slow=run(holdPrompt,slowAgent);
-      await wait(()=>(seen.get('waiting')||0)>waiting || complete.has(slow.id),2_050);
-      assert.ok((seen.get('waiting')||0)>waiting,
+      const slow=run(request.prompt,slowAgent);
+      await wait(()=>request.reached() || complete.has(slow.id),2_050);
+      assert.ok(request.reached(),
         harness+' did not reach the model before cancellation. '+JSON.stringify(complete.get(slow.id))+' '+log);
       const stop=randomUUID();
       pending.push({id:stop,agentId:slowAgent,kind:'stop',payload:{runId:slow.runId,commandId:slow.id}});

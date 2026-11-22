@@ -206,7 +206,7 @@ pub fn write_config(
             } else {
                 model.base_url
             };
-            // Pi expects a nonempty key in its model registry even for unauthenticated endpoints.
+            // Pi resolves $NAME against its environment. Its registry requires a value for keyless endpoints too.
             let key = if model.credential_ref.is_empty() {
                 "open-harness-local".into()
             } else {

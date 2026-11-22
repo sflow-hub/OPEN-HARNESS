@@ -6,7 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { modelFixture, key, answer, holdPrompt } from '../../rust-runner/tests/provider-fixture.mjs';
+import { modelFixture, key, answer } from '../../rust-runner/tests/provider-fixture.mjs';
 
 const binary = process.env.OPEN_HARNESS_TEST_NATIVE_BINARY;
 const cases = [
@@ -94,11 +94,11 @@ test('installed headless harnesses use the native coordinator and a local model'
       assert.ok(history.events.some(e => e.type === 'profile.applied' && e.payload.harness === harness && e.payload.computer.desktop === 'none'));
       t.diagnostic(harness + ' completed through the Rust API and ' + endpoint);
       if (['opencode', 'pi', 'openhands'].includes(harness)) {
-        const waitingBefore = provider.seen.get('waiting') || 0;
-        const active = await submit(holdPrompt);
+        const request = provider.hold();
+        const active = await submit(request.prompt);
         const path = '/v1/runs/' + active.id;
         await until(async () => {
-          if ((provider.seen.get('waiting') || 0) > waitingBefore) return true;
+          if (request.reached()) return true;
           const run = await api(path);
           assert.ok(!terminalStates.has(run.state), 'Run ended before the provider held it: ' + JSON.stringify(run));
           return false;

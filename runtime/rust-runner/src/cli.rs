@@ -240,9 +240,11 @@ pub async fn run(
                     let mut result = output.finish(status?.code())?;
                     engine::redact(&mut result, &secrets);
                     if !pending_text.is_empty() {
-                        outbox.event(command.id, run_id, json!({
+                        let mut event = json!({
                             "type":"message.delta","session_id":session,"payload":{"text":pending_text}
-                        }))?;
+                        });
+                        engine::redact(&mut event["payload"], &secrets);
+                        outbox.event(command.id, run_id, event)?;
                     }
                     return Ok(result);
                 },

@@ -661,7 +661,11 @@ fn merge_tool_selection(
             }
         }
     }
-    selected.extend(old.filter(|id| !shown(id)).map(str::to_owned));
+    let group_shown = group.first().is_some_and(|leader| shown(leader));
+    selected.extend(
+        old.filter(|id| !(shown(id) || group_shown && group.contains(id)))
+            .map(str::to_owned),
+    );
     let mut seen = HashSet::new();
     selected.retain(|id| seen.insert(id.clone()));
     selected
@@ -923,5 +927,17 @@ mod tests {
             merge_tool_selection(&prior, &fields, submitted),
             ["write_file", "patch", "search_files"]
         );
+    }
+
+    #[test]
+    fn revoking_grouped_tools_stays_effective_across_profile_saves() {
+        let mut prior = json!({"harness":"openhands",
+            "allowedTools":["read_file","write_file","patch","terminal"]});
+        let visible = [("toolShown".into(), "read_file".into())];
+        for _ in 0..2 {
+            let tools = merge_tool_selection(&prior, &visible, Vec::new());
+            assert_eq!(tools, ["terminal"]);
+            prior["allowedTools"] = json!(tools);
+        }
     }
 }
