@@ -35,7 +35,11 @@ enum Action {
     /// Serve the dashboard, coordinator and local worker in the foreground.
     Serve,
     /// Start a detached service, logging to the state directory.
-    Start,
+    Start {
+        /// Open the ready dashboard in the default browser.
+        #[arg(long)]
+        open: bool,
+    },
     /// Gracefully stop the coordinator and its local worker.
     Stop,
     /// Build a pinned worker image. With no argument, prepare Hermes, Claude Code and Codex.
@@ -222,6 +226,67 @@ fn state(path: Option<&Path>) -> Result<PathBuf> {
         .map(Path::to_owned)
         .unwrap_or(std::env::current_dir()?.join(".open-harness")))
 }
+async fn start(root: &Path, port: u16, bind: IpAddr) -> Result<Operator> {
+    if let Ok(operator) = Operator::connect(port, bind).await {
+        println!("Open Harness is already running on port {port}.");
+        return Ok(operator);
+    }
+    let root = server::state_dir(root)?;
+    let log = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(root.join("native-service.log"))?;
+    let mut child = Command::new(std::env::current_exe()?)
+        .args([
+            "serve",
+            "--port",
+            &port.to_string(),
+            "--bind",
+            &bind.to_string(),
+            "--state-dir",
+        ])
+        .arg(&root)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .process_group(0)
+        .spawn()?;
+    for _ in 0..100 {
+        if let Ok(operator) = Operator::connect(port, bind).await {
+            println!("Open Harness is running on port {port}.");
+            return Ok(operator);
+        }
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    bail!(
+        "Open Harness did not become ready. Inspect {}.",
+        root.join("native-service.log").display()
+    )
+}
+
+fn open_dashboard(url: &str) -> Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    println!("Dashboard: {url}");
+    let status = Command::new(opener)
+        .arg(url)
+        .status()
+        .with_context(|| format!("Could not launch {opener}. Open {url} in your browser."))?;
+    ensure!(
+        status.success(),
+        "Could not open the dashboard. Open {url} in your browser."
+    );
+    Ok(())
+}
+
 pub async fn main() -> Result<()> {
     let args = Args::parse();
     let root = state(args.state_dir.as_deref())?;
@@ -288,47 +353,12 @@ pub async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Action::Start => {
-            if Operator::connect(args.port, args.bind).await.is_ok() {
-                println!("Open Harness is already running on port {}.", args.port);
-                return Ok(());
+        Action::Start { open } => {
+            let operator = start(&root, args.port, args.bind).await?;
+            if open {
+                open_dashboard(&operator.url)?;
             }
-            let root = server::state_dir(&root)?;
-            let log = fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(root.join("native-service.log"))?;
-            let mut child = Command::new(std::env::current_exe()?)
-                .args([
-                    "serve",
-                    "--port",
-                    &args.port.to_string(),
-                    "--bind",
-                    &args.bind.to_string(),
-                    "--state-dir",
-                ])
-                .arg(&root)
-                .stdin(Stdio::null())
-                .stdout(log.try_clone()?)
-                .stderr(log)
-                .process_group(0)
-                .spawn()?;
-            for _ in 0..100 {
-                if Operator::connect(args.port, args.bind).await.is_ok() {
-                    println!("Open Harness is running on port {}.", args.port);
-                    return Ok(());
-                }
-                if child.try_wait()?.is_some() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(120)).await;
-            }
-            bail!(
-                "Open Harness did not become ready. Inspect {}.",
-                root.join("native-service.log").display()
-            )
+            Ok(())
         }
         Action::InstallService => install_service(&root, args.port, args.bind),
         action => {

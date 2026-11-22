@@ -10,6 +10,10 @@ Each agent selects **Hermes**, **Claude Code**, **Codex**, **OpenCode**, **Pi**,
 
 Use Linux or macOS with Rust 1.89 or later, a C toolchain, Make, Perl, and a running Docker-compatible engine. On Windows, use a Linux distribution under WSL2. Run the service as the account that owns its state directory.
 
+Double-click **Open Harness.command** in macOS Finder or **Open Harness.desktop** in a Linux file manager. On Linux, choose **Allow Launching** if prompted. The launcher builds the app on first use, starts the coordinator, and opens the dashboard in your default browser. Click it again to reopen the running dashboard. Closing the browser or launcher window leaves the coordinator running.
+
+For foreground operation, run these commands in a terminal.
+
 ```sh
 cargo build --locked --release
 ./target/release/open-harness serve

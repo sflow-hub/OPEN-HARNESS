@@ -962,6 +962,48 @@ async fn paired_native_worker_runs_every_harness_and_transfers_private_files() -
 }
 
 #[tokio::test]
+async fn clickable_launcher_reopens_the_configured_dashboard() -> Result<()> {
+    let mut s = Service::launch().await?;
+    let project = s.state.join("Open Harness checkout");
+    let release = project.join("target/release");
+    std::fs::create_dir_all(&release)?;
+    std::os::unix::fs::symlink(BINARY, release.join("open-harness"))?;
+    let launcher = project.join("Open Harness.command");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Open Harness.command"),
+        &launcher,
+    )?;
+    let port = reqwest::Url::parse(&s.url)?.port().unwrap();
+    std::fs::write(project.join(".env"), format!("OPEN_HARNESS_PORT={port}\n"))?;
+
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let opener = s.empty_bin.join(opener);
+    std::fs::write(&opener, "#!/bin/sh\nprintf '%s\\n' \"$@\" > opened-url\n")?;
+    std::fs::set_permissions(&opener, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    let output = Command::new(launcher)
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", s.empty_bin.display()))
+        .current_dir(&s.state)
+        .stdin(Stdio::null())
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("already running"));
+    assert_eq!(
+        std::fs::read_to_string(project.join("opened-url"))?,
+        format!("{}\n", s.url)
+    );
+    s.stop().await
+}
+
+#[tokio::test]
 async fn native_operator_cli_creates_and_runs_an_agent_without_a_browser() -> Result<()> {
     let mut s = Service::launch().await?;
     let v = s
