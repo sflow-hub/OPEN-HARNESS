@@ -4736,3 +4736,11 @@ and image; the final ordinary source gates remain 519 Node passes/8 skips,
 278 browser passes, and successful types/build/lint. Native AMD64 execution,
 full actual Compose lifecycle, hosted managed provisioning/PTY, real external
 accounts and paid model reasoning remain outside this evidence.
+
+## OpenCode, Pi, and OpenHands headless adapters — November 21, 2026
+
+- The Rust workspace passed 90 tests. The native HTTP tests exercised all six harnesses on local and paired workers, including install retry after a worker upgrade and retaining an active run’s profile revision while changing its harness. All seven native Chromium tests passed with JavaScript disabled.
+- The Rust worker fixture passed all 18 new harness and provider combinations. It covered install retry, cancellation, incomplete streams, credential redaction, and event replay after an acknowledgment was lost. Rust formatting and Clippy passed.
+- The pinned OpenCode and Pi executables completed real headless turns against loopback fixtures for OpenAI, Anthropic, xAI, OpenRouter, and a Custom endpoint. The pinned OpenHands SDK completed model fixture turns for all six provider choices on Python 3.12, including a keyless Local endpoint. Its bridge check also exercised terminal events, credential redaction, and a rejected key.
+- The Rust worker also completed and cancelled runs using the real OpenCode and Pi executables through a local test process shim. The cancellation check waited for the fixture to receive the model request before stopping the run.
+- All three pinned images built on Linux ARM64. Each completed a real run through the Rust worker and acknowledged cancellation after a second run reached the local Chat Completions fixture. The test used a Docker CLI adapter for the VM’s rootless containerd engine. The Pi and OpenHands snapshots were warmed before their passing runs.

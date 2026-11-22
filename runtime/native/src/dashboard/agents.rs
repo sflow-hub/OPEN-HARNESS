@@ -4,6 +4,7 @@ use super::{
     html::{self, Page},
 };
 use crate::App;
+use axum::http::StatusCode;
 use axum::{
     Form,
     extract::{Query, State},
@@ -14,7 +15,12 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 
-pub async fn view(app: &App, session: Session, notice: Option<(String, String)>) -> Response {
+async fn view(
+    app: &App,
+    session: Session,
+    notice: Option<(String, String)>,
+    draft: Option<&CreateForm>,
+) -> Response {
     let agents = match api::call(app, Call::Agents, None).await {
         Ok(v) => api::agents_list(&v),
         Err(e) => {
@@ -66,6 +72,7 @@ pub async fn view(app: &App, session: Session, notice: Option<(String, String)>)
     if list.is_empty() {
         list.push_str(r#"<li><div class="muted">No agents yet.</div></li>"#);
     }
+    let model_connections = html::model_connection_options(app).await;
     let body = format!(
         r#"
     <section class="panel">
@@ -81,16 +88,30 @@ pub async fn view(app: &App, session: Session, notice: Option<(String, String)>)
         <form method="post" action="/ui/agents/create" class="stack card">
           <h2>Create</h2>
           {csrf}
-          <label>Name <input name="name" maxlength="30" required autocomplete="off" /></label>
-          <label>ID <input name="id" maxlength="80" placeholder="optional" autocomplete="off" /></label>
+          <label>Name <input name="name" maxlength="30" required autocomplete="off" value="{name}" /></label>
+          <label>ID <input name="id" maxlength="80" placeholder="optional" autocomplete="off" value="{id}" /></label>
           <label>Harness <select name="harness" required>{harness}</select></label>
-          <label>Model ID <input name="model" placeholder="optional override" autocomplete="off" /></label>
+          <details{open}>
+            <summary>Model connection</summary>
+            <label>Provider <input name="provider" list="model-providers" placeholder="harness default" value="{provider}" /></label>
+            <label>Model ID <input name="model" placeholder="harness default" autocomplete="off" value="{model}" /></label>
+            <label>Credential ref <input name="credentialRef" list="model-credentials" autocomplete="off" value="{credential}" /></label>
+            <label>Base URL <input name="baseUrl" autocomplete="off" value="{base_url}" /></label>
+          </details>
           <button type="submit" class="primary">Create agent</button>
         </form>
+        {model_connections}
       </div>
     </section>"#,
         csrf = html::csrf_field(&session),
-        harness = html::harness_options("hermes"),
+        harness = html::harness_options(draft.map_or("hermes", |d| &d.harness)),
+        name = html::attr(draft.map_or("", |d| &d.name)),
+        id = html::attr(draft.map_or("", |d| &d.id)),
+        provider = html::attr(draft.map_or("", |d| &d.provider)),
+        model = html::attr(draft.map_or("", |d| &d.model)),
+        credential = html::attr(draft.map_or("", |d| &d.credential_ref)),
+        base_url = html::attr(draft.map_or("", |d| &d.base_url)),
+        open = if draft.is_some() { " open" } else { "" },
         list = list,
     );
     html::page(Page {
@@ -113,7 +134,7 @@ pub async fn get(
     let Some(session) = auth::session_from(&app, &headers) else {
         return Redirect::to("/").into_response();
     };
-    view(&app, session, auth::notice_from_query(&q)).await
+    view(&app, session, auth::notice_from_query(&q), None).await
 }
 
 #[derive(Deserialize)]
@@ -125,6 +146,12 @@ pub struct CreateForm {
     pub harness: String,
     #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default, rename = "credentialRef")]
+    pub credential_ref: String,
+    #[serde(default, rename = "baseUrl")]
+    pub base_url: String,
 }
 
 pub async fn create(
@@ -146,14 +173,34 @@ pub async fn create(
     if !id.is_empty() {
         payload["id"] = json!(id);
     }
-    let model = form.model.trim();
-    if !model.is_empty() {
-        payload["model"] = json!({"model": model});
+    let mut model = serde_json::Map::new();
+    for (key, value) in [
+        ("model", form.model.trim()),
+        ("provider", form.provider.trim()),
+        ("credentialRef", form.credential_ref.trim()),
+        ("baseUrl", form.base_url.trim()),
+    ] {
+        if !value.is_empty() {
+            model.insert(key.to_owned(), json!(value));
+        }
     }
-    match api::call(&app, Call::CreateAgent, Some(payload)).await {
-        Ok(_) => Redirect::to(&auth::flash_ok("/ui/agents", "Agent created.")).into_response(),
-        Err(e) => Redirect::to(&auth::flash_err("/ui/agents", &e)).into_response(),
-    }
+    let message = if model.contains_key("provider") && !model.contains_key("model") {
+        "Enter a model ID for the selected provider.".into()
+    } else {
+        if !model.is_empty() {
+            payload["model"] = model.into();
+        }
+        match api::call(&app, Call::CreateAgent, Some(payload)).await {
+            Ok(_) => {
+                return Redirect::to(&auth::flash_ok("/ui/agents", "Agent created."))
+                    .into_response();
+            }
+            Err(error) => error,
+        }
+    };
+    let mut response = view(&app, session, Some((message, "error".into())), Some(&form)).await;
+    *response.status_mut() = StatusCode::BAD_REQUEST;
+    response
 }
 
 #[derive(Deserialize)]

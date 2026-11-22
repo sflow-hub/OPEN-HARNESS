@@ -407,12 +407,7 @@ pub async fn call(app: &App, call: Call<'_>, body: Option<Value>) -> Result<Valu
 }
 
 pub fn harness_label(id: &str) -> &'static str {
-    match id {
-        "hermes" => "Hermes",
-        "claude-code" => "Claude Code",
-        "codex" => "Codex",
-        _ => "Hermes",
-    }
+    open_harness_runner::harnesses::find(id).map_or("Hermes", |harness| harness.name)
 }
 
 pub fn agent_name(agents: &[Value], id: &str) -> String {

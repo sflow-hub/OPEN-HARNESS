@@ -50,6 +50,15 @@ fn agent_tools(harness: &str) -> Value {
             "Retrieve a web page.",
         ));
     }
+    if crate::harnesses::is_additional(harness)
+        && let Some(spec) = crate::harnesses::find(harness)
+    {
+        tools.retain(|tool| {
+            tool["id"]
+                .as_str()
+                .is_some_and(|id| spec.tool_ids.contains(&id))
+        });
+    }
     if harness == "hermes" {
         tools.extend(coordination_tools());
     }

@@ -97,11 +97,9 @@ pub async fn run(
             json!({"id":"mock-tool","name":"terminal","result":"Created and executed task.py"}),
         )?;
     }
-    let name = match selected {
-        "hermes" => "Hermes",
-        "claude-code" => "Claude Code",
-        _ => "Codex",
-    };
+    let name = crate::harnesses::find(selected)
+        .context("Unknown agent harness")?
+        .name;
     let text = format!("{name} mock completed the task.");
     emit("message.delta", json!({"text":text}))?;
     emit("message.complete", json!({"text":text,"status":"complete"}))?;

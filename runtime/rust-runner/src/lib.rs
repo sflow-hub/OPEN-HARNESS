@@ -1,7 +1,9 @@
+mod additional_cli;
 mod claude_terminal;
 mod cli;
 mod cli_protocol;
 mod engine;
+pub mod harnesses;
 mod hermes;
 mod inspect;
 mod legacy;
@@ -480,7 +482,8 @@ async fn control(target: Option<mpsc::Sender<Control>>, command: Command) -> Res
 
 fn capabilities(container: bool) -> Value {
     json!({"container":container, "workerLaunch":true, "direct":false, "desktop":false, "virtualDesktop":false,
-        "detail":"Headless Docker workers for Hermes, Claude Code, and Codex."})
+        "harnesses":harnesses::HARNESSES.map(|harness| harness.id),
+        "detail":"Headless Docker worker."})
 }
 
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {

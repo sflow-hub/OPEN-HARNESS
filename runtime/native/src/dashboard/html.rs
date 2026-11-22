@@ -2,6 +2,8 @@
 use super::auth::Session;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
+use open_harness_runner::harnesses::{HARNESSES, MODEL_PROVIDERS};
+use serde_json::Value;
 
 pub fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -182,17 +184,53 @@ pub fn option(value: &str, label: &str, selected: bool) -> String {
 }
 
 pub fn harness_options(selected: &str) -> String {
-    ["hermes", "claude-code", "codex"]
-        .into_iter()
-        .map(|id| {
-            let label = super::api::harness_label(id);
+    HARNESSES
+        .iter()
+        .map(|harness| {
             option(
-                id,
-                label,
-                selected == id || (selected.is_empty() && id == "hermes"),
+                harness.id,
+                harness.name,
+                selected == harness.id || (selected.is_empty() && harness.id == "hermes"),
             )
         })
         .collect()
+}
+
+pub async fn model_connection_options(app: &crate::App) -> String {
+    let providers: String = MODEL_PROVIDERS
+        .iter()
+        .map(|provider| {
+            let label = match *provider {
+                "openai" => "OpenAI",
+                "anthropic" => "Anthropic",
+                "xai" => "xAI",
+                "openrouter" => "OpenRouter",
+                "local" => "Local",
+                _ => "Custom",
+            };
+            option(provider, label, false)
+        })
+        .collect();
+    let credentials = super::api::call(app, super::api::Call::Credentials, None)
+        .await
+        .unwrap_or(Value::Null);
+    let references: String = credentials["credentials"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry["present"] == true)
+        .filter_map(|entry| {
+            let reference = entry["ref"].as_str()?;
+            Some(option(
+                reference,
+                entry["label"].as_str().unwrap_or(reference),
+                false,
+            ))
+        })
+        .collect();
+    format!(
+        r#"<datalist id="model-providers">{providers}</datalist><datalist id="model-credentials">{references}</datalist>"#
+    )
 }
 
 pub fn agent_options(agents: &[serde_json::Value], selected: &str, empty: Option<&str>) -> String {

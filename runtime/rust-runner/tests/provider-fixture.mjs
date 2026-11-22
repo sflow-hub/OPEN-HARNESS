@@ -3,6 +3,7 @@ import {once} from 'node:events';
 
 export const answer='Confirmed the headless run.';
 export const key='fixture-api-key';
+export const holdPrompt='Wait for cancellation from Open Harness.';
 const sse=(res,type,v)=>res.write(`event: ${type}\ndata: ${JSON.stringify(v)}\n\n`);
 export const send=(res,value)=>res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(value));
 
@@ -64,6 +65,14 @@ export async function modelFixture(t) {
     if(req.headers.authorization!=='Bearer '+key && req.headers['x-api-key']!==key) return res.writeHead(401).end('{}');
     if(path==='/v1/responses') return responses(res,body.model);
     if(path==='/v1/messages') return messages(res,body.model,body.stream);
+    if(path==='/v1/chat/completions' && body.messages?.some(message=>
+      message.role==='user' && JSON.stringify(message.content).includes(holdPrompt)
+    )) {
+      seen.set('waiting',1+(seen.get('waiting')||0));
+      res.writeHead(200,{'content-type':'text/event-stream'});
+      res.flushHeaders();
+      return;
+    }
     if(path==='/v1/chat/completions') return chat(res,body.model,body.stream);
     res.writeHead(404).end('{}');
   },process.env.OPEN_HARNESS_RUST_PROVIDER_BIND||'127.0.0.1');

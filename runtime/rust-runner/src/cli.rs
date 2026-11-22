@@ -9,7 +9,7 @@ use tokio::{
 };
 
 use crate::{
-    agent_dir, cli_protocol, directory,
+    additional_cli, agent_dir, cli_protocol, directory,
     engine::{self, Keys},
     hermes::{Control, docker, remove_container},
     outbox::Outbox,
@@ -33,25 +33,49 @@ pub async fn run(
         "Run profile belongs to a different agent."
     );
     let harness = engine::harness(snapshot)?;
-    let argv = cli_protocol::arguments(snapshot)?;
+    let launch = cli_protocol::launch(snapshot)?;
+    ensure!(
+        launch.harness == harness,
+        "Run profile uses a different harness."
+    );
     if snapshot["modelAuth"] == "chatgpt-plan" {
-        return crate::plan_run::run(root, command, machine, outbox, controls, shutdown, argv)
-            .await;
+        return crate::plan_run::run(
+            root,
+            command,
+            machine,
+            outbox,
+            controls,
+            shutdown,
+            launch.args,
+        )
+        .await;
     }
     let run_id = required_str(&command.payload, "runId")?;
     let prompt = required_str(&command.payload, "prompt")?;
     let model = &snapshot["effectiveModel"];
+    let reference = match &launch.config {
+        Some(config) => config.model.credential_ref,
+        None => required_str(model, "credentialRef")?,
+    };
     let credential = secrets
-        .get(required_str(model, "credentialRef")?)
-        .filter(|v| !v.is_empty())
-        .context("Save a model credential for this agent before starting work")?;
-    let mut vars = if harness == "codex" {
-        vec![("CODEX_API_KEY", credential.as_str())]
-    } else {
-        vec![
-            ("ANTHROPIC_API_KEY", credential.as_str()),
+        .get(reference)
+        .map(String::as_str)
+        .filter(|key| !key.is_empty());
+    ensure!(
+        credential.is_some() || (launch.config.is_some() && reference.is_empty()),
+        "Save a model credential for this agent before starting work."
+    );
+    let stream_key = launch.config.as_ref().and(credential).unwrap_or_default();
+    let mut vars = match harness {
+        "codex" => vec![("CODEX_API_KEY", credential.unwrap_or_default())],
+        "claude-code" => vec![
+            ("ANTHROPIC_API_KEY", credential.unwrap_or_default()),
             ("DISABLE_AUTOUPDATER", "1"),
-        ]
+        ],
+        _ => credential
+            .into_iter()
+            .map(|key| (additional_cli::MODEL_KEY, key))
+            .collect(),
     };
     if harness == "claude-code"
         && let Some(url) = model["baseUrl"].as_str().filter(|s| !s.is_empty())
@@ -59,14 +83,19 @@ pub async fn run(
         vars.push(("ANTHROPIC_BASE_URL", url));
     }
     let agent_root = agent_dir(root, agent)?;
-    directory(&agent_root.join("harnesses"))?;
-    let home = agent_root.join("harnesses").join(harness);
-    directory(&home)?;
-    directory(&home.join(if harness == "codex" {
-        ".codex"
+    let config_dir = if let Some(config) = &launch.config {
+        let directory = engine::config_directory(root)?;
+        additional_cli::write_config(
+            harness,
+            directory.path(),
+            &config.model,
+            &config.tools,
+            config.instructions,
+        )?;
+        Some(directory)
     } else {
-        ".claude"
-    }))?;
+        None
+    };
     let name = format!("open-harness-rust-{}", command.id);
     let session = command.id.to_string();
     let image = engine::prepare_image(harness, &mut controls, &mut shutdown).await?;
@@ -91,13 +120,47 @@ pub async fn run(
             .into(),
         "-e".into(),
         "HOME=/home/agent".into(),
-        "-e".into(),
-        "CODEX_HOME=/home/agent/.codex".into(),
-        "-e".into(),
-        "CLAUDE_CONFIG_DIR=/home/agent/.claude".into(),
     ]);
+    if let Some(config_dir) = &config_dir {
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        args.extend([
+            "--mount".into(),
+            engine::bind(config_dir.path(), "target=/run/open-harness", true)?,
+            "--tmpfs".into(),
+            format!("/home/agent:rw,nosuid,nodev,mode=0700,uid={uid},gid={gid}"),
+        ]);
+        if harness == "opencode" {
+            for assignment in [
+                "OPENCODE_CONFIG=/run/open-harness/opencode.json",
+                "OPENCODE_DISABLE_PROJECT_CONFIG=1",
+                "OPENCODE_DISABLE_EXTERNAL_SKILLS=1",
+                "OPENCODE_DISABLE_MODELS_FETCH=1",
+                "OPENCODE_DISABLE_AUTOUPDATE=1",
+                "OPENCODE_DISABLE_LSP_DOWNLOAD=1",
+            ] {
+                args.extend(["-e".into(), assignment.into()]);
+            }
+        }
+    } else {
+        directory(&agent_root.join("harnesses"))?;
+        let home = agent_root.join("harnesses").join(harness);
+        directory(&home)?;
+        directory(&home.join(if harness == "codex" {
+            ".codex"
+        } else {
+            ".claude"
+        }))?;
+        args.extend([
+            "-e".into(),
+            "CODEX_HOME=/home/agent/.codex".into(),
+            "-e".into(),
+            "CLAUDE_CONFIG_DIR=/home/agent/.claude".into(),
+            "--mount".into(),
+            engine::bind(&home, "target=/home/agent", false)?,
+        ]);
+    }
     for (src, target) in [
-        (home, "target=/home/agent"),
         (agent_root.join("private"), "target=/workspace/private"),
         (root.join("shared"), "target=/workspace/shared"),
     ] {
@@ -106,13 +169,17 @@ pub async fn run(
     for mount in engine::folder_mounts(root, snapshot).await? {
         args.extend(["--mount".into(), mount]);
     }
-    // Docker and containerd have different stdin/EOF behavior when attaching to
-    // an already-created container. Both CLIs read one request from this file descriptor.
+    let workdir = if matches!(harness, "opencode" | "openhands") {
+        "/workspace"
+    } else {
+        "/workspace/shared"
+    };
+    // Both Docker and containerd can open this file as stdin, regardless of attach/EOF behavior.
     args.extend([
         "--mount".into(),
         engine::bind(input.path(), "target=/run/open-harness-prompt", true)?,
         "--workdir".into(),
-        "/workspace/shared".into(),
+        workdir.into(),
         "--entrypoint".into(),
         "/bin/sh".into(),
         image,
@@ -120,7 +187,7 @@ pub async fn run(
         r#"exec "$@" < /run/open-harness-prompt"#.into(),
         "open-harness-input".into(),
     ]);
-    args.extend(argv);
+    args.extend(launch.args);
     let mut stop_reply = None;
     let result=async {
         let args=args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -134,6 +201,7 @@ pub async fn run(
         let deadline=sleep(Duration::from_secs(24*60*60));
         tokio::pin!(deadline);
         let mut output=cli_protocol::Output::new(harness);
+        let mut pending_text=String::new();
         outbox.event(command.id,run_id,json!({"type":"gateway.ready","session_id":session,"payload":{"harness":harness}}))?;
         let mut done=false;
         let mut buffer=Vec::new();
@@ -152,13 +220,31 @@ pub async fn run(
                     if let Ok(mut value)=serde_json::from_slice::<Value>(&buffer) {
                         engine::redact(&mut value,&secrets);
                         for mut event in output.accept(&value) {
+                            if event["type"] == "message.delta"
+                                && !stream_key.is_empty()
+                                && let Some(text) = event["payload"]["text"].as_str()
+                            {
+                                let safe = crate::plan_run::stream_text(&mut pending_text, text, stream_key);
+                                if safe.is_empty() { continue; }
+                                event["payload"]["text"] = safe.into();
+                            }
+                            engine::redact(&mut event["payload"], &secrets);
                             event["session_id"]=session.as_str().into();
                             outbox.event(command.id,run_id,event)?;
                         }
                     }
                     buffer.clear();
                 }
-                status=child.wait(), if done=>return output.finish(status?.code()),
+                status=child.wait(), if done=>{
+                    let mut result = output.finish(status?.code())?;
+                    engine::redact(&mut result, &secrets);
+                    if !pending_text.is_empty() {
+                        outbox.event(command.id, run_id, json!({
+                            "type":"message.delta","session_id":session,"payload":{"text":pending_text}
+                        }))?;
+                    }
+                    return Ok(result);
+                },
             }
         }
     }.await;

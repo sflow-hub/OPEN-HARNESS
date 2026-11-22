@@ -1,6 +1,6 @@
 use super::{
     credentials,
-    model::{CORE, Connector, Model, Profile},
+    model::{Connector, Model, Profile},
     profile, response,
     vault::Vault,
 };
@@ -11,6 +11,7 @@ use axum::{
     extract::{Path, State},
     routing::{get, post},
 };
+use open_harness_runner::harnesses as registry;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
@@ -27,13 +28,28 @@ pub(super) fn router() -> Router<App> {
         .route("/v1/agents/{id}/connector-check", post(connector))
 }
 async fn harnesses() -> Json<Value> {
-    Json(json!({"harnesses":[
-        {"id":"hermes","name":"Hermes","description":"General-purpose agents with tools, memory and skills.","headless":true},
-        {"id":"claude-code","name":"Claude Code","description":"Anthropic’s coding harness in an isolated workspace.","headless":true},
-        {"id":"codex","name":"Codex","description":"OpenAI’s coding harness in an isolated workspace.","headless":true}]}))
+    let entries: Vec<Value> = registry::HARNESSES
+        .iter()
+        .map(|harness| {
+            let mut entry = json!({"id":harness.id,"name":harness.name,"description":harness.description,"headless":true});
+            if registry::is_additional(harness.id) {
+                entry["modelProviders"] = json!(registry::MODEL_PROVIDERS);
+            }
+            entry
+        })
+        .collect();
+    Json(json!({"harnesses":entries}))
 }
 pub(super) fn status(db: &Connection, p: &Profile) -> Result<Value> {
     let machine = &p.computer.machine_id;
+    if registry::is_additional(&p.harness)
+        && let Ok(assigned) = machines::info(db, machine)
+        && let Some(detail) = machines::harness_upgrade(&assigned, &p.harness)
+    {
+        return Ok(
+            json!({"harness":p.harness,"state":"failed","detail":detail,"updatedAt":"","workerUpgradeRequired":true}),
+        );
+    }
     let row:Option<(String,Option<String>,String)>=db.query_row("SELECT c.state,c.result_json,h.updated_at FROM machine_harness_installations h JOIN runner_commands c ON h.command_id=c.id WHERE h.machine_id=?1 AND h.harness=?2",params![machine,p.harness],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
     let (state, mut detail, stamp) = match row {
         Some((state, raw, stamp)) => {
@@ -67,7 +83,8 @@ pub(super) fn status(db: &Connection, p: &Profile) -> Result<Value> {
 }
 pub(super) fn queue_install(db: &Connection, p: &Profile, retry: bool) -> Result<()> {
     let prior = status(db, p)?;
-    if matches!(prior["state"].as_str(), Some("queued" | "installing"))
+    if prior["workerUpgradeRequired"] == true
+        || matches!(prior["state"].as_str(), Some("queued" | "installing"))
         || (prior["state"] == "ready" && !retry)
     {
         return Ok(());
@@ -91,11 +108,11 @@ async fn install(State(app): State<App>, Path(id): Path<String>) -> Reply {
     Ok(Json(response(&app, &db, &p)?))
 }
 fn cli_tools(harness: &str) -> Value {
-    let core = CORE
-        .into_iter()
-        .chain(["web_search"])
-        .chain((harness == "claude-code").then_some("web_extract"));
-    let tools = core
+    let definition = registry::find(harness);
+    let ids = definition.map_or(&[][..], |item| item.tool_ids);
+    let tools = ids
+        .iter()
+        .copied()
         .map(|id| {
             let (name, group, description) = match id {
                 "terminal" => (
@@ -113,7 +130,11 @@ fn cli_tools(harness: &str) -> Value {
             json!({"id":id,"name":name,"group":group,"description":description,"available":true})
         })
         .collect::<Vec<_>>();
-    json!({"source":"runtime","tools":tools})
+    let mut catalog = json!({"source":"runtime","tools":tools});
+    if let Some(definition) = definition.filter(|item| !item.tool_group.is_empty()) {
+        catalog["toolGrantGroup"] = json!(definition.tool_group);
+    }
+    catalog
 }
 async fn probe(
     app: &App,

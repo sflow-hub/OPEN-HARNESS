@@ -16,10 +16,13 @@ use tokio::time::{Instant, sleep};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_open-harness");
 const LIMIT: Duration = Duration::from_secs(45);
-const HARNESSES: [(&str, &str, &str); 3] = [
+const HARNESSES: [(&str, &str, &str); 6] = [
     ("atlas", "hermes", "Hermes"),
     ("ada", "claude-code", "Claude Code"),
     ("scout", "codex", "Codex"),
+    ("builder", "opencode", "OpenCode"),
+    ("analyst", "pi", "Pi"),
+    ("maintainer", "openhands", "OpenHands"),
 ];
 
 struct Process(Option<Child>);
@@ -368,6 +371,122 @@ async fn all_harnesses_finish_without_a_connected_client_and_replay_after_restar
 }
 
 #[tokio::test]
+async fn additional_harnesses_offer_all_model_connections() -> Result<()> {
+    let mut s = Service::launch().await?;
+    let c = client()?;
+    let catalog = checked(s.operator(&c, Method::GET, "/v1/harnesses")).await?;
+    let catalog = catalog["harnesses"]
+        .as_array()
+        .context("Missing harness catalog")?;
+    assert_eq!(catalog.len(), HARNESSES.len());
+    let providers = [
+        ("openai", "OPENAI_API_KEY"),
+        ("anthropic", "ANTHROPIC_API_KEY"),
+        ("xai", "XAI_API_KEY"),
+        ("openrouter", "OPENROUTER_API_KEY"),
+        ("local", ""),
+        ("custom", ""),
+    ];
+    for (agent, harness, name) in &HARNESSES[3..] {
+        let entry = catalog
+            .iter()
+            .find(|item| item["id"] == *harness)
+            .context("Missing harness")?;
+        assert_eq!(entry["name"], *name);
+        assert_eq!(entry["headless"], true);
+        assert_eq!(
+            entry["modelProviders"],
+            json!(providers.map(|(provider, _)| provider))
+        );
+        let created = checked(
+            s.operator(&c, Method::POST, "/v1/agents")
+                .json(&json!({"id":agent,"name":name,"harness":harness})),
+        )
+        .await?;
+        assert_eq!(created["profile"]["model"]["provider"], "xai");
+        assert_eq!(created["profile"]["model"]["credentialRef"], "XAI_API_KEY");
+        assert_eq!(created["profile"]["model"]["inherit"], false);
+        let mut profile = created["profile"].clone();
+        let route = format!("/v1/agents/{agent}/profile");
+        for (provider, reference) in providers {
+            let base = if matches!(provider, "local" | "custom") {
+                "http://model.invalid/v1"
+            } else {
+                ""
+            };
+            profile["model"] = json!({"inherit":false,"provider":provider,"model":"fixture-model","credentialRef":"","baseUrl":base});
+            let saved = checked(s.operator(&c, Method::PUT, &route).json(&profile)).await?;
+            profile = saved["profile"].clone();
+            assert_eq!(profile["model"]["provider"], provider);
+            assert_eq!(profile["model"]["credentialRef"], reference);
+            assert_eq!(profile["model"]["baseUrl"], base);
+        }
+        profile["model"]["baseUrl"] = json!("");
+        assert_eq!(
+            s.operator(&c, Method::PUT, &route)
+                .json(&profile)
+                .send()
+                .await?
+                .status(),
+            StatusCode::BAD_REQUEST,
+        );
+        profile["model"]["provider"] = json!("unsupported");
+        assert_eq!(
+            s.operator(&c, Method::PUT, &route)
+                .json(&profile)
+                .send()
+                .await?
+                .status(),
+            StatusCode::BAD_REQUEST,
+        );
+    }
+    s.stop().await
+}
+
+#[tokio::test]
+async fn switching_harnesses_keeps_the_active_revision_and_dormant_grants() -> Result<()> {
+    let mut s = Service::launch().await?;
+    let c = client()?;
+    let created = checked(
+        s.operator(&c, Method::POST, "/v1/agents")
+            .json(&json!({"id":"switcher","name":"Switcher","harness":"opencode"})),
+    )
+    .await?;
+    let before = created["profile"]["revision"].clone();
+    let run = submit(&s, &c, "switcher", "MOCK_SLOW update a report").await?;
+    wait_state(&s, &c, &run, "running").await?;
+    let route = "/v1/agents/switcher/profile";
+    let mut profile = created["profile"].clone();
+    profile["harness"] = json!("openhands");
+    profile["allowedTools"] = json!(["write_file", "terminal", "search_files"]);
+    let saved = checked(s.operator(&c, Method::PUT, route).json(&profile)).await?;
+    assert_eq!(saved["activeRevision"], before);
+    assert_eq!(saved["pending"], true);
+    assert!(
+        saved["profile"]["allowedTools"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!("search_files")))
+    );
+    assert_eq!(
+        wait_state(&s, &c, &run, "completed").await?["result"],
+        "OpenCode mock completed the task.",
+    );
+    let next = submit(&s, &c, "switcher", "Review a report").await?;
+    assert_eq!(
+        wait_state(&s, &c, &next, "completed").await?["result"],
+        "OpenHands mock completed the task.",
+    );
+    let snapshots = events(&s, &c, &next, 0).await?;
+    let applied = snapshots
+        .iter()
+        .find(|e| e["type"] == "profile.applied")
+        .context("Missing run profile")?;
+    assert_eq!(applied["payload"]["revision"], saved["profile"]["revision"]);
+    assert_eq!(applied["payload"]["allowedTools"], json!(["terminal"]));
+    s.stop().await
+}
+
+#[tokio::test]
 async fn approvals_cancellation_and_board_review_use_the_durable_worker_queue() -> Result<()> {
     let mut s = Service::launch().await?;
     let c = client()?;
@@ -477,6 +596,74 @@ async fn claim_run(s: &Service, c: &Client, worker: &WorkerCredential, id: &str)
         );
         sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[tokio::test]
+async fn older_workers_can_install_a_new_harness_after_their_next_compatible_heartbeat()
+-> Result<()> {
+    let mut s = Service::launch().await?;
+    let c = client()?;
+    let worker = pair_fixture(&s, &c, "Older worker").await?;
+    let created = checked(
+        s.operator(&c, Method::POST, "/v1/agents")
+            .json(&json!({"id":"template","name":"Template","harness":"pi"})),
+    )
+    .await?;
+    let mut profile = created["profile"].clone();
+    profile["id"] = json!("remote");
+    profile["computer"]["machineId"] = json!(worker.machine);
+    checked(
+        s.operator(&c, Method::POST, "/v1/agents")
+            .json(&json!({"id":"remote","profile":profile})),
+    )
+    .await?;
+    let route = "/v1/agents/remote/harness";
+    let before = checked(s.operator(&c, Method::POST, route)).await?;
+    assert_eq!(before["harnessInstallation"]["workerUpgradeRequired"], true);
+    assert!(
+        before["harnessInstallation"]["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Update the Open Harness worker")
+    );
+    let run = submit(&s, &c, "remote", "Review a report").await?;
+    let failed = wait_state(&s, &c, &run, "failed").await?;
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Update the Open Harness worker")
+    );
+    let upgraded = checked(
+        worker.request(&s, &c, Method::POST, "/v1/runner/heartbeat")
+            .json(&json!({"capabilities":{"container":true,"harnesses":["hermes","pi","unknown","pi"]}})),
+    ).await?;
+    assert_eq!(
+        upgraded["capabilities"]["harnesses"],
+        json!(["hermes", "pi"])
+    );
+    let queued = checked(s.operator(&c, Method::POST, route)).await?;
+    assert_eq!(queued["harnessInstallation"]["state"], "queued");
+    let commands = checked(worker.request(&s, &c, Method::GET, "/v1/runner/commands")).await?;
+    let commands = commands["commands"]
+        .as_array()
+        .context("Missing worker commands")?;
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0]["kind"], "install-harness");
+    assert_eq!(commands[0]["payload"], json!({"harness":"pi"}));
+    let complete = format!(
+        "/v1/runner/commands/{}/complete",
+        field(&commands[0], "id")?
+    );
+    checked(
+        worker
+            .request(&s, &c, Method::POST, &complete)
+            .json(&json!({"result":{"ok":true}})),
+    )
+    .await?;
+    let ready = checked(s.operator(&c, Method::GET, route)).await?;
+    assert_eq!(ready["harnessInstallation"]["state"], "ready");
+    s.stop().await
 }
 
 #[tokio::test]
@@ -789,6 +976,25 @@ async fn native_operator_cli_creates_and_runs_an_agent_without_a_browser() -> Re
         ])
         .await?;
     assert_eq!(v["id"], "operator");
+    let configured = s
+        .cli(&[
+            "agent",
+            "add",
+            "Local Pi",
+            "--id",
+            "cli-pi",
+            "--harness",
+            "pi",
+            "--model",
+            "fixture-model",
+            "--provider",
+            "local",
+            "--base-url",
+            "http://model.invalid/v1",
+        ])
+        .await?;
+    assert_eq!(configured["profile"]["model"]["provider"], "local");
+    assert_eq!(configured["profile"]["model"]["credentialRef"], "");
     let r = s
         .cli(&[
             "run",

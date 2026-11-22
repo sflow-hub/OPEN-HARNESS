@@ -8,9 +8,9 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 
-import {answer,key,modelFixture,serve,send} from './provider-fixture.mjs';
+import {answer,holdPrompt,key,modelFixture,serve,send} from './provider-fixture.mjs';
 
-test('pinned Hermes, Claude Code and Codex binaries each finish a headless turn using only a local model', {skip:process.env.OPEN_HARNESS_RUST_LIVE!=='1',timeout:1_260_000}, async(t)=>{
+test('pinned headless harnesses run against a local model fixture', {skip:process.env.OPEN_HARNESS_RUST_LIVE!=='1',timeout:1_260_000}, async(t)=>{
   const {seen,base}=await modelFixture(t);
   const pending=[],complete=new Map(),events=new Map();
   const machineId='machine-live-'+randomUUID();
@@ -34,20 +34,53 @@ test('pinned Hermes, Claude Code and Codex binaries each finish a headless turn 
     rmSync(root,{recursive:true,force:true});
   });
   const selected=process.env.OPEN_HARNESS_RUST_LIVE_ONLY;
-  for(const [harness,endpoint] of [['claude-code','/v1/messages'],['codex','/v1/responses'],['hermes','/v1/chat/completions']]) await t.test(harness,{skip:!!selected && harness!==selected},async()=>{
-    const id=randomUUID(), agentId='live-'+harness;
+  const added = ['opencode','pi','openhands'];
+  const harnesses = [
+    ['claude-code','/v1/messages'],
+    ['codex','/v1/responses'],
+    ['hermes','/v1/chat/completions'],
+    ...added.map(harness=>[harness,'/v1/chat/completions']),
+  ];
+  const wait = async (condition, attempts) => {
+    for(let i=0;i<attempts && !condition() && worker.exitCode===null;i++) await delay(200);
+    return condition();
+  };
+  for(const [harness,endpoint] of harnesses) await t.test(harness,{skip:!!selected && harness!==selected},async()=>{
+    const agentId='live-'+harness;
     const snapshot={id:agentId,revision:1,harness,prompt:{enabled:true,text:'Answer once.'},connectors:[],
       allowedTools:harness==='codex'?['terminal','read_file','write_file','patch','search_files']:[],
-      effectiveModel:{provider:harness==='claude-code'?'anthropic':'openai',model:harness==='claude-code'?'claude-sonnet-4-6':'gpt-4o-mini',credentialRef:'FIXTURE_KEY',baseUrl:harness==='claude-code'?base:base+'/v1'},
+      effectiveModel:{provider:harness==='claude-code'?'anthropic':added.includes(harness)?'custom':'openai',
+        model:harness==='claude-code'?'claude-sonnet-4-6':'gpt-4o-mini',credentialRef:'FIXTURE_KEY',baseUrl:harness==='claude-code'?base:base+'/v1'},
       computer:{access:'private',desktop:'none',folders:[],resources:{cpu:2,memoryMb:3072}}};
-    pending.push({id,agentId,kind:'run',payload:{runId:randomUUID(),prompt:'Reply that you confirmed the headless run.',snapshot,coordinationToken:'fixture-agent'}});
-    for(let i=0;i<2_050&&!complete.has(id)&&worker.exitCode===null;i++)await delay(200);
+    const run = (prompt, agent=agentId) => {
+      const id=randomUUID(),runId=randomUUID();
+      pending.push({id,agentId:agent,kind:'run',payload:{
+        runId,prompt,snapshot:{...snapshot,id:agent},coordinationToken:'fixture-agent',
+      }});
+      return {id,runId};
+    };
+    const {id}=run('Reply that you confirmed the headless run.');
+    const priorRequests=seen.get(endpoint)||0;
+    await wait(()=>complete.has(id),2_050);
     const result=complete.get(id);
     const diagnostic=`${harness} ${JSON.stringify(result)} ${JSON.stringify([...seen])} ${JSON.stringify((events.get(id)||[]).map(e=>e.type))} ${log}`;
     assert.ok(result,diagnostic); assert.equal(result.error,undefined,diagnostic);
     assert.equal(result.result.text||result.result.final_response,answer,diagnostic);
-    assert.ok(seen.has(endpoint),diagnostic);
+    assert.ok((seen.get(endpoint)||0)>priorRequests,diagnostic);
     assert.ok(events.get(id)?.some(e=>['message.delta','message.complete'].includes(e.type)),diagnostic);
+    if (added.includes(harness)) {
+      const waiting=seen.get('waiting')||0;
+      const slowAgent=agentId+'-slow';
+      const slow=run(holdPrompt,slowAgent);
+      await wait(()=>(seen.get('waiting')||0)>waiting || complete.has(slow.id),2_050);
+      assert.ok((seen.get('waiting')||0)>waiting,
+        harness+' did not reach the model before cancellation. '+JSON.stringify(complete.get(slow.id))+' '+log);
+      const stop=randomUUID();
+      pending.push({id:stop,agentId:slowAgent,kind:'stop',payload:{runId:slow.runId,commandId:slow.id}});
+      assert.ok(await wait(()=>complete.has(stop)&&complete.has(slow.id),300),harness+' did not acknowledge cancellation. '+log);
+      assert.equal(complete.get(stop).result.ok,true);
+      assert.match(complete.get(slow.id).error,/stopped/);
+    }
     t.diagnostic(harness+' completed via '+endpoint);
   });
 });

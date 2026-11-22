@@ -4,7 +4,7 @@
 
 Open Harness is a local-first workspace for named agents. One Rust executable serves the operator dashboard and HTTP API, schedules jobs in SQLite, and supervises a headless worker. You can create agents, submit work, follow results, and administer the service entirely from the command line. Closing the dashboard or terminal leaves submitted work with the coordinator.
 
-Each agent selects **Hermes**, **Claude Code**, or **Codex**. Local and paired workers use the same adapters. A run receives piped input and output, its saved profile revision, an explicit tool policy, and its own container. Each agent keeps private files across runs. Profiles can also mount selected folders. The native service converts earlier desktop and direct-access profiles to headless container settings.
+Each agent selects **Hermes**, **Claude Code**, **Codex**, **OpenCode**, **Pi**, or **OpenHands**. Local and paired workers use the same adapters. A run receives piped input and output, its saved profile revision, an explicit tool policy, and its own container. Each agent keeps private files across runs. Profiles can also mount selected folders. The native service converts earlier desktop and direct-access profiles to headless container settings.
 
 ### Run the native application
 
@@ -22,14 +22,14 @@ The optional dashboard is at `http://127.0.0.1:4317`. The default state director
 With `target/release` on your `PATH`, run these in another terminal. This example uses a local OpenAI-compatible model named `example-model`. Supply the URL and model ID for your installation. The model endpoint must be reachable from inside the worker container.
 
 ```sh
-open-harness agent add Researcher --id researcher --harness hermes \
+open-harness agent add Researcher --id researcher --harness opencode \
   --provider local --model example-model --base-url http://host.docker.internal:8080/v1
 open-harness run --agent researcher --wait "Summarize the files in the shared workspace."
 ```
 
-Choose `--harness claude-code` for Claude Code or `--harness codex` for Codex. Save the matching provider credential in **Credentials**, or pipe its value into `open-harness credential --agent AGENT --provider PROVIDER --reference REF`. Claude Code uses an Anthropic model and Codex uses an OpenAI model. Private provider credentials stay with the coordinator and the worker assigned the job. To queue a job and return immediately, omit `--wait`. Retrieve saved events with `open-harness events RUN_ID`.
+Use `opencode`, `pi`, or `openhands` with OpenAI, Anthropic, xAI, OpenRouter, or a Local or Custom OpenAI-compatible endpoint. Set an explicit model ID for the selected provider. For a hosted provider or an authenticated endpoint, save a key in **Credentials**, or pipe its value into `open-harness credential --agent AGENT --provider PROVIDER --reference REF`. Claude Code uses Anthropic and Codex uses OpenAI for their configured model connection.
 
-The first job can build the pinned image. To prepare images ahead of time, run `open-harness setup hermes`, `open-harness setup claude-code`, or `open-harness setup codex`. Hermes uses its JSON-RPC gateway, Claude Code uses its streaming print interface, and Codex uses its JSON execution interface. The upstream harnesses and the Hermes policy extension run inside their containers. See [worker setup and pairing](runtime/rust-runner/README.md).
+Install a harness ahead of time with `open-harness setup HARNESS`, or prepare all six with `open-harness setup --all`. The worker can also build the pinned image when you select the harness or run its first task. Update a paired worker before selecting OpenCode, Pi, or OpenHands for its agents. Rootless or remote workers need a model address reachable from their containers. To queue a job and return immediately, omit `--wait`. Retrieve saved events with `open-harness events RUN_ID`. See [worker setup and pairing](runtime/rust-runner/README.md).
 
 ### Use a subscription on the assigned worker
 

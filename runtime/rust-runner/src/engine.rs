@@ -1,10 +1,11 @@
+use crate::harnesses::{self, HARNESSES};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
     io::Write,
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Mutex,
@@ -12,7 +13,6 @@ use std::{
 };
 use tokio::{process::Command, time::timeout};
 
-pub const HARNESSES: [&str; 3] = ["hermes", "claude-code", "codex"];
 pub const OWNER_LABEL: &str = "dev.openharness.rust-runner";
 pub type Keys = BTreeMap<String, String>;
 
@@ -24,7 +24,7 @@ pub fn harness(snapshot: &Value) -> Result<&str> {
     let name = snapshot
         .get("harness")
         .map_or(Some("hermes"), Value::as_str)
-        .filter(|name| HARNESSES.contains(name))
+        .filter(|name| harnesses::find(name).is_some())
         .context("Unknown agent harness")?;
     ensure!(
         matches!(
@@ -51,6 +51,9 @@ fn cli_version(harness: &str) -> Result<&'static str> {
     match harness {
         "claude-code" => Ok("2.1.322"),
         "codex" => Ok("0.167.1"),
+        "opencode" => Ok("1.19.6"),
+        "pi" => Ok("1.6.0"),
+        "openhands" => Ok("1.63.1"),
         _ => bail!("Unknown agent harness."),
     }
 }
@@ -78,12 +81,13 @@ pub async fn image(harness: &str) -> Result<String> {
 
 // Image installs can take many minutes. Allow different engines to build in parallel
 // while coalescing simultaneous requests for the same engine in this process.
-static INSTALLS: [tokio::sync::Mutex<()>; 3] = [const { tokio::sync::Mutex::const_new(()) }; 3];
+static INSTALLS: [tokio::sync::Mutex<()>; HARNESSES.len()] =
+    [const { tokio::sync::Mutex::const_new(()) }; HARNESSES.len()];
 
 pub async fn install(harness: &str) -> Result<()> {
     let index = HARNESSES
         .iter()
-        .position(|v| *v == harness)
+        .position(|spec| spec.id == harness)
         .context("Unknown agent harness")?;
     if mock() {
         return Ok(());
@@ -101,6 +105,17 @@ pub async fn install(harness: &str) -> Result<()> {
         hermes_context(context.path())?
     } else {
         let recipe = context.path().join("Dockerfile");
+        match harness {
+            "pi" => fs::write(
+                context.path().join("pi-entrypoint.sh"),
+                include_str!("../adapters/pi-entrypoint.sh"),
+            )?,
+            "openhands" => fs::write(
+                context.path().join("openhands.py"),
+                include_str!("../adapters/openhands.py"),
+            )?,
+            _ => {}
+        }
         fs::write(&recipe, cli_recipe(harness)?)?;
         recipe
     };
@@ -130,6 +145,44 @@ pub async fn install(harness: &str) -> Result<()> {
 
 fn cli_recipe(harness: &str) -> Result<String> {
     let version = cli_version(harness)?;
+    let recipe = match harness {
+        "opencode" => Some(format!(
+            r#"FROM node:22-bookworm-slim AS fetch
+RUN set -eu; case "$(dpkg --print-architecture)" in amd64) arch=x64 ;; arm64) arch=arm64 ;; *) exit 1 ;; esac; \
+    npm install --prefix /stage --ignore-scripts --no-audit --no-fund "opencode-linux-$arch@{version}" \
+    && cp "/stage/node_modules/opencode-linux-$arch/bin/opencode" /opencode
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git ripgrep ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=fetch /opencode /usr/local/bin/opencode
+RUN opencode --version
+ENV HOME=/home/agent
+WORKDIR /workspace
+"#
+        )),
+        "pi" => Some(format!(
+            r#"FROM node:24-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git ripgrep ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN npm install --global --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@{version} && PI_OFFLINE=1 pi --version
+COPY pi-entrypoint.sh /opt/open-harness/pi-entrypoint.sh
+ENV HOME=/home/agent PI_CODING_AGENT_DIR=/home/agent/.pi-managed PI_OFFLINE=1
+WORKDIR /workspace/shared
+"#
+        )),
+        "openhands" => Some(format!(
+            r#"FROM python:3.12-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends bash git ripgrep ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN pip install --disable-pip-version-check --no-cache-dir openhands-sdk=={version} openhands-tools=={version} \
+    && python3 -c 'from openhands.sdk import Agent, Conversation; from openhands.tools.terminal import TerminalTool; from openhands.tools.file_editor import FileEditorTool'
+COPY openhands.py /opt/open-harness/openhands.py
+ENV HOME=/home/agent PYTHONUNBUFFERED=1
+WORKDIR /workspace
+"#
+        )),
+        _ => None,
+    };
+    if let Some(recipe) = recipe {
+        return Ok(recipe);
+    }
     let (binary, package, stage) = if harness == "codex" {
         (
             "codex",
@@ -555,6 +608,13 @@ pub fn prompt_file(root: &Path, prompt: &str) -> Result<tempfile::NamedTempFile>
     Ok(file)
 }
 
+pub fn config_directory(root: &Path) -> Result<tempfile::TempDir> {
+    Ok(tempfile::Builder::new()
+        .prefix("harness-config-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(root.join("rust-inputs"))?)
+}
+
 fn input_file(root: &Path, prefix: &str) -> Result<tempfile::NamedTempFile> {
     Ok(tempfile::Builder::new()
         .prefix(prefix)
@@ -567,13 +627,13 @@ pub fn recover_inputs(root: &Path) -> Result<()> {
     crate::directory(&directory)?;
     for item in fs::read_dir(directory)? {
         let item = item?;
-        if item.file_type()?.is_file()
-            && item
-                .file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with("env-") || n.starts_with("prompt-"))
-        {
+        let entry = item.file_name();
+        let name = entry.to_str().unwrap_or_default();
+        let kind = item.file_type()?;
+        if kind.is_file() && (name.starts_with("env-") || name.starts_with("prompt-")) {
             fs::remove_file(item.path())?;
+        } else if kind.is_dir() && name.starts_with("harness-config-") {
+            fs::remove_dir_all(item.path())?;
         }
     }
     Ok(())

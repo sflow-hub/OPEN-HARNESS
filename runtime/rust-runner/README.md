@@ -1,6 +1,6 @@
 # Open Harness headless worker
 
-The Rust coordinator starts this worker for its local machine. A paired remote worker uses the same adapters for Hermes, Claude Code, and Codex, along with the same durable event delivery. Each named agent has its own persistent files and harness state. Managed jobs use piped input and output in an isolated Docker container. An interactive Claude Code session uses a private terminal that the worker owner can reattach to over SSH. The worker removes the container and its subprocesses when the run ends or is stopped. The workspace stays on disk between runs.
+The Rust coordinator starts this worker for its local machine. A paired remote worker uses the same adapters for Hermes, Claude Code, Codex, OpenCode, Pi, and OpenHands, along with the same durable event delivery. Each named agent has its own persistent files. Managed jobs use piped input and output in an isolated Docker container. An interactive Claude Code session uses a private terminal that the worker owner can reattach to over SSH. The worker removes the container and its subprocesses when the run ends or is stopped. The workspace stays on disk between runs.
 
 ## Build and pair
 
@@ -10,7 +10,7 @@ From the repository root on Linux or macOS, build with Rust 1.89 or newer, a C t
 cargo build --release --locked -p open-harness-runner
 ```
 
-Copy `target/release/open-harness-runner` to the worker machine. Docker and a non-root account with access to its daemon are required. The worker prepares the pinned images on first use. The native Hermes image includes the Rust coordination and Slack MCP helper. The Claude Code and Codex images run their vendor binaries.
+Copy `target/release/open-harness-runner` to the worker machine. Docker and a non-root account with access to its daemon are required. The worker prepares the pinned images on first use. The native Hermes image includes the Rust coordination and Slack MCP helper. The coding harness images include their pinned CLI or SDK and runtime dependencies.
 
 On the coordinator machine, create a one-time pairing code using the URL reachable by the worker.
 
@@ -45,8 +45,13 @@ The worker adopts the paired machine ID, token, RSA key, and agent files. It imp
 - **Hermes** speaks JSON-RPC over a pipe to its managed gateway. Profiles retain their prompt, model, explicit tool grants and configured MCP connections. Stop, steer and approval requests use the active gateway session. Agent coordination is authenticated per run and relayed through a socket in the agent’s read-only managed directory.
 - **Claude Code** uses print mode, streaming JSON, a supplied tool list and non-interactive permissions. The profile selects the Anthropic credential and model.
 - **Codex** uses `codex exec --json` with non-interactive permissions, disabled external integrations and the OpenAI credential and model selected by the profile. Its five core workspace tools must be enabled together.
+- **OpenCode** uses the JSON output of `opencode run`. Its write and edit tool grants apply together.
+- **Pi** uses one-shot JSON mode with individually selectable terminal and file tools.
+- **OpenHands** runs a managed SDK conversation. Its file editor grant combines read, write, and edit access.
 
-Agents can use a private workspace or explicitly shared folders with a selected read/write mode. All harnesses run with desktop access off. Each CLI job can be stopped. Starting another job supplies further instructions after the active CLI job ends. CLI connectors are unsupported, as in the existing harness contracts. A terminal protocol record and a successful process exit confirm a Claude Code or Codex completion.
+OpenCode, Pi, and OpenHands accept OpenAI, Anthropic, xAI, OpenRouter, and Local or Custom OpenAI-compatible models. Local and Custom require a container-reachable endpoint. Add a credential reference when that endpoint needs authentication.
+
+Agents can use a private workspace or explicitly shared folders with a selected read/write mode. All harnesses run with desktop access off. Each CLI job can be stopped. Starting another job supplies further instructions after the active CLI job ends. CLI connectors are unsupported, as in the existing harness contracts. A terminal protocol record and a successful process exit confirm a CLI completion.
 
 The worker reports events and results from a disk-backed queue. An interrupted connection retries delivery with the original IDs. An unconfirmed job is marked interrupted after its lease is reconciled. The coordinator can send the credentials needed by a profile encrypted for the worker’s key. A credential saved directly on a paired worker is kept in its private mode-0600 credential file. Managed file transfers exclude credentials and transient harness configuration.
 
@@ -59,9 +64,9 @@ OPEN_HARNESS_RUST_RUNNER="$PWD/target/debug/open-harness-runner" \
   node --test runtime/rust-runner/tests/{adoption,harnesses,recovery}.test.mjs
 ```
 
-The process tests cover all three adapters, isolation, agent-scoped sockets, event delivery, cancellation, and unconfirmed results. The recovery test uses the native coordinator. Build both binaries with `cargo build --locked --workspace` from the repository root. Set `OPEN_HARNESS_RUST_LIVE=1` for its actual Hermes container and local provider fixture. Set `OPEN_HARNESS_RUST_PROVIDER_HOST` if the container needs a different address to reach the fixture.
+The process tests cover all six adapters, isolation, agent-scoped sockets, event delivery, cancellation, and unconfirmed results. The recovery test uses the native coordinator. Build both binaries with `cargo build --locked --workspace` from the repository root. Set `OPEN_HARNESS_RUST_LIVE=1` for its actual Hermes container and local provider fixture. Set `OPEN_HARNESS_RUST_PROVIDER_HOST` if the container needs a different address to reach the fixture.
 
-With the pinned images installed, run all three actual harnesses against local Anthropic Messages, OpenAI Responses, and Chat Completions fixtures. Set the bind address to a test interface reachable from these containers. Use `OPEN_HARNESS_RUST_LIVE_ONLY` to check one harness.
+Run the pinned harnesses against local Anthropic Messages, OpenAI Responses, and Chat Completions fixtures. Set the bind address to an interface the test containers can reach. Use `OPEN_HARNESS_RUST_LIVE_ONLY` to check one harness. The OpenCode, Pi, and OpenHands checks also stop a run while the fixture is holding its model response.
 
 ```sh
 OPEN_HARNESS_RUST_LIVE=1 OPEN_HARNESS_RUST_PROVIDER_BIND=0.0.0.0 \
