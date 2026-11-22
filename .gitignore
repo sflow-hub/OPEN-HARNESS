@@ -60,3 +60,5 @@ __pycache__/
 /src-tauri/icons/StoreLogo.png
 /src-tauri/icons/64x64.png
 /src-tauri/icons/icon.png
+/target/
+/runtime/agent-tools/target/

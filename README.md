@@ -1,4 +1,84 @@
-# Open Harness powered by Hermes
+# Open Harness
+
+## Native headless application
+
+Open Harness is a local-first workspace for named agents. One Rust executable serves the operator dashboard and HTTP API, schedules jobs in SQLite, and supervises a headless worker. You can create agents, submit work, follow results, and administer the service entirely from the command line. Closing the dashboard or terminal leaves submitted work with the coordinator.
+
+Each agent selects **Hermes**, **Claude Code**, or **Codex**. Local and paired workers use the same adapters. A run receives piped input and output, its saved profile revision, an explicit tool policy, and its own container. Each agent keeps private files across runs. Profiles can also mount selected folders. The native service converts earlier desktop and direct-access profiles to headless container settings.
+
+### Run the native application
+
+Use Linux or macOS with Rust 1.89 or later, a C toolchain, Make, Perl, and a running Docker-compatible engine. On Windows, use a Linux distribution under WSL2. Run the service as the account that owns its state directory.
+
+```sh
+cargo build --locked --release
+./target/release/open-harness serve
+```
+
+The optional dashboard is at `http://127.0.0.1:4317`. The default state directory is `.open-harness` in the working directory. The service and CLI both read the working directory’s `.env`. Set `OPEN_HARNESS_STATE_DIR` to select an existing workspace or `OPEN_HARNESS_PORT` to use a different port. Use `open-harness start` to detach the service and `open-harness stop` to shut it down. The native application uses the existing SQLite data and saved credentials. Back up an existing workspace with its previous coordinator stopped before switching builds.
+
+### Create and run a headless agent
+
+With `target/release` on your `PATH`, run these in another terminal. This example uses a local OpenAI-compatible model named `example-model`. Supply the URL and model ID for your installation. The model endpoint must be reachable from inside the worker container.
+
+```sh
+open-harness agent add Researcher --id researcher --harness hermes \
+  --provider local --model example-model --base-url http://host.docker.internal:8080/v1
+open-harness run --agent researcher --wait "Summarize the files in the shared workspace."
+```
+
+Choose `--harness claude-code` for Claude Code or `--harness codex` for Codex. Save the matching provider credential in **Credentials**, or pipe its value into `open-harness credential --agent AGENT --provider PROVIDER --reference REF`. Claude Code uses an Anthropic model and Codex uses an OpenAI model. Private provider credentials stay with the coordinator and the worker assigned the job. To queue a job and return immediately, omit `--wait`. Retrieve saved events with `open-harness events RUN_ID`.
+
+The first job can build the pinned image. To prepare images ahead of time, run `open-harness setup hermes`, `open-harness setup claude-code`, or `open-harness setup codex`. Hermes uses its JSON-RPC gateway, Claude Code uses its streaming print interface, and Codex uses its JSON execution interface. The upstream harnesses and the Hermes policy extension run inside their containers. See [worker setup and pairing](runtime/rust-runner/README.md).
+
+### Use a subscription on the assigned worker
+
+For a named Codex agent, select **ChatGPT plan** in its profile and enable worker launches. You can also configure it on the coordinator with the CLI.
+
+```sh
+open-harness agent add Researcher --id researcher --harness codex --model-auth chatgpt-plan --worker-launch
+# For an existing Codex agent:
+open-harness agent access --agent researcher --model-auth chatgpt-plan --worker-launch enable
+```
+
+To create the agent directly on a paired machine, add `--machine MACHINE_ID` to `agent add`. The Machines page lists paired workers. Open a terminal on the assigned machine, or SSH into it as the worker owner. Use the same state directory as the running worker. The standalone worker binary accepts the same commands under `open-harness-runner worker`.
+
+```sh
+open-harness worker login --agent researcher
+open-harness worker status --agent researcher
+open-harness worker run --agent researcher --wait "Summarize the files in this workspace."
+```
+
+Follow the printed browser link and, over SSH, the port-forwarding instructions. The selected agent’s CLI jobs, dashboard requests, schedules, and incoming handoffs all use the connected ChatGPT plan. A usage limit or expired sign-in appears as a run error. Use `worker logout --agent researcher` to disconnect. Moving an agent requires enabling worker launches and signing in on the destination. [Manage ChatGPT usage](https://chatgpt.com/settings/usage)
+
+For an interactive Claude Code session, create a Claude Code agent with `--worker-launch` or enable the setting on an existing one. Run `open-harness worker terminal --agent editor` on the assigned worker and sign in to Claude Code directly. After disconnecting SSH, repeat the command to reattach. The session occupies the agent’s run slot until Claude exits or the operator stops the run. Claude handles its own sign-out with `/logout`. Managed Claude jobs use the profile’s configured API credential.
+
+### Operate the workspace
+
+Use the dashboard or the authenticated API to manage profiles, model credentials, teams, boards and task attempts, routines, files, workers, and approvals. The service admits one job per agent, up to two top-level jobs and four jobs including delegated work. A pending approval holds the run's slot. Workers spool events and completion receipts to disk before delivery so a disconnect can be recovered without submitting another model turn.
+
+For headless API access, `open-harness api GET /v1/runs` prints JSON. For requests with a body, pipe JSON to `open-harness api POST /v1/runs --stdin`. `open-harness doctor` checks the local service and container engine. The dashboard and API bind to loopback by default.
+
+### Native source and verification
+
+| Directory | Responsibility |
+| --- | --- |
+| `runtime/native/src/` | Service lifecycle, host and token authentication, SQLite, queue, profiles, pairing and operator CLI |
+| `runtime/native/src/dashboard/` | Server-rendered operator views and forms |
+| `runtime/native/src/workspace/` | Teams, boards, tasks, handoffs and schedules |
+| `runtime/rust-runner/` | Headless harness execution, isolated mounts, control messages and delivery recovery |
+| `runtime/agent-tools/` | Managed Rust tools inside the Hermes worker |
+| `runtime/hermes/` | Pinned upstream Python gateway and tool-policy integration |
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```
+
+Runtime evidence and test conditions are recorded in [the verification log](runtime/VERIFICATION.md). Open Harness is MIT licensed, independent software. See the [license](LICENSE) and [Hermes attribution](runtime/hermes/NOTICE.md).
+
+## TypeScript release
 
 > **Public beta:** `v0.4.0-beta.1` targets one trusted operator running Open Harness in Linux Docker containers and using it from a local browser. Docker Desktop is the Mac/Windows deployment path; published images and final Docker/browser acceptance are still pending. Physical Mac/Windows hardware checks and signed desktop installers are outside the MVP release gates; see [ROADMAP.md](ROADMAP.md). Model-provider requests can incur charges, and Open Harness sends no product telemetry.
 

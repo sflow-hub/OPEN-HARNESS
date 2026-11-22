@@ -68,3 +68,37 @@ jobs:
           path: test-results/
           retention-days: 7
           if-no-files-found: ignore
+
+  native-rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Linux build libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - run: npm ci
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --locked --workspace
+      - name: Verify native harness protocols and worker recovery
+        run: |
+          cargo build --locked --workspace
+          OPEN_HARNESS_RUST_RUNNER="$PWD/target/debug/open-harness-runner" node --test runtime/rust-runner/tests/harnesses.test.mjs runtime/rust-runner/tests/adoption.test.mjs runtime/rust-runner/tests/recovery.test.mjs
+      - name: Install Chromium
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+      - name: Verify the native dashboard with JavaScript disabled
+        if: runner.os == 'Linux'
+        run: npx playwright test --config playwright.native.config.ts

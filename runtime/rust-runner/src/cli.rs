@@ -1,0 +1,176 @@
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use serde_json::{Value, json};
+use std::{path::Path, process::Stdio, time::Duration};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
+    process::Command as Process,
+    sync::{mpsc, watch},
+    time::sleep,
+};
+
+use crate::{
+    agent_dir, cli_protocol, directory,
+    engine::{self, Keys},
+    hermes::{Control, docker, remove_container},
+    outbox::Outbox,
+    protocol::Command,
+    required_str,
+};
+
+pub async fn run(
+    root: &Path,
+    command: &Command,
+    machine: &str,
+    outbox: &Outbox,
+    mut controls: mpsc::Receiver<Control>,
+    mut shutdown: watch::Receiver<bool>,
+    secrets: Keys,
+) -> Result<Value> {
+    let snapshot = &command.payload["snapshot"];
+    let agent = required_str(snapshot, "id")?;
+    ensure!(
+        command.agent_id.as_deref() == Some(agent),
+        "Run profile belongs to a different agent."
+    );
+    let harness = engine::harness(snapshot)?;
+    let argv = cli_protocol::arguments(snapshot)?;
+    if snapshot["modelAuth"] == "chatgpt-plan" {
+        return crate::plan_run::run(root, command, machine, outbox, controls, shutdown, argv)
+            .await;
+    }
+    let run_id = required_str(&command.payload, "runId")?;
+    let prompt = required_str(&command.payload, "prompt")?;
+    let model = &snapshot["effectiveModel"];
+    let credential = secrets
+        .get(required_str(model, "credentialRef")?)
+        .filter(|v| !v.is_empty())
+        .context("Save a model credential for this agent before starting work")?;
+    let mut vars = if harness == "codex" {
+        vec![("CODEX_API_KEY", credential.as_str())]
+    } else {
+        vec![
+            ("ANTHROPIC_API_KEY", credential.as_str()),
+            ("DISABLE_AUTOUPDATER", "1"),
+        ]
+    };
+    if harness == "claude-code"
+        && let Some(url) = model["baseUrl"].as_str().filter(|s| !s.is_empty())
+    {
+        vars.push(("ANTHROPIC_BASE_URL", url));
+    }
+    let agent_root = agent_dir(root, agent)?;
+    directory(&agent_root.join("harnesses"))?;
+    let home = agent_root.join("harnesses").join(harness);
+    directory(&home)?;
+    directory(&home.join(if harness == "codex" {
+        ".codex"
+    } else {
+        ".claude"
+    }))?;
+    let name = format!("open-harness-rust-{}", command.id);
+    let session = command.id.to_string();
+    let image = engine::prepare_image(harness, &mut controls, &mut shutdown).await?;
+    let env = engine::environment_file(root, &vars)?;
+    let input = engine::prompt_file(root, prompt)?;
+    let mut args = vec![
+        "create".into(),
+        "--init".into(),
+        "--log-driver".into(),
+        "none".into(),
+    ];
+    args.extend(engine::container_flags(
+        &name,
+        machine,
+        &snapshot["computer"]["resources"],
+    )?);
+    args.extend([
+        "--env-file".into(),
+        env.path()
+            .to_str()
+            .context("Invalid environment path")?
+            .into(),
+        "-e".into(),
+        "HOME=/home/agent".into(),
+        "-e".into(),
+        "CODEX_HOME=/home/agent/.codex".into(),
+        "-e".into(),
+        "CLAUDE_CONFIG_DIR=/home/agent/.claude".into(),
+    ]);
+    for (src, target) in [
+        (home, "target=/home/agent"),
+        (agent_root.join("private"), "target=/workspace/private"),
+        (root.join("shared"), "target=/workspace/shared"),
+    ] {
+        args.extend(["--mount".into(), engine::bind(&src, target, false)?]);
+    }
+    for mount in engine::folder_mounts(root, snapshot).await? {
+        args.extend(["--mount".into(), mount]);
+    }
+    // Docker and containerd have different stdin/EOF behavior when attaching to
+    // an already-created container. Both CLIs read one request from this file descriptor.
+    args.extend([
+        "--mount".into(),
+        engine::bind(input.path(), "target=/run/open-harness-prompt", true)?,
+        "--workdir".into(),
+        "/workspace/shared".into(),
+        "--entrypoint".into(),
+        "/bin/sh".into(),
+        image,
+        "-c".into(),
+        r#"exec "$@" < /run/open-harness-prompt"#.into(),
+        "open-harness-input".into(),
+    ]);
+    args.extend(argv);
+    let mut stop_reply = None;
+    let result=async {
+        let args=args.iter().map(String::as_str).collect::<Vec<_>>();
+        docker(&args,90).await.context("Create isolated agent container")?;
+        // Docker has copied the file into the container configuration. Its plaintext copy can go now.
+        drop(env);
+        let mut child=Process::new("docker").args(["start","--attach",&name])
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn().context("Attach to headless agent container")?;
+        let stdout=child.stdout.take().context("Missing agent output")?;
+        let mut lines=BufReader::new(stdout);
+        let deadline=sleep(Duration::from_secs(24*60*60));
+        tokio::pin!(deadline);
+        let mut output=cli_protocol::Output::new(harness);
+        outbox.event(command.id,run_id,json!({"type":"gateway.ready","session_id":session,"payload":{"harness":harness}}))?;
+        let mut done=false;
+        let mut buffer=Vec::new();
+        loop {
+            tokio::select! {
+                _=shutdown.wait_for(|v|*v)=>bail!("The runner stopped during execution."),
+                _=&mut deadline=>bail!("The harness timed out before confirming completion."),
+                Some(control)=controls.recv()=>{
+                    if control.command.kind=="stop" {stop_reply=Some(control.reply); bail!("This run was stopped before execution completed.");}
+                    let _=control.reply.send(Err(anyhow!("This harness supports stopping an active task. Submit another message after it finishes.")));
+                }
+                result=async { (&mut lines).take((4_900_001-buffer.len()) as u64).read_until(b'\n', &mut buffer).await }, if !done=>{
+                    let count=result?;
+                    ensure!(buffer.len()<=4_900_000,"Harness stream record is too large.");
+                    if count==0 {done=true;continue;}
+                    if let Ok(mut value)=serde_json::from_slice::<Value>(&buffer) {
+                        engine::redact(&mut value,&secrets);
+                        for mut event in output.accept(&value) {
+                            event["session_id"]=session.as_str().into();
+                            outbox.event(command.id,run_id,event)?;
+                        }
+                    }
+                    buffer.clear();
+                }
+                status=child.wait(), if done=>return output.finish(status?.code()),
+            }
+        }
+    }.await;
+    let cleanup = remove_container(&name).await;
+    if let Some(reply) = stop_reply {
+        let _ = reply.send(
+            cleanup
+                .as_ref()
+                .map(|_| json!({"ok":true}))
+                .map_err(|_| anyhow!("Docker could not confirm the agent stopped.")),
+        );
+    }
+    cleanup?;
+    result
+}
