@@ -185,7 +185,7 @@ async fn send(input: &mut (impl AsyncWrite + Unpin), request: Value) -> Result<(
 
 /// A provider may divide an echoed credential between arbitrary message deltas.
 /// Hold only a trailing partial match so ordinary text still streams immediately.
-fn stream_text(pending: &mut String, delta: &str, token: &str) -> String {
+pub(crate) fn stream_text(pending: &mut String, delta: &str, token: &str) -> String {
     pending.push_str(delta);
     let Some(first) = token.chars().next() else {
         return std::mem::take(pending);

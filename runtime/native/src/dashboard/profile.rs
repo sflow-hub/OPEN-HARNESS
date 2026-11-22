@@ -10,9 +10,10 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Redirect, Response},
 };
+use open_harness_runner::harnesses;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Default)]
 pub struct Draft {
@@ -75,6 +76,7 @@ pub async fn view(
     let mut worker_access = Value::Null;
     let mut tools_html = String::new();
     let mut harness_status = String::new();
+    let model_connections = html::model_connection_options(app).await;
     let mut load_err = workspace.as_ref().err().cloned();
     if !agent.is_empty() {
         match api::call(app, Call::AgentProfile(agent), None).await {
@@ -86,6 +88,8 @@ pub async fn view(
             Err(e) => load_err = Some(e),
         }
         if let Ok(tools) = api::call(app, Call::AgentTools(agent), None).await {
+            let selected_harness = profile["harness"].as_str().unwrap_or("hermes");
+            let group = grouped_tools(selected_harness);
             let allowed: Vec<String> = draft
                 .as_ref()
                 .and_then(|d| d.tools.clone())
@@ -103,12 +107,35 @@ pub async fn view(
                 if id.is_empty() {
                     continue;
                 }
-                let name = tool["name"].as_str().unwrap_or(id);
-                let checked = if allowed.iter().any(|t| t == id) {
+                let grouped = group.contains(&id);
+                if grouped && group.first() != Some(&id) {
+                    continue;
+                }
+                let name = if grouped {
+                    if group.contains(&"read_file") {
+                        "Read, write and edit files"
+                    } else {
+                        "Write and edit files"
+                    }
+                } else {
+                    tool["name"].as_str().unwrap_or(id)
+                };
+                let shown = if grouped {
+                    group
+                } else {
+                    std::slice::from_ref(&id)
+                };
+                let checked = if shown.iter().all(|id| allowed.iter().any(|t| t == id)) {
                     " checked"
                 } else {
                     ""
                 };
+                for shown_id in shown {
+                    tools_html.push_str(&format!(
+                        r#"<input type="hidden" name="toolShown" value="{}" />"#,
+                        html::attr(shown_id),
+                    ));
+                }
                 tools_html.push_str(&format!(
                     r#"<label class="check"><input type="checkbox" name="tool" value="{id}"{checked} /> {label}</label>"#,
                     id = html::attr(id),
@@ -118,16 +145,11 @@ pub async fn view(
             }
         }
         if let Ok(h) = api::call(app, Call::AgentHarness(agent), None).await {
-            let state = h["state"]
-                .as_str()
-                .or_else(|| h["harness"]["state"].as_str())
-                .unwrap_or("");
-            let detail = h["detail"]
-                .as_str()
-                .or_else(|| h["harness"]["detail"].as_str())
-                .unwrap_or("");
+            let install = &h["harnessInstallation"];
+            let state = install["state"].as_str().unwrap_or("");
+            let detail = install["detail"].as_str().unwrap_or("");
             harness_status = format!(
-                r#"<p class="muted">Harness status: {} — {}</p>{}"#,
+                r#"<p class="muted" role="status">Harness installation {}. {}</p>{}"#,
                 html::esc(state),
                 html::esc(detail),
                 html::post_button(
@@ -245,9 +267,9 @@ pub async fn view(
         {billing}
         {plan_disclosure}
         <label class="check"><input type="checkbox" name="inherit" value="1"{inherit_on} /> Inherit workspace model</label>
-        <label>Provider <input name="provider" value="{provider}" /></label>
+        <label>Provider <input name="provider" list="model-providers" value="{provider}" /></label>
         <label>Model <input name="model" value="{model}" /></label>
-        <label>Credential ref <input name="credentialRef" autocomplete="off" value="{cred}" /></label>
+        <label>Credential ref <input name="credentialRef" list="model-credentials" autocomplete="off" value="{cred}" /></label>
         <label>Base URL <input name="baseUrl" autocomplete="off" value="{base}" /></label>
         {worker_grant}
         {worker_status}
@@ -272,6 +294,7 @@ pub async fn view(
         <button type="submit" class="primary">Save profile</button>
       </form>
       {harness_status}
+      {model_connections}
     </section>"#,
         agent_q = auth::enc_query(agent),
         csrf = html::csrf_field(&session),
@@ -287,6 +310,7 @@ pub async fn view(
         role = html::attr(&d.role),
         harness = html::harness_options(&d.harness),
         harness_status = harness_status,
+        model_connections = model_connections,
         prompt = html::esc(&d.prompt_text),
         prompt_on = if prompt_enabled { " checked" } else { "" },
         billing = billing_html,
@@ -498,17 +522,30 @@ pub async fn save_agent_raw(State(app): State<App>, headers: HeaderMap, body: St
             json!({"id": agent, "computer": {}, "connectors": [], "allowedTools": [], "board": {}})
         }
     };
-    let tools: Vec<String> = pairs
+    let mut tools: Vec<String> = pairs
         .iter()
         .filter(|(k, _)| k == "tool")
         .map(|(_, v)| v.clone())
         .collect();
+    if pairs.iter().any(|(key, _)| key == "tools_touched") {
+        tools = merge_tool_selection(&prior, &pairs, tools);
+    }
     let mut draft = draft_from_pairs(&pairs, &tools);
     let prior_auth = prior["modelAuth"]
         .as_str()
         .unwrap_or("configured")
         .to_owned();
     normalize_draft_for_auth(&mut draft, Some(&prior_auth));
+    if harnesses::is_additional(draft.harness.trim()) {
+        draft.inherit = false;
+        let prior_model = &prior["model"];
+        // Keep the key scoped to the chosen provider when the old reference is still in the field.
+        if prior_model["provider"] != draft.provider.trim()
+            && prior_model["credentialRef"] == draft.credential_ref.trim()
+        {
+            draft.credential_ref.clear();
+        }
+    }
     prior["id"] = json!(agent);
     prior["revision"] = json!(draft.revision);
     prior["name"] = json!(draft.name.trim());
@@ -589,6 +626,49 @@ pub async fn save_agent_raw(State(app): State<App>, headers: HeaderMap, body: St
             res
         }
     }
+}
+
+fn grouped_tools(harness: &str) -> &'static [&'static str] {
+    harnesses::find(harness)
+        .filter(|h| harnesses::is_additional(h.id))
+        .map_or(&[][..], |h| h.tool_group)
+}
+
+fn merge_tool_selection(
+    prior: &Value,
+    pairs: &[(String, String)],
+    mut selected: Vec<String>,
+) -> Vec<String> {
+    let old = prior["allowedTools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    let shown = |id: &str| {
+        pairs
+            .iter()
+            .any(|(key, value)| key == "toolShown" && value == id)
+    };
+    let group = grouped_tools(prior["harness"].as_str().unwrap_or("hermes"));
+    if let Some((&leader, other)) = group.split_first() {
+        if selected.iter().any(|id| id == leader) {
+            selected.extend(other.iter().map(|id| (*id).to_owned()));
+        } else {
+            // Switching from a harness with individual grants can leave an inactive partial group.
+            let retained: Vec<_> = old.clone().filter(|id| group.contains(id)).collect();
+            if retained.len() < group.len() {
+                selected.extend(retained.into_iter().map(str::to_owned));
+            }
+        }
+    }
+    let group_shown = group.first().is_some_and(|leader| shown(leader));
+    selected.extend(
+        old.filter(|id| !(shown(id) || group_shown && group.contains(id)))
+            .map(str::to_owned),
+    );
+    let mut seen = HashSet::new();
+    selected.retain(|id| seen.insert(id.clone()));
+    selected
 }
 
 fn draft_from_pairs(pairs: &[(String, String)], tools: &[String]) -> Draft {
@@ -684,14 +764,18 @@ pub async fn install_harness(
         return Redirect::to(&auth::flash_err("/ui/profile", &msg)).into_response();
     }
     let agent = form.get("agentId").map(|s| s.trim()).unwrap_or("");
-    match api::call(&app, Call::InstallHarness(agent), None).await {
-        Ok(_) => Redirect::to(&auth::flash_ok(
-            &format!("/ui/profile?agent={}", auth::enc_query(agent)),
-            "Harness install requested.",
-        ))
-        .into_response(),
-        Err(e) => Redirect::to(&auth::flash_err("/ui/profile", &e)).into_response(),
-    }
+    let dest = format!("/ui/profile?agent={}", auth::enc_query(agent));
+    let location = match api::call(&app, Call::InstallHarness(agent), None).await {
+        Ok(v) if v["harnessInstallation"]["workerUpgradeRequired"] == true => auth::flash_err(
+            &dest,
+            v["harnessInstallation"]["detail"]
+                .as_str()
+                .unwrap_or("Update the assigned worker."),
+        ),
+        Ok(_) => auth::flash_ok(&dest, "Harness install requested."),
+        Err(e) => auth::flash_err(&dest, &e),
+    };
+    Redirect::to(&location).into_response()
 }
 
 fn parse_form(body: &str) -> Vec<(String, String)> {
@@ -827,4 +911,33 @@ fn worker_commands(agent: &str, harness: &str, model_auth: &str) -> String {
         r#"<fieldset class="stack"><legend>Commands on the assigned computer</legend><p class="muted">{help}</p><pre class="log">{}</pre></fieldset>"#,
         html::esc(&lines.join("\n"))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grouped_selection_reconciles_existing_grants_once() {
+        let prior =
+            json!({"harness":"opencode","allowedTools":["write_file","patch","search_files"]});
+        let fields = [("toolShown".into(), "write_file".into())];
+        let submitted = vec!["write_file".into()];
+        assert_eq!(
+            merge_tool_selection(&prior, &fields, submitted),
+            ["write_file", "patch", "search_files"]
+        );
+    }
+
+    #[test]
+    fn revoking_grouped_tools_stays_effective_across_profile_saves() {
+        let mut prior = json!({"harness":"openhands",
+            "allowedTools":["read_file","write_file","patch","terminal"]});
+        let visible = [("toolShown".into(), "read_file".into())];
+        for _ in 0..2 {
+            let tools = merge_tool_selection(&prior, &visible, Vec::new());
+            assert_eq!(tools, ["terminal"]);
+            prior["allowedTools"] = json!(tools);
+        }
+    }
 }

@@ -13,9 +13,112 @@ const after = (k) => args[args.indexOf(k) + 1];
 const image = 'sha256:' + 'd'.repeat(64);
 const previous = (name) => JSON.parse(readFileSync(join(state, name + '.json')));
 const name = args.includes('--name') ? after('--name') : args.at(-1);
+const modelKey = 'fixture-private-key';
+const imagePins = { opencode: '1.19.6', pi: '1.6.0', openhands: '1.63.1' };
+const additionalImage = /^open-harness-(opencode|pi|openhands):/;
+
+function readonlyBindSource(containerArgs, target) {
+  const suffix = `,target=${target},readonly`;
+  const mount = containerArgs.find((arg) => arg.startsWith('type=bind,') && arg.endsWith(suffix));
+  assert.ok(mount, `${target} must be a read-only bind mount`);
+  const [source] = mount.slice('type=bind,'.length, -suffix.length).match(/^(?:source|src)=(.+)$/).slice(1);
+  return source;
+}
+
+function managedOptions(cli) {
+  const directory = readonlyBindSource(args, '/run/open-harness');
+  assert.equal(statSync(directory).mode & 0o077, 0);
+  const config = (file) => {
+    const value = readFileSync(join(directory, file), 'utf8');
+    assert.ok(!value.includes(modelKey));
+    return JSON.parse(value);
+  };
+  if (cli === 'opencode') {
+    assert.equal(after('--workdir'), '/workspace');
+    assert.equal(after('--format'), 'json');
+    const provider = config('opencode.json').provider['open-harness-model'];
+    const [model] = Object.keys(provider.models);
+    assert.equal(after('--model'), `open-harness-model/${model}`);
+    return { baseUrl: provider.options.baseURL, model };
+  }
+  if (cli === 'pi') {
+    assert.equal(after('--workdir'), '/workspace/shared');
+    assert.equal(after('--mode'), 'json');
+    assert.ok(args.includes('--no-mcp') && args.includes('--no-extensions'));
+    const provider = config('models.json').providers['open-harness-model'];
+    assert.equal(after('--model'), provider.models[0].id);
+    return { baseUrl: provider.baseUrl, model: provider.models[0].id };
+  }
+  assert.equal(after('--workdir'), '/workspace');
+  const { baseUrl, model, provider } = config('config.json');
+  return { baseUrl, model, provider };
+}
+
+function emitAdditional(cli, prompt, keyed) {
+  const expected = prompt === 'Truncate stream' || prompt === 'Exit failure' || prompt === 'Provider error';
+  assert.ok(expected || prompt === '--answer on stdin\nSecond line with π');
+  const reply = `Managed reply${keyed ? ': ' + modelKey : ''}`;
+  const failure = `Provider rejected ${modelKey}`;
+  if (prompt === 'Provider error') {
+    if (cli === 'opencode') emit({type:'error',error:{name:'APIError',data:{message:failure}}});
+    if (cli === 'pi') {
+      emit({type:'message_end',message:{role:'assistant',stopReason:'error',errorMessage:failure,content:[]}});
+      emit({type:'agent_settled',aborted:false});
+    }
+    if (cli === 'openhands') emit({type:'error',message:failure});
+    return;
+  }
+  const completed = prompt !== 'Truncate stream';
+  if (cli === 'opencode') {
+    emit({type:'step_start',part:{type:'step-start'}});
+    emit({type:'tool_use',part:{type:'tool',callID:'tool-1',tool:'bash',state:{status:'completed',input:{command:'pwd'},output:reply}}});
+    emit({type:'step_finish',part:{type:'step-finish',reason:'tool-calls'}});
+    emit({type:'step_start',part:{type:'step-start'}});
+    const chunks = keyed ? [reply.slice(0, -4), reply.slice(-4)] : [reply];
+    for (const text of chunks) emit({type:'text',part:{type:'text',text}});
+    if (completed) emit({type:'step_finish',part:{type:'step-finish',reason:'stop'}});
+  } else if (cli === 'pi') {
+    emit({type:'tool_execution_start',toolCallId:'tool-1',toolName:'bash',args:{command:'pwd'}});
+    emit({type:'tool_execution_end',toolCallId:'tool-1',toolName:'bash',result:{content:[{type:'text',text:reply}]},isError:false});
+    // A key split across two text blocks still needs redaction in the assembled reply.
+    const parts = keyed ? [reply.slice(0, -4), reply.slice(-4)] : [reply];
+    const message = {role:'assistant',stopReason:'stop',content:parts.map(text=>({type:'text',text}))};
+    emit({type:'message_end',message});
+    emit({type:'agent_end',messages:[message],willRetry:false});
+    if (completed) emit({type:'agent_settled',aborted:false});
+  } else {
+    emit({type:'tool.start',id:'tool-1',name:'terminal',preview:'pwd'});
+    emit({type:'tool.complete',id:'tool-1',name:'terminal',result:reply,error:false});
+    emit({type:'message',text:reply});
+    if (completed) emit({type:'result',text:reply});
+  }
+  if (prompt === 'Exit failure') process.exitCode = 17;
+}
+
 switch (command) {
   case 'info': console.log('28.0.0'); break;
-  case 'image': console.log(args.at(-1).includes('hermes') ? image + ' 3' : image); break;
+  case 'image': {
+    const tag = args.at(-1);
+    const harness = tag.match(additionalImage)?.[1];
+    if (harness && !existsSync(join(state, `${harness}.image`))) process.exit(1);
+    if (harness) assert.equal(readFileSync(join(state, `${harness}.image`), 'utf8'), tag);
+    console.log(tag.includes('hermes') ? image + ' 3' : image);
+    break;
+  }
+  case 'build': {
+    const tag = after('--tag');
+    const harness = tag.match(additionalImage)?.[1];
+    assert.ok(harness, 'build a recognized named image');
+    const version = imagePins[harness];
+    assert.ok(tag.startsWith(`open-harness-${harness}:${version}`));
+    assert.ok(readFileSync(after('--file'), 'utf8').includes(version));
+    const attempts = join(state, `${harness}.builds`);
+    const first = !existsSync(attempts);
+    appendFileSync(attempts, 'build\n');
+    if (harness === 'pi' && first) process.exit(1);
+    writeFileSync(join(state, `${harness}.image`), tag);
+    break;
+  }
   case 'ps': {
     const filter=after('--filter');
     const container=filter?.match(/^name=\^\/(open-harness-rust-[a-f0-9-]+)\$$/)?.[1];
@@ -30,18 +133,37 @@ switch (command) {
     assert.equal(after('--security-opt'), 'no-new-privileges');
     assert.ok(!args.some((arg) => arg.includes('DISPLAY') || arg.includes('docker.sock')));
     assert.ok(args.includes(image));
-    const cli = args.includes('codex') ? 'codex' : args.includes('claude') ? 'claude-code' : 'hermes';
+    const cli = args.slice(args.indexOf(image) + 1).map((arg) => ({
+      codex:'codex',claude:'claude-code',opencode:'opencode',pi:'pi','/opt/open-harness/openhands.py':'openhands',
+    })[arg]).find(Boolean) || 'hermes';
+    if (cli === 'openhands') {
+      assert.deepEqual(args.slice(args.indexOf('python3')), ['python3', '-P', '/opt/open-harness/openhands.py']);
+    }
+    let managed;
     if (cli !== 'hermes') {
-      assert.ok(args.includes(cli === 'codex' ? '--json' : '--print'));
-      assert.equal(after('--entrypoint'),'/bin/sh');
+      assert.ok(!args.includes('-i') && !args.includes('--interactive'));
+      assert.equal(after('--entrypoint'), '/bin/sh');
       assert.ok(args.includes('exec "$@" < /run/open-harness-prompt'));
-      assert.ok(!args.includes('Answer via stdin only'));
       const env = after('--env-file');
       assert.equal(statSync(env).mode & 0o777, 0o600);
-      assert.equal(readFileSync(env, 'utf8').includes('fixture-private-key'),true);
-      assert.ok(!args.some((arg) => arg.includes('fixture-private-key')));
+      const vars = readFileSync(env, 'utf8').trim().split('\n');
+      assert.ok(!vars.some((variable) => variable.includes('fixture-other-key')));
+      assert.ok(!args.some((arg) => arg.includes(modelKey)));
+      if (Object.hasOwn(imagePins, cli)) {
+        const modelVar = vars.find((variable) => variable.startsWith('OPEN_HARNESS_MODEL_API_KEY='));
+        assert.ok(!modelVar || modelVar === `OPEN_HARNESS_MODEL_API_KEY=${modelKey}`);
+        assert.equal(vars.filter((variable) => variable.includes(modelKey)).length, Number(Boolean(modelVar)));
+        const [uid, gid] = after('--user').split(':');
+        assert.match(uid, /^[1-9][0-9]*$/);
+        assert.equal(after('--tmpfs'), `/home/agent:rw,nosuid,nodev,mode=0700,uid=${uid},gid=${gid}`);
+        assert.ok(!args.some((arg) => arg.includes('target=/home/agent')));
+        managed = { ...managedOptions(cli), keyed: Boolean(modelVar) };
+      } else {
+        assert.ok(args.includes(cli === 'codex' ? '--json' : '--print'));
+        assert.ok(vars.some((variable) => variable.includes(modelKey)));
+      }
     }
-    writeFileSync(join(state, name + '.json'), JSON.stringify({cli, args}));
+    writeFileSync(join(state, name + '.json'), JSON.stringify({cli, args, managed}));
     break;
   }
   case 'rm': {
@@ -97,16 +219,26 @@ switch (command) {
     assert.ok(args.includes('--attach') && !args.includes('-i') && !args.includes('-t'));
     const config = previous(name);
     assert.equal(existsSync(config.args[config.args.indexOf('--env-file') + 1]), false);
-    const mount = config.args.find(arg=>arg.endsWith(',target=/run/open-harness-prompt,readonly'));
-    const path = mount.match(/,src=([^,]+),|,source=([^,]+),/);
-    assert.equal(statSync(path[1]||path[2]).mode & 0o777,0o600);
-    const prompt = readFileSync(path[1]||path[2], 'utf8');
-    if (prompt === 'Slow job') {console.log('{"type":"thread.started"}');await delay(30_000);}
+    const promptPath = readonlyBindSource(config.args, '/run/open-harness-prompt');
+    assert.equal(statSync(promptPath).mode & 0o777, 0o600);
+    const prompt = readFileSync(promptPath, 'utf8');
+    assert.ok(!config.args.some((arg) => arg.includes(prompt)), 'the prompt must stay out of Docker argv');
+    if (prompt === 'Slow job') {
+      writeFileSync(join(state, `${name}.started`), 'started');
+      await delay(30_000);
+      break;
+    }
+    if (config.managed) {
+      emitAdditional(config.cli, prompt, config.managed.keyed);
+      break;
+    }
     if (prompt === 'Truncate stream') break;
     assert.equal(prompt,'Answer via stdin only');
     if(config.cli==='claude-code'){
-      emit({type:'assistant',message:{content:[{type:'text',text:'Claude reply: fixture-private-key'}]}});
-      emit({type:'result',subtype:'success',result:'Claude reply: fixture-private-key'});
+      const reply = 'Claude reply: ' + modelKey;
+      const content = [reply.slice(0, -4), reply.slice(-4)].map(text => ({type:'text',text}));
+      emit({type:'assistant',message:{content}});
+      emit({type:'result',subtype:'success',result:reply});
     }else{
       emit({type:'item.completed',item:{type:'agent_message',text:'Codex reply: fixture-private-key'}});
       emit({type:'turn.completed'});

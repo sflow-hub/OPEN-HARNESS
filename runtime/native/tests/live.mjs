@@ -13,6 +13,9 @@ const cases = [
   ['claude-code', 'anthropic', '/v1/messages'],
   ['codex', 'openai', '/v1/responses'],
   ['hermes', 'openai', '/v1/chat/completions'],
+  ['opencode', 'custom', '/v1/chat/completions'],
+  ['pi', 'custom', '/v1/chat/completions'],
+  ['openhands', 'custom', '/v1/chat/completions'],
 ];
 const terminalStates = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
 const turnTimeout = Number(process.env.OPEN_HARNESS_TEST_TURN_TIMEOUT_MS ?? 420_000);
@@ -90,5 +93,21 @@ test('installed headless harnesses use the native coordinator and a local model'
       assert.equal(history.events.filter(e => e.type === 'run.completed').length, 1);
       assert.ok(history.events.some(e => e.type === 'profile.applied' && e.payload.harness === harness && e.payload.computer.desktop === 'none'));
       t.diagnostic(harness + ' completed through the Rust API and ' + endpoint);
+      if (['opencode', 'pi', 'openhands'].includes(harness)) {
+        const request = provider.hold();
+        const active = await submit(request.prompt);
+        const path = '/v1/runs/' + active.id;
+        await until(async () => {
+          if (request.reached()) return true;
+          const run = await api(path);
+          assert.ok(!terminalStates.has(run.state), 'Run ended before the provider held it: ' + JSON.stringify(run));
+          return false;
+        }, harness + ' in-flight model request', turnTimeout);
+        const stopped = await api(path + '/stop', {});
+        assert.equal(stopped.stopped, 1);
+        assert.equal((await terminalRun(active.id)).state, 'cancelled');
+        const cancelled = await api(path + '/events');
+        assert.equal(cancelled.events.filter(e => e.type === 'run.cancelled').length, 1);
+      }
     });
   });

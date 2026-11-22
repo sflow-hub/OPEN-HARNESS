@@ -1,6 +1,6 @@
-//! Claude Code and Codex argument and stdout protocol, mirroring `cliArguments` and
-//! `CliOutput` in runtime/cli-harness.ts. Docker orchestration, transport, and secret
-//! handling live elsewhere; this module only builds argv and interprets protocol lines.
+//! Launch validation and stdout protocols for the headless CLI harnesses.
+
+use crate::additional_cli;
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value, json};
@@ -33,6 +33,9 @@ fn claude_tools(tool: &str) -> &'static [&'static str] {
 enum Harness {
     ClaudeCode,
     Codex,
+    OpenCode,
+    Pi,
+    OpenHands,
 }
 
 impl Harness {
@@ -40,6 +43,9 @@ impl Harness {
         match value {
             "claude-code" => Some(Self::ClaudeCode),
             "codex" => Some(Self::Codex),
+            "opencode" => Some(Self::OpenCode),
+            "pi" => Some(Self::Pi),
+            "openhands" => Some(Self::OpenHands),
             _ => None,
         }
     }
@@ -47,12 +53,16 @@ impl Harness {
         match self {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+            Self::OpenCode => "OpenCode",
+            Self::Pi => "Pi",
+            Self::OpenHands => "OpenHands",
         }
     }
-    fn provider(self) -> (&'static str, &'static str) {
+    fn provider(self) -> Option<(&'static str, &'static str)> {
         match self {
-            Self::ClaudeCode => ("anthropic", "Anthropic"),
-            Self::Codex => ("openai", "OpenAI"),
+            Self::ClaudeCode => Some(("anthropic", "Anthropic")),
+            Self::Codex => Some(("openai", "OpenAI")),
+            _ => None,
         }
     }
 }
@@ -116,6 +126,13 @@ fn clip(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
+fn clip_value(value: &Value, limit: usize) -> String {
+    match value.as_str() {
+        Some(text) => clip(text, limit),
+        None => clip(&value.to_string(), limit),
+    }
+}
+
 fn valid_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     !bytes.is_empty()
@@ -138,9 +155,24 @@ fn owned(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
 
-/// Builds argv from `claude`/`codex` onwards for a run snapshot carrying `profile` and
-/// `effectiveModel`. A bare profile with `effectiveModel` beside it is also accepted.
+pub struct ManagedConfig<'a> {
+    pub model: additional_cli::Model<'a>,
+    pub tools: Vec<&'a str>,
+    pub instructions: &'a str,
+}
+
+pub struct Launch<'a> {
+    pub harness: &'a str,
+    pub args: Vec<String>,
+    pub config: Option<ManagedConfig<'a>>,
+}
+
 pub fn arguments(snapshot: &Value) -> Result<Vec<String>> {
+    Ok(launch(snapshot)?.args)
+}
+
+/// The worker accepts both a bare profile snapshot and one with a nested profile.
+pub fn launch(snapshot: &Value) -> Result<Launch<'_>> {
     let profile = snapshot
         .get("profile")
         .filter(|p| p.is_object())
@@ -149,9 +181,9 @@ pub fn arguments(snapshot: &Value) -> Result<Vec<String>> {
         .get("effectiveModel")
         .filter(|m| m.is_object())
         .ok_or_else(|| anyhow!("Choose a model for this agent before starting a task."))?;
-    let harness = text(profile, "harness")
-        .and_then(Harness::parse)
-        .ok_or_else(|| anyhow!("Choose a supported CLI harness."))?;
+    let invalid_harness = || anyhow!("Choose a supported CLI harness.");
+    let harness_id = text(profile, "harness").ok_or_else(invalid_harness)?;
+    let harness = Harness::parse(harness_id).ok_or_else(invalid_harness)?;
     let name = harness.name();
     if !text(profile, "id").is_some_and(valid_id) {
         bail!("Invalid agent ID.");
@@ -184,13 +216,15 @@ pub fn arguments(snapshot: &Value) -> Result<Vec<String>> {
         ),
     }
 
-    let (provider, label) = harness.provider();
-    if text(model, "provider") != Some(provider) {
-        bail!("{name} requires an {label} model and saved credential.");
-    }
+    let legacy_provider = harness.provider();
     let model_id = text(model, "model").unwrap_or("");
-    if !valid_model(model_id) {
-        bail!("Choose a valid {label} model for this agent.");
+    if let Some((provider, label)) = legacy_provider {
+        if text(model, "provider") != Some(provider) {
+            bail!("{name} requires an {label} model and saved credential.");
+        }
+        if !valid_model(model_id) {
+            bail!("Choose a valid {label} model for this agent.");
+        }
     }
     let base_url = text(model, "baseUrl").unwrap_or("");
     let plan = match snapshot.get("modelAuth") {
@@ -199,29 +233,33 @@ pub fn arguments(snapshot: &Value) -> Result<Vec<String>> {
         Some(mode) if mode == "chatgpt-plan" => true,
         _ => bail!("Choose a supported billing method before starting this run."),
     };
-    if plan
-        && (harness != Harness::Codex
-            || !base_url.is_empty()
-            || text(model, "credentialRef").is_some_and(|s| !s.is_empty()))
-    {
-        bail!("Choose Codex with the OpenAI endpoint and ChatGPT plan billing for this agent.");
-    }
-    if base_url.chars().any(char::is_control) {
-        bail!("The selected endpoint contains an unsupported line break.");
-    }
-    if !base_url.is_empty()
-        && !url::Url::parse(base_url).is_ok_and(|url| {
-            matches!(url.scheme(), "http" | "https")
-                && url.has_host()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-        })
-    {
-        bail!(
-            "The selected endpoint must start with http:// or https:// and contain no credentials, query or fragment."
-        );
+    if legacy_provider.is_some() {
+        if plan
+            && (harness != Harness::Codex
+                || !base_url.is_empty()
+                || text(model, "credentialRef").is_some_and(|s| !s.is_empty()))
+        {
+            bail!("Choose Codex with the OpenAI endpoint and ChatGPT plan billing for this agent.");
+        }
+        if base_url.chars().any(char::is_control) {
+            bail!("The selected endpoint contains an unsupported line break.");
+        }
+        if !base_url.is_empty()
+            && !url::Url::parse(base_url).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.has_host()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+            })
+        {
+            bail!(
+                "The selected endpoint must start with http:// or https:// and contain no credentials, query or fragment."
+            );
+        }
+    } else if plan {
+        bail!("Choose a saved model credential for {name}.");
     }
 
     let unreadable_tools = || {
@@ -246,6 +284,22 @@ pub fn arguments(snapshot: &Value) -> Result<Vec<String>> {
     }
     if instructions.contains('\0') {
         bail!("Instructions contain an unsupported character.");
+    }
+
+    if legacy_provider.is_none() {
+        // The managed model validator checks the model ID and provider endpoint together.
+        let model = additional_cli::Model::from_snapshot(model)?;
+        let tools = additional_cli::tool_grants(harness_id, &allowed)?;
+        let args = additional_cli::arguments(harness_id, &model, &tools, instructions);
+        return Ok(Launch {
+            harness: harness_id,
+            args,
+            config: Some(ManagedConfig {
+                model,
+                tools,
+                instructions,
+            }),
+        });
     }
 
     if harness == Harness::ClaudeCode {
@@ -292,7 +346,11 @@ pub fn arguments(snapshot: &Value) -> Result<Vec<String>> {
         if !instructions.is_empty() {
             args.extend(owned(&["--append-system-prompt", instructions]));
         }
-        return Ok(args);
+        return Ok(Launch {
+            harness: harness_id,
+            args,
+            config: None,
+        });
     }
 
     if CORE_CODEX_TOOLS.iter().any(|tool| !allowed.contains(tool)) {
@@ -376,7 +434,11 @@ pub fn arguments(snapshot: &Value) -> Result<Vec<String>> {
     if !plan {
         args.push("-".into());
     }
-    Ok(args)
+    Ok(Launch {
+        harness: harness_id,
+        args,
+        config: None,
+    })
 }
 
 fn event(kind: &str, payload: Value) -> Value {
@@ -392,6 +454,7 @@ pub struct Output {
     completed: bool,
     failure: String,
     transient_error: String,
+    pi_stopped: bool,
 }
 
 impl Output {
@@ -402,6 +465,7 @@ impl Output {
             completed: false,
             failure: String::new(),
             transient_error: String::new(),
+            pi_stopped: false,
         }
     }
 
@@ -415,6 +479,9 @@ impl Output {
             None => {}
             Some(Harness::Codex) => self.accept_codex(value, kind, &mut events),
             Some(Harness::ClaudeCode) => self.accept_claude(value, kind, &mut events),
+            Some(Harness::OpenCode) => self.accept_opencode(value, kind, &mut events),
+            Some(Harness::Pi) => self.accept_pi(value, kind, &mut events),
+            Some(Harness::OpenHands) => self.accept_openhands(value, kind, &mut events),
         }
         events
     }
@@ -569,6 +636,162 @@ impl Output {
                     self.text = result.into();
                 }
             }
+        }
+    }
+
+    fn accept_opencode(&mut self, value: &Value, kind: &str, events: &mut Vec<Value>) {
+        let part = &value["part"];
+        match kind {
+            "step_start" => self.completed = false,
+            "step_finish" => {
+                self.completed = part["reason"] == "stop";
+                if part["reason"] == "length" {
+                    self.failure = "OpenCode reached the model’s output limit.".into();
+                }
+            }
+            "text" => {
+                if let Some(message) = text(part, "text") {
+                    self.text.push_str(message);
+                    events.push(event("message.delta", json!({"text": message})));
+                }
+            }
+            "tool_use" => {
+                let state = &part["state"];
+                let is_error = state["status"] == "error";
+                if (state["status"] == "completed" || is_error)
+                    && let (Some(id), Some(name)) = (text(part, "callID"), text(part, "tool"))
+                {
+                    events.push(event(
+                        "tool.start",
+                        json!({
+                            "id": id, "name": name, "preview": clip_value(&state["input"], 1000)
+                        }),
+                    ));
+                    events.push(event("tool.complete", json!({
+                        "id": id, "name": name, "error": is_error,
+                        "result": clip(text(state, if is_error { "error" } else { "output" }).unwrap_or(""), 4000)
+                    })));
+                }
+            }
+            "error" => {
+                self.failure = clip(
+                    &first_truthy(
+                        &[
+                            value["error"]["data"].get("message"),
+                            value["error"].get("message"),
+                            value.get("message"),
+                        ],
+                        "OpenCode could not complete this task.",
+                    ),
+                    4000,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn accept_pi(&mut self, value: &Value, kind: &str, events: &mut Vec<Value>) {
+        match kind {
+            "agent_start" => {
+                self.completed = false;
+                self.pi_stopped = false;
+                self.transient_error.clear();
+            }
+            "message_end" if value["message"]["role"] == "assistant" => {
+                let message = &value["message"];
+                let stop = text(message, "stopReason");
+                self.pi_stopped = stop == Some("stop");
+                self.transient_error = match stop {
+                    Some("error") => clip(
+                        text(message, "errorMessage").unwrap_or("Pi could not complete this task."),
+                        4000,
+                    ),
+                    Some("length") => "Pi reached the model’s output limit.".into(),
+                    Some("aborted") => "Pi stopped before completing the task.".into(),
+                    _ => String::new(),
+                };
+                let reply = message["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| block["type"] == "text")
+                    .filter_map(|block| text(block, "text"))
+                    .collect::<String>();
+                if !reply.is_empty() {
+                    events.push(event("message.delta", json!({"text": reply})));
+                    // Intermediate replies remain in events and the result holds the last reply.
+                    self.text = reply;
+                } else if self.pi_stopped {
+                    self.text.clear();
+                }
+            }
+            "agent_settled" => {
+                // The pinned Pi protocol always supplies the abort flag at settlement.
+                self.completed = self.pi_stopped && value["aborted"].as_bool() == Some(false);
+                if !self.completed && !self.transient_error.is_empty() {
+                    self.failure = std::mem::take(&mut self.transient_error);
+                }
+            }
+            "tool_execution_start" | "tool_execution_end" => {
+                let (Some(id), Some(name)) = (text(value, "toolCallId"), text(value, "toolName"))
+                else {
+                    return;
+                };
+                if kind == "tool_execution_start" {
+                    events.push(event(
+                        "tool.start",
+                        json!({
+                            "id": id, "name": name, "preview": clip_value(&value["args"], 1000)
+                        }),
+                    ));
+                } else {
+                    events.push(event(
+                        "tool.complete",
+                        json!({
+                            "id": id, "name": name, "error": value["isError"] == true,
+                            "result": clip_value(&value["result"], 4000)
+                        }),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn accept_openhands(&mut self, value: &Value, kind: &str, events: &mut Vec<Value>) {
+        match kind {
+            "message" => {
+                if let Some(message) = text(value, "text") {
+                    self.text = message.into();
+                    events.push(event("message.delta", json!({"text": message})));
+                }
+            }
+            "tool.start" | "tool.complete" => {
+                if let (Some(id), Some(name)) = (text(value, "id"), text(value, "name")) {
+                    let payload = if kind == "tool.start" {
+                        json!({"id": id, "name": name, "preview": clip(text(value, "preview").unwrap_or(""), 1000)})
+                    } else {
+                        json!({"id": id, "name": name, "error": value["error"] == true,
+                            "result": clip(text(value, "result").unwrap_or(""), 4000)})
+                    };
+                    events.push(event(kind, payload));
+                }
+            }
+            "result" => {
+                if let Some(result) = text(value, "text") {
+                    self.completed = true;
+                    self.text = result.into();
+                }
+            }
+            "error" => {
+                self.failure = clip(
+                    text(value, "message")
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("OpenHands could not complete this task."),
+                    4000,
+                );
+            }
+            _ => {}
         }
     }
 
@@ -942,6 +1165,100 @@ mod tests {
         assert_eq!(
             out.finish(Some(0)).unwrap(),
             json!({ "text": "Final answer" })
+        );
+    }
+
+    #[test]
+    fn managed_harnesses_validate_the_model_and_endpoint_before_launch() {
+        for harness in ["opencode", "pi", "openhands"] {
+            let mut profile = snapshot(harness, "custom");
+            set(
+                &mut profile,
+                "/effectiveModel/baseUrl",
+                json!("https://model.example/v1"),
+            );
+            set(&mut profile, "/effectiveModel/model", json!("--invalid"));
+            assert!(rejection(&profile).contains("valid model ID"));
+
+            set(&mut profile, "/effectiveModel/model", json!("valid-model"));
+            set(
+                &mut profile,
+                "/effectiveModel/baseUrl",
+                json!("ftp://model.example/v1"),
+            );
+            assert!(rejection(&profile).contains("Endpoint must be HTTP(S)"));
+            set(&mut profile, "/effectiveModel/baseUrl", json!(""));
+            assert!(rejection(&profile).contains("Enter an OpenAI-compatible endpoint"));
+        }
+    }
+
+    #[test]
+    fn legacy_provider_error_precedes_invalid_tools() {
+        let mut profile = snapshot("claude-code", "openai");
+        set(&mut profile, "/profile/allowedTools", json!("invalid"));
+        assert_eq!(
+            rejection(&profile),
+            "Claude Code requires an Anthropic model and saved credential."
+        );
+    }
+
+    #[test]
+    fn pi_streams_intermediate_replies_and_requires_a_non_aborted_settlement() {
+        for aborted in [Value::Null, json!(true), json!(false)] {
+            let mut output = Output::new("pi");
+            let interim = output.accept(&json!({
+                "type":"message_end", "message":{"role":"assistant","stopReason":"toolUse",
+                "content":[{"type":"text","text":"Working."}]}
+            }));
+            let result = output.accept(&json!({
+                "type":"message_end", "message":{"role":"assistant","stopReason":"stop",
+                "content":[{"type":"text","text":"Finished."}]}
+            }));
+            assert_eq!(interim[0]["payload"]["text"], "Working.");
+            assert_eq!(result[0]["payload"]["text"], "Finished.");
+            let mut settlement = json!({"type":"agent_settled"});
+            if !aborted.is_null() {
+                settlement["aborted"] = aborted.clone();
+            }
+            output.accept(&settlement);
+            if aborted == false {
+                assert_eq!(output.finish(Some(0)).unwrap(), json!({"text":"Finished."}));
+            } else {
+                assert!(output.finish(Some(0)).unwrap_err().is::<Interrupted>());
+            }
+        }
+    }
+
+    #[test]
+    fn pi_clears_stale_provider_errors_when_an_attempt_starts() {
+        let mut output = Output::new("pi");
+        output.accept(&json!({
+            "type":"message_end", "message":{"role":"assistant","stopReason":"error",
+            "errorMessage":"Earlier attempt failed","content":[]}
+        }));
+        output.accept(&json!({"type":"agent_start"}));
+        output.accept(&json!({"type":"agent_settled","aborted":true}));
+        assert!(output.finish(Some(0)).unwrap_err().is::<Interrupted>());
+    }
+
+    #[test]
+    fn tool_event_displays_string_arguments_without_json_quotes() {
+        let mut output = Output::new("opencode");
+        let event = output.accept(&json!({
+            "type":"tool_use","part":{"callID":"t1","tool":"bash",
+            "state":{"status":"completed","input":"pwd","output":"/workspace"}}
+        }));
+        assert_eq!(event[0]["payload"]["preview"], "pwd");
+    }
+
+    #[test]
+    fn openhands_error_takes_precedence_over_a_result_record() {
+        let mut output = Output::new("openhands");
+        output.accept(&json!({"type":"error","message":"Provider failed."}));
+        output.accept(&json!({"type":"result","text":"Partial result."}));
+        assert_eq!(
+            output.finish(Some(0)).unwrap_err().to_string(),
+            "Provider failed."
         );
     }
 

@@ -77,12 +77,9 @@ async fn action(
         Some("start-container-engine") => "start-container-engine",
         _ => return Err(ApiError::bad("Choose an available setup action.")),
     };
-    let harness = match v["harness"].as_str().unwrap_or("hermes") {
-        "hermes" => "hermes",
-        "claude-code" => "claude-code",
-        "codex" => "codex",
-        _ => return Err(ApiError::bad("Unknown harness.")),
-    };
+    let harness = open_harness_runner::harnesses::find(v["harness"].as_str().unwrap_or("hermes"))
+        .ok_or_else(|| ApiError::bad("Unknown harness."))?
+        .id;
     let n=app.lock().execute("INSERT INTO native_onboarding VALUES(1,?,'running',NULL,?) ON CONFLICT(id) DO UPDATE SET action=excluded.action,state='running',message=NULL,updated_at=excluded.updated_at WHERE native_onboarding.state!='running'",params![name,now()])?;
     if n == 0 {
         return Err(ApiError::conflict("A setup action is already running."));

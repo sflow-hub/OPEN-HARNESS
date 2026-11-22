@@ -11,6 +11,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use chrono::{Duration, SecondsFormat, Utc};
+use open_harness_runner::harnesses;
 use openssl::{
     bn::BigNum,
     encrypt::Encrypter,
@@ -92,10 +93,26 @@ pub fn info(db: &Connection, machine: &str) -> Result<Value> {
     obj.remove("revoked_at");
     rec["id"] = json!(name);
     rec["local"] = json!(name == "local");
-    rec["capabilities"] = json!({"container":caps["container"].as_bool().unwrap_or(false),"workerLaunch":caps["workerLaunch"]==true,"desktop":false,"virtualDesktop":false,"direct":false,"detail":"Headless container worker."});
+    rec["capabilities"] = machine_capabilities(&caps);
     rec["status"] = json!(status);
     rec["assignedAgents"] = json!(assigned);
     Ok(rec)
+}
+pub fn harness_upgrade(machine: &Value, harness: &str) -> Option<String> {
+    // The local worker is shipped with the coordinator, including during startup.
+    if machine["local"] == true || !harnesses::is_additional(harness) {
+        return None;
+    }
+    let supports_harness = machine["capabilities"]["harnesses"]
+        .as_array()
+        .is_some_and(|ids| ids.iter().any(|id| id == harness));
+    if supports_harness {
+        return None;
+    }
+    let name = harnesses::find(harness)?.name;
+    Some(format!(
+        "Update the Open Harness worker on this computer. Retry {name} after the worker checks in."
+    ))
 }
 fn public_key(input: &str) -> Result<PKey<Public>> {
     ensure!(input.len() < 8192, "Invalid runner key.");
@@ -300,7 +317,7 @@ async fn pair(
         "UPDATE machine_pairings SET used_at=? WHERE id=?",
         params![now(), pair_id],
     )?;
-    tx.execute("INSERT INTO machines(id,name,platform,arch,status,last_seen_at,local,capabilities_json,credential_hash,created_at,updated_at,encryption_public_key) VALUES(?,?,?,?,'online',?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET credential_hash=excluded.credential_hash, encryption_public_key=excluded.encryption_public_key,last_seen_at=excluded.last_seen_at,capabilities_json=excluded.capabilities_json,updated_at=excluded.updated_at",params![machine,v["name"].as_str().unwrap_or(&name),v["platform"].as_str().unwrap_or(&platform),v["arch"].as_str().unwrap_or("unknown"),now(),local,caps(&v).to_string(),digest(&token),now(),now(),key])?;
+    tx.execute("INSERT INTO machines(id,name,platform,arch,status,last_seen_at,local,capabilities_json,credential_hash,created_at,updated_at,encryption_public_key) VALUES(?,?,?,?,'online',?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET credential_hash=excluded.credential_hash, encryption_public_key=excluded.encryption_public_key,last_seen_at=excluded.last_seen_at,capabilities_json=excluded.capabilities_json,updated_at=excluded.updated_at",params![machine,v["name"].as_str().unwrap_or(&name),v["platform"].as_str().unwrap_or(&platform),v["arch"].as_str().unwrap_or("unknown"),now(),local,machine_capabilities(&v["capabilities"]).to_string(),digest(&token),now(),now(),key])?;
     if local {
         tx.execute("UPDATE machines SET reserved_agent_id=coalesce(reserved_agent_id,(SELECT reserved_agent_id FROM machines WHERE id='local')) WHERE id=?",[LOCAL])?;
     }
@@ -311,8 +328,18 @@ async fn pair(
         Json(json!({"machineId":machine,"machine":m,"token":token})),
     ))
 }
-fn caps(v: &Value) -> Value {
-    json!({"container":v["capabilities"]["container"].as_bool().unwrap_or(false),"workerLaunch":v["capabilities"]["workerLaunch"]==true,"direct":false,"desktop":false,"virtualDesktop":false,"detail":"Headless container worker."})
+fn machine_capabilities(caps: &Value) -> Value {
+    let ids: Vec<&str> = caps["harnesses"].as_array().map_or_else(
+        || harnesses::LEGACY_HARNESSES.to_vec(),
+        |provided| {
+            harnesses::HARNESSES
+                .iter()
+                .map(|harness| harness.id)
+                .filter(|id| provided.iter().any(|value| value == *id))
+                .collect()
+        },
+    );
+    json!({"container":caps["container"].as_bool().unwrap_or(false),"workerLaunch":caps["workerLaunch"] == true,"direct":false,"desktop":false,"virtualDesktop":false,"detail":"Headless container worker.","harnesses":ids})
 }
 #[derive(Clone)]
 pub struct Identity(pub String);
@@ -327,7 +354,7 @@ async fn heartbeat(
         .as_str()
         .map(|s| public_key(s).map(|_| s))
         .transpose()?;
-    tx.execute("UPDATE machines SET status='online',last_seen_at=?,updated_at=?,capabilities_json=?,encryption_public_key=coalesce(?,encryption_public_key) WHERE id=?",params![now(),now(),caps(&v).to_string(),key,machine])?;
+    tx.execute("UPDATE machines SET status='online',last_seen_at=?,updated_at=?,capabilities_json=?,encryption_public_key=coalesce(?,encryption_public_key) WHERE id=?",params![now(),now(),machine_capabilities(&v["capabilities"]).to_string(),key,machine])?;
     if let Some(active) = v["activeCommandIds"].as_array() {
         for cmd in rows(
             &tx,

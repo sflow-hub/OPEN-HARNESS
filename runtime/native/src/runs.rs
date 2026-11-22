@@ -1,5 +1,5 @@
 use crate::{ApiError, App, Reply, id, machines, now, profiles, rows, workspace};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -398,7 +398,14 @@ pub fn pump(app: &App) -> Result<()> {
             {
                 return Ok(());
             }
-            let capabilities = &machines::info(&tx, machine)?["capabilities"];
+            let assigned = machines::info(&tx, machine)?;
+            if let Some(detail) = snapshot["harness"]
+                .as_str()
+                .and_then(|harness| machines::harness_upgrade(&assigned, harness))
+            {
+                bail!("{detail}");
+            }
+            let capabilities = &assigned["capabilities"];
             ensure!(
                 capabilities["container"] == true,
                 "Start the assigned worker's container engine before running this agent."

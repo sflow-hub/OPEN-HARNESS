@@ -95,6 +95,7 @@ jobs:
       - name: Verify native harness protocols and worker recovery
         run: |
           cargo build --locked --workspace
+          python3 -B runtime/rust-runner/tests/openhands_adapter.py
           OPEN_HARNESS_RUST_RUNNER="$PWD/target/debug/open-harness-runner" node --test runtime/rust-runner/tests/harnesses.test.mjs runtime/rust-runner/tests/adoption.test.mjs runtime/rust-runner/tests/recovery.test.mjs
       - name: Install Chromium
         if: runner.os == 'Linux'

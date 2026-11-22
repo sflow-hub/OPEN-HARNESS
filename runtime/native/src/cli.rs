@@ -1,6 +1,7 @@
 use crate::{mock_mode, profiles, server};
 use anyhow::{Context, Result, bail, ensure};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, builder::PossibleValuesParser};
+use open_harness_runner::harnesses;
 use reqwest::{Client, Method};
 use serde_json::{Value, json};
 use std::{
@@ -37,10 +38,13 @@ enum Action {
     Start,
     /// Gracefully stop the coordinator and its local worker.
     Stop,
-    /// Build the pinned worker images (all three by default).
+    /// Build a pinned worker image. With no argument, prepare Hermes, Claude Code and Codex.
     Setup {
-        #[arg(value_parser=["hermes","claude-code","codex"])]
+        #[arg(value_parser = harness_parser())]
         harness: Option<String>,
+        /// Prepare every harness in the worker catalog.
+        #[arg(long, conflicts_with = "harness")]
+        all: bool,
     },
     /// Report the service and container engine's readiness.
     Doctor {
@@ -122,10 +126,11 @@ enum AgentAction {
         /// Assign the new agent directly to a paired worker (default: local).
         #[arg(long)]
         machine: Option<String>,
-        #[arg(long,default_value="hermes",value_parser=["hermes","claude-code","codex"])]
+        #[arg(long, default_value = "hermes", value_parser = harness_parser())]
         harness: String,
         #[arg(long)]
         model: Option<String>,
+        /// Provider ID, such as openai, anthropic, xai, openrouter, local or custom.
         #[arg(long, requires = "model")]
         provider: Option<String>,
         #[arg(long, requires = "model")]
@@ -148,6 +153,9 @@ enum AgentAction {
         #[arg(long, value_parser=["configured","chatgpt-plan"])]
         model_auth: Option<String>,
     },
+}
+fn harness_parser() -> PossibleValuesParser {
+    PossibleValuesParser::new(harnesses::HARNESSES.iter().map(|harness| harness.id))
 }
 fn output(v: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
@@ -267,14 +275,16 @@ pub async fn main() -> Result<()> {
             )?;
             open_harness_runner::worker_local::command(&worker, action).await
         }
-        Action::Setup { harness } => {
-            let names = harness
-                .as_deref()
-                .map(|s| vec![s])
-                .unwrap_or_else(|| vec!["hermes", "claude-code", "codex"]);
-            for h in names {
-                open_harness_runner::install(h).await?;
-                println!("{h} ready");
+        Action::Setup { harness, all } => {
+            for spec in &harnesses::HARNESSES {
+                let selected = harness.as_deref().map_or(
+                    all || harnesses::LEGACY_HARNESSES.contains(&spec.id),
+                    |id| id == spec.id,
+                );
+                if selected {
+                    open_harness_runner::install(spec.id).await?;
+                    println!("{} ready", spec.id);
+                }
             }
             Ok(())
         }
@@ -431,6 +441,7 @@ pub async fn main() -> Result<()> {
                         let default = match harness.as_str() {
                             "claude-code" => "anthropic",
                             "codex" => "openai",
+                            id if harnesses::is_additional(id) => "xai",
                             _ => "local",
                         };
                         p["model"] = json!({"inherit":false,"model":m,"provider":provider.as_deref().unwrap_or(default),"baseUrl":base_url.unwrap_or_default(),"credentialRef":credential_ref.unwrap_or_default()});

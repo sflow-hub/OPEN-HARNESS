@@ -44,6 +44,9 @@ test('submit jobs and reopen results with JavaScript disabled', async ({ page, c
   const agents = [
     ['Researcher', 'researcher', 'hermes', 'Hermes'],
     ['Reviewer', 'reviewer', 'claude-code', 'Claude Code'],
+    ['Navigator', 'navigator', 'opencode', 'OpenCode'],
+    ['Pilot', 'pilot', 'pi', 'Pi'],
+    ['Caretaker', 'caretaker', 'openhands', 'OpenHands'],
     ['Builder', 'builder', 'codex', 'Codex'],
   ] as const;
   for (const [agent, id, harness] of agents) {
@@ -83,6 +86,49 @@ test('submit jobs and reopen results with JavaScript disabled', async ({ page, c
     expect(response?.status()).toBe(200);
     await expect(reopened.locator('h1')).toBeVisible();
   }
+});
+
+test('configure new headless harnesses and model connections with JavaScript disabled', async ({ page }) => {
+  await page.goto(base);
+  const form = page.locator('form[action="/ui/agents/create"]');
+  const harnesses = [
+    ['OpenCode', 'opencode', 'openai'],
+    ['Pi', 'pi', 'local'],
+    ['OpenHands', 'openhands', 'openrouter'],
+  ];
+  for (const [name, harness, provider] of harnesses) {
+    await form.getByLabel('Name', { exact: true }).fill(name + ' Agent');
+    await form.getByLabel('ID', { exact: true }).fill(harness + '-agent');
+    await form.getByLabel('Harness').selectOption(harness);
+    await form.getByText('Model connection', { exact: true }).click();
+    await expect(page.locator('#model-providers option')).toHaveCount(6);
+    await form.getByLabel('Provider', { exact: true }).fill(provider);
+    await form.getByLabel('Model ID', { exact: true }).fill('fixture-model');
+    if (provider === 'local') {
+      await form.getByLabel('Base URL', { exact: true }).fill('http://model.invalid/v1');
+    }
+    await form.getByRole('button', { name: 'Create agent' }).click();
+    await expect(page.getByText('Agent created.', { exact: true })).toBeVisible();
+    await expect(page.getByText(harness + '-agent · ' + name, { exact: true })).toBeVisible();
+  }
+
+  await page.goto(base + '/ui/profile?agent=openhands-agent');
+  const profile = page.locator('form[action="/ui/profile/agent"]');
+  await expect(profile.getByLabel('Harness')).toHaveValue('openhands');
+  await expect(profile.getByLabel('Provider', { exact: true })).toHaveValue('openrouter');
+  await expect(profile.getByLabel('Credential ref', { exact: true })).toHaveValue('OPENROUTER_API_KEY');
+  await expect(profile.getByLabel('Read, write and edit files', { exact: true })).toBeChecked();
+  await expect(profile.getByLabel('Search files', { exact: true })).toHaveCount(0);
+  await profile.getByLabel('Read, write and edit files', { exact: true }).uncheck();
+  await profile.getByRole('button', { name: 'Save profile' }).click();
+  await expect(page.getByText('Profile saved.', { exact: true })).toBeVisible();
+  await expect(profile.getByLabel('Read, write and edit files', { exact: true })).not.toBeChecked();
+  await page.getByRole('button', { name: 'Install / retry harness' }).click();
+  await expect(page.getByText('Harness install requested.', { exact: true })).toBeVisible();
+  await expect.poll(async () => {
+    await page.reload();
+    return page.getByText('Harness installation ready.', { exact: false }).count();
+  }).toBe(1);
 });
 
 test('persist memory, skills and private files for the selected agent', async ({ page }) => {

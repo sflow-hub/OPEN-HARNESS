@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, ensure};
+use open_harness_runner::harnesses;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -259,13 +260,11 @@ impl Profile {
                     merged[k] = v.clone();
                 }
             }
-            if selection.get("credentialRef").is_none() && merged["provider"] != "xai" {
-                merged["credentialRef"] = json!(match merged["provider"].as_str() {
-                    Some("openai") => "OPENAI_API_KEY",
-                    Some("anthropic") => "ANTHROPIC_API_KEY",
-                    Some("openrouter") => "OPENROUTER_API_KEY",
-                    _ => "",
-                });
+            if selection.get("credentialRef").is_none() {
+                let provider = merged["provider"].as_str().unwrap_or("");
+                if harnesses::is_additional(&harness) || provider != "xai" {
+                    merged["credentialRef"] = json!(harnesses::default_credential_ref(provider));
+                }
             }
         }
         let model_auth = agent
@@ -317,10 +316,7 @@ impl Profile {
     }
     pub fn validate(mut self, legacy: bool) -> Result<Self> {
         ensure!(valid_id(&self.id), "Invalid agent ID.");
-        ensure!(
-            matches!(self.harness.as_str(), "hermes" | "claude-code" | "codex"),
-            "Choose a supported agent harness."
-        );
+        harnesses::find(&self.harness).context("Choose a supported agent harness.")?;
         bounded(&self.name, "Name", 30, true)?;
         self.name = self.name.trim().into();
         bounded(&self.role, "Role", 60, true)?;
@@ -418,15 +414,32 @@ impl Profile {
             }
         }
         if self.harness != "hermes" {
-            let provider = if self.harness == "claude-code" {
-                "anthropic"
+            if harnesses::is_additional(&self.harness) {
+                ensure!(
+                    !self.model.inherit,
+                    "Choose an explicit model for this harness."
+                );
+                let model = &mut self.model.choice;
+                harnesses::validate_additional_model(
+                    &model.provider,
+                    &model.model,
+                    &model.base_url,
+                )?;
+                if model.credential_ref.is_empty() {
+                    model.credential_ref =
+                        harnesses::default_credential_ref(&model.provider).into();
+                }
             } else {
-                "openai"
-            };
-            ensure!(
-                !self.model.inherit && self.model.choice.provider == provider,
-                "Choose an explicit {provider} model for this harness."
-            );
+                let provider = if self.harness == "claude-code" {
+                    "anthropic"
+                } else {
+                    "openai"
+                };
+                ensure!(
+                    !self.model.inherit && self.model.choice.provider == provider,
+                    "Choose an explicit {provider} model for this harness."
+                );
+            }
             ensure!(
                 !self.connectors.iter().any(|c| c.enabled),
                 "Configured MCP connections require the Hermes harness."
@@ -474,6 +487,18 @@ impl Profile {
         Ok(self)
     }
     pub fn grants(&self) -> Vec<&str> {
+        if harnesses::is_additional(&self.harness)
+            && let Some(harness) = harnesses::find(&self.harness)
+        {
+            let selected = |id: &&str| self.allowed_tools.iter().any(|tool| tool == *id);
+            let group_is_granted = harness.tool_group.iter().all(selected);
+            return harness
+                .tool_ids
+                .iter()
+                .filter(|id| selected(id) && (group_is_granted || !harness.tool_group.contains(id)))
+                .copied()
+                .collect();
+        }
         self.allowed_tools
             .iter()
             .filter(|t| {
