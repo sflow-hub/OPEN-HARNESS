@@ -1,9 +1,9 @@
+import {randomUUID} from 'node:crypto';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 
 export const answer='Confirmed the headless run.';
 export const key='fixture-api-key';
-export const holdPrompt='Wait for cancellation from Open Harness.';
 const sse=(res,type,v)=>res.write(`event: ${type}\ndata: ${JSON.stringify(v)}\n\n`);
 export const send=(res,value)=>res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(value));
 
@@ -51,12 +51,21 @@ export async function serve(t,handler,host) {
     await handler(req,res,body);
   })().catch(()=>res.writeHead(500).end('{}'));});
   server.listen(0,host);await once(server,'listening');
-  t.after(async()=>{server.closeAllConnections();await new Promise(done=>server.close(done));});
+  t.after(() => new Promise(done => {
+    server.close(done);
+    server.closeAllConnections();
+  }));
   return server.address().port;
 }
 
 export async function modelFixture(t) {
   const seen=new Map();
+  const waiting=new Map();
+  function hold() {
+    const prompt='Wait for cancellation from Open Harness. '+randomUUID();
+    waiting.set(prompt,false);
+    return {prompt,reached:()=>waiting.get(prompt)===true};
+  }
   const provider=await serve(t,(req,res,body)=>{
     const path=req.url.split('?')[0];
     seen.set(path,1+(seen.get(path)||0));
@@ -65,16 +74,19 @@ export async function modelFixture(t) {
     if(req.headers.authorization!=='Bearer '+key && req.headers['x-api-key']!==key) return res.writeHead(401).end('{}');
     if(path==='/v1/responses') return responses(res,body.model);
     if(path==='/v1/messages') return messages(res,body.model,body.stream);
-    if(path==='/v1/chat/completions' && body.messages?.some(message=>
-      message.role==='user' && JSON.stringify(message.content).includes(holdPrompt)
-    )) {
-      seen.set('waiting',1+(seen.get('waiting')||0));
-      res.writeHead(200,{'content-type':'text/event-stream'});
-      res.flushHeaders();
-      return;
+    if(path==='/v1/chat/completions') {
+      const prompt=[...waiting.keys()].find(candidate=>body.messages?.some(message=>
+        message.role==='user' && JSON.stringify(message.content).includes(candidate)
+      ));
+      if(prompt) {
+        waiting.set(prompt,true);
+        res.writeHead(200,{'content-type':'text/event-stream'});
+        res.flushHeaders();
+        return;
+      }
+      return chat(res,body.model,body.stream);
     }
-    if(path==='/v1/chat/completions') return chat(res,body.model,body.stream);
     res.writeHead(404).end('{}');
   },process.env.OPEN_HARNESS_RUST_PROVIDER_BIND||'127.0.0.1');
-  return {seen,base:`http://${process.env.OPEN_HARNESS_RUST_PROVIDER_HOST||'host.docker.internal'}:${provider}`};
+  return {seen,hold,base:`http://${process.env.OPEN_HARNESS_RUST_PROVIDER_HOST||'host.docker.internal'}:${provider}`};
 }

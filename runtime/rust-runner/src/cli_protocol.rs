@@ -126,6 +126,13 @@ fn clip(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
+fn clip_value(value: &Value, limit: usize) -> String {
+    match value.as_str() {
+        Some(text) => clip(text, limit),
+        None => clip(&value.to_string(), limit),
+    }
+}
+
 fn valid_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     !bytes.is_empty()
@@ -209,6 +216,52 @@ pub fn launch(snapshot: &Value) -> Result<Launch<'_>> {
         ),
     }
 
+    let legacy_provider = harness.provider();
+    let model_id = text(model, "model").unwrap_or("");
+    if let Some((provider, label)) = legacy_provider {
+        if text(model, "provider") != Some(provider) {
+            bail!("{name} requires an {label} model and saved credential.");
+        }
+        if !valid_model(model_id) {
+            bail!("Choose a valid {label} model for this agent.");
+        }
+    }
+    let base_url = text(model, "baseUrl").unwrap_or("");
+    let plan = match snapshot.get("modelAuth") {
+        None => false,
+        Some(mode) if mode == "configured" => false,
+        Some(mode) if mode == "chatgpt-plan" => true,
+        _ => bail!("Choose a supported billing method before starting this run."),
+    };
+    if legacy_provider.is_some() {
+        if plan
+            && (harness != Harness::Codex
+                || !base_url.is_empty()
+                || text(model, "credentialRef").is_some_and(|s| !s.is_empty()))
+        {
+            bail!("Choose Codex with the OpenAI endpoint and ChatGPT plan billing for this agent.");
+        }
+        if base_url.chars().any(char::is_control) {
+            bail!("The selected endpoint contains an unsupported line break.");
+        }
+        if !base_url.is_empty()
+            && !url::Url::parse(base_url).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.has_host()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+            })
+        {
+            bail!(
+                "The selected endpoint must start with http:// or https:// and contain no credentials, query or fragment."
+            );
+        }
+    } else if plan {
+        bail!("Choose a saved model credential for {name}.");
+    }
+
     let unreadable_tools = || {
         anyhow!("The tool choices for this agent could not be read. Review them in Agent settings.")
     };
@@ -233,16 +286,8 @@ pub fn launch(snapshot: &Value) -> Result<Launch<'_>> {
         bail!("Instructions contain an unsupported character.");
     }
 
-    let plan = match snapshot.get("modelAuth") {
-        None => false,
-        Some(mode) if mode == "configured" => false,
-        Some(mode) if mode == "chatgpt-plan" => true,
-        _ => bail!("Choose a supported billing method before starting this run."),
-    };
-    if harness.provider().is_none() {
-        if plan {
-            bail!("Choose a saved model credential for {name}.");
-        }
+    if legacy_provider.is_none() {
+        // The managed model validator checks the model ID and provider endpoint together.
         let model = additional_cli::Model::from_snapshot(model)?;
         let tools = additional_cli::tool_grants(harness_id, &allowed)?;
         let args = additional_cli::arguments(harness_id, &model, &tools, instructions);
@@ -255,42 +300,6 @@ pub fn launch(snapshot: &Value) -> Result<Launch<'_>> {
                 instructions,
             }),
         });
-    }
-
-    let (provider, label) = harness
-        .provider()
-        .expect("a legacy harness has a fixed provider");
-    if text(model, "provider") != Some(provider) {
-        bail!("{name} requires an {label} model and saved credential.");
-    }
-    let model_id = text(model, "model").unwrap_or("");
-    if !valid_model(model_id) {
-        bail!("Choose a valid {label} model for this agent.");
-    }
-    let base_url = text(model, "baseUrl").unwrap_or("");
-    if plan
-        && (harness != Harness::Codex
-            || !base_url.is_empty()
-            || text(model, "credentialRef").is_some_and(|s| !s.is_empty()))
-    {
-        bail!("Choose Codex with the OpenAI endpoint and ChatGPT plan billing for this agent.");
-    }
-    if base_url.chars().any(char::is_control) {
-        bail!("The selected endpoint contains an unsupported line break.");
-    }
-    if !base_url.is_empty()
-        && !url::Url::parse(base_url).is_ok_and(|url| {
-            matches!(url.scheme(), "http" | "https")
-                && url.has_host()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-        })
-    {
-        bail!(
-            "The selected endpoint must start with http:// or https:// and contain no credentials, query or fragment."
-        );
     }
 
     if harness == Harness::ClaudeCode {
@@ -652,9 +661,12 @@ impl Output {
                 if (state["status"] == "completed" || is_error)
                     && let (Some(id), Some(name)) = (text(part, "callID"), text(part, "tool"))
                 {
-                    events.push(event("tool.start", json!({
-                        "id": id, "name": name, "preview": clip(&state["input"].to_string(), 1000)
-                    })));
+                    events.push(event(
+                        "tool.start",
+                        json!({
+                            "id": id, "name": name, "preview": clip_value(&state["input"], 1000)
+                        }),
+                    ));
                     events.push(event("tool.complete", json!({
                         "id": id, "name": name, "error": is_error,
                         "result": clip(text(state, if is_error { "error" } else { "output" }).unwrap_or(""), 4000)
@@ -683,6 +695,7 @@ impl Output {
             "agent_start" => {
                 self.completed = false;
                 self.pi_stopped = false;
+                self.transient_error.clear();
             }
             "message_end" if value["message"]["role"] == "assistant" => {
                 let message = &value["message"];
@@ -706,13 +719,15 @@ impl Output {
                     .collect::<String>();
                 if !reply.is_empty() {
                     events.push(event("message.delta", json!({"text": reply})));
+                    // Intermediate replies remain in events and the result holds the last reply.
                     self.text = reply;
                 } else if self.pi_stopped {
                     self.text.clear();
                 }
             }
             "agent_settled" => {
-                self.completed = self.pi_stopped && value["aborted"] == false;
+                // The pinned Pi protocol always supplies the abort flag at settlement.
+                self.completed = self.pi_stopped && value["aborted"].as_bool() == Some(false);
                 if !self.completed && !self.transient_error.is_empty() {
                     self.failure = std::mem::take(&mut self.transient_error);
                 }
@@ -723,15 +738,18 @@ impl Output {
                     return;
                 };
                 if kind == "tool_execution_start" {
-                    events.push(event("tool.start", json!({
-                        "id": id, "name": name, "preview": clip(&value["args"].to_string(), 1000)
-                    })));
+                    events.push(event(
+                        "tool.start",
+                        json!({
+                            "id": id, "name": name, "preview": clip_value(&value["args"], 1000)
+                        }),
+                    ));
                 } else {
                     events.push(event(
                         "tool.complete",
                         json!({
                             "id": id, "name": name, "error": value["isError"] == true,
-                            "result": clip(&value["result"].to_string(), 4000)
+                            "result": clip_value(&value["result"], 4000)
                         }),
                     ));
                 }
@@ -1147,6 +1165,100 @@ mod tests {
         assert_eq!(
             out.finish(Some(0)).unwrap(),
             json!({ "text": "Final answer" })
+        );
+    }
+
+    #[test]
+    fn managed_harnesses_validate_the_model_and_endpoint_before_launch() {
+        for harness in ["opencode", "pi", "openhands"] {
+            let mut profile = snapshot(harness, "custom");
+            set(
+                &mut profile,
+                "/effectiveModel/baseUrl",
+                json!("https://model.example/v1"),
+            );
+            set(&mut profile, "/effectiveModel/model", json!("--invalid"));
+            assert!(rejection(&profile).contains("valid model ID"));
+
+            set(&mut profile, "/effectiveModel/model", json!("valid-model"));
+            set(
+                &mut profile,
+                "/effectiveModel/baseUrl",
+                json!("ftp://model.example/v1"),
+            );
+            assert!(rejection(&profile).contains("Endpoint must be HTTP(S)"));
+            set(&mut profile, "/effectiveModel/baseUrl", json!(""));
+            assert!(rejection(&profile).contains("Enter an OpenAI-compatible endpoint"));
+        }
+    }
+
+    #[test]
+    fn legacy_provider_error_precedes_invalid_tools() {
+        let mut profile = snapshot("claude-code", "openai");
+        set(&mut profile, "/profile/allowedTools", json!("invalid"));
+        assert_eq!(
+            rejection(&profile),
+            "Claude Code requires an Anthropic model and saved credential."
+        );
+    }
+
+    #[test]
+    fn pi_streams_intermediate_replies_and_requires_a_non_aborted_settlement() {
+        for aborted in [Value::Null, json!(true), json!(false)] {
+            let mut output = Output::new("pi");
+            let interim = output.accept(&json!({
+                "type":"message_end", "message":{"role":"assistant","stopReason":"toolUse",
+                "content":[{"type":"text","text":"Working."}]}
+            }));
+            let result = output.accept(&json!({
+                "type":"message_end", "message":{"role":"assistant","stopReason":"stop",
+                "content":[{"type":"text","text":"Finished."}]}
+            }));
+            assert_eq!(interim[0]["payload"]["text"], "Working.");
+            assert_eq!(result[0]["payload"]["text"], "Finished.");
+            let mut settlement = json!({"type":"agent_settled"});
+            if !aborted.is_null() {
+                settlement["aborted"] = aborted.clone();
+            }
+            output.accept(&settlement);
+            if aborted == false {
+                assert_eq!(output.finish(Some(0)).unwrap(), json!({"text":"Finished."}));
+            } else {
+                assert!(output.finish(Some(0)).unwrap_err().is::<Interrupted>());
+            }
+        }
+    }
+
+    #[test]
+    fn pi_clears_stale_provider_errors_when_an_attempt_starts() {
+        let mut output = Output::new("pi");
+        output.accept(&json!({
+            "type":"message_end", "message":{"role":"assistant","stopReason":"error",
+            "errorMessage":"Earlier attempt failed","content":[]}
+        }));
+        output.accept(&json!({"type":"agent_start"}));
+        output.accept(&json!({"type":"agent_settled","aborted":true}));
+        assert!(output.finish(Some(0)).unwrap_err().is::<Interrupted>());
+    }
+
+    #[test]
+    fn tool_event_displays_string_arguments_without_json_quotes() {
+        let mut output = Output::new("opencode");
+        let event = output.accept(&json!({
+            "type":"tool_use","part":{"callID":"t1","tool":"bash",
+            "state":{"status":"completed","input":"pwd","output":"/workspace"}}
+        }));
+        assert_eq!(event[0]["payload"]["preview"], "pwd");
+    }
+
+    #[test]
+    fn openhands_error_takes_precedence_over_a_result_record() {
+        let mut output = Output::new("openhands");
+        output.accept(&json!({"type":"error","message":"Provider failed."}));
+        output.accept(&json!({"type":"result","text":"Partial result."}));
+        assert_eq!(
+            output.finish(Some(0)).unwrap_err().to_string(),
+            "Provider failed."
         );
     }
 

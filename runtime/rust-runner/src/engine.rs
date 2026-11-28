@@ -164,7 +164,7 @@ WORKDIR /workspace
 RUN apt-get update && apt-get install -y --no-install-recommends git ripgrep ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN npm install --global --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@{version} && PI_OFFLINE=1 pi --version
 COPY pi-entrypoint.sh /opt/open-harness/pi-entrypoint.sh
-ENV HOME=/home/agent PI_CODING_AGENT_DIR=/home/agent/.pi-managed PI_OFFLINE=1
+ENV HOME=/home/agent PI_OFFLINE=1
 WORKDIR /workspace/shared
 "#
         )),
@@ -629,7 +629,7 @@ pub fn recover_inputs(root: &Path) -> Result<()> {
         let item = item?;
         let entry = item.file_name();
         let name = entry.to_str().unwrap_or_default();
-        let kind = item.file_type()?;
+        let kind = item.path().symlink_metadata()?.file_type();
         if kind.is_file() && (name.starts_with("env-") || name.starts_with("prompt-")) {
             fs::remove_file(item.path())?;
         } else if kind.is_dir() && name.starts_with("harness-config-") {
@@ -642,6 +642,27 @@ pub fn recover_inputs(root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_removes_stale_config_without_following_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let inputs = root.path().join("rust-inputs");
+        crate::directory(&inputs).unwrap();
+        let stale = config_directory(root.path()).unwrap().keep();
+        fs::write(stale.join("config.json"), "{}").unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let preserved = other.path().join("keep");
+        fs::write(&preserved, "unchanged").unwrap();
+        let alias = inputs.join("harness-config-alias");
+        std::os::unix::fs::symlink(other.path(), &alias).unwrap();
+
+        recover_inputs(root.path()).unwrap();
+
+        assert!(!stale.exists());
+        assert!(alias.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(preserved).unwrap(), "unchanged");
+    }
+
     #[test]
     fn embedded_images_contain_native_headless_entrypoints() {
         let dir = tempfile::tempdir().unwrap();

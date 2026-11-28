@@ -111,7 +111,7 @@ pub fn harness_upgrade(machine: &Value, harness: &str) -> Option<String> {
     }
     let name = harnesses::find(harness)?.name;
     Some(format!(
-        "Update the Open Harness worker on this computer to use {name}."
+        "Update the Open Harness worker on this computer. Retry {name} after the worker checks in."
     ))
 }
 fn public_key(input: &str) -> Result<PKey<Public>> {

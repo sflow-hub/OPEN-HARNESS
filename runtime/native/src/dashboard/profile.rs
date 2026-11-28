@@ -13,7 +13,7 @@ use axum::{
 use open_harness_runner::harnesses;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Default)]
 pub struct Draft {
@@ -661,7 +661,13 @@ fn merge_tool_selection(
             }
         }
     }
-    selected.extend(old.filter(|id| !shown(id)).map(str::to_owned));
+    let group_shown = group.first().is_some_and(|leader| shown(leader));
+    selected.extend(
+        old.filter(|id| !(shown(id) || group_shown && group.contains(id)))
+            .map(str::to_owned),
+    );
+    let mut seen = HashSet::new();
+    selected.retain(|id| seen.insert(id.clone()));
     selected
 }
 
@@ -905,4 +911,33 @@ fn worker_commands(agent: &str, harness: &str, model_auth: &str) -> String {
         r#"<fieldset class="stack"><legend>Commands on the assigned computer</legend><p class="muted">{help}</p><pre class="log">{}</pre></fieldset>"#,
         html::esc(&lines.join("\n"))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grouped_selection_reconciles_existing_grants_once() {
+        let prior =
+            json!({"harness":"opencode","allowedTools":["write_file","patch","search_files"]});
+        let fields = [("toolShown".into(), "write_file".into())];
+        let submitted = vec!["write_file".into()];
+        assert_eq!(
+            merge_tool_selection(&prior, &fields, submitted),
+            ["write_file", "patch", "search_files"]
+        );
+    }
+
+    #[test]
+    fn revoking_grouped_tools_stays_effective_across_profile_saves() {
+        let mut prior = json!({"harness":"openhands",
+            "allowedTools":["read_file","write_file","patch","terminal"]});
+        let visible = [("toolShown".into(), "read_file".into())];
+        for _ in 0..2 {
+            let tools = merge_tool_selection(&prior, &visible, Vec::new());
+            assert_eq!(tools, ["terminal"]);
+            prior["allowedTools"] = json!(tools);
+        }
+    }
 }

@@ -153,7 +153,9 @@ switch (command) {
         const modelVar = vars.find((variable) => variable.startsWith('OPEN_HARNESS_MODEL_API_KEY='));
         assert.ok(!modelVar || modelVar === `OPEN_HARNESS_MODEL_API_KEY=${modelKey}`);
         assert.equal(vars.filter((variable) => variable.includes(modelKey)).length, Number(Boolean(modelVar)));
-        assert.ok(args.some((arg, index) => args[index - 1] === '--tmpfs' && /^\/home\/agent(?::|$)/.test(arg)));
+        const [uid, gid] = after('--user').split(':');
+        assert.match(uid, /^[1-9][0-9]*$/);
+        assert.equal(after('--tmpfs'), `/home/agent:rw,nosuid,nodev,mode=0700,uid=${uid},gid=${gid}`);
         assert.ok(!args.some((arg) => arg.includes('target=/home/agent')));
         managed = { ...managedOptions(cli), keyed: Boolean(modelVar) };
       } else {
@@ -233,8 +235,10 @@ switch (command) {
     if (prompt === 'Truncate stream') break;
     assert.equal(prompt,'Answer via stdin only');
     if(config.cli==='claude-code'){
-      emit({type:'assistant',message:{content:[{type:'text',text:'Claude reply: fixture-private-key'}]}});
-      emit({type:'result',subtype:'success',result:'Claude reply: fixture-private-key'});
+      const reply = 'Claude reply: ' + modelKey;
+      const content = [reply.slice(0, -4), reply.slice(-4)].map(text => ({type:'text',text}));
+      emit({type:'assistant',message:{content}});
+      emit({type:'result',subtype:'success',result:reply});
     }else{
       emit({type:'item.completed',item:{type:'agent_message',text:'Codex reply: fixture-private-key'}});
       emit({type:'turn.completed'});
