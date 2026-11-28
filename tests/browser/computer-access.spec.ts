@@ -48,8 +48,8 @@ const legacy = (computer: Partial<AgentProfile['computer']>) => async (page: Pag
   });
 };
 async function openFolders(page: Page, project: string) {
-  if (project === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: 'Folders', exact: true }).click();
+  await openNavigation(page);
+  await page.locator('aside.sidebar').getByRole('button', { name: 'Folders', exact: true }).click();
   const screen = page.locator('.folders-content');
   await expect(screen.getByRole('heading', { name: 'Folders', exact: true })).toBeVisible();
   return screen;

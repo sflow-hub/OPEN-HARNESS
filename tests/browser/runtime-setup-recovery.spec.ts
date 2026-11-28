@@ -42,7 +42,7 @@ test('Set up later survives recovery, reconnect and other tabs while setup remai
   // coordinator connection can fail, so exercise both automatic setup paths.
   await page.route(/\/v1\/bootstrap$/, route => route.abort('failed'), { times: 1 });
   await page.goto(url + '&original=1');
-  await expect(page.locator('.offline-banner')).toBeVisible();
+  // A single failed first connection is retried quietly; the banner only appears for a persistent outage.
   await expect(page.getByRole('button', { name: 'Improve my Open Harness' })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.offline-banner')).toBeHidden();
   await expect(welcome(page)).toBeHidden();

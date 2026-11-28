@@ -193,7 +193,7 @@ test('a width change keeps the older message being read in place', async ({ page
   const before = await offsetOf(page, 'Long chat A', 250);
   const height = await transcript(page).evaluate(el => el.scrollHeight);
   const size = page.viewportSize()!;
-  await page.setViewportSize({ width: Math.min(700, size.width - 70), height: size.height });
+  await page.setViewportSize({ width: Math.min(480, size.width - 70), height: size.height });
   // The content really did reflow; otherwise this would pass without holding anything.
   await expect.poll(async () => Math.abs(await transcript(page).evaluate(el => el.scrollHeight) - height)).toBeGreaterThan(200);
   await expect.poll(async () => Math.abs(await offsetOf(page, 'Long chat A', 250) - before)).toBeLessThanOrEqual(2);

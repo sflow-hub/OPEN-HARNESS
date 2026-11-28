@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
+import { openNavigation } from './navigation';
 import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,8 +22,8 @@ test('a project shares a folder and gives each agent its own access, capped by t
   mkdirSync(folder);
   const headers = await operator(request);
   await request.post(control + '/v1/boards', { headers, data: { name } });
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: 'Tasks', exact: true }).click();
+  await openNavigation(page);
+  await page.locator('aside.sidebar').getByRole('button', { name: 'Tasks', exact: true }).click();
   await page.getByRole('button', { name: 'Projects', exact: true }).click();
   await page.getByRole('button', { name: `Settings for ${name}` }).click();
   const dialog = page.getByRole('dialog', { name: 'Project settings' });
@@ -60,7 +61,7 @@ test('a chat uses the agent’s own folders unless a project with folders is cho
   await request.post(control + '/v1/boards', { headers, data: { name, folders: [{ name: 'shared', path: folder, mode: 'read', agents: { scout: 'read' } }] } });
   await page.reload();
   await page.getByRole('button', { name: 'Meet Atlas' }).click();
-  await page.getByRole('button', { name: 'New conversation' }).click();
+  await page.getByRole('button', { name: 'New conversation' }).first().click();
   const picker = page.getByLabel('Project folders');
   await expect(picker).toHaveValue('');
   await expect(picker.getByRole('option', { name })).toHaveCount(1);

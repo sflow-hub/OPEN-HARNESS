@@ -155,6 +155,7 @@ test('rejoins a running setup after reload and retries only on request', async (
   });
   const model = page.getByRole('dialog', { name: 'Connect your model' });
   await model.getByLabel('Provider').selectOption('local');
+  await model.getByLabel('Available models').selectOption('__custom');
   await model.getByLabel('Model', { exact: true }).fill('test-model');
   await model.getByLabel('Model server address').fill('http://localhost:11434/v1');
   await model.getByRole('button', { name: 'Save and test' }).click();
@@ -187,6 +188,7 @@ test('restores the chosen model source and account, and checks a changed credent
   await model.getByRole('button', { name: 'Choose another model' }).click();
   await model.getByLabel('Provider').selectOption('openai-codex');
   await account.selectOption(accounts[0]);
+  await model.getByLabel('Available models').selectOption('__custom');
   await model.getByLabel('Model', { exact: true }).fill('fixture-codex-model');
   await model.getByRole('button', { name: 'Set up later' }).click();
   await reloadAndResume(page);

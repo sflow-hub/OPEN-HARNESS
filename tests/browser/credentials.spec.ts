@@ -361,8 +361,8 @@ test('onboarding inline creation seeds the provider, endpoint, and default model
 });
 
 test('typed credentials save each field type without exposing saved fields', async ({ page }, testInfo) => {
-  if (testInfo.project.name === 'mobile') await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: 'Credentials', exact: true }).click();
+  await openNavigation(page);
+  await page.locator('aside.sidebar').getByRole('button', { name: 'Credentials', exact: true }).click();
   const repo = page.getByRole('region', { name: 'Credentials' });
   await repo.getByRole('button', { name: 'Add credential', exact: true }).click();
   const picker = page.getByRole('dialog', { name: 'Add new credential' });
