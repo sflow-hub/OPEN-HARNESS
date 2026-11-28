@@ -2,6 +2,12 @@
 
 <!-- Kept byte-identical across the contributor instruction files below the title. -->
 
+## Native application
+
+The root Cargo workspace is the application entry point. `cargo run -- serve` launches the Rust coordinator, the server-rendered dashboard, and its colocated worker. Local and remote workers execute Hermes, Claude Code, Codex, OpenCode, Pi, and OpenHands headlessly. Use `cargo test --workspace --locked`, `cargo fmt --all --check`, and `cargo clippy --workspace --all-targets --locked -- -D warnings` for native changes. The legacy TypeScript source and its compatibility suites are retained in this checkout. Its Node version, generated bundle, desktop settings, and launch instructions below apply when working on that earlier implementation.
+
+## TypeScript release reference
+
 MIT-licensed, local-first named-agent workspace. Each named agent runs in a managed container through
 Hermes (the default), OpenCode, or a compatible custom harness behind a loopback-only
 Node.js control service. The browser is only a client — closing it must never cancel active work.

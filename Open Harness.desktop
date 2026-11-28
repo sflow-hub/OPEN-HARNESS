@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Open Harness
+Comment=Open the local agent dashboard
+Icon=applications-development
+Exec=/usr/bin/find %k -maxdepth 0 -type f -execdir /bin/sh "./Open Harness.command" ";"
+Terminal=true
+Categories=Utility;
+StartupNotify=false

@@ -1,0 +1,28 @@
+FROM rust:1.89-bookworm AS agent-tools
+WORKDIR /build
+COPY runtime/agent-tools/Cargo.toml runtime/agent-tools/Cargo.lock ./
+COPY runtime/agent-tools/src/ src/
+RUN cargo build --release --locked && strip target/release/open-harness-agent-tools
+
+FROM python:3.12-slim-bookworm
+ARG HERMES_COMMIT=939e45c91d751fadd94dcd1b873ac3cb44846213
+RUN apt-get update && apt-get install -y --no-install-recommends git ripgrep ca-certificates tini \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init /opt/hermes-agent && cd /opt/hermes-agent \
+    && git remote add origin https://github.com/NousResearch/hermes-agent.git \
+    && git fetch --depth 1 origin "$HERMES_COMMIT" && git checkout --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = "$HERMES_COMMIT" && pip install --no-cache-dir -e '.[anthropic,exa,firecrawl,parallel-web,vision,cron,pty,mcp,homeassistant,sms,acp,google,web,youtube]'
+RUN useradd -m -u 10001 hermes && mkdir -p /workspace/private /workspace/shared /home/hermes/.hermes \
+    && chown -R hermes:hermes /workspace /home/hermes
+COPY --from=agent-tools /build/target/release/open-harness-agent-tools /usr/local/bin/open-harness-agent-tools
+COPY runtime/hermes/NOTICE.md runtime/hermes/inspect_runtime.py /opt/open-harness/
+COPY runtime/hermes/headless/managed_entry.py /opt/open-harness/managed_entry.py
+COPY runtime/hermes/extension/pyproject.toml /opt/open-harness/extension/
+COPY runtime/hermes/headless/open_harness_policy.py /opt/open-harness/extension/open_harness_policy.py
+RUN pip install --no-cache-dir /opt/open-harness/extension
+ENV HERMES_HOME=/home/hermes/.hermes HERMES_TUI=1 PYTHONUNBUFFERED=1
+LABEL dev.openharness.runtime="3"
+USER hermes
+WORKDIR /workspace/shared
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sleep", "infinity"]
