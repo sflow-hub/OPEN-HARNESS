@@ -1,4 +1,4 @@
-import type { ModelChoice } from '../lib/agent-profile';
+import { BUNDLED_MODEL, type ModelChoice } from '../lib/agent-profile';
 
 const endpoints: Record<string, string> = {
   xai: 'https://api.x.ai/v1', openrouter: 'https://openrouter.ai/api/v1',
@@ -7,8 +7,13 @@ const endpoints: Record<string, string> = {
 
 export const COMPOSE_LOCAL_MODEL_MESSAGE = 'This Docker browser installation cannot use localhost or Docker host aliases for a model server on your computer. Use a hosted provider or a model server network address reachable from both the coordinator and agent containers.';
 
+export function bundledModelEnabled() {
+  return process.env.OPEN_HARNESS_DEPLOYMENT === 'compose' && process.env.OPEN_HARNESS_BUNDLED_MODEL === '1';
+}
+
 export function modelEndpointIssue(baseUrl?: string): string | null {
   if (process.env.OPEN_HARNESS_DEPLOYMENT !== 'compose' || !baseUrl) return null;
+  if (baseUrl.replace(/\/$/, '') === BUNDLED_MODEL.baseUrl && !bundledModelEnabled()) return 'The on-device model is turned off. Choose your provider in Workspace settings or open the launcher and select the model on this computer.';
   let host: string;
   try { host = new URL(baseUrl).hostname.toLowerCase().replace(/\.$/, ''); } catch { return null; }
   // The coordinator, nested engine and operator host have different loopback

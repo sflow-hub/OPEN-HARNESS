@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { coordinationToken } from '../runtime/coordination-auth';
 import { DatabaseSync } from 'node:sqlite';
-import { folderName, folderNotice, folderTarget, namedFolders, runComputer, runCwd, type AgentProfile, type ComputerConfig, type ProfileResponse, type SharedFolder } from '../lib/agent-profile';
+import { DEFAULT_COMPUTER, folderName, folderNotice, folderTarget, namedFolders, runComputer, runCwd, type AgentProfile, type ComputerConfig, type ProfileResponse, type SharedFolder } from '../lib/agent-profile';
 import type { PersistentRun } from '../lib/control-client';
 import type { ProjectFolder, TaskBoard } from '../lib/task-types';
 
@@ -177,7 +177,7 @@ test('an agent’s own folders cannot reach the data folder or the home folder',
 test('folders saved before names existed get stable, unique names from their paths', () => {
   assert.deepEqual(namedFolders([{ path: '/home/me/My Site' }, { path: 'C:\\Work\\my-site' }, { path: '/' }, { path: '/x', name: 'Not Valid' }]).map(folder => folder.name), ['my-site', 'my-site-2', 'folder', 'x']);
   assert.equal(folderName('/srv/site', ['site', 'site-2']), 'site-3');
-  const own: ComputerConfig = { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 1, memoryMb: 512, concurrency: 1 } };
+  const own: ComputerConfig = { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, network: DEFAULT_COMPUTER.network, resources: { cpu: 1, memoryMb: 512, concurrency: 1 } };
   assert.equal(runComputer(own, []).access, 'private');
   assert.deepEqual(runComputer(own, [{ id: 'p', name: 'site', path: '/srv/site', mode: 'read', scope: 'project' }]).access, 'folders');
 

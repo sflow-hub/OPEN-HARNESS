@@ -5,14 +5,15 @@ import { spawn } from 'node:child_process';
 import { copyFileSync, mkdirSync, chmodSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { API_TOOL, bindingSecretName, COMPUTER_TOOL, folderNotice, folderTarget, HANDOFF_TOOL, ROUTINE_TOOL, runCwd, TASK_TOOL, WORKSPACE_PERMISSIONS, runToolGrants, type AgentProfile, type ModelChoice, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
-import { dockerStatusCached, ensureContainerAsync } from './hermes';
+import { API_TOOL, bindingSecretName, COMPUTER_TOOL, folderNotice, folderTarget, HANDOFF_TOOL, MESSAGE_TOOL, ROUTINE_TOOL, runCwd, TASK_TOOL, WORKSPACE_PERMISSIONS, runToolGrants, type AgentProfile, type ModelChoice, type ToolCatalog, type ToolInfo } from '../lib/agent-profile';
+import { dockerStatusCached, ensureContainerAsync, HermesGateway } from './hermes';
 import { WORKSPACE_TOOL } from '../lib/product';
 import { profileMemory } from './profile-memory';
 import { assertSandboxedComputer } from './computer-validation';
 import { UNSANDBOXED_COMPUTER_MESSAGE } from '../lib/agent-profile';
 import { atomicWorkspaceWrite as atomic } from './path-safety';
-import { modelEndpointIssue } from './model-validation';
+import { BUNDLED_MODEL } from '../lib/agent-profile';
+import { bundledModelEnabled, modelEndpointIssue } from './model-validation';
 import { GROUP_CHAT_TOOL } from '../lib/group-chat';
 import { CODEX_PROVIDER, isCodexSession } from '../lib/codex';
 
@@ -23,6 +24,7 @@ export const COORDINATION_TOOLS: ToolInfo[] = [
   { id: API_TOOL, name: 'Authenticated API request', group: 'other', description: 'Call explicitly granted API origins with saved credentials.', available: true },
   { id: TASK_TOOL, name: 'Task board', group: 'other', description: 'Read and update assigned board tasks.', available: true },
   { id: HANDOFF_TOOL, name: 'Hand off to another agent', group: 'delegation', description: 'Assign explicit task context to a named agent on a shared team.', available: true },
+  { id: MESSAGE_TOOL, name: 'Post a message', group: 'delegation', description: 'Post an update to the current conversation without starting another run.', available: true },
   { id: ROUTINE_TOOL, name: 'Create a routine', group: 'scheduling', description: 'Schedule work through Open Harness.', available: true },
   // Workspace access: Agent settings lists these apart from the runtime's own tools.
   ...WORKSPACE_PERMISSIONS.map(([id, name, description]) => ({ id, name, group: 'workspace', description, available: true })),
@@ -44,6 +46,7 @@ export function runtimeToolCatalog(tools: ToolInfo[], profile?: AgentProfile): T
 export function containerBaseUrl(value: string) {
   const issue = modelEndpointIssue(value); if (issue) throw new Error(issue);
   const url = new URL(value);
+  if (bundledModelEnabled() && url.href.replace(/\/$/, '') === BUNDLED_MODEL.baseUrl) return 'http://host.docker.internal:17572/v1';
   if (['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) url.hostname = 'host.docker.internal';
   return url.toString().replace(/\/$/, '');
 }
@@ -66,7 +69,7 @@ export async function probeAgentRuntime(root:string,profile:AgentProfile,input:o
   try{await runtime.start();return await runtime.request('runtime.probe',input as Record<string,unknown>,25000);}finally{await runtime.stop();}
 }
 export function nativeRuntimeProbe(..._input: unknown[]): never { void _input; throw new Error(UNSANDBOXED_COMPUTER_MESSAGE); }
-export async function discoverTools(agentId: string, root: string, profile?: AgentProfile): Promise<ToolCatalog> {
+export async function discoverTools(agentId: string, root: string, profile?: AgentProfile, teamIds: string[] = [], isBusy: () => boolean = () => false, runtime = { dockerStatusCached, ensureContainerAsync, runtimeProbe }): Promise<ToolCatalog> {
   assertSandboxedComputer(profile?.computer);
   if (process.env.OPEN_HARNESS_MOCK === '1' && (!profile || harnessOf(profile).kind === 'hermes')) return { source: 'mock', tools: runtimeToolCatalog(mockTools, profile) };
   if (profile && harnessOf(profile).kind !== 'hermes') {
@@ -76,8 +79,8 @@ export async function discoverTools(agentId: string, root: string, profile?: Age
     const native = installation.kind==='opencode' ? mockTools.filter(t=>['terminal','read_file','write_file','search_files','web_search','web_extract'].includes(t.id)) : installation.manifest?.tools || [];
     return {source:'runtime',tools:harnessToolCatalog([...native,...(info.features.mcp?COORDINATION_TOOLS:[])],info)};
   }
-  const status = await dockerStatusCached(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
-  try { const result = await runtimeProbe(await ensureContainerAsync(agentId, root, profile?.computer), { action: 'catalog' }); return { source: 'runtime', tools: runtimeToolCatalog(result.tools as ToolInfo[], profile) }; }
+  const status = await runtime.dockerStatusCached(); if (!status.available) return { source: 'unavailable', tools: [], error: status.message };
+  try { const result = await runtime.runtimeProbe(await runtime.ensureContainerAsync(agentId, root, profile?.computer, false, teamIds, isBusy), { action: 'catalog' }); return { source: 'runtime', tools: runtimeToolCatalog(result.tools as ToolInfo[], profile) }; }
   catch (error) { return { source: 'unavailable', tools: [], error: error instanceof Error ? error.message : 'Tool inventory is unavailable.' }; }
 }
 export type PrepareProfileOptions = { cwd?: string; coordinationCommand?: string; controlUrl?: string; controlSocket?: string; idle?: boolean;reviewUnclassified?:boolean };

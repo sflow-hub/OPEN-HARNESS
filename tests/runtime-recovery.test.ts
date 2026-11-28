@@ -13,6 +13,7 @@ import { processIdentity } from '../runtime/process-identity';
 import { assertProcessStopped } from './helpers/process-state';
 
 const pause = (ms = 30) => new Promise(resolve => setTimeout(resolve, ms));
+const STARTUP_BUDGET_MS = 30_000;
 async function until<T>(read: () => Promise<T>, accepts: (value: T) => boolean, label: string) {
   for (let i = 0; i < 250; i++) { const result = await read(); if (accepts(result)) return result; await pause(); }
   throw new Error(`Timed out: ${label}`);
@@ -24,17 +25,22 @@ async function fixture(mock = true, extraEnv: Record<string, string> = {}) {
   const state = mkdtempSync(join(tmpdir(), 'harness-recovery-')), base = `http://127.0.0.1:${port}`;
   let child: ChildProcess, token = '', output = '';
   async function start() {
+    output = '';
+    let spawnError: Error | undefined;
     child = spawn(process.execPath, ['--import', 'tsx', 'runtime/service.ts'], { cwd: join(import.meta.dirname, '..'), env: { NODE_ENV: 'test', PATH: process.env.PATH, HOME: state, TMPDIR: process.env.TMPDIR, SYSTEMROOT: process.env.SYSTEMROOT, OPEN_HARNESS_DISABLE_OS_VAULT: '1', OPEN_HARNESS_MOCK: mock ? '1' : '0', OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: state, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout!.on('data', chunk => output += chunk); child.stderr!.on('data', chunk => output += chunk);
-    for (let i = 0; i < 200; i++) {
-      if (child.exitCode !== null) throw new Error(output);
-      try { const r = await fetch(`${base}/v1/bootstrap`); if (r.ok) { token = (await r.json() as any).token; return; } } catch {}
+    child.on('error', error => { spawnError = error; });
+    const deadline = Date.now() + STARTUP_BUDGET_MS;
+    while (Date.now() < deadline) {
+      if (spawnError) throw spawnError;
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Coordinator exited (${child.exitCode ?? child.signalCode}): ${output}`);
+      try { const r = await fetch(`${base}/v1/bootstrap`, { signal: AbortSignal.timeout(Math.max(1, Math.min(1000, deadline - Date.now()))) }); if (r.ok) { token = (await r.json() as any).token; return; } } catch {}
       await pause(50);
     }
-    throw new Error(`Coordinator did not start: ${output}`);
+    throw new Error(`Coordinator did not start within ${STARTUP_BUDGET_MS} ms: ${output || 'No coordinator output.'}`);
   }
   async function stop(signal: NodeJS.Signals = 'SIGTERM') {
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
     const exited = new Promise<void>(resolve => child.once('exit', () => resolve())); child.kill(signal); await exited;
   }
   async function request(path: string, method = 'GET', data?: unknown, extra?: Record<string, string>) {
@@ -43,8 +49,10 @@ async function fixture(mock = true, extraEnv: Record<string, string> = {}) {
   }
   async function run(agentId: string, prompt: string, conversationId = crypto.randomUUID()) { return request('/v1/runs', 'POST', { agentId, prompt, conversationId }); }
   async function waitRun(id: string, states = ['completed', 'failed', 'cancelled', 'interrupted']) { return until(() => request(`/v1/runs/${id}`), value => states.includes(value.state), `run ${id}: ${states}`); }
-  await start();
-  await request('/v1/agents/sync', 'POST', { agents: ['atlas', 'scout', 'remote'].map(id => ({ id, name: id, role: 'Assistant', description: '', tone: 0, instructions: 'Help.', memory: [] })) });
+  try {
+    await start();
+    await request('/v1/agents/sync', 'POST', { agents: ['atlas', 'scout', 'remote'].map(id => ({ id, name: id, role: 'Assistant', description: '', tone: 0, instructions: 'Help.', memory: [] })) });
+  } catch (error) { await stop('SIGKILL'); throw error; }
   return { base, state, request, start, stop, run, waitRun };
 }
 

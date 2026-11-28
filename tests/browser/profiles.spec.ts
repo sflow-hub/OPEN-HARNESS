@@ -258,7 +258,11 @@ test('creates, filters, and moves an agent task across desktop and phone layouts
   await drawer.getByRole('button', { name: 'Add item' }).click();
   await drawer.getByPlaceholder('Checklist item').fill('Summarize shipped changes');
   await drawer.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Task details' })).toBeVisible();
+  await expect(drawer.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
   await drawer.getByRole('button', { name: 'Close task' }).click();
+  await expect(page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })).toBeHidden();
+  await expect(drawer).toBeHidden();
   const card = page.locator('.task-card').filter({ hasText: title });
   await expect(card).toBeVisible();
   await card.getByRole('button', { name: 'Move right' }).click();
@@ -380,4 +384,37 @@ test('workspace access is granted per agent without advanced features, and start
   const { profile } = await (await request.get(control + '/v1/agents/atlas/profile', { headers: { Authorization: `Bearer ${token}` } })).json();
   expect(profile.allowedTools).toContain('mcp__open_harness__project');
   expect(profile.allowedTools).not.toContain('mcp__open_harness__runs');
+});
+
+test('network policy saves hosts, survives reload, and reports invalid entries', async ({ page }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  let panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
+  await expect(panel.getByLabel('Network access')).toHaveValue('open');
+  await panel.getByLabel('Network access').selectOption('allowlist');
+  await panel.getByLabel('Allowed hosts').fill('EXAMPLE.COM:443\n*.example.org\n[::1]:8080');
+  await panel.getByRole('button', { name: 'Save changes' }).click();
+  await expect(panel.getByText('Saved. Ready for the next task.')).toBeVisible();
+  await panel.getByRole('button', { name: 'Close agent settings' }).click();
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await expect(panel.getByText('Loading saved profile…')).toBeHidden();
+  await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
+  await expect(panel.getByLabel('Network access')).toHaveValue('allowlist');
+  await expect(panel.getByLabel('Allowed hosts')).toHaveValue('example.com:443\n*.example.org\n[::1]:8080');
+  await panel.getByLabel('Allowed hosts').fill('https://example.com/path');
+  await panel.getByRole('button', { name: 'Save changes' }).click();
+  await expect(panel.getByRole('alert')).toContainText('Allowed hosts');
+  await expect(panel.getByLabel('Allowed hosts')).toHaveValue('https://example.com/path');
+});
+
+test('Computer tab verifies sandbox with an explicit mock attestation badge', async ({ page }) => {
+  await page.getByRole('button', { name: 'Edit Atlas profile' }).click();
+  const panel = page.getByRole('dialog', { name: 'Agent settings' });
+  await panel.getByRole('tab', { name: 'Computer', exact: true }).click();
+  await panel.getByRole('button', { name: 'Verify sandbox', exact: true }).click();
+  await expect(panel.locator('.sandbox-badge')).toHaveText('red · mock');
+  await expect(panel.getByText('writable image rootfs (hardening pending)', { exact: false })).toBeVisible();
 });

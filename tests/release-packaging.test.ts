@@ -175,7 +175,7 @@ test('browser ZIP and tar contain only relocatable launch assets and pinned imag
   const root = mkdtempSync(join(tmpdir(), 'open-harness-browser-release-test-'));
   try {
     const sourceRoot = join(root, 'source'), destination = join(root, 'artifacts');
-    for (const file of ['runtime/dind-entrypoint.sh', 'compose.host-folders.example.yaml', 'docs/LOCAL_BROWSER.md', 'docs/SELF_HOSTING.md', 'docs/CREDENTIALS.md', 'LICENSE', 'Start Open Harness.command', 'Start Open Harness.cmd', 'launchers/start.sh', 'launchers/start.ps1']) {
+    for (const file of ['runtime/dind-entrypoint.sh', 'compose.host-folders.example.yaml', 'docs/LOCAL_BROWSER.md', 'docs/SELF_HOSTING.md', 'docs/CREDENTIALS.md', 'LICENSE', 'Start Open Harness.command', 'Start Open Harness.cmd', 'Start Open Harness.desktop', 'Start Open Harness.sh', 'launchers/linux-model.sh', 'launchers/start.sh', 'launchers/start.ps1']) {
       mkdirSync(join(sourceRoot, file, '..'), { recursive: true }); writeFileSync(join(sourceRoot, file), `fixture for ${file}\n`);
     }
     mkdirSync(join(sourceRoot, 'runtime/hermes')); writeFileSync(join(sourceRoot, 'runtime/hermes/private.txt'), 'not a browser asset');
@@ -188,7 +188,7 @@ test('browser ZIP and tar contain only relocatable launch assets and pinned imag
     const result = spawnSync('tar', ['-xzf', join(destination, names[0]), '-C', extract], { encoding: 'utf8' }); assert.equal(result.status, 0, result.stderr);
     const packageRoot = join(extract, `open-harness-browser-${APP_VERSION}`);
     if (process.platform !== 'win32') {
-      assert.ok(statSync(join(packageRoot, 'Start Open Harness.command')).mode & 0o111);
+      for (const file of ['Start Open Harness.command', 'Start Open Harness.desktop', 'Start Open Harness.sh']) assert.ok(statSync(join(packageRoot, file)).mode & 0o111);
       assert.ok(statSync(join(packageRoot, 'launchers/start.sh')).mode & 0o111);
     }
     const packaged = JSON.parse(readFileSync(join(packageRoot, 'compose.yaml'), 'utf8'));

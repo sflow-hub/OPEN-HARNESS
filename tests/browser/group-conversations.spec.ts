@@ -17,7 +17,8 @@ async function seed(request: APIRequestContext) {
 }
 async function openGroups(page: Page, mobile: boolean) {
   if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: 'Group conversations', exact: true }).click();
+  await page.getByRole('button', { name: 'Groups', exact: true }).click();
+  await page.getByRole('button', { name: 'Team conversations', exact: true }).click();
   return page.getByRole('region', { name: 'Group conversations', exact: true });
 }
 test.beforeEach(async ({ page }) => {

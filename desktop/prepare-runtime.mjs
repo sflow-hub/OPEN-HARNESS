@@ -1,8 +1,9 @@
 import { build } from "esbuild";
-import { cp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
+import { cp, mkdir, rm, writeFile, readFile, readdir } from "node:fs/promises";
 import { resolve,basename } from "node:path";
 import { spawn } from "node:child_process";
 import { execFileSync } from 'node:child_process';
+import { prepareLocalDashboard } from '../scripts/prepare-local-dashboard.mjs';
 import { validateImageLock } from '../scripts/release-images.mjs';
 
 const root = resolve(import.meta.dirname, "..");
@@ -26,13 +27,22 @@ await command(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build"]
 await command(process.execPath, ["desktop/build-runner.mjs"]);
 await rm(bundle, { recursive: true, force: true });
 await mkdir(resolve(bundle, "runtime"), { recursive: true });
+// fetch-node.mjs names each sidecar for its Rust target. npm's --target
+// argument is passed to Tauri after desktop:prepare has already completed.
+let desktopTarget = process.env.TAURI_TARGET || process.env.CARGO_BUILD_TARGET;
+if (!desktopTarget) {
+  const sidecars = await readdir(resolve(root, "src-tauri", "binaries")).catch(error => { if (error.code === "ENOENT") return []; throw error; });
+  const targets = sidecars.map(name => /^node-(.+?)(?:\.exe)?$/.exec(name)?.[1]).filter(Boolean);
+  if (targets.length === 1) desktopTarget = targets[0];
+}
+await prepareLocalDashboard(bundle, desktopTarget);
 if(releaseImage)await writeFile(resolve(bundle,'runtime','release-image.json'),JSON.stringify(releaseImage)+'\n');
 await cp(resolve(root, "dist", "standalone"), resolve(bundle, "app"), { recursive: true });
 await cp(resolve(root, "runtime", "hermes"), resolve(bundle, "runtime", "hermes"), { recursive: true,filter:path=>!/ \d+(?:\.|$)|__pycache__|\.pyc$/.test(basename(path)) });
 await cp(resolve(root, "runtime", "ubuntu"), resolve(bundle, "runtime", "ubuntu"), { recursive: true });
 await cp(resolve(root, "runtime", "installers"), resolve(bundle, "runtime", "installers"), { recursive: true });
 for (const entry of ["service", "runner"]) {
-  await build({ entryPoints: [resolve(root, "runtime", `${entry}.ts`)], outfile: resolve(bundle, "runtime", `${entry}.mjs`), bundle: true, platform: "node", format: "esm", target: "node22", packages: "bundle", sourcemap: false, banner: { js: "import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);" } });
+  await build({ entryPoints: [resolve(root, "runtime", `${entry}.ts`)], outfile: resolve(bundle, "runtime", `${entry}.mjs`), bundle: true, platform: "node", format: "esm", target: "node22", packages: "bundle", external: entry === "service" ? ["esbuild"] : [], sourcemap: false, banner: { js: "import { createRequire as __openHarnessCreateRequire } from 'node:module'; const require = __openHarnessCreateRequire(import.meta.url);" } });
 }
 await writeFile(resolve(bundle, "package.json"), JSON.stringify({ type: "module", private: true }));
 console.log(`Desktop runtime prepared in ${bundle}`);

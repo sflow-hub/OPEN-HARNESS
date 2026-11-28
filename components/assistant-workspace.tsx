@@ -18,6 +18,7 @@ import AssistantStarters from './assistant-starters';
 import type { StarterId } from '../lib/assistant-starters';
 import AssistantMemory from './assistant-memory';
 import AssistantAttention from './assistant-attention';
+import LocalImprovements from './local-improvements';
 import { PRIMARY_ASSISTANT_ID } from '../lib/product';
 
 type Overview = { generatedAt: string; outcomes: AssistantOutcome[]; latestBriefRunId: string | null; availability?: { detail: string } };
@@ -53,6 +54,7 @@ export default function AssistantWorkspace({ client, agents, ready=true,onProfil
     {workspace?.actor.role==='owner'&&<WorkspaceVerification client={client} />}
     {workspace?.actor.role==='owner'&&<WorkspaceRecovery client={client} />}
     <div className="eyebrow">{workspace?.name || 'YOUR WORKSPACE'}</div><h1>What would you like done?</h1><p className="muted">Give your assistant a goal. Follow the work here and make decisions when needed.</p>
+    {!client.managed && workspace?.edition === 'self-hosted' && workspace.actor.role === 'owner' && workspace.actor.source === 'local' && <LocalImprovements key={workspace.id} client={client} agents={memoryAgents} workspaceId={workspace.id} />}
     {error && !draft && !review && <p role="alert" className="task-error">{error}</p>}{notice && <p role="status">{notice}</p>}
     {!inbox ? <p role="status">Loading your workspace…</p> : !inbox.profile ? <div className="assistant-card"><h2>Meet your primary assistant</h2><p>Your assistant can coordinate bounded tasks with your existing agents and keep recurring responsibilities in this inbox. You choose which connected accounts each agent can use.</p><button className="light-button" disabled={busy || workspace?.actor.role !== 'owner'} onClick={() => void mutate(async () => { const result = await client.request<{ profile: AgentProfile }>('/v1/assistant/activate', { method: 'POST', body: '{}' }); onProfile(result.profile); try{localStorage.setItem('open-harness.assistant-home','1');}catch{} })}>Set up my assistant</button></div> : <form onSubmit={event => { event.preventDefault(); void submit(); }} className="assistant-composer"><label htmlFor="assistant-goal">Your goal</label><textarea id="assistant-goal" value={message} rows={3} maxLength={12000} placeholder="Prepare tomorrow’s meetings, research a lead list, or triage our GitHub issues…" onChange={event => editMessage(event.target.value)} /><div><button type="submit" className="light-button" disabled={busy || !writable || !message.trim()}>Start work</button><small>Tasks continue when you close this window.</small></div></form>}
     {inbox?.profile&&workspace&&<AssistantStarters key={`${workspace.id}:${workspace.actor.id}:${starterKey}`} scope={`${workspace.id}:${workspace.actor.id}`} autoOpen={starterOpen} client={client} accounts={accounts} writable={writable} ready={ready} onOpenRun={onOpenRun} onConnections={() => setTab('connections')} />}

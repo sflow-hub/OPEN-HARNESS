@@ -49,7 +49,7 @@ function release(scenario: Scenario = {}) {
   mkdirSync(join(dir, 'runtime'));
   mkdirSync(join(dir, 'bin'));
   mkdirSync(join(dir, 'state'));
-  for (const name of ['start.sh', 'start.ps1']) writeFileSync(join(dir, 'launchers', name), readFileSync(join(root, 'launchers', name)));
+  for (const name of ['start.sh', 'start.ps1', 'linux-model.sh']) writeFileSync(join(dir, 'launchers', name), readFileSync(join(root, 'launchers', name)));
   chmodSync(join(dir, 'launchers', 'start.sh'), 0o755);
   writeFileSync(join(dir, 'compose.yaml'), '{"name":"open-harness","services":{}}\n');
   writeFileSync(join(dir, 'image-lock.json'), JSON.stringify({ schemaVersion: 1, images: { hermes: { ref: 'ghcr.io/example/hermes@sha256:' + 'a'.repeat(64) } } }));
@@ -62,6 +62,7 @@ function release(scenario: Scenario = {}) {
 printf '%s\\n' "docker $*" >> "${state}/calls"
 printf 'HERMES_PULL=%s HERMES_IMAGE=%s PROJECT=%s\\n' "\${OPEN_HARNESS_HERMES_PULL-unset}" "\${OPEN_HARNESS_HERMES_IMAGE-unset}" "\${COMPOSE_PROJECT_NAME-unset}" >> "${state}/env"
 case "$1" in
+  inspect) if [ -f "${state}/model-crash" ]; then echo 'restarting 3'; fi; exit 0 ;;
   info)
     ${counter('info')}
     if [ "$count" -le ${scenario.infoFailures ?? 0} ]; then echo "Cannot connect to the Docker daemon" >&2; exit 1; fi
@@ -70,6 +71,24 @@ case "$1" in
   compose)
     ${scenario.composeMissing ? 'echo "docker: unknown command: compose" >&2; exit 1' : ''}
     if [ "$2" = "version" ]; then echo "Docker Compose version v2.29.0"; exit 0; fi
+    case "$*" in
+      *" config") echo "name: \${COMPOSE_PROJECT_NAME:-open-harness}"; exit 0 ;;
+      *" config --services") [ -f "${state}/model-status" ] && echo atlas-model; exit 0 ;;
+      *" build atlas-model open-harness")
+        ${counter('local-build')}
+        if [ -f "${state}/fail-first-build" ] && [ "$count" -eq 1 ]; then exit 1; fi
+        exit 0 ;;
+      *"exec -T atlas-worker-link node "*) [ ! -f "${state}/link-broken" ]; exit $? ;;
+      *" ps --all --quiet atlas-model") echo atlas-container; exit 0 ;;
+      *" restart atlas-model") echo restarted > "${state}/model-restarted"; exit 0 ;;
+      *"exec -T atlas-model node"*)
+        if [ -f "${state}/model-crash" ] && [ ! -f "${state}/model-restarted" ]; then exit 1; fi
+        ${counter('model-check')}
+        row=$(sed -n "\${count}p" "${state}/model-status")
+        [ -n "$row" ] || row=$(sed -n '$p' "${state}/model-status")
+        printf '%s\\n' "$row"; exit 0 ;;
+      *" up -d"*) printf '%s\\n' "\${OPEN_HARNESS_BUNDLED_MODEL-unset}" >> "${state}/model-mode-on-up" ;;
+    esac
     for arg in "$@"; do if [ "$arg" = "exec" ]; then ${scenario.pairFails ? 'echo "Could not create a browser connection link." >&2; exit 1' : `printf '%s\\n' '${scenario.pairOutput ?? `{"code":"${CODE}","expiresAt":"2030-01-01T00:00:00.000Z"}`}'`}; exit 0; fi; done
     exit 0 ;;
 esac
@@ -95,7 +114,7 @@ printf '%s\\n' "open $*" >> "${state}/calls"
   // suite (this sandbox has one, a developer's Mac has Docker Desktop's) must stay out of reach.
   const sysbin = join(dir, 'sysbin');
   mkdirSync(sysbin);
-  for (const tool of ['sh', 'bash', 'sed', 'tr', 'date', 'dirname', 'uname', 'sleep', 'cat', 'pwd', 'env']) {
+  for (const tool of ['sh', 'bash', 'sed', 'tr', 'date', 'dirname', 'uname', 'sleep', 'cat', 'pwd', 'env', 'grep', 'mkdir', 'mv']) {
     const found = ['/usr/bin', '/bin'].map(directory => join(directory, tool)).find(candidate => existsSync(candidate));
     if (found) symlinkSync(found, join(sysbin, tool));
   }
@@ -106,6 +125,14 @@ printf '%s\\n' "open $*" >> "${state}/calls"
     log: () => existsSync(join(dir, 'open-harness-launcher.log')) ? readFileSync(join(dir, 'open-harness-launcher.log'), 'utf8') : '',
     path: `${join(dir, 'bin')}:${sysbin}`,
   };
+}
+function sourceArchive() {
+  const fixture = release();
+  rmSync(join(fixture.dir, 'image-lock.json'));
+  writeFileSync(join(fixture.dir, 'Dockerfile.coordinator'), 'FROM scratch\n');
+  writeFileSync(join(fixture.dir, 'runtime', 'service.ts'), '');
+  writeFileSync(join(fixture.dir, 'Start Open Harness.command'), readFileSync(join(root, 'Start Open Harness.command')));
+  return fixture;
 }
 function run(fixture: ReturnType<typeof release>, args: string[], env: Record<string, string> = {}, viaWrapper = false) {
   const command = viaWrapper ? join(fixture.dir, 'Start Open Harness.command') : join(fixture.dir, 'launchers', 'start.sh');
@@ -136,6 +163,135 @@ async function runPs(fixture: ReturnType<typeof release>, args: string[], health
       child.on('close', status => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
     });
   } finally { server.close(); }
+}
+
+// File-manager selection exercises the same Compose, readiness and pairing path as an ordinary launch.
+function linuxDesktop(states: string[], choice = 'local') {
+  const fixture = sourceArchive();
+  writeFileSync(join(fixture.dir, 'state/model-status'), states.join('\n') + '\n');
+  const dialog = join(fixture.dir, 'bin/kdialog');
+  writeFileSync(dialog, `#!/bin/sh
+printf '%s\\n' "$*" >> "${fixture.dir}/state/dialogs"
+case "$*" in *--menu*) ${choice === 'cancel' ? 'exit 1' : `echo ${choice}`} ;; *--yesno*) exit 0 ;; esac
+`);
+  chmodSync(dialog, 0o755);
+  return { fixture, env: { OPEN_HARNESS_LAUNCHER_PLATFORM: 'linux', DISPLAY: ':99', OPEN_HARNESS_DASHBOARD_PORT: '3001' } };
+}
+posixTest('Linux desktop installs only after a local choice, shows real download progress, reuses the saved model and pairs the selected port', () => {
+  const { fixture, env } = linuxDesktop(['', 'downloading|42|Downloading Atlas', 'ready||Atlas is ready']);
+  const result = run(fixture, ['--desktop'], env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Downloading Atlas \(42%\)/);
+  const local = 'docker compose -f compose.yaml --profile atlas-model ';
+  assert.deepEqual(fixture.calls().filter(call => call.startsWith(local + 'build ') || call.startsWith(local + 'up ') || call.includes('worker-link.mjs --health')), [
+    local + 'build atlas-model open-harness', local + 'up -d --no-build atlas-model', local + 'up -d --no-build', local + 'exec -T atlas-worker-link node /opt/atlas/worker-link.mjs --health'
+  ]);
+  assert.ok(fixture.calls().some(line => line.includes('http://127.0.0.1:3001/api/health')));
+  assert.ok(fixture.calls().includes('browser http://localhost:3001/?setupModel=local#pair=' + CODE));
+  assert.equal(readFileSync(join(fixture.dir, 'state/model-mode-on-up'), 'utf8'), '1\n1\n');
+  const reopened = run(fixture, [], env);
+  assert.equal(reopened.status, 0, reopened.stderr);
+  assert.equal(fixture.calls().filter(c => c.startsWith('browser ')).at(-1), 'browser http://localhost:3001/#pair=' + CODE);
+  assert.equal(fixture.calls().filter(c => c.includes('build atlas-model open-harness')).length, 2);
+  const own = run(fixture, ['--own-provider'], env);
+  assert.equal(own.status, 0, own.stderr);
+  assert.equal(fixture.calls().filter(c => c.startsWith('browser ')).at(-1), 'browser http://localhost:3001/?setupModel=provider#pair=' + CODE);
+  assert.match(own.stdout, /Choose your provider in Workspace settings/);
+  assert.ok(fixture.calls().includes('docker compose -f compose.yaml up -d --build'));
+  assert.ok(!fixture.calls().some(line => line.includes(' stop ')), 'Changing provider must leave active work running.');
+  assert.equal(readFileSync(join(fixture.dir, 'state/model-mode-on-up'), 'utf8').trim().split('\n').at(-1), '0');
+});
+
+posixTest('Linux desktop reports a model failure and retries it with the same download cache', () => {
+  const { fixture, env } = linuxDesktop(['', 'error||Download interrupted', 'error||Download interrupted', 'ready||Atlas is ready']);
+  assert.equal(run(fixture, ['--desktop', '--no-open'], env).status, 0);
+  assert.match(fixture.log(), /Download interrupted/);
+  assert.match(readFileSync(join(fixture.dir, 'state/dialogs'), 'utf8'), /--yesno/);
+  assert.ok(fixture.calls().includes('docker compose -f compose.yaml --profile atlas-model restart atlas-model'));
+  assert.equal(fixture.calls().filter(c => c.includes('build atlas-model open-harness')).length, 1);
+  assert.ok(!fixture.calls().some(line => /--volumes|volume rm|system prune/.test(line)));
+});
+
+posixTest('Linux desktop retries a failed image build before starting the model, and withholds pairing if the worker route is unavailable', () => {
+  const { fixture, env } = linuxDesktop(['ready||Atlas is ready']);
+  writeFileSync(join(fixture.dir, 'state/fail-first-build'), '');
+  writeFileSync(join(fixture.dir, 'state/link-broken'), '');
+  const result = run(fixture, ['--desktop', '--timeout', '0'], env);
+  assert.equal(result.status, 4, result.stderr);
+  assert.match(result.stderr, /Docker could not build the dashboard and local model server/);
+  assert.match(result.stderr, /agents cannot reach the local model/);
+  const builds = fixture.calls().filter(line => / build atlas-model open-harness$| up -d --no-build atlas-model$/.test(line));
+  assert.equal(builds.length, 3);
+  assert.equal(builds[0], builds[1]);
+  assert.match(builds[2], / up -d --no-build atlas-model$/);
+  assert.ok(!fixture.calls().some(line => line.includes('browser-pair.mjs') || line.startsWith('browser ')));
+});
+
+posixTest('Linux desktop detects a model restart loop before the long download timeout and offers a successful retry', () => {
+  const { fixture, env } = linuxDesktop(['ready||Atlas is ready']);
+  writeFileSync(join(fixture.dir, 'state/model-crash'), '');
+  const result = run(fixture, ['--desktop', '--no-open'], { ...env, OPEN_HARNESS_MODEL_TIMEOUT: '6' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /local model server keeps restarting/);
+  assert.doesNotMatch(result.stderr, /taking longer than expected/);
+  assert.match(readFileSync(join(fixture.dir, 'state/dialogs'), 'utf8'), /--yesno/);
+  assert.ok(fixture.calls().includes('docker compose -f compose.yaml --profile atlas-model restart atlas-model'));
+  assert.equal(fixture.calls().filter(call => call.includes('build atlas-model open-harness')).length, 1);
+});
+
+posixTest('Linux desktop own-provider and cancel choices leave the model unstarted', () => {
+  for (const choice of ['provider', 'cancel']) {
+    const { fixture, env } = linuxDesktop(['ready||Atlas is ready'], choice);
+    const result = run(fixture, ['--desktop'], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!fixture.calls().some(line => /up.*atlas-model|exec -T atlas-model/.test(line)));
+    assert.equal(fixture.calls().some(line => line.startsWith('browser ')), choice === 'provider');
+    if (choice === 'provider') assert.ok(fixture.calls().includes('browser http://localhost:3001/?setupModel=provider#pair=' + CODE));
+  }
+});
+
+posixTest('explicit local model CLI choice is passed to browser pairing, including the manual pairing hint', () => {
+  const { fixture, env } = linuxDesktop(['ready||Atlas is ready']);
+  assert.equal(run(fixture, ['--local-model'], env).status, 0);
+  assert.ok(fixture.calls().includes('browser http://localhost:3001/?setupModel=local#pair=' + CODE));
+  const manual = run(fixture, ['--local-model', '--no-open'], env);
+  assert.equal(manual.status, 0, manual.stderr);
+  assert.match(manual.stdout, /\?setupModel=local#pair=<code>/);
+  assert.ok(!manual.stdout.includes(CODE));
+});
+
+const desktopPython = process.platform === 'linux' && ['/usr/bin/python3', 'python3'].find(binary => spawnSync(binary, ['-c', 'from gi.repository import Gio; assert Gio.DesktopAppInfo']).status === 0);
+// Thunar 4.18 reads the raw Exec value, quotes %k, then parses argv. GIO unescapes the
+// value differently: a nested bash -c command passed its launch test but broke in Thunar.
+const thunarLaunch = `
+import os, sys
+from gi.repository import GLib
+entry = sys.argv[1]
+file = GLib.KeyFile()
+file.load_from_file(entry, GLib.KeyFileFlags.NONE)
+template = file.get_value('Desktop Entry', 'Exec')
+assert '%' not in template.replace('%k', ''), 'Implement expansion for the new desktop field code'
+_, argv = GLib.shell_parse_argv(template.replace('%k', GLib.shell_quote(entry)))
+os.execvp(argv[0], argv)
+`;
+// gio launch builds an anonymous entry without a filename. File managers activate a named entry.
+const gioLaunch = 'from gi.repository import Gio; import sys; app=Gio.DesktopAppInfo.new_from_filename(sys.argv[1]); assert app and app.launch([],None)';
+for (const [name, launch] of [['Thunar 4.18 parser', thunarLaunch], ['GIO', gioLaunch]]) {
+  test(`Linux file-manager entry dispatches the launcher from an extracted path with spaces and shell characters (${name})`, { skip: desktopPython ? false : 'Requires Linux with the GIO desktop-entry bindings.' }, async t => {
+    const base = mkdtempSync(join(tmpdir(), "Open Harness user's $files & (test) "));
+    t.after(() => rmSync(base, { recursive: true, force: true }));
+    mkdirSync(join(base, 'launchers'));
+    const entry = join(base, 'Start Open Harness.desktop');
+    const marker = join(base, 'invocation');
+    // CI has no terminal emulator. Only disable the terminal wrapper for the receipt script.
+    writeFileSync(entry, readFileSync(join(root, 'Start Open Harness.desktop'), 'utf8').replace('Terminal=true', 'Terminal=false'));
+    writeFileSync(join(base, 'launchers/start.sh'), 'printf "%s\\n" "$@" > "$LAUNCH_RECEIPT"\n');
+    const launched = spawnSync(desktopPython || 'python3', ['-c', launch, entry], { cwd: tmpdir(), env: { ...process.env, LAUNCH_RECEIPT: marker }, encoding: 'utf8', timeout: 10000 });
+    assert.equal(launched.status, 0, launched.stderr);
+    const deadline = Date.now() + 5000;
+    while (!existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(readFileSync(marker, 'utf8'), '--desktop\n');
+  });
 }
 
 posixTest('start.sh: a computer without Docker is told what to install, and nothing else runs', () => {
@@ -234,23 +390,108 @@ posixTest('start.sh: --no-open neither mints a code nor opens anything, and says
   assert.match(result.stdout, /browser-pair\.mjs/);
 });
 
-posixTest('start.sh: --build is the only way to build, and it switches Hermes pulling off; a release without the source tree refuses it', () => {
-  // A source checkout has no image-lock.json — --build is what starts one, and it needs the
-  // coordinator Dockerfile instead of the lock.
+const linuxPython = process.platform === 'linux' ? ['/usr/bin/python3', '/bin/python3'].find(binary => existsSync(binary)) : undefined;
+const setsidBinary = process.platform === 'linux' ? ['/usr/bin/setsid', '/bin/setsid'].find(binary => existsSync(binary)) : undefined;
+test('start.sh: Linux default browser survives the launcher terminal closing and reports opener failures', { skip: linuxPython && setsidBinary ? false : 'Requires Linux with Python PTY support and util-linux setsid.' }, t => {
   const fixture = release();
-  rmSync(join(fixture.dir, 'image-lock.json'));
-  writeFileSync(join(fixture.dir, 'Dockerfile.coordinator'), 'FROM scratch\n');
-  const result = run(fixture, ['--build', '--no-open']);
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  symlinkSync(setsidBinary!, join(fixture.dir, 'sysbin', 'setsid'));
+  const opener = join(fixture.dir, 'bin', 'xdg-open');
+  // Exo returns before its helper starts the browser. GLib restores SIG_DFL even
+  // after nohup, so the child must survive losing the terminal with normal HUP handling.
+  writeFileSync(opener, `#!${linuxPython}
+import json, os, pathlib, signal, sys, time
+state = pathlib.Path(__file__).resolve().parent.parent / 'state'
+with (state / 'opener-calls').open('a') as calls:
+    calls.write(json.dumps(sys.argv[1:]) + '\\n')
+ready_read, ready_write = os.pipe()
+if os.fork():
+    os.close(ready_write)
+    assert os.read(ready_read, 1) == b'1'
+    os._exit(0)
+os.close(ready_read)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+signal.alarm(10)
+os.write(ready_write, b'1')
+os.close(ready_write)
+while not (state / 'terminal-closed').exists():
+    time.sleep(0.02)
+(state / 'invocation.tmp').write_text(json.dumps(sys.argv[1:]))
+os.replace(state / 'invocation.tmp', state / 'invocation')
+os._exit(0)
+`);
+  chmodSync(opener, 0o755);
+  // One driver owns the PTY and all synchronization. It drains output until the
+  // launcher exits, closes the terminal, then lets the asynchronous browser proceed.
+  const driver = `
+import errno, json, os, pathlib, pty, select, sys, time
+state = pathlib.Path(sys.argv[1]) / 'state'
+pid, terminal = pty.fork()
+if pid == 0:
+    os.execv('/bin/bash', ['/bin/bash', str(pathlib.Path(sys.argv[1]) / 'launchers/start.sh')])
+output = bytearray()
+status = None
+try:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if select.select([terminal], [], [], 0.02)[0]:
+            try:
+                output.extend(os.read(terminal, 65536))
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+        done, result = os.waitpid(pid, os.WNOHANG)
+        if done:
+            status = os.waitstatus_to_exitcode(result)
+            break
+    assert status is not None, 'The launcher did not exit'
+finally:
+    os.close(terminal)
+    if status is None:
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+(state / 'terminal-closed').touch()
+deadline = time.monotonic() + 3
+while not (state / 'invocation').exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+print(json.dumps({'status': status, 'output': output.decode(errors='replace'), 'args': json.loads((state / 'invocation').read_text()) if (state / 'invocation').exists() else None}))
+`;
+  const env: NodeJS.ProcessEnv = { NODE_ENV: 'test', PATH: fixture.path, HOME: fixture.dir, OPEN_HARNESS_LAUNCHER_PLATFORM: 'linux' };
+  const launched = spawnSync(linuxPython!, ['-c', driver, fixture.dir], { env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(launched.status, 0, launched.stderr);
+  const result = JSON.parse(launched.stdout) as { status: number; output: string; args: string[] | null };
+  assert.equal(result.status, 0, result.output);
+  assert.deepEqual(result.args, [`http://localhost:3000/#pair=${ENCODED}`]);
+  assert.equal(readFileSync(join(fixture.dir, 'state', 'opener-calls'), 'utf8').trim().split('\n').length, 1);
+  assert.equal(fixture.calls().filter(call => call.includes('browser-pair.mjs')).length, 1);
+  assert.ok(!result.output.includes(CODE) && !fixture.log().includes(CODE));
+
+  writeFileSync(opener, '#!/bin/sh\nexit 23\n');
+  const refused = run(fixture, [], { OPEN_HARNESS_LAUNCHER_PLATFORM: 'linux', OPEN_HARNESS_BROWSER_COMMAND: '' });
+  assert.equal(refused.status, 5, refused.stderr);
+  assert.match(refused.stderr, /no browser could be opened/);
+  assert.ok(!refused.stdout.includes(CODE) && !refused.stderr.includes(CODE) && !fixture.log().includes(CODE));
+});
+
+posixTest('start.sh: double-clicking a source ZIP builds and opens a paired browser; source lifecycle commands reuse the project', () => {
+  const fixture = sourceArchive();
+  const env = { COMPOSE_PROJECT_NAME: 'source-download' };
+  const result = run(fixture, [], env, true);
   assert.equal(result.status, 0, result.stderr);
-  const compose = fixture.calls().filter(call => call.startsWith('docker compose -f'));
-  assert.deepEqual(compose, ['docker compose -f compose.yaml up -d --build']);
-  assert.match(fixture.env(), /HERMES_PULL=0/);
-  // --stop, --status and --logs stay usable in that checkout when --build says which mode it is.
-  for (const [flag, call] of [['--stop', 'docker compose -f compose.yaml stop'], ['--status', 'docker compose -f compose.yaml ps'], ['--logs', 'docker compose -f compose.yaml logs --tail=200']]) {
-    const action = run(fixture, ['--build', flag]);
+  assert.deepEqual(fixture.calls().filter(call => call.startsWith('docker compose -f')), [
+    'docker compose -f compose.yaml up -d --build',
+    'docker compose -f compose.yaml exec -T open-harness node /opt/open-harness/runtime/browser-pair.mjs',
+  ]);
+  assert.ok(fixture.calls().includes(`browser http://localhost:3000/#pair=${ENCODED}`));
+  const explicit = run(fixture, ['--build', '--no-open'], env);
+  assert.equal(explicit.status, 0, explicit.stderr);
+  for (const [flag, expected] of [['--stop', 'stop'], ['--status', 'ps'], ['--logs', 'logs --tail=200']]) {
+    const before = fixture.calls().length;
+    const action = run(fixture, [flag], env);
     assert.equal(action.status, 0, action.stderr);
-    assert.ok(fixture.calls().includes(call), `${flag}: ${fixture.calls().join('\n')}`);
+    assert.deepEqual(fixture.calls().slice(before).filter(call => call.startsWith('docker compose -f')), [`docker compose -f compose.yaml ${expected}`]);
   }
+  assert.ok(fixture.env().trim().split('\n').every(line => line === 'HERMES_PULL=0 HERMES_IMAGE=unset PROJECT=source-download'));
   const plain = release();
   const refused = run(plain, ['--build', '--no-open']);
   assert.equal(refused.status, 64);
@@ -344,14 +585,15 @@ posixTest('start.sh: the double-click wrapper finds the release directory with s
 });
 
 posixTest('start.sh: a directory that is not a full release is refused before Docker is touched', () => {
-  // Without --build the lock is part of the contract, whatever the action.
+  // A stray Dockerfile in a damaged release cannot make it a source download.
   const fixture = release();
   rmSync(join(fixture.dir, 'image-lock.json'));
-  for (const args of [['--no-open'], ['--stop'], ['--status']]) {
+  writeFileSync(join(fixture.dir, 'Dockerfile.coordinator'), 'FROM scratch\n');
+  for (const args of [[], ['--stop'], ['--status'], ['--logs']]) {
     const result = run(fixture, args);
     assert.equal(result.status, 64, args.join(' '));
     assert.match(result.stderr, /image-lock\.json is missing/);
-    assert.match(result.stderr, /started with --build/);
+    assert.match(result.stderr, /Extract the whole browser release/);
   }
   assert.deepEqual(fixture.calls(), []);
   const noEntrypoint = release();
@@ -397,21 +639,30 @@ test('start.ps1: the same contract holds for the PowerShell launcher', { skip: p
   const stopped = await runPs(release(), ['--stop']);
   assert.equal(stopped.status, 0, stopped.stderr + stopped.stdout);
   assert.equal((await runPs(release(), ['--bogus'])).status, 64);
-  // A source checkout: no image-lock.json, a Dockerfile instead; --build starts it and
-  // --build --stop works there too, while the release path still insists on the lock.
-  const source = release();
-  rmSync(join(source.dir, 'image-lock.json'));
-  writeFileSync(join(source.dir, 'Dockerfile.coordinator'), 'FROM scratch\n');
-  const built = await runPs(source, ['--build', '--no-open']);
+  const source = sourceArchive();
+  const env = { COMPOSE_PROJECT_NAME: 'source-download' };
+  const built = await runPs(source, [], 0, env);
   assert.equal(built.status, 0, built.stderr + built.stdout);
-  assert.deepEqual(source.calls().filter(call => call.startsWith('docker compose -f')), ['docker compose -f compose.yaml up -d --build']);
-  assert.match(source.env(), /HERMES_PULL=0/);
-  const sourceStop = await runPs(source, ['-Build', '-Stop']);
-  assert.equal(sourceStop.status, 0, sourceStop.stderr + sourceStop.stdout);
-  assert.ok(source.calls().includes('docker compose -f compose.yaml stop'));
-  const noLock = await runPs(source, ['--no-open']);
+  assert.deepEqual(source.calls().filter(call => call.startsWith('docker compose -f')), [
+    'docker compose -f compose.yaml up -d --build',
+    'docker compose -f compose.yaml exec -T open-harness node /opt/open-harness/runtime/browser-pair.mjs',
+  ]);
+  assert.ok(source.calls().includes(`browser http://localhost:3000/#pair=${ENCODED}`));
+  const explicit = await runPs(source, ['--build', '--no-open'], 0, env);
+  assert.equal(explicit.status, 0, explicit.stderr + explicit.stdout);
+  for (const [flag, expected] of [['-Stop', 'stop'], ['-Status', 'ps'], ['-Logs', 'logs --tail=200']]) {
+    const before = source.calls().length;
+    const action = await runPs(source, [flag], 0, env);
+    assert.equal(action.status, 0, action.stderr + action.stdout);
+    assert.deepEqual(source.calls().slice(before).filter(call => call.startsWith('docker compose -f')), [`docker compose -f compose.yaml ${expected}`]);
+  }
+  assert.ok(source.env().trim().split('\n').every(line => line === 'HERMES_PULL=0 HERMES_IMAGE=unset PROJECT=source-download'));
+  const damaged = sourceArchive();
+  rmSync(join(damaged.dir, 'runtime', 'service.ts'));
+  const noLock = await runPs(damaged, []);
   assert.equal(noLock.status, 64, noLock.stderr + noLock.stdout);
   assert.match(noLock.stderr, /image-lock\.json is missing/);
+  assert.deepEqual(damaged.calls(), []);
 
   // A pairing helper that fails, or prints a code in another shape, is exit 5 with nothing opened.
   const unmintable = release({ pairFails: true });

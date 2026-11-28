@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { DEFAULT_COMPUTER, DEFAULT_NETWORK, type ComputerConfig } from '../lib/agent-profile';
 import { normalizeModels } from '../runtime/profile-runtime';
-import { HermesGateway, lastWords, stopNativeTree } from '../runtime/hermes';
+import { HermesGateway, lastWords, stopNativeTree, containerSignature, teamMountArgs, shouldRebuildContainer } from '../runtime/hermes';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { assertProcessStopped } from './helpers/process-state';
 
@@ -104,4 +105,36 @@ test('mock clarification waits for the answer and mock sessions retain supplied 
   await gateway.request('clarify.respond', { request_id: 'mock-clarify', answer: 'blue' });
   assert.match((await answer).final_response, /Answer: blue/);
   await gateway.stop();
+});
+
+test('default network keeps the legacy container signature while policy changes invalidate it', () => {
+  const selected = { ...DEFAULT_COMPUTER };
+  const legacy = containerSignature(selected, 'image');
+  assert.equal(containerSignature(selected, 'image'), legacy);
+  const missing = { ...selected } as Partial<ComputerConfig>; delete missing.network;
+  assert.equal(containerSignature(missing as ComputerConfig, 'image'), legacy);
+  assert.equal(containerSignature({ ...selected, network: { ...DEFAULT_NETWORK } }, 'image'), legacy);
+  for (const mode of ['none', 'allowlist'] as const) assert.notEqual(containerSignature({ ...selected, network: { mode, allow: [] } }, 'image'), legacy);
+  assert.notEqual(containerSignature({ ...selected, network: { mode: 'open', allow: ['example.com'] } }, 'image'), legacy);
+  assert.notEqual(containerSignature({ ...selected, network: { mode: 'allowlist', allow: ['example.com'] } }, 'image'), containerSignature({ ...selected, network: { mode: 'allowlist', allow: ['other.com'] } }, 'image'));
+});
+
+test('team mounts and signatures use sorted, validated ids without changing unassigned agents', () => {
+  const root = resolve('/state');
+  assert.deepEqual(teamMountArgs(root, []), []);
+  assert.deepEqual(teamMountArgs(root, ['beta', 'alpha', 'beta']), ['-v', `${join(root, 'teams/alpha/shared')}:/workspace/teams/alpha`, '-v', `${join(root, 'teams/beta/shared')}:/workspace/teams/beta`]);
+  assert.equal(containerSignature(DEFAULT_COMPUTER, 'image', '/state', []), containerSignature(DEFAULT_COMPUTER, 'image', '/state'));
+  assert.equal(containerSignature(DEFAULT_COMPUTER, 'image', '/state', ['beta', 'alpha']), containerSignature(DEFAULT_COMPUTER, 'image', '/state', ['alpha', 'beta']));
+  assert.notEqual(containerSignature(DEFAULT_COMPUTER, 'image', '/state', ['alpha']), containerSignature(DEFAULT_COMPUTER, 'image', '/state'));
+  for (const id of ['../escape', '..', '.', '/absolute', 'team:ro', 'a/b', 'a\\b', '']) {
+    assert.throws(() => teamMountArgs('/state', [id]), /Invalid team id/);
+    assert.throws(() => containerSignature(DEFAULT_COMPUTER, 'image', '/state', [id]), /Invalid team id/);
+  }
+});
+
+test('signature changes defer container rebuilds until idle', () => {
+  assert.equal(shouldRebuildContainer('old', 'new', true), false);
+  assert.equal(shouldRebuildContainer('old', 'new', false), true);
+  assert.equal(shouldRebuildContainer('same', 'same', false), false);
+  assert.equal(shouldRebuildContainer('same', 'same', true), false);
 });

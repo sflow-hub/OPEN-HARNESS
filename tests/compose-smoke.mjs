@@ -369,7 +369,7 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
     runtimeSetup = { ...runtimeSetup, after, durationMs: Date.now() - startedAt, localSetupSucceeded: true };
     save('runtime-setup.json', runtimeSetup);
   }
-  const agentId = 'compose-smoke', otherId = 'compose-peer', conversationId = 'compose-continuity';
+  const agentId = 'compose-smoke', otherId = 'compose-peer', editorId = 'compose-dashboard-editor', conversationId = 'compose-continuity';
   const credential = await api('/v1/credentials', 'POST', { ref: 'COMPOSE_FIXTURE_KEY', label: 'Compose fixture', provider: 'local', value: 'local-scripted-provider-only' });
   assert.equal(credential.ref, 'COMPOSE_FIXTURE_KEY');
   assert.equal(credential.present, true);
@@ -377,7 +377,7 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
   const apiCredential = await api('/v1/credentials', 'POST', { ref: 'COMPOSE_API_KEY', label: 'Compose API fixture', type: 'bearer', fields: { token: 'api-credential-fixture-only' } });
   assert.equal(apiCredential.present, true);
   assert.doesNotMatch(JSON.stringify(apiCredential), /api-credential-fixture-only/);
-  await api('/v1/agents/sync', 'POST', { agents: [agentId, otherId].map(id => ({ id, name: id, role: 'Integration verification', instructions: 'Work only on this isolated acceptance task.', memory: [] })) });
+  await api('/v1/agents/sync', 'POST', { agents: [agentId, otherId, editorId].map(id => ({ id, name: id, role: 'Integration verification', instructions: 'Work only on this isolated acceptance task.', memory: [] })) });
   const { profile } = await api(`/v1/agents/${agentId}/profile`);
   const folders = [{ id: 'fixture-ro', name: 'fixture-ro', path: '/host-folders/fixture-ro', mode: 'read' }, { id: 'fixture-rw', name: 'fixture-rw', path: '/host-folders/fixture-rw', mode: 'write' }];
   for (const grant of [{ ...folders[0], mode: 'write' }, { id: 'unexported', path: '/data', mode: 'read' }, { id: 'descendant', path: '/host-folders/fixture-rw/nested', mode: 'read' }]) {
@@ -424,11 +424,55 @@ console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), write
   assert.notEqual(firstSnapshot.run.session_id, followupSnapshot.run.session_id);
   assert.deepEqual((await api(`/v1/runs/${first.id}/events?after=0`)).events, firstSnapshot.events);
   assert.equal(await nestedRunning(), false);
+  console.log('Asking real Hermes to edit a private dashboard copy, then reviewing, applying and undoing it.');
+  const { profile: editor } = await api(`/v1/agents/${editorId}/profile`);
+  const editTools = ['read_file', 'patch'];
+  const editorSaved = await api(`/v1/agents/${editorId}/profile`, 'PUT', { ...editor, model: saved.profile.model,
+    allowedTools: [...editTools, 'clarify'], computer: { ...editor.computer, access: 'folders', folders: [folders[0]], desktop: 'none' } });
+  const previousRevision = (await api('/v1/bootstrap')).localDashboardRevision;
+  assert.equal(previousRevision, null);
+  const requestId = randomUUID(), marker = `LOCAL-DASHBOARD-${requestId}`;
+  const improvement = await api('/v1/local-improvements', 'POST', { requestId, agentId: editorId,
+    request: `COMPOSE_LOCAL_DASHBOARD: Change the Assistant heading from “What would you like done?” to “${marker}”. Keep the rest of my dashboard as it is.` });
+  assert.equal(improvement.id, requestId);
+  const editRun = await waitRun({ id: improvement.runId });
+  for (const name of editTools) assert.ok(editRun.events.some(event => event.type === 'tool.complete' && event.payload.name === name), name);
+  const deadline = Date.now() + timing.runMs;
+  let reviewed;
+  do {
+    const { items } = await api('/v1/local-improvements');
+    reviewed = items.find(item => item.id === requestId);
+    assert.ok(reviewed, 'The improvement must remain available after its agent finishes.');
+    if (!['editing', 'building'].includes(reviewed.state)) break;
+    await pause(200);
+  } while (Date.now() < deadline);
+  assert.equal(reviewed.state, 'review', reviewed.error || 'The dashboard build did not reach review.');
+  assert.deepEqual(reviewed.changes.map(({ path, kind }) => ({ path, kind })), [{ path: 'components/assistant-workspace.tsx', kind: 'modified' }]);
+  const edits = reviewed.changes[0].diff.split('\n').filter(line => /^[+-]/.test(line) && !line.startsWith('+++ ') && !line.startsWith('--- '));
+  assert.equal(edits.length, 2, 'Only the heading line may change.');
+  const removed = edits.find(line => line[0] === '-')?.slice(1), added = edits.find(line => line[0] === '+')?.slice(1);
+  assert.ok(removed?.includes('<h1>What would you like done?</h1>'));
+  assert.equal(added, removed.replace('<h1>What would you like done?</h1>', `<h1>${marker}</h1>`), 'Every other character in the changed line must be preserved.');
+  assert.match(reviewed.check, /Dashboard build passed/);
+  const changePath = `/v1/local-improvements/${requestId}`;
+  assert.ok((await api(changePath + '/preview')).html.includes(marker), 'The preview must contain the compiled, unique label.');
+  assert.equal((await api('/v1/bootstrap')).localDashboardRevision, previousRevision);
+  assert.equal((await api(changePath + '/apply', 'POST', {})).state, 'applied');
+  assert.equal((await api('/v1/bootstrap')).localDashboardRevision, requestId);
+  assert.ok((await api(changePath + '/active')).html.includes(marker));
+  assert.equal((await api(changePath + '/undo', 'POST', {})).state, 'undone');
+  assert.equal((await api('/v1/bootstrap')).localDashboardRevision, previousRevision);
+  assert.deepEqual((await api(`/v1/agents/${editorId}/profile`)).profile, editorSaved.profile);
+  assert.equal((await api('/v1/files?scope=shared&name=compose-verified.txt')).content, artifact.content);
+  assert.deepEqual((await api(`/v1/conversations?agentId=${agentId}`)).conversations.find(item => item.id === conversationId).runs.map(run => run.id), [first.id, second.id]);
   const requests = await nodeIn('fixture', `console.log(JSON.stringify(await (await fetch('http://127.0.0.1:3131/__fixture/requests')).json()));`);
   save('provider-requests.json', requests);
   assert.ok(requests.some(request => request.fixtureCredential === 'original'));
   assert.ok(requests.some(request => request.fixtureCredential === 'rotated'));
   assert.ok(requests.every(request => request.fixtureCredential !== 'invalid'), 'Every real provider request must resolve the saved credential.');
+  const editRequests = requests.filter(body => body.tools?.length && body.messages?.some(message => message.role === 'user' && String(message.content).includes(marker)));
+  assert.ok(editRequests.length >= 3, 'Hermes must request the model before and after each tool call.');
+  for (const body of editRequests) assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), editTools.toSorted(), 'Only the granted dashboard editing tools may be visible.');
   const mainRequests = requests.filter(body => body.tools?.some(tool => tool.function?.name === 'write_file') && body.messages?.some(message => String(message.content).includes('COMPOSE_SMOKE')));
   assert.ok(mainRequests.length >= 5);
   for (const body of mainRequests) assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), ['clarify', 'mcp__open_harness__api_request', 'mcp__open_harness__computer', 'mcp__open_harness__task', 'write_file'], 'Only the five explicitly granted tools may be model-visible.');
@@ -541,6 +585,10 @@ for name in ['/workspace/private', '/workspace/shared']:
   await nested(agentId, ['python', '-c', "from pathlib import Path\nassert Path('/workspace/folders/fixture-ro/host-proof.txt').read_text()=='COMPOSE_HOST_729'\ntry: Path('/workspace/folders/fixture-ro/denied.txt').write_text('denied')\nexcept OSError: pass\nelse: raise AssertionError('Read-only export was writable')\nPath('/workspace/folders/fixture-rw/agent-proof.txt').write_text('COMPOSE_GRANTED_WRITE_729')"]);
   assert.equal(readFileSync(join(writeFolder, 'agent-proof.txt'), 'utf8'), 'COMPOSE_GRANTED_WRITE_729');
   await nested(otherId, ['python', '-c', "from pathlib import Path\nassert not Path('/workspace/folders/fixture-ro').exists()\nassert not Path('/workspace/folders/fixture-rw').exists()\nassert not Path('/host-folders').exists()"]);
+  const teamFile = `/workspace/teams/${team.id}/team-proof.txt`;
+  await nested(agentId, ['python', '-c', `from pathlib import Path\npath=Path(${JSON.stringify(teamFile)})\npath.write_text('COMPOSE_TEAM_729')\nassert path.read_text()=='COMPOSE_TEAM_729'`]);
+  assert.equal(await nodeIn('open-harness', `import fs from 'node:fs';console.log(JSON.stringify(fs.readFileSync(${JSON.stringify(`/data/teams/${team.id}/shared/team-proof.txt`)},'utf8')));`), 'COMPOSE_TEAM_729');
+  await nested(otherId, ['python', '-c', `from pathlib import Path\npath=Path(${JSON.stringify(`/workspace/teams/${team.id}`)})\nassert not path.exists() and not path.is_symlink(), 'A nonmember can access the team folder'`]);
   const desktopScript = readFileSync(join(repository, 'tests/helpers/compose-desktop.py'), 'utf8').replaceAll('/workspace/shared/', '/workspace/exchange/');
   await nodeIn('open-harness', `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(join(desktopPaths(agentId).staging, 'compose-desktop.py'))},${JSON.stringify(desktopScript)});console.log('true');`);
   console.log('Checking real private desktop input, shared files, and isolation between two agents.');
@@ -563,6 +611,7 @@ for name in ['/workspace/private', '/workspace/shared']:
     { source: '/data/shared', destination: '/workspace/shared', type: 'bind', writable: true },
     { source: '/host-folders/fixture-ro', destination: '/workspace/folders/fixture-ro', type: 'bind', writable: false },
     { source: '/host-folders/fixture-rw', destination: '/workspace/folders/fixture-rw', type: 'bind', writable: true },
+    { source: `/data/teams/${team.id}/shared`, destination: `/workspace/teams/${team.id}`, type: 'bind', writable: true },
   ].sort((a, b) => a.destination.localeCompare(b.destination)));
   const coordinatorId = await dc(['ps', '-q', 'open-harness']);
   const coordinatorInfo = JSON.parse(await command(docker, ['inspect', coordinatorId]))[0];
@@ -629,6 +678,9 @@ for name in ['/workspace/private', '/workspace/shared']:
   assert.ok(restoredRequests.length && restoredRequests.every(request => request.fixtureCredential === 'rotated'), 'Real work after restore must use the saved rotated credential.');
   const restoredDesktopRun = await api('/v1/runs', 'POST', { agentId, prompt: 'COMPOSE_SHUTDOWN: Keep the restored private desktop alive for input verification.' });
   await waitRun(restoredDesktopRun, { waitForInput: true });
+  assert.equal(await nested(agentId, ['cat', teamFile]), 'COMPOSE_TEAM_729', 'Team files must survive stopped-volume backup and restore.');
+  const restoredAgentContainer = JSON.parse(await dc(['exec', '-T', 'docker', 'docker', 'inspect', 'open-harness-compose-smoke']))[0];
+  assert.deepEqual(restoredAgentContainer.Mounts.map(mount => ({ source: mount.Source, destination: mount.Destination, type: mount.Type, writable: mount.RW })).sort((a, b) => a.destination.localeCompare(b.destination)), agentMounts, 'Restored execution must retain exactly its authorized mounts.');
   const restoredDesktopOutput = await nestedDesktop(agentId, desktopHelper, 150_000);
   const restoredDesktop = JSON.parse(restoredDesktopOutput.split('\n').findLast(line => line.startsWith('{') && line.includes('screenshotBytes')));
   assert.equal(restoredDesktop.clickReadback, desktop.clickReadback); assert.equal(restoredDesktop.typeReadback, desktop.typeReadback);
@@ -674,8 +726,9 @@ for name in ['/workspace/private', '/workspace/shared']:
       },
     });
   }
-  evidence = { ok: true, mode: 'real Compose stack and pinned Hermes with scripted completion fixture; not model reasoning', project, restoreProject, root, deployment, packaged, coordinatorImage, image: HERMES_IMAGE, providerIp, dashboardCsp: true, authenticatedApi: true, browserPairing: { required: true, invalidDenied: true, expiredDenied: true, replayDenied: true }, hostFolderPermissions, explicitHostFolders: { physicalPathsContainSpaces: true, readOnlyCeiling: true, selectedAgentWrite: true, otherAgentDenied: true, unexportedPathsDenied: true }, savedCredentialRotation: true, teamTaskPersistence: true, localBootstrap: true, forgedHostDenied: true, nestedBootstrapDenied: nestedBootstrap, privateDockerTcp: tcp, identity, agentMounts, fileTool: true, clarification: true, taskMcp: true, deniedTerminal: true, freshSessionContext: true, replayStable: true, restartPersistence: true, gracefulAgentCleanup: true, privateDesktop: desktop, twoAgentDesktopIsolation: true, sharedFilesPreserved: true, backupRestore: { destinationWasEmpty: true, stoppedFileOwnerModeHashesEqual: true, entries: restoredManifest.length, profiles: true, credentialsUsedByRealRun: true, privateFiles: true, sharedFiles: true, memory: true, skills: true, tasks: true, history: true, interruptedRunsNotReplayed: true, freshEngineCache: true }, firstRun: first.id, followupRun: second.id, restoredRun: restoredRun.run.id };
+  evidence = { ok: true, mode: 'real Compose stack and pinned Hermes with scripted completion fixture; not model reasoning', project, restoreProject, root, deployment, packaged, coordinatorImage, image: HERMES_IMAGE, providerIp, dashboardCsp: true, authenticatedApi: true, browserPairing: { required: true, invalidDenied: true, expiredDenied: true, replayDenied: true }, hostFolderPermissions, explicitHostFolders: { physicalPathsContainSpaces: true, readOnlyCeiling: true, selectedAgentWrite: true, otherAgentDenied: true, unexportedPathsDenied: true }, savedCredentialRotation: true, teamTaskPersistence: true, teamSharedFiles: { memberWrite: true, hostReadback: true, nonmemberDenied: true, restoredReadback: true }, localBootstrap: true, forgedHostDenied: true, nestedBootstrapDenied: nestedBootstrap, privateDockerTcp: tcp, identity, agentMounts, fileTool: true, clarification: true, taskMcp: true, deniedTerminal: true, freshSessionContext: true, replayStable: true, restartPersistence: true, gracefulAgentCleanup: true, privateDesktop: desktop, twoAgentDesktopIsolation: true, sharedFilesPreserved: true, backupRestore: { destinationWasEmpty: true, stoppedFileOwnerModeHashesEqual: true, entries: restoredManifest.length, profiles: true, credentialsUsedByRealRun: true, privateFiles: true, sharedFiles: true, memory: true, skills: true, tasks: true, history: true, interruptedRunsNotReplayed: true, freshEngineCache: true }, firstRun: first.id, followupRun: second.id, restoredRun: restoredRun.run.id };
   evidence.realApprovalRoundTrips = approvalRuns;
+  evidence.localDashboardImprovement = { requestId, agentRunId: improvement.runId, file: 'components/assistant-workspace.tsx', heading: marker, realFileTools: true, compiledPreview: true, applied: true, undone: true, savedGrantsPreserved: true };
   evidence.typedApiAccess = { realSocketDispatch: true, ungrantedOriginDenied: true, forbiddenMethodDenied: true, ungrantedCredentialDenied: true, secretsHiddenFromModel: true };
   if (soakResult) evidence.soak = soakResult;
   if (browserOverrides) {

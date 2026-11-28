@@ -9,7 +9,7 @@ pre-1.0, so breaking changes can still land in a minor version.
 ### Added
 
 - Add a per-agent Computer panel with live desktop takeover, a private interactive terminal, persistent terminal consent, and confirmed permission revocation. Preserve existing grants and keep human terminal access separate from agent permissions. (claude, codex)
-- Separate persistent Linux desktops from stoppable execution containers, preserving live browser pages across handoffs while stopping detached commands. Add ownership-checked managed computer tools, ephemeral runner streams, destination-encrypted transfers and runtime contract 10. (codex)
+- Separate persistent Linux desktops from stoppable execution containers, preserving live browser pages across handoffs while stopping detached commands. Add ownership-checked managed computer tools, ephemeral runner streams, destination-encrypted transfers and runtime contract 11. (codex)
 
 - Add prepared decision previews and edits requiring fresh approval, finished-work cards with artifacts and review evidence, a Today brief, three guided starters, agent-scoped notes, workflow reuse and completion-notification preferences to the assistant workspace. (claude, codex)
 
@@ -25,6 +25,8 @@ pre-1.0, so breaking changes can still land in a minor version.
 
 - Close two harness isolation gaps. Image archives must use standard POSIX tar headers with valid checksums, since Docker reads other formats' names differently and a hidden second manifest could retag another agent's runtime; any tag a load applies anyway is undone and the install fails. OpenCode no longer loads plugins or downloaded tools from the agent's writable private folder: its config, data, cache, and home are created fresh for each launch. (claude)
 - Make agent instructions reliably reach the model. Pinned Hermes discarded a whole SOUL.md, folder and API notices included, when any line resembled prompt injection, which ordinary phrases such as "pull new tasks from the board" do. The managed entry now trusts only the SOUL.md whose hash the coordinator recorded in the read-only policy, and keeps scanning project context files. Every harness also receives the agent's name, role and description, and OpenCode and custom harnesses now receive API grants. Requires runtime contract 13. (claude)
+- Advance the database to schema 5 so older interval-only schedulers refuse cron schedules instead of running them at the wrong cadence. Preserve a restricted pre-upgrade database backup. (codex)
+
 - Reuse a matching prepared private runtime between chat turns, expire unused preparation, and coordinate cleanup with active tasks, settings probes, backups and shutdown. Keep the newest reply visible on short phone viewports. (codex)
 
 - Count agents inheriting the workspace credential in its usage, and require explicit deletion when an active task still uses a credential after its agent switches away. (codex)
@@ -74,6 +76,30 @@ pre-1.0, so breaking changes can still land in a minor version.
 - Prepare digest-pinned ARM64/AMD64 browser packages with native image checks and anonymous install/restore release gates; runtime setup downloads the packaged image without a source-build fallback. Publication and native Mac/Windows acceptance remain pending. (codex)
 - Require a one-use local pairing link for Compose browsers, expose only explicitly exported host folders to agent grants, and refuse unsupported localhost-only model routes with actionable guidance. (codex)
 - Real Docker, Compose, runner, private desktop and persistent-workflow regression gates alongside expanded lifecycle and integration tests. (codex)
+### Security
+
+- The coordinator's agent-directory file operations are now symlink-safe on Linux. `/v1/files`
+  (read, list, write, delete), the skill and context (`MEMORY.md`/`USER.md`) endpoints, the
+  `/v1/migrate` profile and shared writes, and agent file transfer export/import resolve every
+  path from a trusted coordinator-owned anchor through held directory handles (fd-relative via
+  `/proc/self/fd`, `O_NOFOLLOW`), so a planted or racing symlink can no longer redirect a read,
+  write, or delete outside the agent or shared directories. Deleting a symlink is refused rather
+  than followed, and `/v1/bootstrap` now reports the active mode as `fileSafety`
+  (`fd-relative` | `path-fallback` | `unsupported`). Non-Linux hosts keep the pathname fallback;
+  see the Known limitations in `SECURITY.md` for what it does and does not protect.
+- Finished runner commands now drop their probe input as well as credential material, and the
+  startup sweep rescans all finished rows. Commands failed by a machine revoke or by lease
+  reconciliation keep their payload until the next coordinator restart, when the sweep scrubs them.
+
+### Fixed
+
+- Agents with very long IDs get a valid container name; a hashed suffix keeps it within Docker's
+  limit instead of overflowing it.
+- A run that has already reached a terminal state is no longer revived by a late event.
+- Tool discovery no longer rebuilds a busy container or drops its team mounts.
+- The task drawer prompts before discarding unsaved edits.
+- Computers and approvals keep load errors separate from revoke and approval-decision errors.
+- A single ordering guard keeps the approvals badge count correct.
 
 ## [0.4.0-beta.1] — 2026-09-25
 

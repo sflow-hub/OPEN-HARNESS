@@ -20,6 +20,8 @@ import {
   ListTodo,
   Menu,
   MessageSquare,
+  MonitorCog,
+  MessagesSquare,
   Plus,
   Search,
   Settings,
@@ -60,6 +62,7 @@ import {
 } from "../lib/control-client";
 
 import AgentSettings from "../components/agent-settings";
+import AgentDelete from "../components/agent-delete";
 import Onboarding from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import TeamManager, { TeamBadge } from "../components/team-manager";
@@ -82,7 +85,13 @@ import { DesktopPanel } from "../components/desktop-panel";
 import { CredentialSelector } from "../components/credential-editor";
 import { modelCredential } from "../lib/credential-types";
 import { CREDENTIAL_PROVIDERS, modelForCredential, providerLabel, type CredentialRecord } from "../lib/credentials";
-import { isSandboxedComputer, profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
+import { BUNDLED_MODEL, isSandboxedComputer, profileAgent, type AgentProfile, type ModelChoice } from "../lib/agent-profile";
+import RoutineHistoryDrawer from "../components/routine-history-drawer";
+import GroupChatView from "../components/group-chat-view";
+import ComputersPage from "../components/computers-page";
+import ApprovalsInbox from "../components/approvals-inbox";
+import type { Routine } from "../lib/routine";
+import { trackKeyboardInset, useMobileBackGuard } from "../lib/browser-overlays";
 import type { Team } from "../lib/team";
 import type { TaskBoard } from "../lib/task-types";
 import { APP_VERSION } from "../lib/version";
@@ -105,12 +114,40 @@ function describe(value: unknown, fallback: string): string {
 }
 
 const ONBOARDING_KEY = "open-harness.onboarding.v1";
+type LauncherModel = 'local' | 'provider';
+function launcherModelKey(url: URL) {
+  return 'open-harness.launcher-model.' + (url.searchParams.get('controlPort') || 'dashboard');
+}
+function launcherModelIntent(): LauncherModel | null {
+  const url = new URL(window.location.href);
+  const choice = url.searchParams.get('setupModel') ?? sessionStorage.getItem(launcherModelKey(url));
+  return choice === 'local' || choice === 'provider' ? choice : null;
+}
+function openActiveEdition(runtime: RuntimeStatus) {
+  const url = new URL(window.location.href);
+  if (!runtime.localDashboardRevision || url.pathname !== '/' || url.searchParams.get('original') === '1') return false;
+  url.pathname = '/local-edition';
+  window.location.replace(url.href);
+  return true;
+}
+function rememberLauncherModel(pending: LauncherModel | null) {
+  const url = new URL(window.location.href);
+  if (pending) sessionStorage.setItem(launcherModelKey(url), pending);
+  else sessionStorage.removeItem(launcherModelKey(url));
+  if (url.searchParams.has('setupModel')) {
+    url.searchParams.delete('setupModel');
+    window.history.replaceState(window.history.state, '', url);
+  }
+}
+
+const suppressFirstRun = (choice: string | null) => choice === 'done' || choice === 'deferred';
 const ADVANCED_KEY = "open-harness.advanced.v1";
 const MIGRATED_KEY = "open-harness.migrated.v1";
 // Kept apart from SETTINGS_KEY on purpose: the onboarding save rewrites that whole
 // blob, which would silently drop anything else stored alongside it.
 const NOTIFY_KEY = "open-harness.notify.v1";
-type View = "assistant" | "home" | "teams" | "groups" | "chat" | "files" | "folders" | "routines" | "tasks" | "credentials";
+type View = "assistant" | "home" | "teams" | "groups" | "chat" | "files" | "folders" | "routines" | "tasks" | "credentials" | "computers" | "approvals";
+const EMPTY_AGENT: Agent = { id: "", name: "No agent selected", role: "", description: "", instructions: "", memory: [], tone: 0 };
 type ModelSettings = { provider: string; model: string; maxSteps?: number; baseUrl?: string; credentialRef?: string };
 const defaultSettings: ModelSettings = {
   provider: "xai",
@@ -193,14 +230,18 @@ export default function Home() {
   // the coordinator's answer was still in flight flagged an untouched form as edited.
   const [settingsBaseline, setSettingsBaseline] = useState(JSON.stringify(defaultSettings));
   const [confirmCloseSettings, setConfirmCloseSettings] = useState(false);
-  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingMode, setOnboardingMode] = useState<'automatic' | 'manual' | LauncherModel | null>(null);
+  const [checkingLauncherModel, setCheckingLauncherModel] = useState(false);
+  const launcherModel = onboardingMode === 'local' || onboardingMode === 'provider' ? onboardingMode : undefined;
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [editingAgentTab, setEditingAgentTab] = useState<'profile' | 'computer' | 'harness'>('profile');
+  const [agentBusy, setAgentBusy] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [input, setInput] = useState("");
   const [replyOnly, setReplyOnly] = useState(false);
   const [search, setSearch] = useState("");
   const [agentTeamFilter, setAgentTeamFilter] = useState("all");
+  const [groupKind, setGroupKind] = useState<"chat" | "team">("chat");
   const [liveRuns, setLiveRuns] = useState<Record<string, PersistentRun>>({});
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [connectionReady, setConnectionReady] = useState(false);
@@ -209,10 +250,19 @@ export default function Home() {
   const [answering, setAnswering] = useState("");
   const [inputDraft, setInputDraft] = useState<{ inputId: string; answers: Record<string, { text: string; choices: string[] }> }>({ inputId: "", answers: {} });
   const [inputMode, setInputMode] = useState<"steer" | "followup">("steer");
-  const [routines, setRoutines] = useState<Array<Record<string, unknown>>>([]);
+  // Includes approvals from runs this page is not following.
+  const [pendingApprovals, setPendingApprovals] = useState(0);
+  // The badge poll and the inbox both write this count; a poll that started before an answer can
+  // land after the inbox's newer count, so a write older than the last applied one is dropped.
+  const badgeTicket = useRef(0), badgeApplied = useRef(0);
+  const applyPendingApprovals = (ticket: number, count: number) => { if (ticket < badgeApplied.current) return; badgeApplied.current = ticket; setPendingApprovals(count); };
+  const startApprovalCount = useCallback(() => ++badgeTicket.current, []);
+  const reportInboxCount = useCallback((ticket: number, count: number) => applyPendingApprovals(ticket, count), []);
+  const [routines, setRoutines] = useState<Routine[]>([]);
   const [projects, setProjects] = useState<TaskBoard[]>([]);
   const [draftProjectId, setDraftProjectId] = useState("");
-  const [routineDraft, setRoutineDraft] = useState<{ id?: string; name: string; prompt: string; agentId: string; intervalMinutes: number } | null>(null);
+  const [historyRoutine, setHistoryRoutine] = useState<Routine | null>(null);
+  const [routineDraft, setRoutineDraft] = useState<{ id?: string; name: string; prompt: string; agentId: string; intervalMinutes: number; cronSchedule?: string } | null>(null);
   const [routineBusy, setRoutineBusy] = useState(false);
   const [reviewRun, setReviewRun] = useState<PersistentRun | null>(null);
   const [desktopAgentId, setDesktopAgentId] = useState<string | null>(null);
@@ -265,7 +315,7 @@ export default function Home() {
   const importRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const agent =
-    workspace.agents.find((a) => a.id === selectedAgent) || workspace.agents[0];
+    workspace.agents.find((a) => a.id === selectedAgent) || workspace.agents[0] || EMPTY_AGENT;
   const conversation = workspace.conversations.find(
     (c) => c.id === conversationId,
   );
@@ -311,7 +361,7 @@ export default function Home() {
   // the coordinator decides whether it can, and a refusal changes nothing on screen.
   const preparedAt = useRef(new Map<string, number>());
   const prepareComposer = () => {
-    if (!connected || running || !runtime?.features?.includes('agent-prepare')) return;
+    if (!agent.id || !connected || running || !runtime?.features?.includes('agent-prepare')) return;
     const key = `${agent.id}:${replyOnlyMode}`, last = preparedAt.current.get(key) || 0;
     if (Date.now() - last < 60_000) return;
     preparedAt.current.set(key, Date.now());
@@ -500,6 +550,7 @@ export default function Home() {
         "Saved data could not be loaded. Import a workspace backup or start fresh.",
       );
     }
+    setCheckingLauncherModel(!controlRef.current.managed && Boolean(launcherModelIntent()));
     setReady(true);
     const watchers = watchControllers.current;
     return () => {
@@ -513,6 +564,16 @@ export default function Home() {
     let cancelled = false;
     let retryTimer = 0;
     let connectionEpoch = 0;
+    function offerFirstRun() {
+      if (!controlRef.current.managed && !suppressFirstRun(localStorage.getItem(ONBOARDING_KEY))) {
+        setOnboardingMode(current => current ?? 'automatic');
+      }
+    }
+    function syncFirstRun(event: StorageEvent) {
+      if (event.key === ONBOARDING_KEY && suppressFirstRun(event.newValue)) {
+        setOnboardingMode(current => current === 'automatic' ? null : current);
+      }
+    }
     const connect = async () => {
       setConnectionReady(false);
       const client = controlRef.current;
@@ -540,6 +601,7 @@ export default function Home() {
         const checkId = ++runtimeCheckId.current;
         const status = await client.bootstrap();
         if (!isCurrent()) return;
+        if (!client.managed && !launcherModelIntent() && openActiveEdition(status)) return;
         setPairing({ state: "none", message: "" });
         if (checkId === runtimeCheckId.current) setRuntime(status);
         if(client.managed){const requestedDesktop=new URL(window.location.href).searchParams.get('desktop');if(requestedDesktop&&/^[A-Za-z0-9_-]+$/.test(requestedDesktop))setDesktopAgentId(requestedDesktop);}
@@ -548,8 +610,16 @@ export default function Home() {
           body: JSON.stringify({ agents: workspace.agents }),
         });
         if (!isCurrent()) return;
-        workspaceRef.current = { ...workspaceRef.current, agents: synced.agents };
-        setWorkspace(current => ({ ...current, agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })) }));
+        const agentIds = new Set(synced.agents.map(agent => agent.id));
+        const reconcileAgents = (current: Workspace): Workspace => ({ ...current,
+          agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })),
+          conversations: current.conversations.filter(conversation => agentIds.has(conversation.agentId)),
+          teams: current.teams.map(team => ({ ...team, memberAgentIds: team.memberAgentIds.filter(id => agentIds.has(id)) })),
+        });
+        workspaceRef.current = reconcileAgents(workspaceRef.current);
+        setWorkspace(reconcileAgents);
+        setSelectedAgent(current => agentIds.has(current) ? current : synced.agents[0]?.id || "");
+        if (!synced.agents.length) { pendingAgentHistory.current = null; setConversationId(null); setView(current => current === "chat" ? "home" : current); }
         if (!client.managed && localStorage.getItem(MIGRATED_KEY) !== 'done') {
           await client.request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) });
           localStorage.setItem(MIGRATED_KEY, 'done');
@@ -559,7 +629,7 @@ export default function Home() {
         // or credential response must not hold up history and reattaching active work.
         await Promise.all([
           (async () => {
-            if (!client.managed && workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspace.teams }) });
+            if (!client.managed && workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspaceRef.current.teams }) });
             const { teams } = await client.request<{ teams: Team[] }>("/v1/teams?includeRetired=1");
             if (!isCurrent()) return;
             setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) }));
@@ -576,14 +646,24 @@ export default function Home() {
             if (!form.open || JSON.stringify(form.settings) === form.baseline) setSettings(saved);
             setSettingsBaseline(JSON.stringify(saved));
             setWorkspaceModelRevision(defaults.revision);
-            if (!client.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
+            const requested = client.managed ? null : launcherModelIntent();
+            if (requested) {
+              const { provider, baseUrl, model } = defaults.model;
+              const isBundled = provider === 'local' && baseUrl.replace(/\/$/, '') === BUNDLED_MODEL.baseUrl && model === BUNDLED_MODEL.model;
+              const mismatch = (requested === 'local') !== isBundled;
+              rememberLauncherModel(mismatch ? requested : null);
+              setCheckingLauncherModel(false);
+              if (mismatch) { setOnboardingMode(requested); return; }
+              if (openActiveEdition(status)) return;
+            }
+            offerFirstRun();
           }),
           client.request<{ credentials: CredentialRecord[] }>("/v1/credentials")
             .then(saved => { if (isCurrent()) setCredentials(saved.credentials); }).catch(() => {}),
           client.request<{ boards: TaskBoard[] }>("/v1/boards")
             .then(saved => { if (isCurrent()) setProjects(saved.boards); }).catch(() => {}),
-          client.request<{ routines: Array<Record<string, unknown>> }>("/v1/routines")
-            .then(saved => { if (isCurrent()) setRoutines(saved.routines); }),
+          client.listRoutines()
+            .then(saved => { if (isCurrent()) setRoutines(saved); }),
           client.managed ? refreshRuntimeFiles().catch(() => {}) : Promise.resolve(),
           Promise.all([client.request<{ runs: PersistentRun[] }>("/v1/runs"), client.conversations()]).then(([{ runs }, history]) => {
             if (!isCurrent()) return;
@@ -591,9 +671,10 @@ export default function Home() {
             const liveNow = runs.filter(run => !run.parent_run_id && isLiveRun(run));
             for (const run of liveNow) attachRun(run);
             // A late response may reattach work, but must not undo the user's navigation.
-            if (liveNow[0] && !navigated.current) {
-              setSelectedAgent(liveNow[0].agent_id);
-              setConversationId(liveNow[0].conversation_id);
+            const foreground = liveNow.find(run => !run.local_improvement);
+            if (foreground && !navigated.current) {
+              setSelectedAgent(foreground.agent_id);
+              setConversationId(foreground.conversation_id);
               setView("chat");
             }
             const notificationRun = new URL(window.location.href).searchParams.get("run");
@@ -627,15 +708,17 @@ export default function Home() {
         if (error instanceof ControlRequestError || connectAttempt.current >= 2) setOffline(error instanceof Error ? error.message : "The local agent runtime is unavailable.");
         // First run needs the guide most when nothing is reachable yet, and the gate for it
         // used to sit inside the success path.
-        if (!client.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') setOnboardingOpen(true);
+        offerFirstRun();
         // Back off, but keep trying: starting the coordinator should be enough to recover
         // without reloading the page.
         const wait = Math.min(30_000, 2_000 * 2 ** Math.min(connectAttempt.current++, 4));
         retryTimer = window.setTimeout(() => { if (!cancelled) void connect(); }, wait);
       }
     };
+    if (!controlRef.current.managed) window.addEventListener('storage', syncFirstRun);
     void connect();
     return () => {
+      window.removeEventListener('storage', syncFirstRun);
       cancelled = true;
       runtimeCheckId.current += 1;
       if (retryTimer) window.clearTimeout(retryTimer);
@@ -760,8 +843,7 @@ export default function Home() {
   };
 
   const refreshRoutines = async () => {
-    const result = await controlRef.current.request<{ routines: Array<Record<string, unknown>> }>("/v1/routines");
-    setRoutines(result.routines);
+    setRoutines(await controlRef.current.listRoutines());
   };
   const saveRoutine = async () => {
     if (!routineDraft) return;
@@ -769,9 +851,11 @@ export default function Home() {
     if (!name || !prompt) { setNotice("Give the routine a name and a task."); return; }
     setRoutineBusy(true);
     try {
-      const payload = JSON.stringify({ name, prompt, agentId: routineDraft.agentId, intervalMinutes: routineDraft.intervalMinutes, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
-      if (routineDraft.id) await controlRef.current.request(`/v1/routines/${routineDraft.id}`, { method: "PUT", body: payload });
-      else await controlRef.current.request("/v1/routines", { method: "POST", body: payload });
+      // Updates leave timezone and schedule kind to the server: resending the browser's
+      // timezone would shift a cron routine saved elsewhere, and cron routines have no interval.
+      const fields = { name, prompt, agentId: routineDraft.agentId };
+      if (routineDraft.id) await controlRef.current.updateRoutine(routineDraft.id, routineDraft.cronSchedule ? fields : { ...fields, intervalMinutes: routineDraft.intervalMinutes });
+      else await controlRef.current.createRoutine({ ...fields, intervalMinutes: routineDraft.intervalMinutes, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
       await refreshRoutines();
       setRoutineDraft(null);
       setNotice(routineDraft.id ? "Routine updated." : "Routine created.");
@@ -815,6 +899,11 @@ export default function Home() {
   const requestCloseSettings = () => { if (settingsDirty) setConfirmCloseSettings(true); else closeSettings(); };
   const escapeSettingsRef = useRef<() => void>(() => {});
   escapeSettingsRef.current = () => { if (settingsOpen) requestCloseSettings(); };
+  useEffect(trackKeyboardInset, []);
+  useMobileBackGuard(mobileOpen, () => setMobileOpen(false));
+  useMobileBackGuard(settingsOpen, () => { if (confirmCloseSettings) setConfirmCloseSettings(false); else requestCloseSettings(); });
+  useMobileBackGuard(Boolean(onboardingMode) && !launcherModel, () => setOnboardingMode(null));
+  useMobileBackGuard(Boolean(selectedFile), () => setSelectedFile(null));
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -840,6 +929,13 @@ export default function Home() {
       window.removeEventListener("beforeunload", beforeLeave);
     };
   }, []);
+  useEffect(() => {
+    if (!runtime) return;
+    const load = () => { if (document.hidden) return; const ticket = ++badgeTicket.current; controlRef.current.listApprovals({ state: "pending", limit: 1 }).then(value => applyPendingApprovals(ticket, value.pendingCount)).catch(() => {}); };
+    load();
+    const timer = window.setInterval(load, 15_000);
+    return () => window.clearInterval(timer);
+  }, [runtime, approvals.length]);
   useEffect(() => {
     if (notice) {
       const timeout = setTimeout(() => setNotice(""), 6500);
@@ -900,16 +996,44 @@ export default function Home() {
     setConversationId(run.conversation_id);
     setView("chat");
   }
-  function newAgent() {
-    setEditingAgent({
-      id: uid(),
-      name: "",
-      role: "",
-      description: "",
-      instructions: "",
-      memory: [],
-      tone: workspace.agents.length % 3,
-    });
+  async function newAgent() {
+    if (agentBusy) return;
+    setAgentBusy(true);
+    try {
+      const created = await controlRef.current.createAgent({ name: "New agent" });
+      setWorkspace((w) => ({ ...w, agents: [...w.agents.filter((a) => a.id !== created.id), created] }));
+      pendingAgentHistory.current = null;
+      setSelectedAgent(created.id);
+      setConversationId(null);
+      setInput("");
+      setEditingAgent(created);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not create an agent. Check that Open Harness is running.");
+    } finally {
+      setAgentBusy(false);
+    }
+  }
+  async function deleteAgent(target: Agent) {
+    if (agentBusy || !window.confirm(`Delete ${target.name}? Its profile is removed and cannot be restored.`)) return;
+    setAgentBusy(true);
+    try {
+      await controlRef.current.deleteAgent(target.id);
+      const next = workspace.agents.find((a) => a.id !== target.id);
+      setWorkspace((w) => ({
+        ...w,
+        agents: w.agents.filter((a) => a.id !== target.id),
+        conversations: w.conversations.filter(conversation => conversation.agentId !== target.id),
+        // The coordinator already dropped it from its teams; a stale cached membership
+        // would otherwise be sent back by the next teams sync.
+        teams: w.teams.map((team) => ({ ...team, memberAgentIds: team.memberAgentIds.filter((id) => id !== target.id) })),
+      }));
+      if (next && selectedAgent === target.id) openAgent(next.id);
+      setNotice(`${target.name} was deleted.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : `Could not delete ${target.name}.`);
+    } finally {
+      setAgentBusy(false);
+    }
   }
   function handleEvents(
     events: RunEvent[],
@@ -1381,6 +1505,38 @@ export default function Home() {
   const visibleAgents = workspace.agents.filter(candidate => !advancedFeatures || agentTeamFilter === "all"
     || (agentTeamFilter === "unassigned" ? !workspace.teams.some(team => team.memberAgentIds.includes(candidate.id)) : workspace.teams.find(team => team.id === agentTeamFilter)?.memberAgentIds.includes(candidate.id)));
 
+  const onboardingDialog = onboardingMode && runtime && <Onboarding launcherModel={launcherModel} client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: settings.credentialRef || "" }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
+        if (launcherModel) {
+          rememberLauncherModel(null);
+          if (suppressFirstRun(localStorage.getItem(ONBOARDING_KEY))) { setOnboardingMode(null); openActiveEdition(runtime); }
+        }
+        const chosen = { provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl, credentialRef: model.credentialRef };
+        setSettings(chosen);
+        setSettingsBaseline(JSON.stringify(chosen));
+        setWorkspaceModelRevision(revision);
+        void controlRef.current.request<{ credentials: CredentialRecord[] }>("/v1/credentials").then(saved => setCredentials(saved.credentials)).catch(() => {});
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify({ provider: model.provider, model: model.model, baseUrl: model.baseUrl }));
+      }} onComputerSettings={() => {
+        setAdvancedFeatures(true);
+        localStorage.setItem(ADVANCED_KEY, 'on');
+        setOnboardingMode(null);
+        refreshRuntime();
+        setEditingAgentTab('computer');
+        setEditingAgent(agent);
+      }} onDismiss={() => {
+        if (launcherModel) { rememberLauncherModel(null); openActiveEdition(runtime); }
+        if (!controlRef.current.managed && localStorage.getItem(ONBOARDING_KEY) !== 'done') localStorage.setItem(ONBOARDING_KEY, 'deferred');
+        setOnboardingMode(null);
+        refreshRuntime();
+      }} onFinished={() => {
+        if (launcherModel) openActiveEdition(runtime);
+        localStorage.setItem(ONBOARDING_KEY, 'done');
+        setOnboardingMode(null);
+        refreshRuntime();
+      }} onRuntimeChecked={status => refreshRuntime(status.executionReady)} />;
+  if (checkingLauncherModel && pairing.state === 'none') return <main role="status">{offline || 'Checking your workspace model…'}</main>;
+  if (launcherModel && onboardingDialog) return onboardingDialog;
+
   return (
     <div className="app-shell" onPointerDownCapture={() => { navigated.current = true; }} onKeyDownCapture={() => { navigated.current = true; }}>
       {mobileOpen && (
@@ -1401,7 +1557,7 @@ export default function Home() {
           <span className="brand-mark">h</span> open harness{" "}
           <span className="version">/ 01</span>
         </button>
-        <button className="new-button" onClick={newAgent} disabled={running}>
+        <button className="new-button" onClick={() => void newAgent()} disabled={running || agentBusy}>
           <Plus size={15} /> New agent
         </button>
         <div className="search-box">
@@ -1465,7 +1621,33 @@ export default function Home() {
         >
           <CalendarClock size={16} /> Routines <span>{routines.length || ""}</span>
         </button>
-        {advancedFeatures && <button className={`nav-item ${view === "groups" ? "active" : ""}`} onClick={() => { setView("groups"); setMobileOpen(false); }}><MessageSquare size={16} /> Group conversations</button>}
+        <button
+          className={`nav-item ${view === "approvals" ? "active" : ""}`}
+          onClick={() => {
+            setView("approvals");
+            setMobileOpen(false);
+          }}
+        >
+          <ShieldCheck size={16} /> Approvals <span className={pendingApprovals ? "nav-alert-count" : ""}>{pendingApprovals || ""}</span>
+        </button>
+        <button
+          className={`nav-item ${view === "groups" ? "active" : ""}`}
+          onClick={() => {
+            setView("groups");
+            setMobileOpen(false);
+          }}
+        >
+          <MessagesSquare size={16} /> Groups
+        </button>
+        {advancedFeatures && <button
+          className={`nav-item ${view === "computers" ? "active" : ""}`}
+          onClick={() => {
+            setView("computers");
+            setMobileOpen(false);
+          }}
+        >
+          <MonitorCog size={16} /> Computers
+        </button>}
         <div className="nav-label">YOUR AGENTS</div>
         <div className="sidebar-scroll">
           {workspace.agents
@@ -1543,8 +1725,6 @@ export default function Home() {
                 ? "Agents"
                 : view === "teams"
                   ? "Teams"
-                : view === "groups"
-                  ? "Group conversations"
                 : view === "files"
                   ? "Files"
                 : view === "credentials"
@@ -1553,8 +1733,14 @@ export default function Home() {
                   ? "Folders"
                   : view === "routines"
                     ? "Routines"
+                    : view === "groups"
+                    ? "Groups"
+                    : view === "approvals"
+                    ? "Approvals"
                     : view === "tasks"
                       ? "Tasks"
+                    : view === "computers"
+                      ? "Computers"
                       : agent.name}
             </span>
           </span>
@@ -1563,7 +1749,6 @@ export default function Home() {
         {view === 'assistant' && <AssistantWorkspace client={controlRef.current} ready={Boolean(runtime)} agents={workspace.agents} onProfile={applySavedProfile} onOpenRun={openTaskRun} onWorkflow={id => { setSelectedWorkflowId(id); setWorkflowSourceRunId(''); setView('routines'); }} />}
         {advancedFeatures && view === "tasks" && <TaskManager agents={workspace.agents} teams={[...workspace.teams, ...retiredTeams]} client={controlRef.current} onOpenRun={openTaskRun} />}
         {advancedFeatures && view === "teams" && <TeamManager agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onChanged={teams => { setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) })); setRetiredTeams(teams.filter(team => Boolean(team.retiredAt))); }} />}
-        {advancedFeatures && view === "groups" && <GroupConversations agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onOpenRun={openTaskRun} />}
         {view === "credentials" && <CredentialsPage client={controlRef.current} onChanged={setCredentials} />}
         {view === "folders" && <FolderManager agents={workspace.agents} client={controlRef.current} />}
         {view === "home" && (
@@ -1584,7 +1769,7 @@ export default function Home() {
                 Your agents{" "}
                 <span>{String(workspace.agents.length).padStart(2, "0")}</span>
               </h2>
-              <button onClick={newAgent} disabled={running}>
+              <button onClick={() => void newAgent()} disabled={running || agentBusy}>
                 <Plus size={13} /> Create agent
               </button>
             </div>
@@ -1593,6 +1778,7 @@ export default function Home() {
               {workspace.teams.map(team => <button className={agentTeamFilter === team.id ? "active" : ""} onClick={() => setAgentTeamFilter(team.id)} key={team.id}>{team.name}</button>)}
               <button className={agentTeamFilter === "unassigned" ? "active" : ""} onClick={() => setAgentTeamFilter("unassigned")}>Unassigned</button>
             </div>}
+            {!workspace.agents.length && <div className="files-empty"><h2>No agents yet</h2><p>Create your first agent, or set up your primary assistant from Assistant.</p></div>}
             <div className="agent-grid">
               {visibleAgents.map((a) => (
                 <div className="agent-card-shell" key={a.id}>
@@ -1626,7 +1812,7 @@ export default function Home() {
                 </div>
               ))}
             </div>
-            <div className="start-panel">
+            {workspace.agents.length > 0 && <div className="start-panel">
               <Sparkles className="spark" size={31} />
               <div>
                 <h3>Start small. Make it yours.</h3>
@@ -1641,7 +1827,7 @@ export default function Home() {
               >
                 Meet {workspace.agents[0].name} <ArrowUpRight size={13} />
               </button>
-            </div>
+            </div>}
             <div className="home-footer">
               <span>YOUR MODELS. YOUR INSTRUCTIONS. YOUR WORK.</span>
               <button onClick={() => openSettings()}>
@@ -1650,7 +1836,7 @@ export default function Home() {
             </div>
           </section>
         )}
-        {view === "chat" && (
+        {view === "chat" && Boolean(agent.id) && (
           <div className={`chat-layout ${inspector ? "" : "no-inspector"}`}>
             <section className="chat-main">
               <div className="chat-toolbar">
@@ -1949,7 +2135,7 @@ export default function Home() {
                 </form>
                 <div className="composer-note">
                   {submitting || (!connected && !testMode && !running
-                    ? <>{runtime?.runtime.message || "Checking the agent runtime…"}{runtime && <> <button type="button" className="composer-note-action" onClick={() => setOnboardingOpen(true)}>Open setup</button></>}</>
+                    ? <>{runtime?.runtime.message || "Checking the agent runtime…"}{runtime && <> <button type="button" className="composer-note-action" onClick={() => setOnboardingMode('manual')}>Open setup</button></>}</>
                     : running
                     ? "This task continues if you close the browser. Send guidance or queue a follow-up."
                     : "Enter to send · Shift + Enter for a new line · Files are shared with all your agents")}
@@ -2163,6 +2349,7 @@ export default function Home() {
                 <div className="inspector-label"><Cable size={13} /> PROFILE TOOLS <span>{agent.profile?.allowedTools.length || 0}</span></div>
                 <p className="panel-help">{agent.profile?.allowedTools.length ? `${agent.profile.allowedTools.length} tools selected. Open Agent settings to check availability or change access.` : "No tools selected. Choose the capabilities this agent needs."}</p>
                 <button className="subtle-button" onClick={() => setEditingAgent({ ...agent })}><SlidersHorizontal size={13} /> Agent settings</button>
+                <AgentDelete agent={agent} disabled={running || agentBusy} onDelete={(target) => void deleteAgent(target)} />
                 <div className="scope-note">
                   {testMode
                     ? "Automated test mode does not run agents. Open the installed desktop app for live work."
@@ -2285,19 +2472,22 @@ export default function Home() {
             ) : (
               <div className="file-table">
                 {routines.map((routine) => (
-                  <div className="file-table-row" key={String(routine.id)}>
+                  <div className="file-table-row" key={routine.id}>
                     <div className="file-name">
                       <CalendarClock size={20} />
                       <span>
-                        {String(routine.name)}
+                        {routine.name}
                         <small>
-                          {agentNameFor(String(routine.agent_id))}
-                          {" · "}every {formatInterval(Number(routine.interval_minutes))}
-                          {" · "}next {new Date(String(routine.next_run_at)).toLocaleString()}
+                          {agentNameFor(routine.agent_id)}
+                          {" · "}
+                          {routine.schedule_kind === "cron"
+                            ? `cron ${routine.cron_expression || "(no expression)"}${routine.timezone ? ` (${routine.timezone})` : ""}`
+                            : `every ${formatInterval(routine.interval_minutes)}`}
+                          {routine.next_run_at && <>{" · "}next {new Date(routine.next_run_at).toLocaleString()}</>}
                         </small>
                         <small>
                           {routine.last_run_at
-                            ? `Last run ${new Date(String(routine.last_run_at)).toLocaleString()}`
+                            ? `Last run ${new Date(routine.last_run_at).toLocaleString()}`
                             : "Has not run yet"}
                         </small>
                       </span>
@@ -2309,7 +2499,7 @@ export default function Home() {
                       className="subtle-button"
                       onClick={async () => {
                         try {
-                          await controlRef.current.request(`/v1/routines/${String(routine.id)}/run`, { method: "POST" });
+                          await controlRef.current.runRoutine(routine.id);
                           // The server stamps last_run_at and next_run_at; without this the
                           // row keeps showing the schedule it had before you pressed the button.
                           await refreshRoutines();
@@ -2323,12 +2513,20 @@ export default function Home() {
                     </button>
                     <button
                       className="subtle-button"
+                      aria-label={`History for ${routine.name}`}
+                      onClick={() => setHistoryRoutine(routine)}
+                    >
+                      History
+                    </button>
+                    <button
+                      className="subtle-button"
                       onClick={() => setRoutineDraft({
-                        id: String(routine.id),
-                        name: String(routine.name),
-                        prompt: String(routine.prompt),
-                        agentId: String(routine.agent_id),
-                        intervalMinutes: Number(routine.interval_minutes) || 1440,
+                        id: routine.id,
+                        name: routine.name,
+                        prompt: routine.prompt,
+                        agentId: routine.agent_id,
+                        intervalMinutes: routine.interval_minutes,
+                        cronSchedule: routine.schedule_kind === "cron" ? `${routine.cron_expression || "(no expression)"}${routine.timezone ? ` (${routine.timezone})` : ""}` : undefined,
                       })}
                     >
                       Edit
@@ -2336,7 +2534,7 @@ export default function Home() {
                     <button
                       onClick={async () => {
                         try {
-                          await controlRef.current.request(`/v1/routines/${String(routine.id)}/toggle`, { method: "POST" });
+                          await controlRef.current.toggleRoutine(routine.id);
                           await refreshRoutines();
                         } catch (error) {
                           setNotice(error instanceof Error ? error.message : "Could not change that routine.");
@@ -2347,11 +2545,11 @@ export default function Home() {
                     </button>
                     <button
                       className="danger-text"
-                      aria-label={`Delete routine ${String(routine.name)}`}
+                      aria-label={`Delete routine ${routine.name}`}
                       onClick={async () => {
-                        if (!window.confirm(`Delete the routine “${String(routine.name)}”? Its schedule and history are removed.`)) return;
+                        if (!window.confirm(`Delete the routine “${routine.name}”? Its schedule and history are removed.`)) return;
                         try {
-                          await controlRef.current.request(`/v1/routines/${String(routine.id)}`, { method: "DELETE" });
+                          await controlRef.current.deleteRoutine(routine.id);
                           await refreshRoutines();
                           setNotice("Routine deleted.");
                         } catch (error) {
@@ -2367,6 +2565,12 @@ export default function Home() {
             )}
           </section>
         )}
+        {view === "approvals" && <ApprovalsInbox client={controlRef.current} refreshKey={approvals.length} onCountStart={startApprovalCount} onCount={reportInboxCount} onResolved={(id, runId) => setAnswered(current => [...current.filter(item => item.id !== id), { id, runId, at: Date.now() }])} />}
+        {view === "groups" && <div className="groups-workspace">
+          {advancedFeatures && <div className="task-view-switch groups-tabs" role="group" aria-label="Group type"><button className={groupKind === "chat" ? "active" : ""} aria-pressed={groupKind === "chat"} onClick={() => setGroupKind("chat")}>Group chats</button><button className={groupKind === "team" ? "active" : ""} aria-pressed={groupKind === "team"} onClick={() => setGroupKind("team")}>Team conversations</button></div>}
+          {advancedFeatures && groupKind === "team" ? <GroupConversations agents={workspace.agents} teams={workspace.teams} client={controlRef.current} onOpenRun={openTaskRun} /> : <GroupChatView client={controlRef.current} agents={workspace.agents} onNotice={setNotice} />}
+        </div>}
+        {advancedFeatures && view === "computers" && <ComputersPage client={controlRef.current} agents={workspace.agents} onAddComputer={() => { if (!agent.id) { setNotice('Create an agent before choosing its computer.'); return; } setEditingAgentTab('computer'); setEditingAgent(agent); }} />}
       </main>
       {docEditor && (
         <div className="modal-backdrop" onClick={() => !docBusy && setDocEditor(null)}>
@@ -2473,7 +2677,9 @@ export default function Home() {
                   ))}
                 </select>
               </label>
-              <label>
+              {routineDraft.cronSchedule ? (
+                <p className="muted small">Runs on the cron schedule {routineDraft.cronSchedule}. Saving keeps that schedule.</p>
+              ) : <label>
                 Run every
                 <select
                   value={String(routineDraft.intervalMinutes)}
@@ -2488,7 +2694,7 @@ export default function Home() {
                 <small className="muted">
                   Counted from the last run, not from a clock time — a daily routine drifts if you also run it by hand.
                 </small>
-              </label>
+              </label>}
             </div>
             <div className="modal-footer">
               <button className="subtle-button" disabled={routineBusy} onClick={() => setRoutineDraft(null)}>Cancel</button>
@@ -2498,6 +2704,15 @@ export default function Home() {
             </div>
           </section>
         </div>
+      )}
+      {historyRoutine && (
+        <RoutineHistoryDrawer
+          key={historyRoutine.id}
+          routine={historyRoutine}
+          agentName={agentNameFor(historyRoutine.agent_id)}
+          client={controlRef.current}
+          onClose={() => setHistoryRoutine(null)}
+        />
       )}
       <input
         type="file"
@@ -2638,7 +2853,7 @@ export default function Home() {
                   setAdvancedFeatures(enabled);
                   if (!enabled) {
                     setAgentTeamFilter("all");
-                    if (["teams", "groups", "tasks"].includes(view)) setView("home");
+                    if (["teams", "tasks", "computers"].includes(view)) setView("home");
                   }
                   localStorage.setItem(ADVANCED_KEY, enabled ? "on" : "off");
                 }}
@@ -2669,7 +2884,7 @@ export default function Home() {
               </button>
               <button
                 className="subtle-button"
-                onClick={() => { closeSettings(); setOnboardingOpen(true); }}
+                onClick={() => { closeSettings(); setOnboardingMode('manual'); }}
               >
                 <Sparkles size={14} /> Run setup again
               </button>
@@ -2743,28 +2958,7 @@ export default function Home() {
       )}
       {decisionsOpen && <DecisionSettings client={controlRef.current} credentials={credentials} onClose={() => setDecisionsOpen(false)} onManageCredentials={() => setCredentialsOpen(true)} />}
       {credentialsOpen && <CredentialManager client={controlRef.current} provider={settings.provider} onClose={() => setCredentialsOpen(false)} onChanged={setCredentials} />}
-      {onboardingOpen && runtime && <Onboarding client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: settings.credentialRef || "" }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
-        const chosen = { provider: model.provider as Provider, model: model.model, baseUrl: model.baseUrl, credentialRef: model.credentialRef };
-        setSettings(chosen);
-        setSettingsBaseline(JSON.stringify(chosen));
-        setWorkspaceModelRevision(revision);
-        void controlRef.current.request<{ credentials: CredentialRecord[] }>("/v1/credentials").then(saved => setCredentials(saved.credentials)).catch(() => {});
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify({ provider: model.provider, model: model.model, baseUrl: model.baseUrl }));
-      }} onComputerSettings={() => {
-        setAdvancedFeatures(true);
-        localStorage.setItem(ADVANCED_KEY, 'on');
-        setOnboardingOpen(false);
-        refreshRuntime();
-        setEditingAgentTab('computer');
-        setEditingAgent(agent);
-      }} onDismiss={() => {
-        setOnboardingOpen(false);
-        refreshRuntime();
-      }} onFinished={() => {
-        localStorage.setItem(ONBOARDING_KEY, 'done');
-        setOnboardingOpen(false);
-        refreshRuntime();
-      }} onRuntimeChecked={status => refreshRuntime(status.executionReady)} />}
+      {onboardingDialog}
       {reviewRun && <RunReview client={controlRef.current} run={reviewRun} onClose={() => setReviewRun(null)} onRepair={run => { setReviewRun(null); openTaskRun(run, 'Repair task result'); }} />}
       {desktopAgentId && <DesktopPanel agentId={desktopAgentId} agentName={workspace.agents.find(item => item.id === desktopAgentId)?.name} client={controlRef.current} onClose={() => setDesktopAgentId(null)} onWorkflowCreated={id => { setDesktopAgentId(null); setSelectedWorkflowId(id); setWorkflowSourceRunId(undefined); setView("routines"); }} />}
       {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} credentialCatalog={credentials} client={controlRef.current} onManageFolders={() => { setEditingAgent(null); setEditingAgentTab('profile'); setView("folders"); }} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}

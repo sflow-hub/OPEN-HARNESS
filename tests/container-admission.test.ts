@@ -14,13 +14,19 @@ test('shutdown drains delayed execution and desktop creation before cleanup and 
   writeFileSync(join(directory, 'docker'), String.raw`#!${process.execPath}
 const fs=require('node:fs'),path=require('node:path'),args=process.argv.slice(2),inventory=${JSON.stringify(inventory)},release=${JSON.stringify(release)};
 fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(args)+'\n');
+// Other fake Docker processes can inspect the inventory while a container is stopping.
+function saveRecord(file, value) {
+  const temporary = file + '.' + process.pid + '.tmp';
+  fs.writeFileSync(temporary, JSON.stringify(value));
+  fs.renameSync(temporary, file);
+}
 const records=()=>fs.readdirSync(inventory).filter(name=>name.endsWith('.json')).map(name=>({path:path.join(inventory,name),value:JSON.parse(fs.readFileSync(path.join(inventory,name),'utf8'))}));
 if(args[0]==='image')console.log(args.includes('{{.Id}}')?'sha256:test':'${RUNTIME_CONTRACT}');
 if(args[0]==='inspect'){const record=records().find(item=>item.value.Id===args.at(-1)||item.value.Name===args.at(-1));if(!record){console.error('No such object');process.exit(1);}console.log(JSON.stringify(record.value));}
 if(args[0]==='ps')console.log(records().filter(item=>item.value.State.Running).map(item=>item.value.Id).join('\n'));
-if(args[0]==='stop'){const record=records().find(item=>item.value.Id===args.at(-1));record.value.State.Running=false;fs.writeFileSync(record.path,JSON.stringify(record.value));}
+if(args[0]==='stop'){const record=records().find(item=>item.value.Id===args.at(-1));record.value.State.Running=false;saveRecord(record.path,record.value);}
 if(args[0]==='run'&&args.includes('--rm')){const mount=args[args.indexOf('-v')+1];console.log(fs.readFileSync(mount.slice(0,-':/probe:ro'.length)+'/'+args.at(-1).split('/').at(-1),'utf8'));}
-if(args[0]==='run'&&args.includes('-d')){const labels={};for(let n=0;n<args.length;n++)if(args[n]==='--label'){const at=args[n+1].indexOf('=');labels[args[n+1].slice(0,at)]=args[n+1].slice(at+1);}const role=labels['open-harness.role'];fs.writeFileSync(path.join(inventory,role+'.starting'),'');const started=Date.now();while(!fs.existsSync(release)){if(Date.now()-started>10000)process.exit(2);Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}const value={Id:(role==='desktop'?'b':'a').repeat(64),Name:args[args.indexOf('--name')+1],State:{Running:true},Config:{Labels:labels}};fs.writeFileSync(path.join(inventory,role+'.json'),JSON.stringify(value));console.log(value.Id);}
+if(args[0]==='run'&&args.includes('-d')){const labels={};for(let n=0;n<args.length;n++)if(args[n]==='--label'){const at=args[n+1].indexOf('=');labels[args[n+1].slice(0,at)]=args[n+1].slice(at+1);}const role=labels['open-harness.role'];fs.writeFileSync(path.join(inventory,role+'.starting'),'');const started=Date.now();while(!fs.existsSync(release)){if(Date.now()-started>10000)process.exit(2);Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}const value={Id:(role==='desktop'?'b':'a').repeat(64),Name:args[args.indexOf('--name')+1],State:{Running:true},Config:{Labels:labels}};saveRecord(path.join(inventory,role+'.json'),value);console.log(value.Id);}
 `, { mode: 0o700 });
   const oldPath = process.env.PATH, oldMock = process.env.OPEN_HARNESS_MOCK; process.env.PATH = `${directory}:${oldPath || ''}`; delete process.env.OPEN_HARNESS_MOCK;
   t.after(() => { if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath; if (oldMock === undefined) delete process.env.OPEN_HARNESS_MOCK; else process.env.OPEN_HARNESS_MOCK = oldMock; rmSync(directory, { recursive: true, force: true }); });

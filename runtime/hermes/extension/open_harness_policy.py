@@ -39,6 +39,8 @@ def load_grant():
     return _GRANT
 
 def permitted(name):
+    if name == 'mcp__open_harness__read_inbox':
+        name = 'mcp__open_harness__post_message'
     return active_lease() and isinstance(name, str) and name in load_grant()
 
 def active_lease():
@@ -144,7 +146,7 @@ def unclassified(name):
     known = {'read_file', 'write_file', 'patch', 'search_files', 'web_search', 'web_extract', 'session_search', 'skills_list', 'skill_view', 'clarify'}
     # These exact endpoints enforce their own permissions and action review. New tools
     # must not inherit that exemption just by sharing the coordination server name.
-    reviewed_by_coordinator = {'mcp__open_harness__' + tool for tool in ('workspace', 'group_chat', 'task', 'delegate_named_agent', 'create_open_harness_routine', 'computer')}
+    reviewed_by_coordinator = {'mcp__open_harness__' + tool for tool in ('workspace', 'group_chat', 'post_message', 'read_inbox', 'task', 'delegate_named_agent', 'create_open_harness_routine', 'computer')}
     return name not in known and name not in reviewed_by_coordinator
 
 def coordination(path, value):

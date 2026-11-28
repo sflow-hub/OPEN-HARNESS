@@ -11,9 +11,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GROUP_CHAT_TOOL } from '../lib/group-chat';
 import { WORKSPACE_TOOL } from '../lib/product';
-import { COORDINATION_TOOLS, prepareProfile } from '../runtime/profile-runtime';
+import { COORDINATION_TOOLS, discoverTools, prepareProfile } from '../runtime/profile-runtime';
 import { hermesApprovalDecision } from '../runtime/hermes';
-import { COMPUTER_TOOL, DEFAULT_BOARD, DEFAULT_COMPUTER, API_TOOL, DECIDE_TOOL, DIRECTORY_TOOL, HANDOFF_TOOL, PROJECT_TOOL, ROUTINES_TOOL, RUNS_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
+import { COMPUTER_TOOL, DEFAULT_BOARD, DEFAULT_COMPUTER, API_TOOL, MESSAGE_TOOL, DECIDE_TOOL, DIRECTORY_TOOL, HANDOFF_TOOL, PROJECT_TOOL, ROUTINES_TOOL, RUNS_TOOL, MCP_PREFIX, mcpServerOf, mcpToolId, normalizeToolIds, ROUTINE_TOOL, runToolGrants, TASK_TOOL, type AgentProfile, type ModelChoice } from '../lib/agent-profile';
 
 const model: ModelChoice = { provider: 'custom', model: 'some-model', credentialRef: 'SOME_KEY', baseUrl: 'http://localhost:9/v1' };
 const profile: AgentProfile = {
@@ -140,13 +140,14 @@ test('coordination tools are named the way Hermes registers them', () => {
   assert.equal(mcpToolId('research', 'lookup'), 'mcp__research__lookup');
   assert.equal(mcpServerOf('mcp__research__lookup'), 'research');
   assert.equal(mcpServerOf('terminal'), null);
+  // Inbox reads/acknowledgments share the explicit messaging grant in the policy middleware.
   // Every name the coordination server offers must be a tool Open Harness can grant, or the
   // model is shown a tool the policy will refuse; and every tool it grants must exist there.
   const response = execFileSync(process.execPath, [join(import.meta.dirname, '..', 'runtime/hermes/coordination.mjs')], { input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n', encoding: 'utf8', timeout: 5000 });
   const schemas = JSON.parse(response.trim()).result.tools as Array<{ name: string; inputSchema: { properties: Record<string, { type?: string }>; required: string[] } }>;
   const offered = schemas.map(tool => tool.name);
-  const all = [API_TOOL, COMPUTER_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, DECIDE_TOOL, DIRECTORY_TOOL, HANDOFF_TOOL, PROJECT_TOOL, ROUTINE_TOOL, ROUTINES_TOOL, RUNS_TOOL, TASK_TOOL].sort();
-  assert.deepEqual(offered.map(name => mcpToolId('open_harness', name)).sort(), all);
+  const readInbox = mcpToolId('open_harness', 'read_inbox'), all = [API_TOOL, COMPUTER_TOOL, MESSAGE_TOOL, GROUP_CHAT_TOOL, WORKSPACE_TOOL, DECIDE_TOOL, DIRECTORY_TOOL, HANDOFF_TOOL, PROJECT_TOOL, ROUTINE_TOOL, ROUTINES_TOOL, RUNS_TOOL, TASK_TOOL].sort();
+  assert.deepEqual(offered.map(name => mcpToolId('open_harness', name)).sort(), [...all, readInbox].sort());
   assert.deepEqual(COORDINATION_TOOLS.map(tool => tool.id).sort(), all);
   assert.deepEqual([PROJECT_TOOL, ROUTINES_TOOL, DIRECTORY_TOOL, RUNS_TOOL, DECIDE_TOOL], ['mcp__open_harness__project', 'mcp__open_harness__routines', 'mcp__open_harness__directory', 'mcp__open_harness__runs', 'mcp__open_harness__decide']);
 });
@@ -236,4 +237,53 @@ test('managed profiles send flagged commands to the operator approval flow', () 
   const source = readFileSync(join(import.meta.dirname, '..', 'runtime', 'profile-runtime.ts'), 'utf8');
   assert.match(source, /approvals: \{ mode: 'manual', unattended_mode: 'deny', cron_mode: 'deny' \}/);
   assert.doesNotMatch(source, /approvals: \{ mode: 'smart'/);
+});
+
+test('tool discovery forwards team mounts and the live busy predicate', async () => {
+  const previousMock = process.env.OPEN_HARNESS_MOCK;
+  delete process.env.OPEN_HARNESS_MOCK;
+  try {
+    const teamIds = ['shared-team'];
+    let busy = true, ensured = false, probed = false;
+    const isBusy = () => busy;
+    const catalog = await discoverTools(profile.id, '/state', profile, teamIds, isBusy, {
+      dockerStatusCached: async () => ({ available: true, version: 'test', message: 'Ready' }),
+      ensureContainerAsync: async (agentId, root, computer, fresh, forwardedTeams, forwardedBusy) => {
+        ensured = true; assert.equal(fresh, false);
+        assert.equal(agentId, profile.id);
+        assert.equal(root, '/state');
+        assert.equal(computer, profile.computer);
+        assert.equal(forwardedTeams, teamIds);
+        assert.equal(forwardedBusy, isBusy);
+        assert.equal(forwardedBusy!(), true);
+        busy = false;
+        assert.equal(forwardedBusy!(), false);
+        return 'existing-container';
+      },
+      runtimeProbe: async (container, input) => {
+        probed = true;
+        assert.equal(container, 'existing-container');
+        assert.deepEqual(input, { action: 'catalog' });
+        return { tools: [] };
+      },
+    });
+    assert.equal(ensured, true);
+    assert.equal(probed, true);
+    assert.equal(catalog.source, 'runtime');
+  } finally {
+    if (previousMock === undefined) delete process.env.OPEN_HARNESS_MOCK;
+    else process.env.OPEN_HARNESS_MOCK = previousMock;
+  }
+});
+
+
+test('messaging-only grants configure their transport and empty grants do not', t => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-messaging-contract-')); t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const allowedTools of [[MESSAGE_TOOL], []]) {
+    prepareProfile(root, { ...profile, allowedTools }, model, { environment: () => ({}) }, 'token', 'message-run');
+    const config = JSON.parse(readFileSync(join(root, 'agents', profile.id, 'profile/config.yaml'), 'utf8'));
+    const policy = JSON.parse(readFileSync(join(root, 'agents', profile.id, 'managed/policy.json'), 'utf8'));
+    assert.equal(Boolean(config.mcp_servers.open_harness), allowedTools.length > 0);
+    assert.deepEqual(policy.allowedTools, allowedTools);
+  }
 });

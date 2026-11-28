@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Start Open Harness
+Comment=Choose a model and open your local workspace
+Icon=applications-development
+TryExec=/bin/bash
+Exec=/usr/bin/find %k -maxdepth 0 -type f -execdir /bin/bash ./launchers/start.sh --desktop ";"
+Terminal=true
+Categories=Utility;
+StartupNotify=false

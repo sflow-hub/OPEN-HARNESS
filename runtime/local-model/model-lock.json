@@ -1,0 +1,18 @@
+{
+  "name": "atlas-linux",
+  "context": 65536,
+  "weights": {
+    "filename": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    "url": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/a06e946bb6b655725eafa393f4a9745d460374c9/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    "bytes": 2497281120,
+    "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+    "license": "Apache-2.0"
+  },
+  "runtime": {
+    "tag": "b12458",
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "license": "MIT",
+    "arm64": {"file": "llama-b12458-bin-ubuntu-arm64.tar.gz", "sha256": "68d190366f7f107ce4271273fedb7aabbb0bb4530853e09e4928bc422b03e8b8"},
+    "amd64": {"file": "llama-b12458-bin-ubuntu-x64.tar.gz", "sha256": "7cbd93c44b0c74b96c4ff99f9ab3c8cff2002c05307add362f0d50e175a3fa79"}
+  }
+}

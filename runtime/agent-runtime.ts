@@ -18,10 +18,10 @@ export interface AgentRuntime extends EventEmitter {
   submitPrompt(sessionId:string,text:string,timeout?:number):Promise<any>;
   stop():Promise<void>;
 }
-export async function createAgentRuntime(root:string,profile:AgentProfile,tools=runToolGrants(profile)):Promise<AgentRuntime>{
+export async function createAgentRuntime(root:string,profile:AgentProfile,tools=runToolGrants(profile),scope:{teamIds?:string[];isBusy?:()=>boolean}={}):Promise<AgentRuntime>{
   const installation=resolveInstallation(root,harnessOf(profile));
   const payload=installation.kind.startsWith('custom:')?safeWorkspacePath(root,`harnesses/${installation.kind.slice(7)}/${installation.version}`):undefined;
-  const container=await ensureContainerAsync(profile.id,root,profile.computer,false,installation.protocol==='hermes'?undefined:{image:installation.image,payload});
+  const container=await ensureContainerAsync(profile.id,root,profile.computer,false,scope.teamIds||[],scope.isBusy,installation.protocol==='hermes'?undefined:{image:installation.image,payload});
   if(installation.protocol==='hermes')return new HermesGateway(container,tools);
   if(installation.protocol==='acp/v1')return new AcpGateway(container,installation,tools);
   return new CustomGateway(container,installation,tools);
@@ -40,7 +40,7 @@ export async function createInstallationProbe(root:string,installation:HarnessIn
   atomicWorkspaceWrite(join(root,'agents',agentId,'managed','policy.json'),JSON.stringify({allowedTools:[],mcpServers:[],coordination:{},reviewUnclassified:false,runId:'probe'}));
   atomicWorkspaceWrite(join(root,'agents',agentId,'managed','run-lease.json'),JSON.stringify({active:false,runId:null}));
   const payload=installation.kind.startsWith('custom:')?safeWorkspacePath(root,`harnesses/${installation.kind.slice(7)}/${installation.version}`):undefined;
-  const container=await ensureContainerAsync(agentId,root,profile.computer,true,{image:installation.image,payload});
+  const container=await ensureContainerAsync(agentId,root,profile.computer,true,[],undefined,{image:installation.image,payload});
   return installation.protocol==='acp/v1'?new AcpGateway(container,installation,[]):new CustomGateway(container,installation,[]);
 }
 class CustomGateway extends HermesGateway {

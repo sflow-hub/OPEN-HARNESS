@@ -64,14 +64,14 @@ RUN --mount=type=bind,from=build-inputs,source=/opt/open-harness-build,target=/o
     sh /opt/open-harness-build/helpers/check-native-platform.sh \
  && sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh 20261003T180000Z /opt/open-harness-build/lock/ubuntu-os-packages.txt \
  && sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
- && apt-get -o Acquire::Retries=0 update \
+ && sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh --update \
  && DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends build-dep curl=8.18.0-1ubuntu2.7 \
  && DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends install libnghttp3-dev=1.12.0-1 pkg-config \
  && apt-get check \
  && mkdir -p /opt/build-provenance /work /out \
  && cp /var/lib/apt/lists/*InRelease /etc/apt/sources.list.d/ubuntu.sources /opt/build-provenance/ \
  && dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' > /opt/build-provenance/packages.tsv \
- && cd /work && apt-get -o Acquire::Retries=0 source --download-only curl=8.18.0-1ubuntu2.7 \
+ && cd /work && apt-get source --download-only curl=8.18.0-1ubuntu2.7 \
  && python3 /opt/open-harness-build/helpers/curl_http3.py verify-source \
       --lock /opt/open-harness-build/lock/runtime-inputs.lock.json --dir /work \
  && useradd -m -u 10001 -s /bin/bash builder \
@@ -103,11 +103,12 @@ RUN --mount=type=bind,from=build-inputs,source=/opt/open-harness-build,target=/o
  && rm -rf /var/lib/apt/lists/*
 # The three rebuilt runtime packages (not the dev, doc or debug ones), kept with their build provenance as in
 # the tested image, and their one new dependency.
-RUN --mount=type=bind,from=curl-builder,source=/out,target=/mnt/curl-http3 \
+RUN --mount=type=bind,from=build-inputs,source=/opt/open-harness-build,target=/opt/open-harness-build \
+    --mount=type=bind,from=curl-builder,source=/out,target=/mnt/curl-http3 \
     mkdir -p /opt/open-harness/curl \
  && cp -R /mnt/curl-http3/debs /opt/open-harness/curl/packages \
  && cp -R /mnt/curl-http3/provenance /opt/open-harness/curl/provenance \
- && apt-get -o Acquire::Retries=0 update \
+ && sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh --update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libnghttp3-9=1.12.0-1 \
  && dpkg -i /opt/open-harness/curl/packages/curl_8.18.0-1ubuntu2.7+openharness.http3.1_${TARGETARCH}.deb \
       /opt/open-harness/curl/packages/libcurl4t64_8.18.0-1ubuntu2.7+openharness.http3.1_${TARGETARCH}.deb \
@@ -127,7 +128,7 @@ RUN --mount=type=bind,from=build-inputs,source=/opt/open-harness-build,target=/o
     mkdir -p /opt/open-harness/debian-browser/ubuntu-provenance \
  && cp -R /mnt/debian-inputs/packages /opt/open-harness/debian-browser/packages \
  && cp -R /mnt/debian-inputs/metadata /opt/open-harness/debian-browser/provenance \
- && apt-get -o Acquire::Retries=0 update \
+ && sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh --update \
  && /usr/local/bin/python3 /opt/open-harness-build/helpers/debian_inputs.py install-args \
       --lock /opt/open-harness-build/lock/runtime-inputs.lock.json --arch "$TARGETARCH" \
       --packages /opt/open-harness/debian-browser/packages > /tmp/open-harness-browser-install.txt \
@@ -164,7 +165,8 @@ RUN git clone https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent
   && python -c "from tools.lazy_deps import feature_missing; missing = {name: feature_missing(name) for name in ('provider.vertex', 'provider.bedrock', 'provider.anthropic')}; assert not any(missing.values()), missing"
 # These compile browser native addons; the MVP runtime supplies Python, Node and
 # shell tools, not a system C/C++ development environment. Keep installer outputs.
-RUN apt-get update && apt-get install -y --no-install-recommends make g++ \
+RUN --mount=type=bind,from=build-inputs,source=/opt/open-harness-build,target=/opt/open-harness-build \
+    sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh --update && apt-get install -y --no-install-recommends make g++ \
   && npm install -g --allow-scripts=@askjo/camofox-browser,agent-browser,better-sqlite3 \
     agent-browser@0.37.1 @askjo/camofox-browser@1.16.0 \
   && apt-get purge -y --auto-remove make g++ \
@@ -180,7 +182,8 @@ RUN CUA_DRIVER_RS_VERSION="$CUA_DRIVER_VERSION" CUA_DRIVER_RS_HOME=/opt/cua-driv
   && chmod -R a+rX /opt/cua-driver
 # The slim Python image ships _tkinter but not its Tcl/Tk runtime libraries.
 # The coordinator UID must also traverse the parent of its private profile mount.
-RUN apt-get update && apt-get install -y --no-install-recommends libtk8.6 \
+RUN --mount=type=bind,from=build-inputs,source=/opt/open-harness-build,target=/opt/open-harness-build \
+    sh /opt/open-harness-build/helpers/ubuntu-snapshot.sh --update && apt-get install -y --no-install-recommends libtk8.6 \
   && rm -rf /var/lib/apt/lists/* \
   && chmod 0755 /home/hermes
 # Keep frequently changed managed-policy files after the expensive upstream layers.

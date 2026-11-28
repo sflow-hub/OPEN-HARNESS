@@ -7,8 +7,9 @@ import { EventEmitter } from "node:events";
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve,sep } from 'node:path';
-import type { ComputerConfig } from '../lib/agent-profile';
-import { HERMES_IMAGE, classifyContract, imageContract, imageContractWith, imageInspectionArgs, runtimeImageMessage } from './readiness';
+import { DEFAULT_NETWORK, type ComputerConfig } from '../lib/agent-profile';
+import { ensureTeamFolders, safeTeamIds } from './teams';
+import { HERMES_IMAGE, RUNTIME_LABEL, classifyContract, imageContract, imageContractWith, imageInspectionArgs, runtimeImageMessage } from './readiness';
 import { assertSandboxedComputer, sharedFolderSource } from './computer-validation';
 import { folderTarget, namedFolders, UNSANDBOXED_COMPUTER_MESSAGE } from '../lib/agent-profile';
 import { createVerifiedFolderContainer, createVerifiedFolderContainerAsync, pinSelectedFolders, requiresFolderVerification } from './folder-mounts';
@@ -366,8 +367,8 @@ export function stateSharing(stateRoot: string): SharingProbe {
 // documents as a supported operation -- the old container was reused with its mounts still
 // pointing at the previous path, Docker recreated that path empty, and every run died with
 // "Hermes gateway exited during startup" and a log line blaming the image.
-export function containerSignature(selected: ComputerConfig, imageId: string, stateRoot = '') {
-  return createHash('sha256').update(JSON.stringify({ role: 'execution-v2-files', access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...(selected.browserSessionTeamId ? { browserSessionTeamId: selected.browserSessionTeamId, machineId: selected.machineId } : {}), imageId, stateRoot: stateRoot && resolve(stateRoot), ...(requiresFolderVerification(selected) ? { folderStartup: 'verified-inert-v1' } : {}) })).digest('hex').slice(0, 24);
+export function containerSignature(selected: ComputerConfig, imageId: string, stateRoot = '', teamIds: string[] = [], agentId = '') {
+  return createHash('sha256').update(JSON.stringify({ role: 'execution-v2-files', ...(safeTeamIds(teamIds).length ? { teamIds: safeTeamIds(teamIds) } : {}), ...((selected.network?.mode ?? DEFAULT_NETWORK.mode) !== DEFAULT_NETWORK.mode || selected.network?.allow.length ? { network: selected.network } : {}), ...(agentId.length > 48 ? { agentId } : {}), access: selected.access, folders: selected.folders, desktop: selected.desktop, resources: selected.resources, ...(selected.browserSessionTeamId ? { browserSessionTeamId: selected.browserSessionTeamId, machineId: selected.machineId } : {}), imageId, stateRoot: stateRoot && resolve(stateRoot), ...(requiresFolderVerification(selected) ? { folderStartup: 'verified-inert-v1' } : {}) })).digest('hex').slice(0, 24);
 }
 // Short-lived so a rebuild from Settings takes effect without restarting the coordinator.
 let imageIdCache: { id: string; at: number } | null = null;
@@ -387,9 +388,14 @@ export function containerStateKey(stateRoot: string) {
   return createHash('sha256').update(resolve(stateRoot)).digest('hex').slice(0, 24);
 }
 
+export function containerNameFor(agentId: string) { return `open-harness-${agentId.replace(/[^a-zA-Z0-9_.-]/g, '-')}`; }
+export function agentMountDirs(stateRoot: string, agentId: string) { const root = join(stateRoot, 'agents', agentId); return { profile: join(root, 'profile'), privateDir: join(root, 'private'), managed: join(root, 'managed') }; }
+export function teamMountArgs(stateRoot: string, teamIds: string[]) { return safeTeamIds(teamIds).flatMap(id => ['-v', `${safeWorkspacePath(stateRoot, `teams/${id}/shared`)}:/workspace/teams/${id}`]); }
+export function shouldRebuildContainer(currentSignature: string, signature: string, isBusy: boolean) { return currentSignature !== signature && !isBusy; }
+
 type ContainerInspection = { Id: string; State: { Running: boolean }; Config: { Labels?: Record<string, string> | null }; Mounts?: { Source: string; Destination: string }[] };
 function agentContainerNames(agentId: string, stateRoot: string) {
-  const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, '-'), base = `open-harness-${safe}`;
+  const safe = agentId.replace(/[^a-zA-Z0-9_.-]/g, '-'), base = containerNameFor(agentId);
   return { safe, names: [base, `${base}-${containerStateKey(stateRoot).slice(0, 12)}`] };
 }
 function inspectedContainer(code: number | null, stdout: string, stderr: string, name: string): ContainerInspection | null {
@@ -474,7 +480,8 @@ export async function stopManagedContainers(stateRoot: string) {
   return result;
 }
 
-export function ensureContainer(agentId: string, stateRoot: string, computer?: ComputerConfig) {
+export function ensureContainer(agentId: string, stateRoot: string, computer?: ComputerConfig, teamIds: string[] = [], isBusy: () => boolean = () => false) {
+  teamIds = safeTeamIds(teamIds);
   assertContainerAdmission(stateRoot);
   assertSandboxedComputer(computer);
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
@@ -487,16 +494,17 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
   const { safe, names } = agentContainerNames(agentId, stateRoot);
   prepareExecutionDirectories(safe, stateRoot);
   // A runner can receive a snapshot from a coordinator that predates folder names.
-  const given = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
+  const given = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, network: DEFAULT_NETWORK, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
   const selected: ComputerConfig = { ...given, folders: namedFolders(given.folders) };
-  const mounts: string[] = [];
+  ensureTeamFolders(stateRoot, teamIds);
+  const mounts: string[] = teamMountArgs(stateRoot, teamIds);
   if (selected.access === 'folders') selected.folders.forEach(folder => {
     const source = sharedFolderSource(folder.path, folder.mode, stateRoot);
     mounts.push('-v', `${source}:${folderTarget(folder)}${folder.mode === 'read' ? ':ro' : ''}`);
   });
   const pinned = requiresFolderVerification(selected) ? pinSelectedFolders(selected.folders) : null;
   try {
-    const signature = containerSignature(selected, currentImageId(), stateRoot);
+    const signature = containerSignature(selected, currentImageId(), stateRoot, teamIds, agentId);
     let name = names[0], container = inspectContainer(name);
     if (!container || !ownsContainer(container, safe, stateRoot)) {
       const alternate = inspectContainer(names[1]);
@@ -505,6 +513,7 @@ export function ensureContainer(agentId: string, stateRoot: string, computer?: C
     }
     if (container) {
       if (pinned || container.Config.Labels?.['open-harness.config'] !== signature || !container.Config.Labels?.[STATE_LABEL]) {
+        if (isBusy()) throw new Error('This agent is busy. Wait for its work to finish before updating its computer.');
         const removed = spawnSync('docker', ['rm', '-f', container.Id], { encoding: 'utf8', timeout: 20_000 });
         if (removed.status !== 0) throw new Error(removed.stderr?.trim() || 'Could not replace the previous agent container. Check the Docker daemon.');
       } else if (!container.State.Running) {
@@ -567,10 +576,11 @@ export function stateSharingAsync(stateRoot: string, fresh = false, image = HERM
   })(); const entry: { at: number; value: Promise<SharingProbe>; ok?: boolean } = { at: Date.now(), value }; asyncSharing.set(cacheKey, entry); void value.then(probe => { entry.ok = probe.ok; }); return value;
 }
 
-export function ensureContainerAsync(agentId: string, stateRoot: string, computer?: ComputerConfig, fresh = false, runtime?: { image: string; payload?: string }) {
-  return withContainerAdmission(stateRoot, () => startExecutionContainer(agentId, stateRoot, computer, fresh, runtime));
+export function ensureContainerAsync(agentId: string, stateRoot: string, computer?: ComputerConfig, fresh = false, teamIds: string[] = [], isBusy: () => boolean = () => false, runtime?: { image: string; payload?: string }) {
+  return withContainerAdmission(stateRoot, () => startExecutionContainer(agentId, stateRoot, computer, fresh, teamIds, isBusy, runtime));
 }
-async function startExecutionContainer(agentId: string, stateRoot: string, computer?: ComputerConfig, fresh = false, runtime?: { image: string; payload?: string }) {
+async function startExecutionContainer(agentId: string, stateRoot: string, computer?: ComputerConfig, fresh = false, teamIds: string[] = [], isBusy: () => boolean = () => false, runtime?: { image: string; payload?: string }) {
+  teamIds = safeTeamIds(teamIds);
   assertSandboxedComputer(computer);
   if(computer)authorizeWorkspaceMounts(stateRoot,computer);
   if (process.env.OPEN_HARNESS_MOCK === "1") return `mock-${agentId}`;
@@ -583,16 +593,17 @@ async function startExecutionContainer(agentId: string, stateRoot: string, compu
   const { safe, names } = agentContainerNames(agentId, stateRoot);
   prepareExecutionDirectories(safe, stateRoot);
   // A runner can receive a snapshot from a coordinator that predates folder names.
-  const given = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
+  const given = computer || { machineId: 'local', access: 'private', folders: [], desktop: 'none', reserveMachine: false, network: DEFAULT_NETWORK, resources: { cpu: 2, memoryMb: 4096, concurrency: 4 } } as ComputerConfig;
   const selected: ComputerConfig = { ...given, folders: namedFolders(given.folders) };
-  const mounts: string[] = [];
+  ensureTeamFolders(stateRoot, teamIds);
+  const mounts: string[] = teamMountArgs(stateRoot, teamIds);
   if (selected.access === 'folders') selected.folders.forEach(folder => {
     const source = sharedFolderSource(folder.path, folder.mode, stateRoot);
     mounts.push('-v', `${source}:${folderTarget(folder)}${folder.mode === 'read' ? ':ro' : ''}`);
   });
   const pinned = requiresFolderVerification(selected) ? pinSelectedFolders(selected.folders) : null;
   try {
-    const signature = containerSignature(selected, runtime ? image + ':' + (runtime.payload || '') : await currentImageIdAsync(), stateRoot);
+    const signature = containerSignature(selected, runtime ? image + ':' + (runtime.payload || '') : await currentImageIdAsync(), stateRoot, teamIds, agentId);
     let name = names[0], container = await inspectContainerAsync(name);
     if (!container || !ownsContainer(container, safe, stateRoot)) {
       const alternate = await inspectContainerAsync(names[1]);
@@ -601,6 +612,7 @@ async function startExecutionContainer(agentId: string, stateRoot: string, compu
     }
     if (container) {
       if (fresh || pinned || container.Config.Labels?.['open-harness.config'] !== signature || !container.Config.Labels?.[STATE_LABEL]) {
+        if (isBusy()) throw new Error('This agent is busy. Wait for its work to finish before updating its computer.');
         const removed = await commandAsync('docker', ['rm', '-f', container.Id], 20_000);
         if (removed.status !== 0) throw new Error(removed.stderr?.trim() || 'Could not replace the previous agent container. Check the Docker daemon.');
       } else if (!container.State.Running) {

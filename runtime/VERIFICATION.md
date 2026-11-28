@@ -66,6 +66,312 @@ file after restart (fixed in the current `runtime/secrets.ts`). Native Linux
 selected-folder verification and remote runners were not exercised;
 `tests/real-folders-smoke.mjs` covers the native path and refuses Docker Desktop.
 
+## Linux default browser from the native desktop (2026-11-17 UTC)
+
+An Ubuntu 24.04 ARM64 guest downloaded the `main` source ZIP at
+`1d7b4d096930f6427c757e88331fb8fe36faf2de`. A native Xorg session on the virtual
+GPU and VT7 ran Xfce, Thunar, Zenity and Mozilla's signed Firefox package.
+The desktop used a fresh home directory and Firefox as its HTTP/HTTPS default.
+Ubuntu's AppArmor service and unprivileged-user-namespace restriction remained
+enabled throughout. Desktop packages and an independent Docker daemon used
+an isolated mount namespace and a temporary test disk.
+
+A genuine double-click on the unchanged desktop entry and a click on the
+local-model choice built the images and downloaded the model. The original
+launcher then closed its terminal. A process trace recorded the kernel sending
+`SIGHUP` to `xfce4-mime-helper` before Firefox executed.
+
+In a separate extraction with the Linux `setsid --wait` browser-handoff fix,
+the same GUI actions opened Firefox through the normal `xdg-open` path. The
+browser consumed one launcher-issued pairing link, cleared its address-bar
+fragment, and displayed the connected workspace with Atlas. A GUI reload
+retained the authenticated workspace without asking for another pairing code.
+There was no browser-command override, manual URL navigation, copied link or
+injected browser credential. Firefox's content processes had `NoNewPrivs=1`
+and `Seccomp=2`. The shipped Firefox AppArmor profile retained its original
+hash and Ubuntu's `unconfined` profile flag with the explicit `userns` permission.
+
+A Linux Python PTY regression reproduces the terminal hangup with a delayed
+browser helper that restores default `SIGHUP` handling. The original launcher
+loses the helper; the fixed launcher preserves the single exact URL, keeps the
+pairing code out of its output, and reports an opener failure with exit code 5.
+
+
+## Linux source launcher with an on-device Atlas model (2026-11-17 UTC)
+
+An Ubuntu ARM64 guest downloaded the GitHub source ZIP for
+`c4f8380f86f91ca1a31513f4225415a38f8bf820` and extracted it with umask 077.
+GIO launched the shipped `Start Open Harness.desktop` on an X display. In the
+launcher's terminal menu, selecting the local model took **1** and **Return**.
+The launcher built both images, downloaded the full 2,497,281,120-byte GGUF
+on Linux, verified SHA-256 `3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597`,
+and opened Chromium with its one-use pairing URL. The loaded server reported
+`atlas-linux` with a 65,536-token context. The previous native model was
+stopped for the test and the Mac inference relays stayed disabled.
+
+The new workspace had revision zero, zero saved credentials, zero previous
+file checks, and zero improvement proposals. In the setup guide, **Save and
+test** worked without entering a model name, address or key. Atlas used
+`write_file` and `read_file`, and the coordinator checked the unique contents.
+In **Improve my Open Harness**, the user asked Atlas to change “What would you
+like done?” to “How can I help today?”. Run `24c60387-03a3-44e3-9e97-77125fe53cec`
+used `search_files` and `patch`; one line changed in
+`components/assistant-workspace.tsx`. The coordinator compiled 70 source files.
+
+The sandboxed preview displayed the requested heading while the original
+dashboard was active. Apply and a fresh opening of the regular dashboard
+showed the new heading. Undo and another fresh opening showed the original
+heading. Proposal `dc9b9176-d49e-4127-9730-488c174729f6` finished in `undone`
+with no active revision. The verified shared file retained its hash.
+
+The guest had four CPU cores, 8 GB of RAM and swap. The test reused the pinned
+Hermes image layers with separate Docker state, and used temporary Linux
+storage for the build cache and empty model volume. The worker made a live
+TCP connection through the private model link. The model exposed zero host
+ports, and the link mounted neither the engine socket nor workspace data.
+The live trial covered ARM64. Both ARM64 and x86-64 runtime archives were
+checked against their pinned hashes.
+
+A separate launcher dispatch check on the same Ubuntu guest used Thunar 4.18.8
+and native GIO. Each opened the desktop entry from `Downloads/OPEN-HARNESS-main`
+and from a folder with spaces, parentheses and a dollar sign. In all four
+cases the terminal invoked the sibling launcher with `--desktop` and accepted
+**1** followed by **Return**. This check used a stand-in launcher to isolate
+file-manager argument handling.
+
+## Local dashboard improvements — November 16, 2026
+
+Feature revision `999ff91d67ec885bc0feea2c7984441ee490dd0d` was built from
+`07d1b1d`. In a local Chromium run the owner asked Atlas to change the Assistant
+heading to “How can I help?” Claude Code (`claude-sonnet-5-5`) performed the
+source edit through a disposable test gateway. It changed one file,
+`components/assistant-workspace.tsx`. The coordinator froze the diff and built
+70 dashboard source files. Chromium showed the new heading inside the offline
+preview, on the applied dashboard, and after reopening. After Undo, a fresh
+browser and restarted coordinator showed the original heading.
+
+The desktop and mobile browser regression uses deterministic editing in the
+test gateway and the production compiler, source store, preview and activation
+paths. It verifies a downloaded patch with Git and checks an unrelated binary
+workspace file before and after activation and undo. On macOS with Node 22.23.5
+the complete Node suite passed 661 tests with 41 skips. The complete browser
+suite passed 369 tests with seven skips. GitHub's Linux, Mac, Windows and browser
+checks passed in [Verify](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43832027691).
+
+The separate [real-container workflow](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43832027552)
+runs the Linux Compose test through the pinned Hermes file tools and a scripted
+model provider. The first attempt stopped during the upstream Ubuntu snapshot
+download with HTTP 500. On retry, setup reached its 45-minute Docker image
+build limit. Both attempts stopped before any Compose assertion ran. The
+real-model browser trial above used Claude Code through its test gateway.
+
+### Native Linux Docker and a live model
+
+On November 16, the Ubuntu ARM64 VM built the pinned production Hermes revision
+`939e45c91d751fadd94dcd1b873ac3cb44846213` from the repaired Dockerfile at
+`19f0b27`. Docker reported runtime contract 11. A fresh Chromium session chose
+**Set up later**, opened **Improve my Open Harness**, and asked a named local
+editor to change the Assistant heading to “My local workspace 960b8b98”.
+Claude Sonnet 5.5 provided model responses through a temporary adapter. Hermes
+executed `search_files` and `patch` inside the VM's real Docker worker.
+
+Run `4e1d708d-2c39-4638-8ea7-7dc5b4e0b1ff` changed one line in
+`components/assistant-workspace.tsx`. The coordinator built 70 source files.
+Chromium verified the actual heading in the offline preview, on the live
+dashboard, and in a reopened tab. After clicking Undo, a new tab showed the
+original heading. The test checked the pre-existing binary file byte for byte,
+the editor's saved profile, and the restored dashboard revision. This run
+included the fix for first-run setup reopening during recovery.
+
+The VM started with about 19 GiB free and briefly exhausted it during image
+unpacking. Docker completed the image export and the final readiness check
+confirmed the coordinator, runtime and data mount. The source install guide
+now reserves room for temporary layers. The redacted browser receipt and four
+screenshots are in `real-browser` under the VM evidence directory
+`/home/developer/open-harness-evidence/improve-20261116-XD0dfl`.
+
+The hosted AMD64 [real-container run](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43906049359)
+built the same pinned source, ran the real Hermes gates and reached Compose.
+The new dashboard checks passed through apply, undo, and preservation of
+history and file grants. A subsequent test assertion still expected the old
+write tool. The corrected fixture checks that the model sees exactly the
+configured read and patch tools. The [feature PR](https://github.com/sflow-hub/OPEN-HARNESS/pull/3)
+tracks the full hosted rerun.
+
+## Branch integration review — November 13, 2026
+
+Candidate `89a4ae6b3fff4640b117247cd971379d560ff863` includes all reviewed
+local and remote branch tips. The dev/test work is integrated with the
+current managed workspace; the older browser-release and MVP branch history
+is included after retaining useful changes and verifying superseded work.
+Database schema 5 rejects older interval-only readers. Runtime contract 11
+and the regenerated runner require rebuilding cached agent images and
+updating runners.
+
+[Verify run 43491430478](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43491430478)
+passed all four jobs on this candidate. Each platform ran 690 Node tests:
+Linux passed 689 with one skip, macOS passed 651 with 39 skips, and Windows
+passed 589 with 101 skips. Typecheck, lint, production/desktop preparation
+and Tauri debug builds passed. The hosted Python package suite passed 134
+of 165 tests with 31 expected evidence-dependent skips.
+
+The browser job passed 365 tests with seven skips on attempt 2, after one
+bounded browser-only retry on unchanged source. The retained first-failure
+trace shows the fixture's synthetic 50 ms deadline aborting a readiness
+request; the final screenshot already contains the expected prepared state.
+Local checks of the same application/runtime source at `7fe1a97` also
+passed 365 browser tests with seven skips, plus four separate managed
+workspace desktop/mobile checks. Local Node 22 passed 649 tests with 41 skips;
+Python 3.12 passed 14 policy and four sandbox probe tests. Lint has zero errors
+and five existing fixture warnings.
+
+[Real-runtime run 43491430537](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43491430537),
+job `132113319410`, passed on its first attempt with native Ubuntu 24.04 AMD64,
+Node 22.23.4, Docker 28.0.4 and Compose 2.38.2. All individual fixtures passed:
+real Hermes runs, durable memory/skills/delegation/schedules, eight sandbox
+boundary checks, Chromium/private desktop, human/shared-browser control,
+paired streams and terminal revocation, local and paired managed computer
+reviews/continuation, sealed transfers and legacy browser migration.
+
+The complete Compose fixture passed pairing, credential rotation, host-folder
+permissions, private desktop input, restart persistence and cleanup. Its exact
+seven execution mounts include the authorized team folder. Actual member
+writes, host readback, nonmember denial and restored team-file readback passed.
+The stopped backup restored 868 entries into an empty destination with
+identical owners, modes and file hashes. A new real run used the restored
+credential; restored private/shared files, memory, skills, tasks, history and
+desktop input passed without replaying interrupted work. Both Compose projects
+and all fixture resources were removed; all three CI cleanup steps passed.
+
+Compose preserved the canonical managed browser with independent click/type
+readbacks and a valid 63,812-byte PNG. Before/after snapshots showed 128 tasks
+against a 256-task limit, no PID-limit or memory events, and memory below the
+unchanged 1 GiB limit. Sealed transfer preserved private files and browser
+cookie/local storage in both directions; seven spool samples and one sealed
+completion contained no plaintext transfer payload.
+
+The observed native Hermes image ID was
+`sha256:4fb8c950a6e03ec607e55b56207a8172bd505a5b9425c5c6a7108d683326d7a8`;
+its recorded runtime-source SHA256 was
+`a02a2da30b58ff1511aa377b412af15a9b2a86dae7748a0315069e67247827d8`.
+This was a source-built stack (`packaged: false`); the coordinator is recorded
+by fixture tag, without an immutable image identity. Runtime evidence artifact
+`14073336167` has 39 safe ZIP members, passed CRC validation, and matches
+GitHub's SHA256:
+`49c09bffeadd95f095a4eebb82e436b23ae47be122f04503e42ac782f9b718cb`.
+
+Review fixes retain actor permissions and current computer ownership while
+adding group conversations, approvals, agent lifecycle controls, cron
+routines, team folders and sandbox diagnostics. Stopped or uncertain
+follow-ups are not replayed automatically; removed members cannot publish
+late replies; agent deletion requires confirmed computer cleanup before
+removing the profile. Additional checks cover old-schema rejection,
+remote deletion failure/acknowledgement, messaging grants, RSA public-key
+validation and allowlisted bootstrap credential adoption.
+
+Hosted Linux exercises fd-relative file access and deterministic/adversarial
+parent swaps. macOS and Windows exercise the path fallback, whose concurrent
+parent-replacement limitation remains. Real Compose file/context paths and
+paired transfers provide integration evidence; they do not inject every
+file-operation race inside containers. The exact Node 22.13 minimum was not
+separately exercised. The new sandbox self-test API remains without dedicated
+real-container acceptance; the runtime sandbox fixture tests boundaries
+directly. Per-agent network policy remains metadata, not enforced egress.
+
+Successful evidence, logs, hashes and the prior failed/cancelled attempts are
+retained separately with private permissions under
+`~/.local/state/open-harness-verification/all-branches-20261113`. The earlier
+Linux race-hook and Compose team-mount assertion failures were corrected in
+test fixtures, retaining outside-file, exact-mount and member/nonmember
+checks. Failed attempts have not been relabeled. The merge adds only
+verification and security-documentation updates to the tested candidate.
+
+These source-built real-runtime fixtures use a scripted local provider.
+They establish tool, transport, isolation and persistence behavior, not
+paid-model reasoning, cross-version upgrade/rollback, published-image
+security/qualification, signed-installer or device acceptance, or a
+final-image 24-hour soak. Linux remains the supported beta installation;
+this integration is not a release.
+
+## Final integration review — November 13, 2026
+
+Candidate `ba0bd82174d549a0b79ab6359377a82a20f6a18d` passed all four jobs in
+[Verify run 43400907498](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43400907498)
+on the first attempt. Hosted Linux passed 538 of 539 Node tests with one
+platform skip; the Python runtime-package suite completed 165 tests with
+31 expected evidence-dependent skips. Production-browser checks passed
+294 tests with two managed-only skips. Linux, macOS 15 and Windows passed
+typecheck, lint, desktop preparation and Tauri debug builds.
+
+[Real-runtime run 43400907453](https://github.com/sflow-hub/OPEN-HARNESS/actions/runs/43400907453),
+job `131803218337`, passed on native Ubuntu AMD64 with runtime contract 10.
+All individual runtime fixtures passed, including managed and paired
+computer continuation, browser transfers, legacy browser migration and
+execution mount isolation. The complete Compose check passed authenticated
+pairing, credential rotation, host-folder permissions, private desktop
+input, restart persistence and cleanup. Its stopped backup restored 864
+entries into an empty destination with identical owners, modes and file
+hashes; a real restored run used the saved credential, and restored desktop
+input, memory, skills, tasks and history passed without replaying interrupted
+work. Both Compose projects were removed and all CI cleanup steps passed.
+
+Compose retained the canonical browser (`managedBrowserPreserved: true`),
+with independent click/type readbacks and validation of a 63,773-byte PNG.
+Before/after
+resource snapshots showed 126 tasks against a 256-task limit and no PID-limit
+or memory events; memory stayed below the unchanged 1 GiB limit. The helper
+asserts unchanged PID/start-time identities but does not retain their raw
+values. The observed local Hermes image ID was
+`sha256:f1c852c7b608094fcf2c26ca874fd06a03e1d60bbd18c0ec6a354db815af6362`.
+The coordinator is recorded only by its fixture tag; no immutable identity
+was retained. This was a source-built stack (`packaged: false`), not a
+published image qualification.
+
+Runtime evidence artifact `14026304687` has 39 safe ZIP members, passed CRC
+validation, and matches GitHub's SHA256:
+`6082d194b84518d0c7624f814efad9b7868daec9736decc1e123e2f9628b42ec`.
+The merge adds only this verification record to the tested candidate.
+
+Local checks additionally passed both managed desktop/mobile browser tests,
+72 focused history/recovery tests, 200 OAuth fixture executions, and 13
+Python policy tests on Python 3.12.16. The final contract-10 local Node
+suite passed 530 tests with nine platform skips, followed by a successful
+production build. Lint has zero errors and five existing fixture warnings.
+The full dependency audit found no critical/high findings and ten moderate
+tooling/image-generation findings; the production-dependency audit found none.
+
+The reviewed UI fixes restore the coordinator's latest conversation after
+history and navigation commit while preserving drafts and explicit
+navigation. Browser shutdown now brackets executable/argument inspection
+with process-state/start-time checks: confirmed exits are ignored, while
+unknown live identities, changed PIDs and unreadable final state still
+fail closed. Six Python-backed tests cover normal shutdown and 13 new
+race/failure cases; the three new regression tests fail on the prior code.
+Runtime contract 10, signed-image manifest validation and the regenerated
+runner require cached images to be rebuilt.
+
+Acceptance fixtures retain exact tool/mount boundaries and read-only,
+peer-isolation and actual write checks. Their writable export is prepared
+for the runtime UID before work starts. Compose reuses the canonical
+managed browser with independent page readbacks, accessibility click/type,
+PNG checks and bounded resource diagnostics; resource limits are unchanged.
+Its 13 focused fault/HTTP checks use simulated CUA and do not replace real
+Chromium acceptance. Related packaging/upgrade contracts passed 103 tests
+with one local Docker-CLI-dependent skip. OAuth fixtures now await route
+completion and require the selected account before offering models.
+
+Successful evidence and prior failed/cancelled runs are retained separately
+under `~/.local/state/open-harness-verification/main-merge-20261113`, with
+private permissions and SHA256 manifests. Failures have not been relabeled.
+
+Real fixtures use a scripted local provider without paid inference.
+These results do not establish paid-model reasoning, cross-version
+upgrade/rollback, shipping-image security, signed-installer/device
+acceptance or the final-image 24-hour soak. The applicable MVP and
+complete-experience release requirements remain in `docs/BETA_RELEASE.md`
+and `docs/EXPERIENCE_ACCEPTANCE.md`; this integration is not a release.
+Linux remains the supported beta installation.
+
 ## September 29: Docker-and-browser scope and actual emulation prerequisite
 
 The user removed physical Mac/Windows hardware and native AMD64 hardware as MVP

@@ -9,6 +9,8 @@ const token = process.env.OPEN_HARNESS_AGENT_TOKEN;
 const socketPath = process.env.OPEN_HARNESS_CONTROL_SOCKET || "/run/open-harness/coord.sock";
 const controlUrl = process.env.OPEN_HARNESS_CONTROL_URL;
 const tools = [
+  { name: "post_message", description: "Post a message to a conversation you belong to.", inputSchema: { type: "object", properties: { conversationId: { type: "string" }, body: { type: "string" }, mentions: { type: "array", items: { type: "string" } }, idempotencyKey: { type: "string" } }, required: ["conversationId", "body"], additionalProperties: false } },
+  { name: "read_inbox", description: "Read pending messages once without waiting. Optionally acknowledge your own message IDs.", inputSchema: { type: "object", properties: { conversationId: { type: "string" }, messageIds: { type: "array", items: { type: "string" } } }, additionalProperties: false } },
   {
     name: "computer",
     description: 'See and control the managed private browser on this agent’s assigned computer. Capture before input and inspect the result afterwards. Navigation, input and stage-upload require coordinator approval; human takeover blocks agent control. Downloads are copied into this agent’s private/downloads. stage-upload copies the named file’s current contents from private/exchange into private browser upload staging and returns its container path; it does not submit the file to a website. Approval covers the named file as it exists when copied. This tool cannot run commands or grant permissions. Never repeat an action whose completion is uncertain.',
@@ -172,7 +174,7 @@ function attempt(options, input) {
     // Only a failure to reach the coordinator is retryable. A 4xx is the coordinator's answer --
     // "delegation is disabled for this run" must not be retried down another route.
     req.on("error", () => reject(options.path.endsWith('/internal/computer') && connected ? new Error('Computer action completion was not confirmed. Inspect the browser before repeating it.') : new Unreachable("unreachable")));
-    req.end(JSON.stringify(input));
+    req.end(options.method === 'GET' ? undefined : JSON.stringify(input));
   });
 }
 function computerResult(action, value) {
@@ -192,7 +194,7 @@ function activeRunId() {
   if(process.env.OPEN_HARNESS_RUN_LEASE){let lease;try{lease=JSON.parse(readFileSync(process.env.OPEN_HARNESS_RUN_LEASE,'utf8'));}catch{throw new Error('The active task lease is unavailable.');}if(lease.active!==true||typeof lease.runId!=='string'||!lease.runId||typeof lease.expiresAt!=='number'||!Number.isFinite(lease.expiresAt)||lease.expiresAt<=Date.now())throw new Error('No active task owns this runtime.');runId=lease.runId;}
   return runId;
 }
-async function call(path, input, expectedRunId) {
+async function call(path, input, expectedRunId, method = "POST") {
   // One options object, never (url, options, callback): node reads the second argument as the
   // response listener when the first is options rather than a URL, so the socket route -- how
   // every local container agent reaches the coordinator -- failed on every call with
@@ -204,10 +206,10 @@ async function call(path, input, expectedRunId) {
   // Docker Desktop passes a bind mount through a VM, and a unix socket inside that mount is
   // visible but refuses every connection, so the configured URL is a fallback for that case
   // rather than the default. One failed connect to a socket that is not there costs nothing.
-  const routes = [{ socketPath, path, method: "POST", headers }];
+  const routes = [{ socketPath, path, method, headers }];
   if (controlUrl) {
     const target = new URL(`${controlUrl.replace(/\/$/, '')}${path}`);
-    routes.push({ protocol: target.protocol, hostname: target.hostname, port: target.port || undefined, path: `${target.pathname}${target.search}`, method: "POST", headers });
+    routes.push({ protocol: target.protocol, hostname: target.hostname, port: target.port || undefined, path: `${target.pathname}${target.search}`, method, headers });
   }
   for (const [index, route] of routes.entries()) {
     try {
@@ -218,7 +220,7 @@ async function call(path, input, expectedRunId) {
   }
   throw new Error("Open Harness is not reachable right now. This was not caused by your arguments: try once more, and if it fails again tell the user that Open Harness may be stopped.");
 }
-const routes = { workspace: "/internal/workspace", group_chat: "/internal/group-chat", api_request: "/internal/api-request", delegate_named_agent: "/internal/handoff", create_open_harness_routine: "/internal/schedule", task: "/internal/task", project: "/internal/project", routines: "/internal/routines", directory: "/internal/directory", runs: "/internal/runs", decide: "/internal/decide" };
+const routes = { post_message: "/internal/message", read_inbox: "/internal/inbox", workspace: "/internal/workspace", group_chat: "/internal/group-chat", api_request: "/internal/api-request", delegate_named_agent: "/internal/handoff", create_open_harness_routine: "/internal/schedule", task: "/internal/task", project: "/internal/project", routines: "/internal/routines", directory: "/internal/directory", runs: "/internal/runs", decide: "/internal/decide" };
 // Models fill flat, typed fields; the coordinator's workspace route keeps its { action, input } shape.
 function workspaceInput(args) {
   const { action, operationInput, ...fields } = args || {};
@@ -253,6 +255,10 @@ async function dispatch(message) {
           if (!input.requestId || value.requestId !== input.requestId) throw new Error('The computer approval does not match this request.');
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
+      }
+      if (name === 'read_inbox') {
+        const value = args.messageIds ? await call('/internal/inbox/ack', { messageIds: args.messageIds }) : await call(`/internal/inbox${args.conversationId ? `?conversationId=${encodeURIComponent(args.conversationId)}` : ''}`, {}, undefined, 'GET');
+        return { content: [{ type: "text", text: JSON.stringify(value) }] };
       }
       return { content: [{ type: "text", text: JSON.stringify(await call(routes[name], shapes[name] ? shapes[name](args) : args)) }] };
     } catch (error) {

@@ -21,7 +21,7 @@ const stop = async child => { if (child.exitCode !== null || child.signalCode !=
 const web = createServer((_request, response) => { response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end('<!doctype html><title>Actual paired Linux computer</title><style>body{background:#e9efe8;color:#19372d;font:24px system-ui;padding:80px}h1{font-size:48px}input{padding:14px;font-size:24px;width:60%}</style><h1>Actual paired Linux computer</h1><p>Open Harness · isolated acceptance workspace</p><input aria-label="Fixture note" placeholder="Browser session remains open"><script>window.fixtureSession=String(Math.random())</script>'); });
 console.log(`Actual Computer UI fixture: ${root}`);
 try {
-  const imageInfo = JSON.parse(await command(['image','inspect',image]))[0]; assert.equal(imageInfo.Config.Labels['dev.openharness.runtime'], '10');
+  const imageInfo = JSON.parse(await command(['image','inspect',image]))[0]; assert.equal(imageInfo.Config.Labels['dev.openharness.runtime'], '11');
   await new Promise(resolve => web.listen(0, '0.0.0.0', resolve)); const webPort = web.address().port;
   start('coordinator', ['--import','tsx','runtime/service.ts'], { OPEN_HARNESS_STATE_DIR: coordinatorState, OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_BIND: '127.0.0.1', OPEN_HARNESS_ALLOW_LOOPBACK_PAIRING: '1' });
   token = await wait(async () => { try { const response = await fetch(endpoint + '/v1/bootstrap'); return response.ok && (await response.json()).token; } catch { return false; } }, 'coordinator');

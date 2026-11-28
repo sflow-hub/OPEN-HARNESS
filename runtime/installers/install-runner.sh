@@ -45,7 +45,7 @@ download "runtime/runner.mjs"
 download "runtime/runtime-launch.mjs"
 download "runtime/opencode-policy.mjs"
 download "runtime/opencode-policy-core.mjs"
-for file in Dockerfile NOTICE.md container-init.sh browser_shutdown.py cua_compat.py coordination.mjs gateway-entry.mjs model-proxy.mjs inspect_runtime.py managed_entry.py soul_trust.py security-constraints.txt apply-security-overrides.py apply-npm-security-overrides.py npm-security-overrides.json vendor/http-cache-semantics/index.js vendor/http-cache-semantics/package.json vendor/http-cache-semantics/LICENSE extension/open_harness_policy.py extension/pyproject.toml; do
+for file in Dockerfile NOTICE.md container-init.sh browser_shutdown.py cua_compat.py coordination.mjs gateway-entry.mjs model-proxy.mjs inspect_runtime.py sandbox_selftest.py managed_entry.py soul_trust.py security-constraints.txt apply-security-overrides.py apply-npm-security-overrides.py npm-security-overrides.json vendor/http-cache-semantics/index.js vendor/http-cache-semantics/package.json vendor/http-cache-semantics/LICENSE extension/open_harness_policy.py extension/pyproject.toml; do
   download "runtime/hermes/$file"
 done
 for file in helpers/check-native-platform.sh helpers/ubuntu-snapshot.sh helpers/check_packages.py helpers/curl_http3.py helpers/debian_inputs.py helpers/debian_origin.py helpers/elf_arch.py helpers/ohpkg.py lock/runtime-inputs.lock.json lock/ubuntu-os-packages.txt; do

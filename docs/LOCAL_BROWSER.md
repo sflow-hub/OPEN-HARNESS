@@ -1,9 +1,10 @@
 # Local browser installation
 
-Open Harness can run on a Mac or Windows PC through Docker Desktop, with the dashboard in your
-own browser at `http://localhost:3000`. Everything runs in Linux containers: the coordinator,
-the private container engine that hosts agents, and the agents themselves. Nothing has to be
-installed on the computer except Docker Desktop — no Node, Python or Git.
+Open Harness runs on Linux, macOS and Windows. Open the dashboard in your browser at
+`http://localhost:3000`. Docker runs the coordinator, private container engine and agents.
+On Linux, the source launcher also offers a local CPU model. A fresh Ubuntu ARM64
+installation completed model setup and an Atlas edit, preview, apply, reopen and undo.
+[Linux verification record](../runtime/VERIFICATION.md#linux-source-launcher-with-an-on-device-atlas-model-2026-11-17-utc)
 
 **Status, stated plainly.** The launchers, the one-use browser pairing link and the exported
 host-folder editor are implemented. Automated launcher tests drive both scripts against a
@@ -22,21 +23,47 @@ remain follow-up work in `ROADMAP.md`, and are not implied by the Linux results.
 
 ## What you need
 
-- **Docker Desktop** — a supported macOS release (Apple Silicon or Intel) or supported
-  Windows release with the WSL 2 backend. Check Docker's current requirements for
+- **On Linux, install Docker Engine and the Docker Compose v2 plugin.** Start Docker, then check
+  that your account can run `docker info` and `docker compose version`.
+  [Docker Engine installation](https://docs.docker.com/engine/install/) ·
+  [Compose plugin installation](https://docs.docker.com/compose/install/linux/)
+- **On Mac or Windows, install Docker Desktop** and use Linux containers. On Windows, use the
+  WSL 2 backend. Check Docker's requirements for
   [Mac](https://docs.docker.com/desktop/setup/install/mac-install/) or
   [Windows](https://docs.docker.com/desktop/setup/install/windows-install/).
-  It must be in *Linux containers* mode (the default; Windows containers are refused).
-- About **20 GB** of free disk for images, agent runtime and data.
-- **A model provider.** Your agents, files, conversations and credentials stay on this
-  computer, in Docker volumes. Model inference does not: requests go to the provider you
-  configure (xAI, OpenAI, OpenRouter, or another hosted endpoint), and may cost money. A model
-  server that listens only on this computer's `localhost` — Ollama or LM Studio in their default
-  configuration, for example — cannot be reached from the containers, and the Docker Desktop
-  installation refuses such addresses (and Docker's host aliases) with a message saying so.
-  Use a hosted provider, or a model server with an address the containers can reach.
+- **Connect to the internet** for the first launch to download the runtime components. Allow about
+  **40 GB of free Docker storage** for a source build, which temporarily holds compressed
+  and unpacked layers. A prebuilt release needs about **20 GB** for images, runtime and data.
+  The optional Linux CPU model needs another **2.5 GB** for weights, plus space for its server
+  image. Docker keeps verified weights for later launches.
+- **The bundled Linux model runs on your CPU** and needs no provider account.
+  The tested Linux VM had **4 CPU cores, 8 GB of RAM and swap enabled**. You can also choose
+  a hosted provider, which receives model requests and may charge for use, or supply a model
+  server reachable from both the coordinator and agent containers. Host-only addresses such
+  as `localhost` and `host.docker.internal` are unsuitable for custom model servers in Compose.
 
 ## Install
+
+To run or improve your own copy today, open the [Open Harness repository](https://github.com/sflow-hub/OPEN-HARNESS),
+choose **Code → Download ZIP**, then extract the ZIP and open the folder containing
+`compose.yaml`. If you already cloned the repository, open your checkout. With Docker
+running, double-click **Start Open Harness.command** on Mac or **Start Open Harness.cmd**
+on Windows. On Linux, double-click **Start Open Harness.desktop** inside the extracted folder.
+If Thunar shows **Untrusted application launcher**, choose **Launch Anyway**. Other file managers
+may offer **Trust and Launch** or **Allow Launching**. If the desktop entry opens in a text editor,
+open its **Properties → Permissions**, allow it to execute, then double-click it again. File managers
+with a **Run as a Program** option can also use **Start Open Harness.sh** in the same folder.
+Keep the launcher beside the extracted files.
+
+Choose **Use a model on this computer** to download about 2.5 GB and run Atlas locally on your CPU.
+The launcher shows download progress and waits for the model to verify and load. If the download
+fails, choose **Retry** to continue with the downloaded data. Choose **Use my own model provider**
+to use an existing provider or connect one in the dashboard.
+The first launch builds the app from that folder. Leave the launcher open until it opens
+your browser. The setup guide there prepares the agent runtime and connects your model.
+Allow tens of minutes for the first runtime build.
+
+### Prebuilt browser release
 
 The prebuilt browser release is not published yet: final image scanning, per-architecture
 Docker/browser acceptance and the final 24-hour soak remain release gates. Once it is published, download your platform's archive from the project's
@@ -49,6 +76,7 @@ from wherever the folder is, spaces in the path included. It contains:
 | --- | --- |
 | `Start Open Harness.command` | Mac: double-click launcher |
 | `Start Open Harness.cmd` | Windows: double-click launcher |
+| `Start Open Harness.desktop`, `Start Open Harness.sh` | Linux file manager launchers |
 | `launchers/start.sh`, `launchers/start.ps1` | The launchers themselves, for a terminal |
 | `compose.yaml` | The Docker Compose definition, with every image pinned by digest |
 | `image-lock.json` | The digests the release was tested with |
@@ -56,9 +84,10 @@ from wherever the folder is, spaces in the path included. It contains:
 | `runtime/dind-entrypoint.sh` | Start-up script of the private container engine |
 | `docs/LOCAL_BROWSER.md`, `docs/SELF_HOSTING.md`, `LICENSE` | Installation, backup/restore, and the MIT license |
 
-There is no source code in the browser release and nothing to build: the launcher downloads
-the images listed in `compose.yaml` from the registry, by digest, the first time it runs
-(several gigabytes; later starts reuse them).
+The browser archive contains the launcher and configuration. On first use the launcher
+downloads the images pinned in `compose.yaml` (several gigabytes). The coordinator image
+includes the editable dashboard source and its compiler. For the entire application
+repository, including the coordinator and agent runtime, use the source ZIP under **Install**.
 
 ## Start on a Mac
 
@@ -72,8 +101,8 @@ the images listed in `compose.yaml` from the registry, by digest, the first time
    `bash launchers/start.sh` — the same launcher, without the double-click wrapper.
 3. A Terminal window shows progress. The launcher finds Docker (on your `PATH`, or inside
    `Docker.app` if the command-line tools have not been put on `PATH` yet), starts Docker
-   Desktop if it is installed but not running, waits for it (up to five minutes), downloads the
-   pinned images on first use, starts the stack, waits for the app to answer, and then opens
+   Desktop if needed, and waits up to five minutes for Docker. It builds the dashboard from
+   a source ZIP or downloads pinned images for a prebuilt release, starts the stack, waits for the app to answer, and then opens
    your default browser on a freshly paired window. The Terminal window waits for a key press when it is done, so that a
    message stays readable if something went wrong.
 
@@ -88,7 +117,8 @@ the images listed in `compose.yaml` from the registry, by digest, the first time
 3. The console shows the same steps as on the Mac: find Docker (on `PATH`, or in the per-user
    `%LOCALAPPDATA%\Programs\DockerDesktop` or all-users `C:\Program Files\Docker\Docker`
    install), start Docker Desktop if needed, wait for it, check that it runs Linux containers,
-   download the images once, start the stack, wait for health, open a paired browser window.
+   build the dashboard from the source ZIP or download the release images, start the stack,
+   wait for it to answer, and open a paired browser window.
 
 ## The pairing link
 
@@ -116,7 +146,7 @@ Consequences worth knowing:
 - The token is stored in that browser only. Clearing site data for `localhost` un-pairs it.
 
 Every Compose installation requires pairing, including a source checkout started with
-`docker compose up -d --build` or the launcher's `--build`. Only the native development
+`docker compose up -d --build` or by opening its launcher. Only the native development
 setup (`npm run dev`, coordinator on this computer, no containers for the dashboard) keeps the
 previous loopback-only bootstrap and needs no link.
 
@@ -134,7 +164,9 @@ just opens another paired window. From a terminal in the release folder:
 | `bash launchers/start.sh --no-open` | `.\launchers\start.ps1 -NoOpen` | Start and wait for health without minting a code or opening a browser (for scripts and acceptance runs) |
 | `bash launchers/start.sh --override <file>` | `.\launchers\start.ps1 -Override <file>` | Add your edited host-folder override (see below) |
 | `bash launchers/start.sh --timeout <seconds>` | `.\launchers\start.ps1 -Timeout <seconds>` | Change the five-minute wait for Docker and for health |
-| `bash launchers/start.sh --build` | `.\launchers\start.ps1 -Build` | Development only: build from a source tree instead of using the pinned images |
+| `bash launchers/start.sh --local-model` | Linux source install | Set up Atlas locally and remember this choice |
+| `bash launchers/start.sh --own-provider` | Linux source install | Return to your own model provider |
+| `bash launchers/start.sh --build` | `.\launchers\start.ps1 -Build` | Explicitly build the app from the source folder |
 
 The PowerShell launcher also accepts the `--long` spellings, so the same command line works in
 both. Every message is also appended to `open-harness-launcher.log` in the release folder; pairing
@@ -216,29 +248,17 @@ docker compose -f compose.yaml exec -T open-harness node /opt/open-harness/runti
 This is also how a `--no-open` run gets a browser afterwards. Put the code only in the
 fragment (`#pair=`), never in a query string, and do not paste it anywhere else.
 
-## Development: building from source
+## Rebuilding after a source change
 
-From the source folder, with Docker Desktop installed, run:
+When you are ready to run an edit to Open Harness, finish any active agent tasks, then open
+the launcher in the edited source folder again. It runs `docker compose up -d --build`,
+which reuses cached build steps, and opens a paired browser window. The Compose project name
+and data volumes stay the same. Include the same folder override if you use one.
 
-```bash
-# macOS or Linux
-bash launchers/start.sh --build
-```
-
-```powershell
-# Windows PowerShell
-& '.\Start Open Harness.cmd' --build
-```
-
-A source checkout can use the same launchers. `--build` (`-Build`) builds the coordinator image
-from the `Dockerfile.coordinator` next to `compose.yaml`, starts with `docker compose up -d
---build`, and sets `OPEN_HARNESS_HERMES_PULL=0` so that the agent runtime image is prepared
-from the checkout's own Hermes build instead of the published one. A checkout has no
-`image-lock.json`; the launcher asks for one only in release mode, and in a checkout every
-action is given together with `--build` (`--build --stop`, `--build --status`, `--build --logs`)
-so that the same files are used throughout. `--build` is refused in a downloaded browser
-release, which has no source tree — that release always uses the pinned images and never
-builds anything. Pairing applies to a source Compose stack exactly as to a release.
+The launcher recognizes both a Git clone and an extracted source ZIP. The explicit `--build`
+(PowerShell `-Build`) option also works. Use `--stop`, `--status` or `--logs` on their own
+for the corresponding actions. In a browser release the launcher uses the images pinned in
+`compose.yaml`. To edit the software, download the source ZIP described under **Install**.
 
 ## When something goes wrong
 

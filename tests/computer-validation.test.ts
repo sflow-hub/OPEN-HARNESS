@@ -129,3 +129,25 @@ test('Docker context endpoints and conventional desktop/rootless sockets cannot 
   context('custom', `unix://${join(nextSocketDir, 'engine.sock')}`);
   for (const path of [join(homedir(), '.docker/desktop'), join(homedir(), '.docker/run'), ...(process.getuid ? [`/run/user/${process.getuid()}`] : [])]) assert.throws(() => assertGrantAllowed(path, state), /Docker control socket/);
 });
+
+test('workspace security defaults off, preserves legacy model settings, and shares revisions', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { Profiles } = await import('../runtime/profiles');
+  const db = new DatabaseSync(':memory:');
+  try {
+    const profiles = new Profiles(db), model = profiles.defaults().model;
+    assert.deepEqual(profiles.security(), { allowDirectAccess: false, revision: 0 });
+    db.prepare('INSERT INTO workspace_settings VALUES(1,1,?)').run(JSON.stringify(model));
+    assert.equal(profiles.security().allowDirectAccess, false);
+    assert.throws(() => profiles.setSecurity(true, 1), /not sandboxed and is disabled/);
+    assert.throws(() => profiles.setSecurity(true, 1, true), /not sandboxed and is disabled/);
+    profiles.setSecurity(false, 1);
+    assert.deepEqual(profiles.defaults().model, model);
+    profiles.setDefaults(model, 2);
+    assert.equal(profiles.security().allowDirectAccess, false);
+    assert.throws(() => profiles.setSecurity(false, 2), /changed elsewhere/);
+    profiles.setSecurity(false, 3);
+    assert.throws(() => profiles.checkDirect({ access: 'direct' } as never), /not sandboxed and is disabled/);
+    assert.throws(() => profiles.save({ ...profile, computer: { ...profile.computer, access: 'direct' } }), /not sandboxed and is disabled/);
+  } finally { db.close(); }
+});

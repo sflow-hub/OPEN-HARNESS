@@ -77,7 +77,7 @@ const move = async (profile, machineId) => {
 };
 console.log(`Computer transfer acceptance artifacts: ${root}`);
 try {
-  const imageInfo = JSON.parse(await command('docker', ['image', 'inspect', image]))[0]; assert.equal(imageInfo.Config.Labels['dev.openharness.runtime'], '10');
+  const imageInfo = JSON.parse(await command('docker', ['image', 'inspect', image]))[0]; assert.equal(imageInfo.Config.Labels['dev.openharness.runtime'], '11');
   const free = createServer(), port = await listen(free); await new Promise(resolve => free.close(resolve)); endpoint = `http://127.0.0.1:${port}`;
   const webPort = await listen(web), proxyPort = await listen(proxy);
   processChild('coordinator', ['--import', 'tsx', 'runtime/service.ts'], { OPEN_HARNESS_STATE_DIR: state, OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_BIND: '127.0.0.1', OPEN_HARNESS_ALLOW_LOOPBACK_PAIRING: '1' });
