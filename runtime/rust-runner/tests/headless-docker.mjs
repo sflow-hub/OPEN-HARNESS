@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { request } from 'node:http';
 import { createInterface } from 'node:readline';
@@ -181,15 +181,24 @@ switch (command) {
     const managed=join(state,'agents',agent,'managed');
     const profile=JSON.parse(readFileSync(join(state,'agents',agent,'profile','config.yaml')));
     const sessionEnv=profile.mcp_servers.open_harness.env;
-    const post=(path,token) => new Promise((resolve,reject)=>{
-      const options={socketPath:join(managed,'coord.sock'),method:'POST',path,headers:{
-        authorization:'Bearer '+token,'x-open-harness-agent':agent,'x-open-harness-run':sessionEnv.OPEN_HARNESS_RUN_ID,'content-type':'application/json'}};
-      const r=request(options,res=>{res.resume();res.on('end',()=>resolve(res.statusCode));});
-      r.on('error',reject);r.end('{}');
-    });
-    assert.equal(await post('/v1/bootstrap',sessionEnv.OPEN_HARNESS_AGENT_TOKEN),404);
-    assert.equal(await post('/internal/task','wrong-token'),403);
-    assert.equal(await post('/internal/task',sessionEnv.OPEN_HARNESS_AGENT_TOKEN),200);
+    // The container connects through its short mount path even when the host workspace is deep.
+    const alias = mkdtempSync('/tmp/oh-fixture-socket-');
+    try {
+      const mount = join(alias, 'managed');
+      symlinkSync(managed, mount, 'dir');
+      const socketPath = join(mount, 'coord.sock');
+      const post=(path,token) => new Promise((resolve,reject)=>{
+        const options={socketPath,method:'POST',path,headers:{
+          authorization:'Bearer '+token,'x-open-harness-agent':agent,'x-open-harness-run':sessionEnv.OPEN_HARNESS_RUN_ID,'content-type':'application/json'}};
+        const r=request(options,res=>{res.resume();res.on('end',()=>resolve(res.statusCode));});
+        r.on('error',reject);r.end('{}');
+      });
+      assert.equal(await post('/v1/bootstrap',sessionEnv.OPEN_HARNESS_AGENT_TOKEN),404);
+      assert.equal(await post('/internal/task','wrong-token'),403);
+      assert.equal(await post('/internal/task',sessionEnv.OPEN_HARNESS_AGENT_TOKEN),200);
+    } finally {
+      rmSync(alias, { recursive: true, force: true });
+    }
     const session = 'hermes-test-session';
     const event=(type,payload)=>emit({method:'event',params:{type,session_id:session,payload}});
     event('gateway.ready',{});
