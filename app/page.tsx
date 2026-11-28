@@ -63,7 +63,7 @@ import {
 
 import AgentSettings from "../components/agent-settings";
 import AgentDelete from "../components/agent-delete";
-import Onboarding from "../components/onboarding";
+import Onboarding, { hasOnboardingProgress } from "../components/onboarding";
 import TaskManager from "../components/task-manager";
 import TeamManager, { TeamBadge } from "../components/team-manager";
 import CredentialManager, { CredentialSwitcher, CredentialsPage } from "../components/credential-manager";
@@ -74,6 +74,7 @@ import { CODEX_PROVIDER } from "../lib/codex";
 import ConversationTranscript from "../components/conversation-transcript";
 import ChatProgress from "../components/chat-progress";
 import { applyChatEvents } from "../lib/chat-stream";
+import { useComposerDraft } from "../lib/composer-drafts";
 import GroupConversations from "../components/group-conversations";
 import WorkflowManager from "../components/workflow-manager";
 import DeliverySettings from "../components/delivery-settings";
@@ -214,7 +215,7 @@ export default function Home() {
   const [latestAgentHistory, setLatestAgentHistory] = useState<Record<string, string> | null>(null);
   const [view, setView] = useState<View>("assistant");
   const navigated = useRef(false);
-  const pendingAgentHistory = useRef<string | null>(null);
+  const pendingAgentHistory = useRef<{ agentId: string; hadDraft: boolean; edited?: { key: string; revision: string } } | null>(null);
   const [selectedAgent, setSelectedAgent] = useState("atlas");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [settings, setSettings] = useState<ModelSettings>(defaultSettings);
@@ -237,7 +238,7 @@ export default function Home() {
   const [editingAgentTab, setEditingAgentTab] = useState<'profile' | 'computer' | 'harness'>('profile');
   const [agentBusy, setAgentBusy] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [input, setInput] = useState("");
+  const [draftScope, setDraftScope] = useState<string | null>(null);
   const [replyOnly, setReplyOnly] = useState(false);
   const [search, setSearch] = useState("");
   const [agentTeamFilter, setAgentTeamFilter] = useState("all");
@@ -306,12 +307,23 @@ export default function Home() {
   const runtimeExpectation = useRef<boolean | null>(null);
   const [notifyWhenDone, setNotifyWhenDone] = useState(false);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [inspector, setInspector] = useState(true);
+  const [inspector, setInspector] = useState(false);
   const controlRef = useRef(new ControlClient());
   const followed = useRef(new Set<string>());
   const sending = useRef(new Set<string>());
   const [submissions, setSubmissions] = useState<Record<string, string>>({});
   const uploadRef = useRef<HTMLInputElement>(null);
+  const composerInput = useRef<HTMLTextAreaElement>(null);
+  // The ref closes the gap before React re-renders the disabled controls, so a second
+  // batch cannot start against a file list the first batch is still changing.
+  const uploadingRef = useRef(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState("");
+  useEffect(() => {
+    if (!uploadMessage) return;
+    const timeout = setTimeout(() => setUploadMessage(""), 8000);
+    return () => clearTimeout(timeout);
+  }, [uploadMessage]);
   const importRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const agent =
@@ -319,17 +331,34 @@ export default function Home() {
   const conversation = workspace.conversations.find(
     (c) => c.id === conversationId,
   );
-  const submitting = conversationId ? submissions[conversationId] : undefined;
-  const composerRef = useRef({ conversationId, agentId: agent.id, view });
-  useLayoutEffect(() => { composerRef.current = { conversationId, agentId: agent.id, view }; }, [conversationId, agent.id, view]);
+  const chatId = view === "chat" ? conversationId : null;
+  const draftKey = chatId ? `chat:${chatId}` : `agent:${agent.id}`;
+  const { drafts, saved: draftRevision, input, edit } = useComposerDraft(draftScope, draftKey);
+  function setInput(text: string) {
+    const revision = edit(text);
+    const pending = pendingAgentHistory.current;
+    if (pending?.agentId === agent.id && view === "chat") pending.edited = { key: draftKey, revision };
+  }
+  const submitting = chatId ? submissions[chatId] : undefined;
+  const composerChat = useRef(chatId);
+  useLayoutEffect(() => { composerChat.current = chatId; }, [chatId, agent.id, view]);
   useEffect(() => {
-    const requestedAgent = pendingAgentHistory.current;
-    if (loadingHistory || !latestAgentHistory || !requestedAgent || view !== 'chat' || selectedAgent !== requestedAgent) return;
+    const pending = pendingAgentHistory.current;
+    if (loadingHistory || !latestAgentHistory || !pending || view !== 'chat' || selectedAgent !== pending.agentId) return;
     // Resolve after history and navigation commit, including a click that overtakes the history render.
     pendingAgentHistory.current = null;
-    const latest = latestAgentHistory[requestedAgent] || workspace.conversations.find(item => item.agentId === requestedAgent)?.id;
-    if (latest) setConversationId(latest);
-  }, [loadingHistory, latestAgentHistory, workspace.conversations, selectedAgent, view]);
+    const latest = latestAgentHistory[pending.agentId] || workspace.conversations.find(item => item.agentId === pending.agentId)?.id;
+    if (!latest) return;
+    const target = `chat:${latest}`, edited = pending.edited;
+    if (edited?.revision && edited.key !== target) {
+      // Typing can precede the history response. Carry that edit to the resolved chat
+      // unless either chat already had a draft or another tab changed the source.
+      if (pending.hadDraft || drafts.read(target) || drafts.read(edited.key) !== edited.revision) return;
+      drafts.write(target, edited.revision);
+      drafts.clearIfUnedited(edited.key, edited.revision);
+    }
+    setConversationId(latest);
+  }, [drafts, loadingHistory, latestAgentHistory, workspace.conversations, selectedAgent, view]);
   const file = workspace.files.find((f) => f.id === selectedFile);
   // The deterministic adapter exists for automated tests only. Treating it as a
   // connected runtime let a source preview display canned prose as an agent reply.
@@ -348,7 +377,7 @@ export default function Home() {
   const settingsRef = useRef({ open: settingsOpen, settings, baseline: settingsBaseline });
   useLayoutEffect(() => { settingsRef.current = { open: settingsOpen, settings, baseline: settingsBaseline }; }, [settingsOpen, settings, settingsBaseline]);
   const live = Object.values(liveRuns);
-  const conversationRuns = conversation ? live.filter((run) => run.conversation_id === conversation.id) : [];
+  const conversationRuns = chatId ? live.filter((run) => run.conversation_id === chatId && run.agent_id === agent.id) : [];
   // What Steer and Stop act on in the open conversation: the run executing, else the first
   // one queued. `running` is about this conversation only; other agents keep working.
   const activeRun = conversationRuns.find((run) => run.state !== "queued") || conversationRuns[0] || null;
@@ -515,16 +544,12 @@ export default function Home() {
       });
   }
   useEffect(() => {
-    const narrow = window.matchMedia("(max-width: 1000px)");
-    const matchLayout = () => setInspector(!narrow.matches);
-    const layoutTimer = window.setTimeout(matchLayout, 0);
-    narrow.addEventListener("change", matchLayout);
     try {
       // Managed workspaces hydrate from their authenticated coordinator, never another account's browser cache.
       const saved = controlRef.current.managed ? null : localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
       // Hydrate browser-only persistence after the server-rendered first frame.
       if (saved) {
-        const parsed = normalizeWorkspace(JSON.parse(saved));
+        const parsed = normalizeWorkspace(JSON.parse(saved), "cache");
         if (!parsed) throw new Error();
         // The coordinator owns active work. Preserve the last rendered activity until
         // reconnect replays authoritative events instead of implying that closing the
@@ -551,11 +576,10 @@ export default function Home() {
       );
     }
     setCheckingLauncherModel(!controlRef.current.managed && Boolean(launcherModelIntent()));
+    setDraftScope(controlRef.current.draftScope);
     setReady(true);
     const watchers = watchControllers.current;
     return () => {
-      window.clearTimeout(layoutTimer);
-      narrow.removeEventListener("change", matchLayout);
       for (const controller of watchers) controller.abort();
     };
   }, []);
@@ -603,7 +627,7 @@ export default function Home() {
         if (!isCurrent()) return;
         if (!client.managed && !launcherModelIntent() && openActiveEdition(status)) return;
         setPairing({ state: "none", message: "" });
-        if (checkId === runtimeCheckId.current) setRuntime(status);
+        if (checkId === runtimeCheckId.current) { setDraftScope(client.draftScope); setRuntime(status); }
         if(client.managed){const requestedDesktop=new URL(window.location.href).searchParams.get('desktop');if(requestedDesktop&&/^[A-Za-z0-9_-]+$/.test(requestedDesktop))setDesktopAgentId(requestedDesktop);}
         const synced = client.managed ? await client.request<{agents:Agent[]}>('/v1/client-agents') : await client.request<{ agents: Agent[] }>("/v1/agents/sync", {
           method: "POST",
@@ -614,7 +638,7 @@ export default function Home() {
         const reconcileAgents = (current: Workspace): Workspace => ({ ...current,
           agents: synced.agents.map(agent => ({ ...agent, memory: current.agents.find(a => a.id === agent.id)?.memory || [] })),
           conversations: current.conversations.filter(conversation => agentIds.has(conversation.agentId)),
-          teams: current.teams.map(team => ({ ...team, memberAgentIds: team.memberAgentIds.filter(id => agentIds.has(id)) })),
+          teams: teamsForRoster(current.teams, agentIds),
         });
         workspaceRef.current = reconcileAgents(workspaceRef.current);
         setWorkspace(reconcileAgents);
@@ -629,7 +653,7 @@ export default function Home() {
         // or credential response must not hold up history and reattaching active work.
         await Promise.all([
           (async () => {
-            if (!client.managed && workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspaceRef.current.teams }) });
+            if (!client.managed && workspace.teams.length) await client.request("/v1/teams/sync", { method: "POST", body: JSON.stringify({ teams: workspaceRef.current.teams, onlyMissing: true }) });
             const { teams } = await client.request<{ teams: Team[] }>("/v1/teams?includeRetired=1");
             if (!isCurrent()) return;
             setWorkspace(current => ({ ...current, teams: teams.filter(team => !team.retiredAt) }));
@@ -901,6 +925,10 @@ export default function Home() {
   escapeSettingsRef.current = () => { if (settingsOpen) requestCloseSettings(); };
   useEffect(trackKeyboardInset, []);
   useMobileBackGuard(mobileOpen, () => setMobileOpen(false));
+  useMobileBackGuard(inspector && view === "chat", () => setInspector(false));
+  useMobileBackGuard(Boolean(desktopAgentId), () => setDesktopAgentId(null));
+  useMobileBackGuard(Boolean(reviewRun), () => setReviewRun(null));
+  useMobileBackGuard(Boolean(docEditor), () => { if (!docBusy) setDocEditor(null); });
   useMobileBackGuard(settingsOpen, () => { if (confirmCloseSettings) setConfirmCloseSettings(false); else requestCloseSettings(); });
   useMobileBackGuard(Boolean(onboardingMode) && !launcherModel, () => setOnboardingMode(null));
   useMobileBackGuard(Boolean(selectedFile), () => setSelectedFile(null));
@@ -909,14 +937,15 @@ export default function Home() {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key === "k") {
         event.preventDefault();
-        // Cmd+K is a desktop habit too; the sidebar drawer is only a mobile concern.
-        if (window.matchMedia("(max-width: 900px)").matches) setMobileOpen(true);
-        searchRef.current?.focus();
+        if (document.querySelector('[role="dialog"][aria-modal="true"]:not(#workspace-navigation)')) return;
+        setMobileOpen(true);
+        requestAnimationFrame(() => searchRef.current?.focus());
       }
-      if (event.key === "Escape") {
-        escapeSettingsRef.current();
-        setSelectedFile(null);
-        setMobileOpen(false);
+      if (event.key === "Escape" && !event.defaultPrevented) {
+        const top = Array.from(document.querySelectorAll('[role="dialog"]')).at(-1);
+        if (top?.id === "workspace-navigation") setMobileOpen(false);
+        else if (top?.id === "agent-workspace") setInspector(false);
+        else { escapeSettingsRef.current(); setSelectedFile(null); }
       }
     };
     const beforeLeave = (e: BeforeUnloadEvent) => {
@@ -944,11 +973,11 @@ export default function Home() {
   }, [notice]);
 
   useEffect(() => {
-    if (!settingsOpen && !editingAgent && !selectedFile) return;
+    if (!settingsOpen && !editingAgent && !selectedFile && !mobileOpen && !(inspector && view === "chat")) return;
     const prior = document.activeElement as HTMLElement | null;
     const trap = (event: KeyboardEvent) => {
       if (event.key !== "Tab") return;
-      const dialog = document.querySelector("[role=dialog]");
+      const dialog = Array.from(document.querySelectorAll("[role=dialog]")).at(-1);
       const items = Array.from(
         dialog?.querySelectorAll<HTMLElement>(
           "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href]",
@@ -976,17 +1005,18 @@ export default function Home() {
     document.addEventListener("keydown", trap);
     return () => {
       document.removeEventListener("keydown", trap);
-      prior?.focus();
+      if (document.activeElement === document.body) prior?.focus();
     };
-  }, [settingsOpen, editingAgent, selectedFile]);
+  }, [settingsOpen, editingAgent, selectedFile, mobileOpen, inspector, view]);
 
   function openAgent(id: string, fresh = false) {
     const latest = fresh ? null : workspace.conversations.find((c) => c.agentId === id)?.id || null;
-    pendingAgentHistory.current = loadingHistory && !fresh ? id : null;
+    pendingAgentHistory.current = loadingHistory && !fresh
+      ? { agentId: id, hadDraft: Boolean(drafts.read(latest ? `chat:${latest}` : `agent:${id}`)) }
+      : null;
     setSelectedAgent(id);
     setView("chat");
     setMobileOpen(false);
-    setInput("");
     setConversationId(latest);
   }
   function openTaskRun(run: PersistentRun, title: string) {
@@ -1005,7 +1035,6 @@ export default function Home() {
       pendingAgentHistory.current = null;
       setSelectedAgent(created.id);
       setConversationId(null);
-      setInput("");
       setEditingAgent(created);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not create an agent. Check that Open Harness is running.");
@@ -1238,12 +1267,12 @@ export default function Home() {
   async function send(text = input) {
     const prompt = text.trim();
     // Work waits for the coordinator connection; a cached conversation need not wait for history.
-    if (!prompt || !ready || !runtime) return;
+    if (!prompt || !ready || !runtime || !agent.id || uploadingRef.current) return;
     if (testMode) {
       setNotice("Agent chat is disabled in automated test mode. Start Open Harness without mock mode to run a real agent.");
       return;
     }
-    const cid = conversationId || composerRef.current.conversationId || uid();
+    const cid = chatId || composerChat.current || uid();
     if (sending.current.has(cid)) return;
     const agentId = agent.id;
     const beginSending = (label: string) => {
@@ -1256,8 +1285,9 @@ export default function Home() {
       setSubmissions(current => { const next = { ...current }; delete next[cid]; return next; });
     };
     const clearSentDraft = () => {
-      if (composerRef.current.conversationId === cid && composerRef.current.agentId === agentId)
-        setInput(current => current.trim() === prompt ? "" : current);
+      // A fresh message also has a draft in its optimistic conversation, including on retry.
+      drafts.clearIfUnedited(`agent:${agentId}`, draftRevision);
+      drafts.clearIfUnedited(`chat:${cid}`, draftRevision);
     };
     // Steering and follow-ups go to this conversation's own run — never to whatever some
     // other agent is doing. A run that is only queued has nothing to steer yet.
@@ -1298,10 +1328,11 @@ export default function Home() {
     }
     beginSending("Sending…");
     const userMessage = { id: uid(), role: "user" as const, content: prompt };
-    if (!conversationId) {
+    if (!chatId) {
       // Repeated submits in the same render share this id; explicitly opening another
       // new conversation clears it at commit and is free to submit its own task.
-      composerRef.current = { conversationId: cid, agentId, view: 'chat' };
+      composerChat.current = cid;
+      drafts.write(`chat:${cid}`, draftRevision);
       setWorkspace((w) => ({
         ...w,
         conversations: [
@@ -1310,6 +1341,7 @@ export default function Home() {
         ],
       }));
       setConversationId(cid); setDraftProjectId("");
+      setView("chat");
     } else {
       updateConversation(cid, (c) => ({ ...c, messages: [...c.messages, userMessage], updatedAt: now() }));
     }
@@ -1387,72 +1419,59 @@ export default function Home() {
       setAnswering("");
     }
   };
+  // A file is listed only after the coordinator confirms it, and createOnly makes the
+  // coordinator refuse a name that already exists instead of replacing an agent's work.
   async function upload(files: FileList | null) {
-    if (!files) return;
-    const additions: Artifact[] = [];
-    for (const f of Array.from(files)) {
-      if (
-        !/\.(txt|md|csv|json|html|css|js|ts|tsx|py|yaml|yml|xml|log)$/i.test(
-          f.name,
-        ) ||
-        f.size > 100000
-      ) {
-        setNotice(
-          "Upload text, Markdown, code, JSON, or CSV files up to 100 KB each.",
-        );
-        continue;
-      }
-      if (
-        !/^[a-zA-Z0-9][a-zA-Z0-9._ -]*$/.test(f.name) ||
-        f.name.includes("..")
-      ) {
-        setNotice(
-          "Use filenames with letters, numbers, spaces, dots, dashes, or underscores.",
-        );
-        continue;
-      }
-      additions.push({
-        id: uid(),
-        name: f.name,
-        content: await f.text(),
-        agentId: "user",
-        updatedAt: now(),
-      });
-    }
-    setWorkspace((w) => {
-      const merged = [...w.files];
-      for (const f of additions) {
-        if (merged.some((old) => old.name === f.name)) {
-          setNotice(
-            `A file named ${f.name} already exists. Rename the upload first.`,
-          );
-          continue;
-        }
-        if (merged.length >= 40) {
-          setNotice("Workspace limit reached: 40 files.");
-          break;
-        }
-        merged.push(f);
-      }
-      return { ...w, files: merged };
-    });
-    if (runtime)
-      for (const file of additions)
-        void controlRef.current
-          .request("/v1/files?scope=shared", {
-            method: "POST",
-            body: JSON.stringify({ name: file.name, content: file.content }),
-          })
-          .catch((error) =>
-            setNotice(error instanceof Error ? error.message : "Upload failed."),
-          );
+    if (!files?.length || uploadingRef.current) return;
+    const batch = Array.from(files), shared = Boolean(runtime);
     if (uploadRef.current) uploadRef.current.value = "";
+    uploadingRef.current = true;
+    setUploading(true);
+    setUploadMessage("");
+    const errors: string[] = [], added: Artifact[] = [];
+    try {
+      const names = new Set(workspaceRef.current.files.map(file => file.name));
+      for (const f of batch) {
+        try {
+          if (!/\.(txt|md|csv|json|html|css|js|ts|tsx|py|yaml|yml|xml|log)$/i.test(f.name) || f.size > 100000) throw new Error("Upload text, Markdown, code, JSON, or CSV files up to 100 KB each.");
+          if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(f.name) || f.name.includes("..")) throw new Error("Use filenames with letters, numbers, spaces, dots, dashes, or underscores.");
+          if (names.has(f.name)) throw new Error(`A file named ${f.name} already exists. Rename the upload first.`);
+          if (names.size >= 40) throw new Error("The workspace already has 40 files. Remove a file to add another.");
+          const content = await f.text();
+          if (shared) await controlRef.current.request("/v1/files?scope=shared", { method: "POST", body: JSON.stringify({ name: f.name, content, createOnly: true }) });
+          names.add(f.name);
+          added.push({ id: uid(), name: f.name, content, agentId: "user", updatedAt: now() });
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : `Could not add ${f.name}.`);
+        }
+      }
+      if (added.length) {
+        // A refresh may already have listed a confirmed upload; keep its id so an open
+        // preview stays selected. Without a coordinator, an existing local copy wins.
+        setWorkspace(current => ({
+          ...current,
+          files: [
+            ...current.files.map(file => { const mine = shared && added.find(item => item.name === file.name); return mine ? { ...mine, id: file.id } : file; }),
+            ...added.filter(item => !current.files.some(file => file.name === item.name)),
+          ],
+        }));
+        const label = added.length === 1 ? added[0].name : `${added.length} files`;
+        setUploadMessage(shared ? `Shared with all agents · ${label}` : `Saved in this browser · ${label}`);
+      }
+      if (errors.length) setNotice(errors.length === 1 ? errors[0] : `${errors.length} files were not added. ${errors[0]}`);
+    } finally {
+      uploadingRef.current = false;
+      setUploading(false);
+    }
   }
+  const uploadStatus = uploading || uploadMessage
+    ? <p className="upload-status" role="status">{uploading ? "Adding files…" : uploadMessage}</p>
+    : null;
   async function importWorkspace(upload: File | undefined) {
     if (!upload) return;
     try {
       if (upload.size > 5000000) throw new Error();
-      const parsed = normalizeWorkspace(JSON.parse(await upload.text()));
+      const parsed = normalizeWorkspace(JSON.parse(await upload.text()), "backup");
       if (!parsed) throw new Error();
       if (
         confirm(
@@ -1505,7 +1524,161 @@ export default function Home() {
   const visibleAgents = workspace.agents.filter(candidate => !advancedFeatures || agentTeamFilter === "all"
     || (agentTeamFilter === "unassigned" ? !workspace.teams.some(team => team.memberAgentIds.includes(candidate.id)) : workspace.teams.find(team => team.id === agentTeamFilter)?.memberAgentIds.includes(candidate.id)));
 
-  const onboardingDialog = onboardingMode && runtime && <Onboarding launcherModel={launcherModel} client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: settings.credentialRef || "" }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
+  const runtimeLabel = testMode ? "Automated test mode" : pairing.state !== "none" ? "Browser not paired" : offline ? "Not connected" : !runtime ? "Connecting…" : connected ? "Agent runtime ready" : "Agent runtime needs setup";
+  const composer = (
+    <form
+      className="composer"
+      onSubmit={(e) => {
+        e.preventDefault();
+        send();
+      }}
+    >
+      <textarea
+        ref={composerInput}
+        value={input}
+        onChange={(e) => { setInput(e.target.value); if (e.target.value.trim()) prepareComposer(); }}
+        onFocus={prepareComposer}
+        placeholder={`Message ${agent.name}…`}
+        aria-label={`Message ${agent.name}`}
+        maxLength={30000}
+        rows={2}
+        onKeyDown={(e) => {
+          if (
+            e.key === "Enter" &&
+            !e.shiftKey &&
+            !e.nativeEvent.isComposing
+          ) {
+            e.preventDefault();
+            send();
+          }
+        }}
+      />
+      {replyOnlyAvailable && <div className="composer-options">
+        <label title="Answer from this conversation without tools. Turn this off for tasks that need files, web access or actions.">
+          <input type="checkbox" checked={replyOnlyMode} disabled={running || Boolean(submitting)} onChange={event => setReplyOnly(event.target.checked)} />
+          Reply only <span>Answer without tools</span>
+        </label>
+      </div>}
+      {uploadStatus}
+      <div className="composer-bottom">
+        <button
+          type="button"
+          className="attach-button"
+          aria-label="Attach text files"
+          title="Attach text files"
+          disabled={running || uploading}
+          onClick={() => uploadRef.current?.click()}
+        >
+          <Paperclip size={17} />
+        </button>
+        <button className="subtle-button" onClick={()=>{setEditingAgentTab('harness');setEditingAgent(agent);}}>Upload to {agent.name}’s computer</button>
+        {view === "home" ? <select className="composer-agent-picker" aria-label="Choose agent" value={agent.id}
+          onChange={event => { pendingAgentHistory.current = null; setSelectedAgent(event.target.value); setConversationId(null); }}>
+          {workspace.agents.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select> : <button
+          type="button"
+          className="model-choice"
+          onClick={() => openSettings()}
+        >
+          <span className="status-dot" />
+          {!runtime
+            ? "Reconnecting…"
+            : testMode
+            ? "Automated test mode"
+            : connected
+            ? `Hermes ${runtime?.hermes.release}`
+            : "Start local runtime"}
+          <ChevronRight size={12} />
+        </button>}
+        {chatProjects.length > 0 && (
+          <label className="chat-project" title={chatProject && !chatProject.folders.some((folder) => folder.agents[agent.id]) ? `${agent.name} has no folders in ${chatProject.name}` : "Folders this chat can use"}>
+            <FolderOpen size={14} aria-hidden="true" />
+            <select
+              aria-label="Project folders"
+              value={chatProject?.id || ""}
+              disabled={running}
+              onFocus={() => void controlRef.current.request<{ boards: TaskBoard[] }>("/v1/boards").then((saved) => setProjects(saved.boards)).catch(() => {})}
+              onChange={(e) => {
+                const projectId = e.target.value;
+                if (conversation) updateConversation(conversation.id, (c) => ({ ...c, projectId: projectId || null }));
+                else setDraftProjectId(projectId);
+              }}
+            >
+              <option value="">Agent folders only</option>
+              {chatProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </select>
+            {chatProject && !chatProject.folders.some((folder) => folder.agents[agent.id]) && <small>No access</small>}
+          </label>
+        )}
+        {running ? (
+          <>
+            <button
+              className={`run-mode ${canSteer && inputMode === "steer" ? "active" : ""}`}
+              type="button"
+              disabled={!canSteer}
+              title={canSteer?undefined:"This harness accepts follow-ups after the current task."}
+              onClick={() => setInputMode("steer")}
+            >
+              Steer
+            </button>
+            <button
+              className={`run-mode ${!canSteer || inputMode === "followup" ? "active" : ""}`}
+              type="button"
+              onClick={() => setInputMode("followup")}
+            >
+              Follow-up
+            </button>
+            <button
+              className="send-button"
+              type="submit"
+              disabled={!input.trim() || uploading || Boolean(submitting)}
+              aria-label={`Send ${canSteer?inputMode:"followup"}`}
+            >
+              <ArrowUp size={18} />
+            </button>
+            <button
+              className="send-button stop"
+              type="button"
+              aria-label="Stop run"
+              onClick={() => {
+                if (activeRun)
+                  void controlRef.current
+                    .request<{ failures?: string[] }>(`/v1/runs/${activeRun.id}/stop`, { method: "POST" })
+                    .then((result) => { if (result.failures?.length) setNotice(`The runtime has not confirmed that this task stopped: ${result.failures[0]}`); })
+                    .catch((error) => setNotice(error instanceof Error ? error.message : "Could not stop this task."));
+              }}
+            >
+              <Square size={14} fill="currentColor" />
+            </button>
+            <button
+              className="run-mode"
+              type="button"
+              aria-label="Stop all runs"
+              onClick={() =>
+                void controlRef.current
+                  .request<{ failures?: string[] }>("/v1/runs/stop-all", { method: "POST" })
+                  .then((result) => { if (result.failures?.length) setNotice(`The runtime has not confirmed that all tasks stopped: ${result.failures[0]}`); })
+                  .catch((error) => setNotice(error instanceof Error ? error.message : "Could not stop the running tasks."))
+              }
+            >
+              Stop all
+            </button>
+          </>
+        ) : (
+          <button
+            className="send-button"
+            type="submit"
+            disabled={!input.trim() || !ready || uploading || Boolean(submitting) || (!connected && !testMode)}
+            aria-label="Send message"
+          >
+            <ArrowUp size={18} />
+          </button>
+        )}
+      </div>
+    </form>
+  );
+
+  const onboardingDialog = onboardingMode && runtime && <Onboarding key={JSON.stringify([draftScope, launcherModel])} launcherModel={launcherModel} client={controlRef.current} model={{ provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl || '', credentialRef: settings.credentialRef || "" }} revision={workspaceModelRevision} onModelSaved={(model, revision) => {
         if (launcherModel) {
           rememberLauncherModel(null);
           if (suppressFirstRun(localStorage.getItem(ONBOARDING_KEY))) { setOnboardingMode(null); openActiveEdition(runtime); }
@@ -1515,7 +1688,7 @@ export default function Home() {
         setSettingsBaseline(JSON.stringify(chosen));
         setWorkspaceModelRevision(revision);
         void controlRef.current.request<{ credentials: CredentialRecord[] }>("/v1/credentials").then(saved => setCredentials(saved.credentials)).catch(() => {});
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify({ provider: model.provider, model: model.model, baseUrl: model.baseUrl }));
+        if (!controlRef.current.managed) localStorage.setItem(SETTINGS_KEY, JSON.stringify({ provider: model.provider, model: model.model, baseUrl: model.baseUrl }));
       }} onComputerSettings={() => {
         setAdvancedFeatures(true);
         localStorage.setItem(ADVANCED_KEY, 'on');
@@ -1530,7 +1703,7 @@ export default function Home() {
         refreshRuntime();
       }} onFinished={() => {
         if (launcherModel) openActiveEdition(runtime);
-        localStorage.setItem(ONBOARDING_KEY, 'done');
+        if (!controlRef.current.managed) localStorage.setItem(ONBOARDING_KEY, 'done');
         setOnboardingMode(null);
         refreshRuntime();
       }} onRuntimeChecked={status => refreshRuntime(status.executionReady)} />;
@@ -1539,14 +1712,25 @@ export default function Home() {
 
   return (
     <div className="app-shell" onPointerDownCapture={() => { navigated.current = true; }} onKeyDownCapture={() => { navigated.current = true; }}>
+      <nav className="sidebar-rail" aria-label="Workspace shortcuts">
+        <button className="rail-brand" aria-label="Open Harness home" title="Home" onClick={() => { setView("home"); setMobileOpen(false); }}>h</button>
+        <button className="rail-action navigation-toggle" aria-label="Open navigation" title="Navigation" aria-expanded={mobileOpen} aria-controls="workspace-navigation" onClick={() => setMobileOpen(!mobileOpen)}><Menu size={19} /></button>
+        <button className="rail-action" aria-label="Start new conversation" title="New conversation" disabled={!agent.id} onClick={() => openAgent(agent.id, true)}><Plus size={19} /></button>
+        <button className="rail-action" aria-label="Search workspace" title="Search conversations (⌘K)" onClick={() => { setMobileOpen(true); requestAnimationFrame(() => searchRef.current?.focus()); }}><Search size={18} /></button>
+        <div className="rail-bottom">
+          {pendingApprovals > 0 && <button className="rail-action" aria-label={`Open approvals, ${pendingApprovals} pending`} title={`${pendingApprovals} pending approvals`} onClick={() => setView("approvals")}><ShieldAlert size={18} /></button>}
+          <span className={`status-dot ${offline || pairing.state !== "none" ? "offline" : connected || testMode ? "" : "pending"}`} role="img" aria-label={runtimeLabel} title={runtimeLabel} />
+        </div>
+      </nav>
       {mobileOpen && (
         <button
           className="mobile-overlay"
-          aria-label="Close navigation"
+          aria-label="Dismiss navigation"
           onClick={() => setMobileOpen(false)}
         />
       )}
-      <aside className={`sidebar ${mobileOpen ? "open" : ""}`}>
+      <aside id="workspace-navigation" aria-label="Workspace navigation" role={mobileOpen ? "dialog" : undefined} aria-modal={mobileOpen || undefined} className={`sidebar ${mobileOpen ? "open" : ""}`} inert={!mobileOpen}>
+        <button className="sidebar-close" aria-label="Close navigation" onClick={() => setMobileOpen(false)}><X size={18} /></button>
         <button
           className="brand"
           onClick={() => {
@@ -1701,7 +1885,7 @@ export default function Home() {
         </div>
         <div className="sidebar-bottom">
           <span className={`status-dot ${offline || pairing.state !== "none" ? "offline" : connected || testMode ? "" : "pending"}`} />
-          {testMode ? "Automated test mode" : pairing.state !== "none" ? "Browser not paired" : offline ? "Not connected" : !runtime ? "Connecting…" : connected ? "Agent runtime ready" : "Agent runtime not ready"}
+          {runtimeLabel}
           <button onClick={() => openSettings()}>
             <Settings size={15} /> Settings <span>↗</span>
           </button>
@@ -1709,42 +1893,9 @@ export default function Home() {
         </div>
       </aside>
       <main className="main">
-        <header>
-          <button
-            className="mobile-menu"
-            aria-label="Open navigation"
-            onClick={() => setMobileOpen(true)}
-          >
-            <Menu size={20} />
-          </button>
-          <span>
-            Workspace{" "}
-            <span className="breadcrumb">
-              /{" "}
-              {view === 'assistant' ? 'Assistant' : view === "home"
-                ? "Agents"
-                : view === "teams"
-                  ? "Teams"
-                : view === "files"
-                  ? "Files"
-                : view === "credentials"
-                  ? "Credentials"
-                : view === "folders"
-                  ? "Folders"
-                  : view === "routines"
-                    ? "Routines"
-                    : view === "groups"
-                    ? "Groups"
-                    : view === "approvals"
-                    ? "Approvals"
-                    : view === "tasks"
-                      ? "Tasks"
-                    : view === "computers"
-                      ? "Computers"
-                      : agent.name}
-            </span>
-          </span>
-          <span className="badge">Open source · Yours to shape</span>
+        <header className="workspace-header">
+          <span className="header-title">{view === "chat" || view === "home" ? "Open Harness" : view === "assistant" ? "Assistant" : view[0].toUpperCase() + view.slice(1)}</span>
+          <button className="header-settings" aria-label="Settings" title="Settings" onClick={openSettings}><Settings size={18} /></button>
         </header>
         {view === 'assistant' && <AssistantWorkspace client={controlRef.current} ready={Boolean(runtime)} agents={workspace.agents} onProfile={applySavedProfile} onOpenRun={openTaskRun} onWorkflow={id => { setSelectedWorkflowId(id); setWorkflowSourceRunId(''); setView('routines'); }} />}
         {advancedFeatures && view === "tasks" && <TaskManager agents={workspace.agents} teams={[...workspace.teams, ...retiredTeams]} client={controlRef.current} onOpenRun={openTaskRun} />}
@@ -1752,18 +1903,9 @@ export default function Home() {
         {view === "credentials" && <CredentialsPage client={controlRef.current} onChanged={setCredentials} />}
         {view === "folders" && <FolderManager agents={workspace.agents} client={controlRef.current} />}
         {view === "home" && (
-          <section className="home-content">
-            <div className="eyebrow">YOUR PERSONAL AGENT WORKSPACE</div>
-            <h1>
-              A little direction.
-              <br />
-              <span>A lot done.</span>
-            </h1>
-            <p className="intro">
-              Give your agents a job. They keep the context,
-              <br />
-              use their tools, and bring the work back to you.
-            </p>
+          <section className="home-content minimal-home">
+            <div className="home-heading"><h1>What are we working on?</h1></div>
+            {agent.id && composer}
             <div className="section-heading">
               <h2>
                 Your agents{" "}
@@ -1773,71 +1915,29 @@ export default function Home() {
                 <Plus size={13} /> Create agent
               </button>
             </div>
-            {advancedFeatures && <div className="agent-team-filters" aria-label="Filter agents by team">
+            {advancedFeatures && workspace.teams.length > 0 && <details className="home-team-filter"><summary>Filter by team</summary><div className="agent-team-filters" aria-label="Filter agents by team">
               <button className={agentTeamFilter === "all" ? "active" : ""} onClick={() => setAgentTeamFilter("all")}>All</button>
               {workspace.teams.map(team => <button className={agentTeamFilter === team.id ? "active" : ""} onClick={() => setAgentTeamFilter(team.id)} key={team.id}>{team.name}</button>)}
               <button className={agentTeamFilter === "unassigned" ? "active" : ""} onClick={() => setAgentTeamFilter("unassigned")}>Unassigned</button>
-            </div>}
+            </div></details>}
             {!workspace.agents.length && <div className="files-empty"><h2>No agents yet</h2><p>Create your first agent, or set up your primary assistant from Assistant.</p></div>}
-            <div className="agent-grid">
-              {visibleAgents.map((a) => (
-                <div className="agent-card-shell" key={a.id}>
-                <button
-                  className="agent-card"
-                  onClick={() => openAgent(a.id)}
-                  >
-                  <Avatar agent={a} large />
-                  <ArrowUpRight className="card-arrow" size={17} />
-                  <h3>{a.name}</h3>
-                  <div className="role">{a.role}</div>
-                  {advancedFeatures && <div className="agent-team-badges">{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).slice(0, 2).map(team => <TeamBadge team={team} key={team.id} />)}{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).length > 2 && <small>+{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).length - 2}</small>}{!workspace.teams.some(team => team.memberAgentIds.includes(a.id)) && <span className="team-badge unassigned">Unassigned</span>}</div>}
-                  <p>
-                    {a.description ||
-                      "Your custom agent. Give it a task and make it your own."}
-                  </p>
-                  <div className="card-footer">
-                    <span className="status-dot" />
-                    {busyAgents.has(a.id)
-                      ? "Working on your task"
-                      : needsComputerSettings(a)
-                        ? "Needs new computer settings"
-                        : !runtime?.runtime.available ? 'Needs setup' : "Ready when you are"}
-                    <span>→</span>
-                  </div>
-                </button>
-                <button className="agent-card-settings" onClick={() => setEditingAgent({ ...a })} aria-label={`Edit ${a.name} profile`} title="Agent settings"><SlidersHorizontal size={16} /></button>
-                <div className="agent-card-tools">
-                  <CredentialSwitcher onCredentialsChanged={setCredentials} agent={a} credentials={credentials} workspaceRef={settings.credentialRef || ""} workspaceProvider={settings.provider} client={controlRef.current} running={busyAgents.has(a.id)} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
-                </div>
+            <div className="home-agent-list">
+              {visibleAgents.map(a => (
+                <div className="home-agent-row agent-card-shell" key={a.id}>
+                  <button className="agent-card home-agent-start" aria-label={`Meet ${a.name}`} aria-describedby={`agent-status-${a.id}`} onClick={() => openAgent(a.id)}>
+                    <Avatar agent={a} />
+                    <div className="home-agent-identity"><h3>{a.name}</h3><span className="home-agent-description">{a.role}</span></div>
+                    <span className="home-agent-state" id={`agent-status-${a.id}`}>{busyAgents.has(a.id) ? "Working on your task" : needsComputerSettings(a) ? "Needs new computer settings" : !runtime?.runtime.available ? "Needs setup" : ""}</span>
+                    {advancedFeatures && workspace.teams.length > 0 && <div className="agent-team-badges">{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).slice(0, 2).map(team => <TeamBadge team={team} key={team.id} />)}{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).length > 2 && <small>+{workspace.teams.filter(team => team.memberAgentIds.includes(a.id)).length - 2}</small>}{!workspace.teams.some(team => team.memberAgentIds.includes(a.id)) && <span className="team-badge unassigned">Unassigned</span>}</div>}
+                  </button>
+                  <button className="home-agent-edit" onClick={() => setEditingAgent({ ...a })} aria-label={`Edit ${a.name} profile`} title="Agent settings"><SlidersHorizontal size={16} /></button>
                 </div>
               ))}
-            </div>
-            {workspace.agents.length > 0 && <div className="start-panel">
-              <Sparkles className="spark" size={31} />
-              <div>
-                <h3>Start small. Make it yours.</h3>
-                <p>
-                  Choose an agent, give it one real task, and take it from
-                  there.
-                </p>
-              </div>
-              <button
-                className="light-button"
-                onClick={() => openAgent(workspace.agents[0].id)}
-              >
-                Meet {workspace.agents[0].name} <ArrowUpRight size={13} />
-              </button>
-            </div>}
-            <div className="home-footer">
-              <span>YOUR MODELS. YOUR INSTRUCTIONS. YOUR WORK.</span>
-              <button onClick={() => openSettings()}>
-                Built to be opened up ↗
-              </button>
             </div>
           </section>
         )}
         {view === "chat" && Boolean(agent.id) && (
-          <div className={`chat-layout ${inspector ? "" : "no-inspector"}`}>
+          <div className={`chat-layout agent-chat ${!conversation?.messages.length ? "empty-chat" : ""}`}>
             <section className="chat-main">
               <div className="chat-toolbar">
                 <Avatar agent={agent} />
@@ -1845,21 +1945,7 @@ export default function Home() {
                   <strong>{agent.name}</strong>
                   <small>{agent.role}</small>
                 </div>
-                <CredentialSwitcher onCredentialsChanged={setCredentials} agent={agent} credentials={credentials} workspaceRef={settings.credentialRef || ""} workspaceProvider={settings.provider} client={controlRef.current} running={running} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
                 <div className="toolbar-actions">
-                  <button className="toolbar-computer" title={`Open ${agent.name}’s computer: watch its desktop, take control, or use a workspace terminal`} aria-label="Open agent computer" onClick={() => setDesktopAgentId(agent.id)}><Monitor size={18} /><span>Computer</span></button>
-                  <button title="Review task result" aria-label="Review task result" onClick={async () => {
-                    try { const { conversations } = await controlRef.current.conversations(); const latest = conversations.find(item => item.id === conversationId && item.agentId === agent.id)?.runs.filter(item => !isLiveRun(item)).at(-1); if (latest) setReviewRun(latest); else setNotice("Finish a task in this conversation before reviewing its result."); }
-                    catch (error) { setNotice(error instanceof Error ? error.message : "Could not load this task."); }
-                  }}><ShieldCheck size={18} /></button>
-                  <button title="Save as workflow" aria-label="Save as workflow" onClick={async () => {
-                    try {
-                      const { conversations } = await controlRef.current.conversations();
-                      const completed = conversations.find(item => item.id === conversationId && item.agentId === agent.id)?.runs.filter(item => item.state === "completed").at(-1);
-                      if (!completed) { setNotice("Finish a task in this conversation before saving its workflow."); return; }
-                      setWorkflowSourceRunId(completed.id); setSelectedWorkflowId(undefined); setView("routines");
-                    } catch (error) { setNotice(error instanceof Error ? error.message : "Could not load this task."); }
-                  }}><CalendarClock size={18} /></button>
                   <button
                     title="New conversation"
                     aria-label="New conversation"
@@ -1877,7 +1963,7 @@ export default function Home() {
                   </button>
                   <button
                     title="Toggle workspace panel"
-                    aria-label="Toggle workspace panel"
+                    aria-label="Toggle workspace panel" aria-expanded={inspector} aria-controls="agent-workspace"
                     onClick={() => setInspector(!inspector)}
                   >
                     <FolderOpen size={18} />
@@ -1989,150 +2075,7 @@ export default function Home() {
                 footer={submitting && <ChatProgress label={submitting} />}
               />
               <div className="composer-wrap">
-                <form
-                  className="composer"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    send();
-                  }}
-                >
-                  <textarea
-                    value={input}
-                    onChange={(e) => { setInput(e.target.value); if (e.target.value.trim()) prepareComposer(); }}
-                    onFocus={prepareComposer}
-                    placeholder={`Message ${agent.name}…`}
-                    aria-label={`Message ${agent.name}`}
-                    maxLength={30000}
-                    rows={3}
-                    onKeyDown={(e) => {
-                      if (
-                        e.key === "Enter" &&
-                        !e.shiftKey &&
-                        !e.nativeEvent.isComposing
-                      ) {
-                        e.preventDefault();
-                        send();
-                      }
-                    }}
-                  />
-                  {replyOnlyAvailable && <div className="composer-options">
-                    <label title="Answer from this conversation without tools. Turn this off for tasks that need files, web access or actions.">
-                      <input type="checkbox" checked={replyOnlyMode} disabled={running || Boolean(submitting)} onChange={event => setReplyOnly(event.target.checked)} />
-                      Reply only <span>Answer without tools</span>
-                    </label>
-                  </div>}
-                  <div className="composer-bottom">
-                    <button
-                      type="button"
-                      aria-label="Attach text files"
-                      title="Attach text files"
-                      disabled={running}
-                      onClick={() => uploadRef.current?.click()}
-                    >
-                      <Paperclip size={17} />
-                    </button>
-              <button className="subtle-button" onClick={()=>{setEditingAgentTab('harness');setEditingAgent(agent);}}>Upload to {agent.name}’s computer</button>
-                    <button
-                      type="button"
-                      className="model-choice"
-                      onClick={() => openSettings()}
-                    >
-                      <span className="status-dot" />
-                      {!runtime
-                        ? "Reconnecting…"
-                        : testMode
-                        ? "Automated test mode"
-                        : connected
-                        ? `Hermes ${runtime?.hermes.release}`
-                        : "Start local runtime"}
-                      <ChevronRight size={12} />
-                    </button>
-                    {chatProjects.length > 0 && (
-                      <label className="chat-project" title={chatProject && !chatProject.folders.some((folder) => folder.agents[agent.id]) ? `${agent.name} has no folders in ${chatProject.name}` : "Folders this chat can use"}>
-                        <FolderOpen size={14} aria-hidden="true" />
-                        <select
-                          aria-label="Project folders"
-                          value={chatProject?.id || ""}
-                          disabled={running}
-                          onFocus={() => void controlRef.current.request<{ boards: TaskBoard[] }>("/v1/boards").then((saved) => setProjects(saved.boards)).catch(() => {})}
-                          onChange={(e) => {
-                            const projectId = e.target.value;
-                            if (conversation) updateConversation(conversation.id, (c) => ({ ...c, projectId: projectId || null }));
-                            else setDraftProjectId(projectId);
-                          }}
-                        >
-                          <option value="">Agent folders only</option>
-                          {chatProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-                        </select>
-                        {chatProject && !chatProject.folders.some((folder) => folder.agents[agent.id]) && <small>No access</small>}
-                      </label>
-                    )}
-                    {running ? (
-                      <>
-                        <button
-                          className={`run-mode ${canSteer && inputMode === "steer" ? "active" : ""}`}
-                          type="button"
-                          disabled={!canSteer}
-                          title={canSteer?undefined:"This harness accepts follow-ups after the current task."}
-                          onClick={() => setInputMode("steer")}
-                        >
-                          Steer
-                        </button>
-                        <button
-                          className={`run-mode ${!canSteer || inputMode === "followup" ? "active" : ""}`}
-                          type="button"
-                          onClick={() => setInputMode("followup")}
-                        >
-                          Follow-up
-                        </button>
-                        <button
-                          className="send-button"
-                          type="submit"
-                          disabled={!input.trim() || Boolean(submitting)}
-                          aria-label={`Send ${canSteer?inputMode:"followup"}`}
-                        >
-                          <ArrowUp size={18} />
-                        </button>
-                        <button
-                          className="send-button stop"
-                          type="button"
-                          aria-label="Stop run"
-                          onClick={() => {
-                            if (activeRun)
-                              void controlRef.current
-                                .request<{ failures?: string[] }>(`/v1/runs/${activeRun.id}/stop`, { method: "POST" })
-                                .then((result) => { if (result.failures?.length) setNotice(`The runtime has not confirmed that this task stopped: ${result.failures[0]}`); })
-                                .catch((error) => setNotice(error instanceof Error ? error.message : "Could not stop this task."));
-                          }}
-                        >
-                          <Square size={14} fill="currentColor" />
-                        </button>
-                        <button
-                          className="run-mode"
-                          type="button"
-                          aria-label="Stop all runs"
-                          onClick={() =>
-                            void controlRef.current
-                              .request<{ failures?: string[] }>("/v1/runs/stop-all", { method: "POST" })
-                              .then((result) => { if (result.failures?.length) setNotice(`The runtime has not confirmed that all tasks stopped: ${result.failures[0]}`); })
-                              .catch((error) => setNotice(error instanceof Error ? error.message : "Could not stop the running tasks."))
-                          }
-                        >
-                          Stop all
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        className="send-button"
-                        type="submit"
-                        disabled={!input.trim() || !ready || Boolean(submitting) || (!connected && !testMode)}
-                        aria-label="Send message"
-                      >
-                        <ArrowUp size={18} />
-                      </button>
-                    )}
-                  </div>
-                </form>
+                {composer}
                 <div className="composer-note">
                   {submitting || (!connected && !testMode && !running
                     ? <>{runtime?.runtime.message || "Checking the agent runtime…"}{runtime && <> <button type="button" className="composer-note-action" onClick={() => setOnboardingMode('manual')}>Open setup</button></>}</>
@@ -2224,7 +2167,9 @@ export default function Home() {
               </div>
             </section>
             {inspector && (
-              <aside className="inspector">
+              <>
+              <button className="inspector-overlay" aria-label="Dismiss workspace panel" onClick={() => setInspector(false)} />
+              <aside id="agent-workspace" className="inspector" role="dialog" aria-modal="true" aria-label="Agent workspace">
                 <div className="inspector-heading">
                   Agent workspace{" "}
                   <button
@@ -2233,6 +2178,22 @@ export default function Home() {
                   >
                     <X size={15} />
                   </button>
+                </div>
+                <CredentialSwitcher onCredentialsChanged={setCredentials} agent={agent} credentials={credentials} workspaceRef={settings.credentialRef || ""} workspaceProvider={settings.provider} client={controlRef.current} running={running} onManage={() => setCredentialsOpen(true)} onSaved={profile => applySavedProfile(profile as AgentProfile)} />
+                <div className="inspector-actions">
+                  <button className="toolbar-computer" title={`Open ${agent.name}’s computer: watch its desktop, take control, or use a workspace terminal`} aria-label="Open agent computer" onClick={() => setDesktopAgentId(agent.id)}><Monitor size={18} /><span>Computer</span></button>
+                  <button title="Review task result" aria-label="Review task result" onClick={async () => {
+                    try { const { conversations } = await controlRef.current.conversations(); const latest = conversations.find(item => item.id === conversationId && item.agentId === agent.id)?.runs.filter(item => !isLiveRun(item)).at(-1); if (latest) setReviewRun(latest); else setNotice("Finish a task in this conversation before reviewing its result."); }
+                    catch (error) { setNotice(error instanceof Error ? error.message : "Could not load this task."); }
+                  }}><ShieldCheck size={16} /> Review task result</button>
+                  <button title="Save as workflow" aria-label="Save as workflow" onClick={async () => {
+                    try {
+                      const { conversations } = await controlRef.current.conversations();
+                      const completed = conversations.find(item => item.id === conversationId && item.agentId === agent.id)?.runs.filter(item => item.state === "completed").at(-1);
+                      if (!completed) { setNotice("Finish a task in this conversation before saving its workflow."); return; }
+                      setWorkflowSourceRunId(completed.id); setSelectedWorkflowId(undefined); setInspector(false); setView("routines");
+                    } catch (error) { setNotice(error instanceof Error ? error.message : "Could not load this task."); }
+                  }}><CalendarClock size={16} /> Save as workflow</button>
                 </div>
                 <div className="inspector-label">
                   <FileText size={13} /> FILES{" "}
@@ -2268,7 +2229,7 @@ export default function Home() {
                 )}
                 <button
                   className="subtle-button"
-                  disabled={running}
+                  disabled={running || uploading}
                   onClick={() => uploadRef.current?.click()}
                 >
                   <Plus size={12} /> Add a file
@@ -2308,7 +2269,11 @@ export default function Home() {
                   <div className="tool-chips">
                     {agentContext.skills.map((skill) => (
                       <span className="skill-control" key={skill}>
-                        <button onClick={() => setInput(`/${skill} `)} title={`Invoke ${skill}`}>/{skill}</button>
+                        <button onClick={() => {
+                          setInput(`/${skill} `);
+                          setInspector(false);
+                          composerInput.current?.focus();
+                        }} title={`Invoke ${skill}`}>/{skill}</button>
                         <button
                           onClick={async () => {
                             try {
@@ -2359,6 +2324,7 @@ export default function Home() {
                       "Run npm run harness:doctor to connect the local Hermes runtime."}
                 </div>
               </aside>
+              </>
             )}
           </div>
         )}
@@ -2374,13 +2340,14 @@ export default function Home() {
               </div>
               <button
                 className="light-button"
-                disabled={running}
+                disabled={running || uploading}
                 onClick={() => uploadRef.current?.click()}
               >
                 <Plus size={14} /> Add files
               </button>
               <button className="subtle-button" onClick={()=>{setEditingAgentTab('harness');setEditingAgent(agent);}}>Upload to {agent.name}’s computer</button>
             </div>
+            {uploadStatus}
             {!workspace.files.length ? (
               <div className="files-empty">
                 <FolderOpen size={40} />
@@ -2720,7 +2687,8 @@ export default function Home() {
         multiple
         ref={uploadRef}
         accept=".txt,.md,.csv,.json,.html,.css,.js,.ts,.tsx,.py,.yaml,.yml,.xml,.log"
-        onChange={(e) => upload(e.target.files)}
+        disabled={uploading}
+        onChange={(e) => void upload(e.target.files)}
       />
       <input
         type="file"
@@ -2886,7 +2854,7 @@ export default function Home() {
                 className="subtle-button"
                 onClick={() => { closeSettings(); setOnboardingMode('manual'); }}
               >
-                <Sparkles size={14} /> Run setup again
+                <Sparkles size={14} /> {hasOnboardingProgress(draftScope) || (!controlRef.current.managed && typeof window !== 'undefined' && localStorage.getItem(ONBOARDING_KEY) === 'deferred') ? 'Resume setup' : 'Run setup again'}
               </button>
               <button
                 className="subtle-button"
@@ -2959,8 +2927,8 @@ export default function Home() {
       {decisionsOpen && <DecisionSettings client={controlRef.current} credentials={credentials} onClose={() => setDecisionsOpen(false)} onManageCredentials={() => setCredentialsOpen(true)} />}
       {credentialsOpen && <CredentialManager client={controlRef.current} provider={settings.provider} onClose={() => setCredentialsOpen(false)} onChanged={setCredentials} />}
       {onboardingDialog}
-      {reviewRun && <RunReview client={controlRef.current} run={reviewRun} onClose={() => setReviewRun(null)} onRepair={run => { setReviewRun(null); openTaskRun(run, 'Repair task result'); }} />}
-      {desktopAgentId && <DesktopPanel agentId={desktopAgentId} agentName={workspace.agents.find(item => item.id === desktopAgentId)?.name} client={controlRef.current} onClose={() => setDesktopAgentId(null)} onWorkflowCreated={id => { setDesktopAgentId(null); setSelectedWorkflowId(id); setWorkflowSourceRunId(undefined); setView("routines"); }} />}
+      {reviewRun && <RunReview client={controlRef.current} run={reviewRun} onClose={() => setReviewRun(null)} onRepair={run => { setReviewRun(null); setInspector(false); openTaskRun(run, 'Repair task result'); }} />}
+      {desktopAgentId && <DesktopPanel agentId={desktopAgentId} agentName={workspace.agents.find(item => item.id === desktopAgentId)?.name} client={controlRef.current} onClose={() => setDesktopAgentId(null)} onWorkflowCreated={id => { setDesktopAgentId(null); setInspector(false); setSelectedWorkflowId(id); setWorkflowSourceRunId(undefined); setView("routines"); }} />}
       {editingAgent && <AgentSettings key={`${editingAgent.id}:${editingAgentTab}`} initialTab={editingAgentTab} advancedFeatures={advancedFeatures} agent={editingAgent} credentialCatalog={credentials} client={controlRef.current} onManageFolders={() => { setEditingAgent(null); setEditingAgentTab('profile'); setView("folders"); }} onClose={() => { setEditingAgent(null); setEditingAgentTab('profile'); }} onSaved={applySavedProfile} onManageCredentials={() => setCredentialsOpen(true)} />}
       {file && (
         <div className="modal-backdrop" onClick={() => setSelectedFile(null)}>
@@ -3007,13 +2975,14 @@ export default function Home() {
   );
 }
 
-function normalizeWorkspace(value: unknown): Workspace | null {
+function normalizeWorkspace(value: unknown, sourceKind: "cache" | "backup"): Workspace | null {
   if (!value || typeof value !== "object") return null;
   const source = value as Record<string, unknown>;
   if (source.version !== 1 && source.version !== 2) return null;
   const files = (Array.isArray(source.files) ? source.files : []).filter(storableFile);
   const normalized = { ...source, version: 2 as const, files, teams: Array.isArray(source.teams) ? source.teams : [] } as unknown as Workspace;
-  return validWorkspace(normalized) ? normalized : null;
+  if (!validWorkspace(normalized, sourceKind)) return null;
+  return sourceKind === "cache" ? storable(normalized) : normalized;
 }
 
 const FILE_CONTENT_LIMIT = 100_000;
@@ -3021,14 +2990,20 @@ function storableFile(file: unknown): file is Artifact {
   const value = file as Artifact | null;
   return Boolean(value && typeof value.id === "string" && typeof value.name === "string" && typeof value.content === "string" && value.content.length <= FILE_CONTENT_LIMIT && typeof value.agentId === "string" && typeof value.updatedAt === "string");
 }
-// What goes to browser storage must be readable back. A runtime file bigger than the limit is
-// left out rather than saved in a shape that would invalidate the whole record on the next load.
-function storable(value: Workspace): Workspace {
-  const files = value.files.filter(storableFile);
-  return files.length === value.files.length ? value : { ...value, files };
+function teamsForRoster(teams: Team[], agentIds: Set<string>): Team[] {
+  return teams.map(team => {
+    const memberAgentIds = team.memberAgentIds.filter(id => agentIds.has(id));
+    return memberAgentIds.length === team.memberAgentIds.length ? team : { ...team, memberAgentIds };
+  });
 }
 
-function validWorkspace(value: unknown): value is Workspace {
+// Team and agent snapshots arrive independently. Keep the cache readable even when a
+// new member hasn't arrived yet, or a runtime file exceeds the browser storage limit.
+function storable(value: Workspace): Workspace {
+  return { ...value, files: value.files.filter(storableFile), teams: teamsForRoster(value.teams, new Set(value.agents.map(agent => agent.id))) };
+}
+
+function validWorkspace(value: unknown, sourceKind: "cache" | "backup"): value is Workspace {
   if (!value || typeof value !== "object") return false;
   const w = value as Workspace;
   return (
@@ -3055,7 +3030,7 @@ function validWorkspace(value: unknown): value is Workspace {
     new Set(w.agents.map((a) => a.id)).size === w.agents.length &&
     Array.isArray(w.teams) &&
     w.teams.length <= 100 &&
-    w.teams.every(team => team && typeof team.id === "string" && typeof team.name === "string" && team.name.trim() && team.name.length <= 60 && typeof team.description === "string" && team.description.length <= 240 && typeof team.color === "string" && typeof team.icon === "string" && Number.isInteger(team.revision) && Array.isArray(team.memberAgentIds) && team.memberAgentIds.every(id => w.agents.some(agent => agent.id === id))) &&
+    w.teams.every(team => team && typeof team.id === "string" && typeof team.name === "string" && team.name.trim() && team.name.length <= 60 && typeof team.description === "string" && team.description.length <= 240 && typeof team.color === "string" && typeof team.icon === "string" && Number.isInteger(team.revision) && Array.isArray(team.memberAgentIds) && team.memberAgentIds.every(id => typeof id === "string" && (sourceKind === "cache" || w.agents.some(agent => agent.id === id)))) &&
     new Set(w.teams.map(team => team.id)).size === w.teams.length &&
     Array.isArray(w.files) &&
     w.files.length <= 40 &&

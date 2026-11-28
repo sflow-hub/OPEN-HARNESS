@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { openNavigation } from './navigation';
 import { initialWorkspace, type Conversation, type Message } from '../../lib/types';
 
 // Long conversations come from this browser's own storage, and the coordinator's history and
@@ -32,8 +33,8 @@ async function open(page: Page, conversations: Conversation[], runs: unknown[] =
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
 }
-async function openConversation(page: Page, title: string, isMobile: boolean) {
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+async function openConversation(page: Page, title: string) {
+  await openNavigation(page);
   await page.getByRole('button', { name: title, exact: true }).click();
 }
 const transcript = (page: Page) => page.locator('.transcript');
@@ -44,9 +45,9 @@ const fromBottom = (page: Page) => transcript(page).evaluate(el => el.scrollHeig
 const offsetOf = (page: Page, title: string, index: number) => message(page, title, index).evaluate(el => el.getBoundingClientRect().top - el.closest('.transcript')!.getBoundingClientRect().top);
 const scrollToTop = (page: Page) => transcript(page).evaluate(el => el.scrollTo({ top: 0, behavior: 'instant' }));
 
-test('a long cached conversation opens on its newest messages and loads earlier ones in place', async ({ page, isMobile }) => {
+test('a long cached conversation opens on its newest messages and loads earlier ones in place', async ({ page }) => {
   await open(page, [chat('long-a', 'Long chat A', 300)]);
-  await openConversation(page, 'Long chat A', isMobile);
+  await openConversation(page, 'Long chat A');
   await expect(messages(page)).toHaveCount(60);
   await expect(message(page, 'Long chat A', 300)).toBeInViewport();
   await expect(message(page, 'Long chat A', 241)).toHaveCount(1);
@@ -75,15 +76,15 @@ test('a long cached conversation opens on its newest messages and loads earlier 
   await expect(message(page, 'Long chat A', 1)).toHaveCount(1);
 });
 
-test('switching conversations starts each one on its newest messages', async ({ page, isMobile }) => {
+test('switching conversations starts each one on its newest messages', async ({ page }) => {
   await open(page, [chat('long-a', 'Long chat A', 300), chat('long-b', 'Long chat B', 150)]);
-  await openConversation(page, 'Long chat A', isMobile);
+  await openConversation(page, 'Long chat A');
   await expect(messages(page)).toHaveCount(60);
   await scrollToTop(page);
   await page.getByRole('button', { name: 'Load earlier messages' }).click();
   await expect(messages(page)).toHaveCount(120);
 
-  await openConversation(page, 'Long chat B', isMobile);
+  await openConversation(page, 'Long chat B');
   await expect(messages(page)).toHaveCount(60);
   await expect(message(page, 'Long chat A', 300)).toHaveCount(0);
   // At the end straight away, not partway through a smooth scroll down a long chat.
@@ -91,7 +92,7 @@ test('switching conversations starts each one on its newest messages', async ({ 
   await expect(message(page, 'Long chat B', 150)).toBeInViewport();
 
   // Coming back does not restore the batches loaded earlier or the old reading position.
-  await openConversation(page, 'Long chat A', isMobile);
+  await openConversation(page, 'Long chat A');
   await expect(messages(page)).toHaveCount(60);
   await expect(message(page, 'Long chat A', 240)).toHaveCount(0);
   await expect.poll(() => fromBottom(page), { timeout: 1_000 }).toBeLessThan(4);
@@ -126,8 +127,11 @@ test('streamed text follows the end only while the reader is already there', asy
   await expect(message(page, title, 170)).toBeInViewport();
   await expect(messages(page)).toHaveCount(60);
 
-  // Back at the end, following resumes.
-  await transcript(page).evaluate(el => el.scrollTo({ top: el.scrollHeight, behavior: 'instant' }));
+  const latest = page.getByRole('button', { name: 'Jump to latest' });
+  await expect(latest).toBeInViewport();
+  await latest.click();
+  await expect(latest).toBeHidden();
+  await expect(transcript(page)).toBeFocused();
   stream(`\n\n${Array.from({ length: 20 }, (_, index) => `Final line ${index + 1}.`).join('\n\n')}`);
   await expect(message(page, title, 200)).toContainText('Final line 20.');
   await expect.poll(() => fromBottom(page)).toBeLessThan(4);
@@ -135,7 +139,7 @@ test('streamed text follows the end only while the reader is already there', asy
 
 test('a transcript that gets shorter keeps the newest message in view', async ({ page, isMobile }) => {
   await open(page, [chat('long-a', 'Long chat A', 300)]);
-  await openConversation(page, 'Long chat A', isMobile);
+  await openConversation(page, 'Long chat A');
   await expect.poll(() => fromBottom(page)).toBeLessThan(4);
   // A phone keyboard or a smaller window takes height from the transcript without any new
   // content, so nothing used to bring the end back into view.
@@ -144,15 +148,14 @@ test('a transcript that gets shorter keeps the newest message in view', async ({
   await expect.poll(() => fromBottom(page)).toBeLessThan(4);
   await expect(message(page, 'Long chat A', 300)).toBeInViewport();
   if (!isMobile) {
-    // The workspace panel narrows the transcript, so every message wraps onto more lines.
-    for (let index = 0; index < 2; index++) {
-      await page.getByRole('button', { name: 'Toggle workspace panel' }).click();
+    for (const width of [680, size.width]) {
+      await page.setViewportSize({ width, height: size.height - 240 });
       await expect.poll(() => fromBottom(page)).toBeLessThan(4);
     }
   }
 });
 
-test('sending from older messages returns to the newest one', async ({ page, isMobile }) => {
+test('sending from older messages returns to the newest one', async ({ page }) => {
   const sent = { id: 'run-transcript-send', agent_id: 'atlas', conversation_id: 'long-a', prompt: 'Fixture question from older messages', state: 'running', pendingApprovals: [], pendingInputs: [] };
   // Chat is disabled against the mock runtime, so the send itself is answered by fixtures.
   await page.route(`${control}/v1/bootstrap`, async route => {
@@ -163,7 +166,7 @@ test('sending from older messages returns to the newest one', async ({ page, isM
   await page.route(`${control}/v1/runs`, route => route.request().method() === 'POST' ? route.fulfill({ json: sent }) : route.fallback());
   await page.route(`${control}/v1/runs/${sent.id}/events*`, route => route.fulfill({ json: { events: [], run: { ...sent, state: 'completed', result: 'Fixture reply to the question.' } } }));
   await open(page, [chat('long-a', 'Long chat A', 300)]);
-  await openConversation(page, 'Long chat A', isMobile);
+  await openConversation(page, 'Long chat A');
   await message(page, 'Long chat A', 250).evaluate(el => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
   await expect.poll(() => fromBottom(page)).toBeGreaterThan(200);
 
@@ -178,13 +181,13 @@ test('sending from older messages returns to the newest one', async ({ page, isM
 
 // Where the message being read sits once the transcript's width changes: every message above
 // it wraps differently, which moves it unless something holds it in place.
-test('a width change keeps the older message being read in place', async ({ page, isMobile }) => {
+test('a width change keeps the older message being read in place', async ({ page }) => {
   // Messages are capped at 730px, so short text, or a desktop transcript still wider than
   // that cap, never rewraps. Long paragraphs and a window narrower than the cap both do.
   const wrapping = 'This paragraph is long enough to wrap onto several lines at any transcript width, so a narrower window changes how tall every message above the one being read is. '.repeat(3);
   const long = chat('long-a', 'Long chat A', 300);
   await open(page, [{ ...long, messages: long.messages.map(item => ({ ...item, content: `${item.content}\n\n${wrapping}` })) }]);
-  await openConversation(page, 'Long chat A', isMobile);
+  await openConversation(page, 'Long chat A');
   await message(page, 'Long chat A', 250).evaluate(el => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
   await expect.poll(() => fromBottom(page)).toBeGreaterThan(200);
   const before = await offsetOf(page, 'Long chat A', 250);
@@ -198,13 +201,13 @@ test('a width change keeps the older message being read in place', async ({ page
   expect(await fromBottom(page)).toBeGreaterThan(200);
 });
 
-test('messages another client adds do not pull a reader away from older ones', async ({ page, isMobile }) => {
+test('messages another client adds do not pull a reader away from older ones', async ({ page }) => {
   let release: (remote: unknown[]) => void = () => {};
   const history = new Promise<unknown[]>(resolve => { release = resolve; });
   const prompt = 'Remote prompt from another client';
   const remote = { id: 'long-a', agentId: 'atlas', title: 'Long chat A', updatedAt: new Date().toISOString(), runs: [{ id: 'run-transcript-remote', agent_id: 'atlas', conversation_id: 'long-a', prompt, state: 'completed', result: 'Remote reply from another client.' }] };
   await open(page, [chat('long-a', 'Long chat A', 300)], [], history);
-  await openConversation(page, 'Long chat A', isMobile);
+  await openConversation(page, 'Long chat A');
   await message(page, 'Long chat A', 250).evaluate(el => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
   await expect.poll(() => fromBottom(page)).toBeGreaterThan(200);
   const scrolled = await transcript(page).evaluate(el => el.scrollTop);

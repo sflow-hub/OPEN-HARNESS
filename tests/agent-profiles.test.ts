@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,7 +19,7 @@ const POLL_BUDGET_MS = 30_000;
 const port = 14318, base = `http://127.0.0.1:${port}`, state = mkdtempSync(join(tmpdir(), 'harness-profiles-'));
 let child: ChildProcess, token = '';
 async function start() {
-  child = spawn(process.execPath, ['--import', 'tsx', 'runtime/service.ts'], { cwd: join(import.meta.dirname, '..'), env: { ...process.env, OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: state }, stdio: 'pipe' });
+  child = spawn(process.execPath, ['--import', 'tsx', 'runtime/service.ts'], { cwd: join(import.meta.dirname, '..'), env: { ...process.env, OPEN_HARNESS_MOCK: '1', OPEN_HARNESS_DISABLE_OS_VAULT: '1', OPEN_HARNESS_PORT: String(port), OPEN_HARNESS_STATE_DIR: state }, stdio: 'pipe' });
   const deadline = Date.now() + POLL_BUDGET_MS;
   while (Date.now() < deadline) { try { const r = await fetch(`${base}/v1/bootstrap`); if (r.ok) { token = (await r.json() as { token: string }).token; return; } } catch {} await new Promise(r => setTimeout(r, 50)); }
   throw new Error('Service did not start.');
@@ -117,9 +118,9 @@ test('missing credentials and invalid endpoint URLs produce actionable errors', 
   const result = await request<{ ok: boolean; message: string }>('/v1/agents/atlas/connection-check', 'POST', { model }); assert.equal(result.ok, false); assert.match(result.message, /MISSING_KEY/);
   await assert.rejects(save({ ...await profile(), model: { ...model, inherit: false, baseUrl: 'https://user:password@example.test' } }), { status: 400 });
 });
-test('managed middleware denies direct and nested dispatch and filters both schema formats', () => {
-  const result = spawnSync('python3', ['tests/policy-extension-test.py'], { cwd: join(import.meta.dirname, '..'), encoding: 'utf8' });
-  assert.equal(result.status, 0, result.stderr || result.stdout);
+test('managed middleware denies direct and nested dispatch and filters both schema formats', async () => {
+  // Keep the event loop processing idle HTTP sockets while Python runs.
+  await promisify(execFile)('python3', ['tests/policy-extension-test.py'], { cwd: join(import.meta.dirname, '..') });
 });
 
 test('MCP inventory survives refresh without claiming a stale handshake is connected', async () => {

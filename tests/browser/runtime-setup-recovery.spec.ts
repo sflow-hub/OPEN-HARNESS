@@ -1,3 +1,4 @@
+import { openWorkspaceSettings } from './navigation';
 import { test, expect } from '@playwright/test';
 
 test('ready runtime clears obsolete setup failures from onboarding and the workspace', async ({ page }) => {
@@ -25,7 +26,7 @@ test('ready runtime clears obsolete setup failures from onboarding and the works
   await expect(page.getByText(failure, { exact: false })).toHaveCount(0, { timeout: 10000 });
 });
 
-test('Set up later survives recovery, reconnect and other tabs while setup remains available', async ({ page, context, isMobile }) => {
+test('Set up later survives recovery, reconnect and other tabs while setup remains available', async ({ page, context }) => {
   const url = '/?controlPort=' + (process.env.OPEN_HARNESS_TEST_PORT || 4317);
   const welcome = (tab: typeof page) => tab.getByRole('dialog', { name: 'Welcome to Open Harness' });
   await page.goto(url);
@@ -45,21 +46,19 @@ test('Set up later survives recovery, reconnect and other tabs while setup remai
   await expect(page.getByRole('button', { name: 'Improve my Open Harness' })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.offline-banner')).toBeHidden();
   await expect(welcome(page)).toBeHidden();
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
-  await page.getByRole('button', { name: 'Run setup again' }).click();
+  await openWorkspaceSettings(page);
+  await page.getByRole('button', { name: 'Resume setup' }).click();
   await expect(welcome(page)).toBeVisible();
   await welcome(page).getByRole('button', { name: 'Set up later' }).click();
   expect(await page.evaluate(() => localStorage.getItem('open-harness.onboarding.v1'))).toBe('deferred');
   await second.close();
 });
 
-test('closing manually reopened setup preserves an existing completion', async ({ page, isMobile }) => {
+test('closing manually reopened setup preserves an existing completion', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('open-harness.onboarding.v1', 'done'));
   await page.goto('/?controlPort=' + (process.env.OPEN_HARNESS_TEST_PORT || 4317));
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await openWorkspaceSettings(page);
   await page.getByRole('button', { name: 'Run setup again' }).click();
   await page.getByRole('button', { name: 'Set up later' }).click();
   expect(await page.evaluate(() => localStorage.getItem('open-harness.onboarding.v1'))).toBe('done');

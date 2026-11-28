@@ -16,6 +16,7 @@ async function seed(request: APIRequestContext, tools?: string[]) {
 async function openComputer(page: Page) {
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await page.getByRole('button', { name: 'Meet Atlas' }).click();
+  await page.getByRole('button', { name: 'Toggle workspace panel' }).click();
   await page.getByRole('button', { name: 'Open agent computer' }).click();
   return page.getByRole('dialog', { name: 'Atlas’s computer' });
 }

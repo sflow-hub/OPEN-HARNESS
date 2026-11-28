@@ -1063,6 +1063,19 @@ function ensureFileDir(anchor: string, base: string) {
   const parts = base.split('/');
   for (let i = 1; i <= parts.length; i++) { const rel = parts.slice(0, i).join('/'), info = statInside(anchor, rel); if (info === null) mkdirInside(anchor, rel); else if (!info.isDirectory || info.isSymbolicLink) throw new SafeFsError('invalid-path', 'Workspace folders must be real directories.'); }
 }
+// Uploads must never replace a file an agent or another tab already wrote, so the name is
+// claimed with O_EXCL through the anchored writer; two racing uploads get exactly one winner.
+// The 40-file cap mirrors the dashboard and is advisory under concurrent distinct names.
+function createWorkspaceFile(anchor: string, base: string, name: string, content: string, encoding: BufferEncoding, scope: string) {
+  const conflict = () => new ProductError(`A file named ${name} already exists. Rename the upload first.`, 409);
+  const existing = statInside(anchor, `${base}/${name}`);
+  if (existing?.isSymbolicLink) throw new SafeFsError('symlink', 'Refusing to follow a symbolic link.');
+  if (existing) throw conflict();
+  if (listInside(anchor, base, { max: 10000 }).filter(entry => !entry.isDirectory).length >= 40) throw new ProductError('The workspace already has 40 files. Remove a file to add another.', 409);
+  try { writeInside(anchor, `${base}/${name}`, content, { encoding, maxBytes: 1_000_000, exclusive: true }); }
+  catch (error) { if (error instanceof SafeFsError && error.code === 'conflict') throw conflict(); throw error; }
+  return { name, scope, created: true };
+}
 function safeFileName(name: string) { if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,159}$/.test(name) || name.includes('..')) throw new ProfileError('Invalid filename.'); return name; }
 function isText(name: string) { return /\.(txt|md|csv|json|html|css|js|mjs|cjs|ts|tsx|py|yaml|yml|xml|log|svg)$/i.test(name); }
 function mimeType(name: string) {
@@ -1680,7 +1693,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     }
     if (url.pathname === "/v1/teams/sync" && req.method === "POST") {
       const input = await body(req), saved = [];
-      for (const team of Array.isArray(input.teams) ? input.teams : []) saved.push(teams.import(team));
+      for (const team of Array.isArray(input.teams) ? input.teams : []) saved.push(teams.import(team, input.onlyMissing === true));
       return json(res, 200, { teams: saved });
     }
     const teamMatch = url.pathname.match(/^\/v1\/teams\/([^/]+)$/);
@@ -1867,7 +1880,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         if (Array.isArray(agent.memory) && agent.memory.length && !existsSync(memory)) writeInside(root, relative(root, memory).split("\\").join("/"), agent.memory.map((item: unknown) => `- ${String(item)}`).join("\n") + "\n", { maxBytes: 200000, exclusive: true });
       }
       for (const conversation of input.conversations || []) store.db.prepare("INSERT OR IGNORE INTO conversations(id,agent_id,title,legacy_json,created_at,updated_at) VALUES(?,?,?,?,?,?)").run(conversation.id, conversation.agentId, conversation.title, JSON.stringify(conversation), conversation.updatedAt || new Date().toISOString(), conversation.updatedAt || new Date().toISOString());
-      for (const file of files) writeInside(root, relative(root, file.target).split("\\").join("/"), file.content, { maxBytes: 1000000 });
+      for (const file of files) {
+        try { writeInside(root, relative(root, file.target).split("\\").join("/"), file.content, { maxBytes: 1_000_000, exclusive: true }); }
+        catch (error) { if (!(error instanceof SafeFsError && error.code === 'conflict')) throw error; }
+      }
       writeFileSync(join(root, "browser-v1-backup.json"), JSON.stringify(input, null, 2), { mode: 0o600 });
       return json(res, 200, { migrated: true });
     }
@@ -2095,7 +2111,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       return json(res, 200, { ok: true, name: row.ref });
     }
     if (/^\/v1\/agents\/[^/]+\/connectors/.test(url.pathname)) return json(res, 410, { error: 'Connection settings moved into Agent settings. Reload the app.' });
-    if (url.pathname === "/v1/files") { const { scope, anchor, base } = workspaceDir(url); ensureFileDir(anchor, base); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = `${base}/${safeFileName(name)}`; if (statInside(anchor, target) === null) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readInside(anchor, target, { encoding, maxBytes: 1_000_000 }), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(anchor, base), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const target = `${base}/${safeFileName(String(input.name || ""))}`; writeInside(anchor, target, content, { encoding, maxBytes: 1_000_000 }); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = `${base}/${safeFileName(String(url.searchParams.get("name") || ""))}`; try { unlinkInside(anchor, target); } catch (error) { if (!(error instanceof SafeFsError && error.code === 'not-found')) throw error; } return json(res, 200, { ok: true }); } }
+    if (url.pathname === "/v1/files") { const { scope, anchor, base } = workspaceDir(url); ensureFileDir(anchor, base); if (req.method === "GET") { const name = url.searchParams.get("name"); if (name) { const target = `${base}/${safeFileName(name)}`; if (statInside(anchor, target) === null) return json(res, 404, { error: "File not found." }); const encoding = isText(name) ? "utf8" : "base64"; return json(res, 200, { name, content: readInside(anchor, target, { encoding, maxBytes: 1_000_000 }), encoding, mimeType: mimeType(name), scope }); } return json(res, 200, { files: listFiles(anchor, base), scope }); } if (req.method === "POST") { const input = await body(req), content = String(input.content || ""), encoding = input.encoding === "base64" ? "base64" : "utf8", bytes = encoding === "base64" ? Buffer.byteLength(content, "base64") : Buffer.byteLength(content); if (bytes > 1_000_000) return json(res, 413, { error: "Files are limited to 1 MB." }); const name = safeFileName(String(input.name || "")), target = `${base}/${name}`; if (input.createOnly === true) { return json(res, 201, createWorkspaceFile(anchor, base, name, content, encoding, scope)); } writeInside(anchor, target, content, { encoding, maxBytes: 1_000_000 }); return json(res, 201, { name: input.name, scope }); } if (req.method === "DELETE") { const target = `${base}/${safeFileName(String(url.searchParams.get("name") || ""))}`; try { unlinkInside(anchor, target); } catch (error) { if (!(error instanceof SafeFsError && error.code === 'not-found')) throw error; } return json(res, 200, { ok: true }); } }
     if (req.method === "GET" && url.pathname === "/v1/routines") return json(res, 200, { routines: store.db.prepare("SELECT * FROM schedules ORDER BY created_at DESC").all() });
     if (req.method === "POST" && url.pathname === "/v1/routines") { const routine = saveRoutine(store.db, await body(req), new Date()); store.db.prepare('INSERT INTO schedule_actors VALUES(?,?)').run(routine.id,workspaceIdentity.actor().id); return json(res, 201, routine); }
     // A routine with a typo, a wrong agent, or a runaway interval could previously only

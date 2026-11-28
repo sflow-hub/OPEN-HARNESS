@@ -1,3 +1,4 @@
+import { openNavigation } from './navigation';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 
@@ -42,10 +43,9 @@ async function enforcePairing(page: Page, realToken: string, { bareDelayMs = 0 }
 }
 const dashboard = (page: Page) => page.getByRole('button', { name: 'Edit Atlas profile' });
 const storedToken = (page: Page) => page.evaluate(base => localStorage.getItem(`open-harness.pair.v1:${base}`), control);
-// The connection status sits in the sidebar, which the phone layout keeps behind a button.
+// Read the detailed connection status from the navigation drawer.
 async function sidebarShows(page: Page, text: string) {
-  const open = page.getByRole('button', { name: 'Open navigation' });
-  if (await open.isVisible() && !await page.getByRole('button', { name: 'Close navigation' }).isVisible()) await open.click();
+  await openNavigation(page);
   await expect(page.getByText(text)).toBeVisible();
 }
 

@@ -68,6 +68,7 @@
     "lib/clarify.ts",
     "lib/cloud-client.ts",
     "lib/codex.ts",
+    "lib/composer-drafts.ts",
     "lib/control-client.ts",
     "lib/conversation.ts",
     "lib/credential-types.ts",

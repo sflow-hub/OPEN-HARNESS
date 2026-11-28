@@ -1,3 +1,4 @@
+import { openNavigation, openWorkspaceSettings } from './navigation';
 import {setupFixture} from './setup-fixture';
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
@@ -21,7 +22,7 @@ test.beforeEach(async ({ request, page }) => {
   await page.addInitScript(() => localStorage.setItem('open-harness.onboarding.v1', 'done'));
 });
 
-test('a rejected onboarding key preserves the selected saved credential and workspace model', async ({ page, request, isMobile }) => {
+test('a rejected onboarding key preserves the selected saved credential and workspace model', async ({ page, request }) => {
   const headers = await operator(request);
   const created = await (await request.post(control + '/v1/credentials', { headers, data: { label: 'Working onboarding key', provider: 'xai', value: 'working-provider-key' } })).json();
   const defaults = await (await request.get(control + '/v1/workspace/model', { headers })).json();
@@ -30,8 +31,7 @@ test('a rejected onboarding key preserves the selected saved credential and work
   await page.route('**/v1/onboarding/model-test', route => route.fulfill({ json: { ok: false, message: 'Candidate API key rejected.' } }));
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await openWorkspaceSettings(page);
   await page.getByRole('button', { name: 'Run setup again' }).click();
   await page.getByRole('button', { name: 'Use this computer' }).click();
   await page.getByRole('button', { name: 'Continue' }).click();
@@ -49,14 +49,15 @@ test('a rejected onboarding key preserves the selected saved credential and work
   await expect(setup.getByLabel('API key')).toHaveValue('rejected-candidate-key');
 });
 
-test('an inheriting agent offers credentials for its effective workspace provider', async ({ page, request, isMobile }) => {
+test('an inheriting agent offers credentials for its effective workspace provider', async ({ page, request }) => {
   const headers = await operator(request);
   const created = await (await request.post(control + '/v1/credentials', { headers, data: { label: 'OpenAI workspace key', provider: 'openai', value: 'openai-workspace-value' } })).json();
   const defaults = await (await request.get(control + '/v1/workspace/model', { headers })).json();
   await request.put(control + '/v1/workspace/model', { headers, data: { revision: defaults.revision, model: { provider: 'openai', model: 'workspace-model', credentialRef: created.ref, baseUrl: '' } } });
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  if (!isMobile) await page.getByRole('button', { name: 'Meet Atlas' }).click();
+  await page.getByRole('button', { name: 'Meet Atlas' }).click();
+  await page.getByRole('button', { name: 'Toggle workspace panel' }).click();
   await page.getByRole('button', { name: 'Credential for Atlas' }).click();
   await expect(page.getByRole('menuitem', { name: /^OpenAI workspace key/ }).last()).toBeVisible();
 });
@@ -74,8 +75,7 @@ test('runtime preparation can outlast ordinary control requests', async ({ page 
   });
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  if (await page.getByRole('button', { name: 'Open navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await openWorkspaceSettings(page);
   await page.getByRole('button', { name: 'Run setup again' }).click();
   await page.getByRole('button', { name: 'Use this computer' }).click();
   await expect(page.getByRole('button', { name: 'Prepare runtime' })).toBeVisible();
@@ -88,14 +88,13 @@ test('runtime preparation can outlast ordinary control requests', async ({ page 
   await expect(page.getByText('Prepared slowly.')).toBeVisible();
 });
 
-test('workspace Save and test keeps a rejected model draft without committing it', async ({ page, request, isMobile }) => {
+test('workspace Save and test keeps a rejected model draft without committing it', async ({ page, request }) => {
   const headers = await operator(request);
   await page.route('**/v1/onboarding/model-test', route => route.fulfill({ json: { ok: false, message: 'Workspace candidate rejected.' } }));
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
   const before = await (await request.get(control + '/v1/workspace/model', { headers })).json();
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await openWorkspaceSettings(page);
   const settings = page.getByRole('dialog', { name: 'Workspace settings' });
   // Type only once the saved model has arrived in the form: an untouched form takes the
   // coordinator's answer, and a value replaced under a selection would be appended to.
@@ -112,7 +111,7 @@ test('workspace Save and test keeps a rejected model draft without committing it
 test('task labels can be typed one comma at a time', async ({ page }) => {
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  if (await page.getByRole('button', { name: 'Open navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNavigation(page);
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'New task', exact: true }).click();
@@ -129,7 +128,7 @@ test('task labels can be typed one comma at a time', async ({ page }) => {
   await expect(card.locator('.task-labels')).toContainText('launch');
 });
 
-test('chat recovers from an unavailable runtime without setup or a reload and keeps the draft', async ({ page, isMobile }) => {
+test('chat recovers from an unavailable runtime without setup or a reload and keeps the draft', async ({ page }) => {
   let available = false, setups = 0;
   await page.route(`${control}/v1/bootstrap`, async route => {
     const response = await route.fetch(), body = await response.json();
@@ -138,10 +137,9 @@ test('chat recovers from an unavailable runtime without setup or a reload and ke
   await page.route('**/v1/onboarding/action', async route => { setups++; await route.abort(); });
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
-  await expect(page.getByText('Agent runtime not ready')).toBeVisible();
-  if (isMobile) await page.getByRole('button', { name: /^Agents \d/ }).click();
-  await page.getByRole('button', { name: 'Meet Atlas' }).click();
+  await openNavigation(page);
+  await expect(page.getByText('Agent runtime needs setup')).toBeVisible();
+  await page.locator('aside.sidebar .agent-row').filter({ has: page.getByText('Atlas', { exact: true }) }).click();
   const composer = page.locator('.composer textarea');
   await composer.fill('Keep this draft while Docker recovers');
   available = true;
@@ -150,7 +148,7 @@ test('chat recovers from an unavailable runtime without setup or a reload and ke
   expect(setups).toBe(0);
 });
 
-test('an older unavailable response cannot overwrite a newer successful runtime check', async ({ page, isMobile }) => {
+test('an older unavailable response cannot overwrite a newer successful runtime check', async ({ page }) => {
   let reads = 0, releaseOld!: () => void;
   const oldGate = new Promise<void>(resolve => { releaseOld = resolve; });
   await page.route(`${control}/v1/bootstrap`, async route => {
@@ -161,8 +159,8 @@ test('an older unavailable response cannot overwrite a newer successful runtime 
   try {
     await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
     await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-    if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
-    await expect(page.getByText('Agent runtime not ready')).toBeVisible();
+    await openNavigation(page);
+    await expect(page.getByText('Agent runtime needs setup')).toBeVisible();
     await page.getByRole('button', { name: /Settings/ }).first().click();
     await page.getByRole('button', { name: 'Run setup again' }).click();
     await page.getByRole('button', { name: 'Use this computer' }).click();
@@ -170,12 +168,12 @@ test('an older unavailable response cannot overwrite a newer successful runtime 
     // The background runtime poll may add a newer read; what matters is that read 2 is held.
     await expect.poll(() => reads).toBeGreaterThanOrEqual(2);
     await page.getByRole('button', { name: 'Set up later' }).click();
-    if (isMobile && !await page.getByRole('button', { name: 'Close navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click();
+    await openNavigation(page);
     await expect(page.getByText('Agent runtime ready')).toBeVisible();
     const late = page.waitForResponse(response => response.url() === `${control}/v1/bootstrap`);
     releaseOld(); await (await late).finished();
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-    expect(await page.getByText('Agent runtime not ready').count()).toBe(0);
+    expect(await page.getByText('Agent runtime needs setup').count()).toBe(0);
     await expect(page.getByText('Agent runtime ready')).toBeVisible();
   } finally { releaseOld(); }
 });
@@ -198,34 +196,31 @@ test('the runtime label follows a successful set-up action without a reload, and
     prepared = true;
     await route.fulfill({ json: status() });
   });
-  const openNav = async () => { if (await page.getByRole('button', { name: 'Open navigation' }).isVisible() && !await page.getByRole('button', { name: 'Close navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click(); };
-  const runSetup = async () => {
-    await openNav();
-    await page.getByRole('button', { name: /Settings/ }).first().click();
-    await page.getByRole('button', { name: 'Run setup again' }).click();
-    await page.getByRole('button', { name: 'Use this computer' }).click();
-    await page.getByRole('button', { name: 'Set up agent runtime' }).click();
-  };
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  await openNav();
-  await expect(page.getByText('Agent runtime not ready')).toBeVisible();
+  await openNavigation(page);
+  await expect(page.getByText('Agent runtime needs setup')).toBeVisible();
   // A failed action changes nothing: not while the guide is open, not after it is closed.
   failNext = true;
-  await runSetup();
+  await openWorkspaceSettings(page);
+  await page.getByRole('button', { name: 'Run setup again' }).click();
+  await page.getByRole('button', { name: 'Use this computer' }).click();
+  await page.getByRole('button', { name: 'Set up agent runtime' }).click();
   await expect(page.getByText('The agent runtime image could not be built.')).toBeVisible();
   await page.getByRole('button', { name: 'Set up later' }).click();
-  await openNav();
-  await expect(page.getByText('Agent runtime not ready')).toBeVisible();
+  await openNavigation(page);
+  await expect(page.getByText('Agent runtime needs setup')).toBeVisible();
   await page.waitForTimeout(400);
-  await expect(page.getByText('Agent runtime not ready')).toBeVisible();
+  await expect(page.getByText('Agent runtime needs setup')).toBeVisible();
   // A successful one is reflected as soon as the guide is closed — no reload.
-  await runSetup();
+  await openWorkspaceSettings(page);
+  await page.getByRole('button', { name: 'Resume setup' }).click();
+  await page.getByRole('dialog', { name: 'Check this computer' }).getByRole('button', { name: 'Try again' }).click();
   await expect(page.getByText('This setup step completed.')).toBeVisible();
   await page.getByRole('button', { name: 'Set up later' }).click();
-  await openNav();
+  await openNavigation(page);
   await expect(page.getByText('Agent runtime ready')).toBeVisible();
-  await expect(page.getByText('Agent runtime not ready')).toHaveCount(0);
+  await expect(page.getByText('Agent runtime needs setup')).toHaveCount(0);
 });
 
 test('the runtime label still becomes ready when the guide is dismissed before the coordinator catches up', async ({ page }) => {
@@ -243,19 +238,18 @@ test('the runtime label still becomes ready when the guide is dismissed before t
   await setupFixture(page,{status,prepare:()=>{prepared=true;}});
   await page.route('**/v1/onboarding/status', route => route.fulfill({ json: status() }));
   await page.route('**/v1/onboarding/action', async route => { prepared = true; await route.fulfill({ json: status() }); });
-  const openNav = async () => { if (await page.getByRole('button', { name: 'Open navigation' }).isVisible() && !await page.getByRole('button', { name: 'Close navigation' }).isVisible()) await page.getByRole('button', { name: 'Open navigation' }).click(); };
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  await openNav();
-  await expect(page.getByText('Agent runtime not ready')).toBeVisible();
-  await page.getByRole('button', { name: /Settings/ }).first().click();
+  await openNavigation(page);
+  await expect(page.getByText('Agent runtime needs setup')).toBeVisible();
+  await openWorkspaceSettings(page);
   await page.getByRole('button', { name: 'Run setup again' }).click();
   await page.getByRole('button', { name: 'Use this computer' }).click();
   await page.getByRole('button', { name: 'Set up agent runtime' }).click();
   await expect(page.getByText('This setup step completed.')).toBeVisible();
   await page.getByRole('button', { name: 'Set up later' }).click();
-  await openNav();
+  await openNavigation(page);
   await expect(page.getByText('Agent runtime ready')).toBeVisible({ timeout: 12_000 });
   expect(staleReads).toBeGreaterThanOrEqual(3);
-  await expect(page.getByText('Agent runtime not ready')).toHaveCount(0);
+  await expect(page.getByText('Agent runtime needs setup')).toHaveCount(0);
 });

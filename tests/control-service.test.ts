@@ -118,10 +118,15 @@ test("authenticates local clients, migrates once, and protects its secret file",
   await assert.rejects(request('/v1/migrate', { method: 'POST', body: JSON.stringify(workspace) }), /symbolic links/);
   assert.equal(readFileSync(sentinel, 'utf8'), 'Host data');
   unlinkSync(join(stateDir, 'shared', 'notes.md'));
+  writeFileSync(join(stateDir, 'shared', 'current.md'), 'Newer coordinator copy');
+  workspace.files.push({ name: 'current.md', content: 'Older browser copy' });
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).migrated, true);
   assert.equal((await request("/v1/migrate", { method: "POST", body: JSON.stringify(workspace) })).reason, "already_migrated");
   assert.equal(readFileSync(join(stateDir, "shared", "notes.md"), "utf8"), "Shared context");
+  assert.equal(readFileSync(join(stateDir, 'shared', 'current.md'), 'utf8'), 'Newer coordinator copy');
+  assert.deepEqual(JSON.parse(readFileSync(join(stateDir, 'browser-v1-backup.json'), 'utf8')).files, workspace.files);
   assert.match(readFileSync(join(stateDir, "agents", "atlas", "profile", "memories", "MEMORY.md"), "utf8"), /concise reports/);
+  assert.equal(readFileSync(join(stateDir, "secrets.backend"), "utf8"), "encrypted-file");
   if (process.platform !== "win32") assert.equal(statSync(join(stateDir, "secrets.json")).mode & 0o777, 0o600);
 });
 
@@ -319,6 +324,17 @@ test("blocks named handoffs when agents do not share an active team", async () =
   assert.equal(response.status, 403);
   assert.match(JSON.stringify(await response.json()), /share an active team/);
   await waitRun(parent.id);
+});
+
+test("browser cache sync seeds missing teams and preserves existing memberships until an explicit import", async () => {
+  const cached = { id: 'cache-team', name: 'Cache sync team', color: 'sage', icon: 'people', memberAgentIds: ['atlas', 'scout'] };
+  const sync = (team: typeof cached, onlyMissing?: boolean) => request('/v1/teams/sync', { method: 'POST', body: JSON.stringify({ teams: [team], onlyMissing }) });
+  const original = (await sync(cached, true)).teams[0];
+  assert.deepEqual([...original.memberAgentIds].sort(), ['atlas', 'scout']);
+  const partial = { ...cached, memberAgentIds: ['atlas'] };
+  assert.deepEqual((await sync(partial, true)).teams[0], original);
+  assert.deepEqual((await sync({ ...partial, id: 'old-browser-id' }, true)).teams[0], original);
+  assert.deepEqual((await sync(partial)).teams[0].memberAgentIds, ['atlas']);
 });
 
 test("persists boards and tasks, rejects stale edits, and preserves assignments", async () => {

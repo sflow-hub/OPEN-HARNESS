@@ -1,3 +1,4 @@
+import { openNavigation, closeNavigation } from './navigation';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 import { draftProfile } from '../../lib/agent-profile';
@@ -41,12 +42,12 @@ async function liveRuns(request: APIRequestContext) {
 // Opening an agent continues its latest conversation — on this shared coordinator that is
 // whatever the previous spec said to it — so each spec starts a conversation of its own,
 // the way a person would.
-async function openAgent(page: Page, name: string, isMobile: boolean, fresh = true) {
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+async function openAgent(page: Page, name: string, fresh = true) {
+  await openNavigation(page);
   await page.locator('aside.sidebar .agent-row').filter({ has: page.getByText(name, { exact: true }) }).click();
   await expect(page.getByRole('textbox', { name: `Message ${name}` })).toBeVisible();
   if (fresh && await page.locator('.transcript .message').count()) {
-    await page.getByRole('button', { name: 'New conversation' }).click();
+    await page.getByRole('button', { name: 'New conversation', exact: true }).click();
     await expect(page.locator('.transcript .message')).toHaveCount(0);
   }
 }
@@ -69,8 +70,8 @@ test.beforeEach(async ({ request, page }) => {
 });
 test.afterEach(async ({ request }) => { await stopEverything(request); });
 
-test('refresh waits for the connection, not history, before accepting chat', async ({ page, isMobile }) => {
-  await openAgent(page, 'Atlas', isMobile);
+test('refresh waits for the connection, not history, before accepting chat', async ({ page }) => {
+  await openAgent(page, 'Atlas');
   await expect(page.locator('.model-choice')).toContainText('Hermes');
   let restoreBootstrap!: () => void, restoreHistory!: () => void;
   const bootstrapGate = new Promise<void>(resolve => { restoreBootstrap = resolve; });
@@ -85,7 +86,7 @@ test('refresh waits for the connection, not history, before accepting chat', asy
   await page.route(`${control}/v1/conversations`, async route => { historyRequested = true; await historyGate; await route.continue(); });
   try {
     await page.reload();
-    await openAgent(page, 'Atlas', isMobile);
+    await openAgent(page, 'Atlas');
     const draft = page.getByRole('textbox', { name: 'Message Atlas' });
     await draft.fill('Continue after refreshing');
     await expect(page.locator('.model-choice')).toHaveText('Reconnecting…');
@@ -107,8 +108,8 @@ test('refresh waits for the connection, not history, before accepting chat', asy
   } finally { restoreBootstrap(); restoreHistory(); }
 });
 
-test('refresh automatically reconnects after a dropped bootstrap without setup or a lost draft', async ({ page, isMobile }) => {
-  await openAgent(page, 'Atlas', isMobile);
+test('refresh automatically reconnects after a dropped bootstrap without setup or a lost draft', async ({ page }) => {
+  await openAgent(page, 'Atlas');
   await expect(page.locator('.model-choice')).toContainText('Hermes');
   let attempts = 0;
   await page.route(`${control}/v1/bootstrap`, async route => {
@@ -117,7 +118,7 @@ test('refresh automatically reconnects after a dropped bootstrap without setup o
     await route.fulfill({ response, json: { ...await response.json(), mode: 'live' } });
   });
   await page.reload();
-  await openAgent(page, 'Atlas', isMobile);
+  await openAgent(page, 'Atlas');
   const draft = page.getByRole('textbox', { name: 'Message Atlas' });
   await draft.fill('Keep this while reconnecting');
   await expect(page.getByRole('dialog', { name: 'Welcome to Open Harness' })).toHaveCount(0);
@@ -129,8 +130,8 @@ test('refresh automatically reconnects after a dropped bootstrap without setup o
   await expect(replies(page).last()).toContainText(MOCK_REPLY);
 });
 
-test('sends a task and shows the agent working, then its reply', async ({ page, isMobile }) => {
-  await openAgent(page, 'Atlas', isMobile);
+test('sends a task and shows the agent working, then its reply', async ({ page }) => {
+  await openAgent(page, 'Atlas');
   await send(page, 'Atlas', 'Summarize my notes MOCK_SLOW');
   // The prompt is in the transcript before the coordinator has answered, and the reply
   // placeholder says the agent is on it.
@@ -142,14 +143,14 @@ test('sends a task and shows the agent working, then its reply', async ({ page, 
   await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible();
 });
 
-test('two agents work at the same time and each conversation follows its own run', async ({ page, request, isMobile }) => {
+test('two agents work at the same time and each conversation follows its own run', async ({ page, request }) => {
   // Atlas pauses on an approval, which keeps its run live for as long as this test likes.
-  await openAgent(page, 'Atlas', isMobile);
+  await openAgent(page, 'Atlas');
   await send(page, 'Atlas', 'Publish the report MOCK_APPROVAL');
   await expect(page.locator('.approval-banner')).toContainText('Atlas needs approval', { timeout: 15_000 });
 
   // Switching to Scout is allowed while Atlas works, and Scout gets a run of its own.
-  await openAgent(page, 'Scout', isMobile);
+  await openAgent(page, 'Scout');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible();
   await send(page, 'Scout', 'Compare the files in my workspace');
   await expect(replies(page).last()).toContainText(MOCK_REPLY, { timeout: 15_000 });
@@ -157,15 +158,15 @@ test('two agents work at the same time and each conversation follows its own run
   // Atlas's request is still visible from here, because its slot is held until answered,
   // and Atlas still shows as busy in the sidebar.
   await expect(page.locator('.approval-banner')).toContainText('Atlas needs approval');
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNavigation(page);
   await expect(page.locator('aside.sidebar .agent-row', { hasText: 'Atlas' }).getByLabel('Atlas is working')).toBeVisible();
-  if (isMobile) await page.keyboard.press('Escape');
+  await closeNavigation(page);
 
   // Back in Atlas's conversation nothing of Scout's leaked in, and Stop acts on Atlas's
   // run — not on whichever run was started last.
   const [atlas] = (await liveRuns(request)).filter(run => run.agent_id === 'atlas');
   expect(atlas).toBeTruthy();
-  await openAgent(page, 'Atlas', isMobile, false);
+  await openAgent(page, 'Atlas', false);
   await expect(page.locator('.transcript .message.user')).toContainText('Publish the report');
   await expect(page.locator('.transcript .message.user')).toHaveCount(1);
   const stop = page.waitForRequest(candidate => candidate.url().endsWith(`/v1/runs/${atlas.id}/stop`) && candidate.method() === 'POST');
@@ -175,8 +176,8 @@ test('two agents work at the same time and each conversation follows its own run
   await expect(page.locator('.approval-banner')).toBeHidden();
 });
 
-test('a follow-up queued behind a running task is shown, then followed to its own reply', async ({ page, isMobile }) => {
-  await openAgent(page, 'Atlas', isMobile);
+test('a follow-up queued behind a running task is shown, then followed to its own reply', async ({ page }) => {
+  await openAgent(page, 'Atlas');
   await send(page, 'Atlas', 'Publish the report MOCK_APPROVAL');
   await expect(page.locator('.approval-banner')).toContainText('Atlas needs approval', { timeout: 15_000 });
 
@@ -196,8 +197,8 @@ test('a follow-up queued behind a running task is shown, then followed to its ow
   await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible();
 });
 
-test('an approval survives three reloads without duplicating the run and can still be answered', async ({ page, request, isMobile }) => {
-  await openAgent(page, 'Atlas', isMobile);
+test('an approval survives three reloads without duplicating the run and can still be answered', async ({ page, request }) => {
+  await openAgent(page, 'Atlas');
   await send(page, 'Atlas', 'Publish the report MOCK_APPROVAL');
   await expect(page.locator('.approval-banner')).toContainText('publish mock result', { timeout: 15_000 });
 
@@ -215,8 +216,8 @@ test('an approval survives three reloads without duplicating the run and can sti
   await expect(replies(page).last()).toContainText(MOCK_REPLY, { timeout: 15_000 });
 });
 
-test('a question from the agent is answered from the conversation', async ({ page, isMobile }) => {
-  await openAgent(page, 'Atlas', isMobile);
+test('a question from the agent is answered from the conversation', async ({ page }) => {
+  await openAgent(page, 'Atlas');
   await send(page, 'Atlas', 'Set up the project MOCK_CLARIFY');
   const question = page.getByRole('form', { name: 'Atlas has a question' });
   await expect(question).toContainText('What should I use?', { timeout: 15_000 });
@@ -228,8 +229,8 @@ test('a question from the agent is answered from the conversation', async ({ pag
   await expect(replies(page).last()).toContainText('Answer: the blue one', { timeout: 15_000 });
 });
 
-test('every question in a batch is shown and each answer reaches the agent', async ({ page, isMobile }) => {
-  await openAgent(page, 'Atlas', isMobile);
+test('every question in a batch is shown and each answer reaches the agent', async ({ page }) => {
+  await openAgent(page, 'Atlas');
   await send(page, 'Atlas', 'Pick the stack MOCK_CLARIFY_BATCH');
   const question = page.getByRole('form', { name: 'Atlas has a question' });
   await expect(question).toContainText('Which language?', { timeout: 15_000 });
@@ -244,7 +245,7 @@ test('every question in a batch is shown and each answer reaches the agent', asy
   await expect(replies(page).last()).toContainText('q0=Go, q1=add tests', { timeout: 15_000 });
 });
 
-test('a fresh client rebuilds earlier conversations from the coordinator', async ({ page, request, isMobile }) => {
+test('a fresh client rebuilds earlier conversations from the coordinator', async ({ page, request }) => {
   const headers = await operator(request);
   const run = await (await request.post(control + '/v1/runs', { headers, data: { agentId: 'scribe', prompt: 'Write the launch note from another client' } })).json();
   await expect.poll(async () => (await (await request.get(control + `/v1/runs/${run.id}`, { headers })).json()).state).toBe('completed');
@@ -253,7 +254,7 @@ test('a fresh client rebuilds earlier conversations from the coordinator', async
   // is enough to show the conversation, with the prompt and the reply.
   await page.reload();
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNavigation(page);
   await page.getByRole('textbox', { name: 'Search conversations' }).fill('launch note from another client');
   await page.locator('aside.sidebar .recent', { hasText: 'Write the launch note from another client' }).first().click();
   await expect(page.locator('.transcript .message.user')).toContainText('Write the launch note from another client');
@@ -262,9 +263,9 @@ test('a fresh client rebuilds earlier conversations from the coordinator', async
 });
 
 
-test('a run that finishes while the page is closed shows its reply when the page reopens', async ({ page, request, isMobile }) => {
+test('a run that finishes while the page is closed shows its reply when the page reopens', async ({ page, request }) => {
   const headers = await operator(request);
-  await openAgent(page, 'Atlas', isMobile);
+  await openAgent(page, 'Atlas');
   await send(page, 'Atlas', 'Publish the report MOCK_APPROVAL');
   await expect(page.locator('.approval-banner')).toContainText('Atlas needs approval', { timeout: 15_000 });
   const [run] = (await liveRuns(request)).filter(item => item.agent_id === 'atlas');
@@ -279,14 +280,14 @@ test('a run that finishes while the page is closed shows its reply when the page
   // an empty reply forever.
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  await openAgent(page, 'Atlas', isMobile, false);
+  await openAgent(page, 'Atlas', false);
   await expect(page.locator('.transcript .message.user').last()).toContainText('Publish the report');
   await expect(replies(page).last()).toContainText(MOCK_REPLY, { timeout: 15_000 });
   await expect(page.locator('.transcript .working')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible();
 });
 
-test('catching up a finished run reads every page of its events, not just the first', async ({ page, request, isMobile }) => {
+test('catching up a finished run reads every page of its events, not just the first', async ({ page, request }) => {
   // A real run, so the dashboard finds it; its events are served here in the coordinator's
   // 500-per-page shape, with the result on the second page.
   const headers = await operator(request);
@@ -306,7 +307,7 @@ test('catching up a finished run reads every page of its events, not just the fi
 
   await page.reload();
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  await openAgent(page, 'Scribe', isMobile, false);
+  await openAgent(page, 'Scribe', false);
   const reply = replies(page).last();
   await expect(reply).toContainText('part1 ', { timeout: 15_000 });
   await expect(reply).toContainText('part504', { timeout: 15_000 });
@@ -314,8 +315,8 @@ test('catching up a finished run reads every page of its events, not just the fi
   await page.unroute(eventsOf);
 });
 
-test('a request the coordinator reopens after an answer is shown again', async ({ page, request, isMobile }) => {
-  await openAgent(page, 'Atlas', isMobile);
+test('a request the coordinator reopens after an answer is shown again', async ({ page, request }) => {
+  await openAgent(page, 'Atlas');
   await send(page, 'Atlas', 'Publish the report MOCK_APPROVAL');
   await expect(page.locator('.approval-banner')).toContainText('publish mock result', { timeout: 15_000 });
   const [run] = (await liveRuns(request)).filter(item => item.agent_id === 'atlas');
@@ -340,9 +341,9 @@ test('a request the coordinator reopens after an answer is shown again', async (
 });
 
 
-test('a reply that had streamed only its first words when the page closed is completed on reopen', async ({ page, request, isMobile }) => {
+test('a reply that had streamed only its first words when the page closed is completed on reopen', async ({ page, request }) => {
   const headers = await operator(request);
-  await openAgent(page, 'Atlas', isMobile);
+  await openAgent(page, 'Atlas');
   // The run pauses on an approval; meanwhile the coordinator's first page of events is
   // played here as a single streamed fragment, so the saved reply is non-empty but partial.
   const anyEvents = (url: URL) => url.pathname.includes('/v1/runs/') && url.pathname.endsWith('/events');
@@ -367,13 +368,13 @@ test('a reply that had streamed only its first words when the page closed is com
   // client left off and appended.
   await page.goto(`/?controlPort=${process.env.OPEN_HARNESS_TEST_PORT || 4317}`);
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  await openAgent(page, 'Atlas', isMobile, false);
+  await openAgent(page, 'Atlas', false);
   // The run's stored result is what the agent answered, so it replaces the fragment.
   await expect(replies(page).last().locator('.markdown')).toHaveText(MOCK_REPLY, { timeout: 15_000 });
   await expect(page.locator('.transcript .working')).toHaveCount(0);
 });
 
-test('a reply saved by an older client — partial text, no cursor — is completed without repeating itself', async ({ page, request, isMobile }) => {
+test('a reply saved by an older client — partial text, no cursor — is completed without repeating itself', async ({ page, request }) => {
   const headers = await operator(request);
   const run = await (await request.post(control + '/v1/runs', { headers, data: { agentId: 'scribe', prompt: 'Draft the launch note MOCK_SLOW' } })).json();
   await expect.poll(async () => (await (await request.get(control + `/v1/runs/${run.id}`, { headers })).json()).state).toBe('completed');
@@ -395,7 +396,7 @@ test('a reply saved by an older client — partial text, no cursor — is comple
   }, [run.conversation_id, run.id, 'scribe']);
   await page.reload();
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  await openAgent(page, 'Scribe', isMobile, false);
+  await openAgent(page, 'Scribe', false);
   const reply = replies(page).last();
   await expect(reply.locator('.markdown')).toHaveText(MOCK_REPLY, { timeout: 15_000 });
   // The step that was still "running" when the page closed is settled with the run.
@@ -404,18 +405,18 @@ test('a reply saved by an older client — partial text, no cursor — is comple
   // And a second visit does not fetch or append anything again.
   await page.reload();
   await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-  await openAgent(page, 'Scribe', isMobile, false);
+  await openAgent(page, 'Scribe', false);
   await expect(replies(page).last().locator('.markdown')).toHaveText(MOCK_REPLY, { timeout: 15_000 });
 });
 
-test('history rebuilt from the coordinator says each reply once, however often the page is opened', async ({ page, request, isMobile }) => {
+test('history rebuilt from the coordinator says each reply once, however often the page is opened', async ({ page, request }) => {
   const headers = await operator(request);
   const run = await (await request.post(control + '/v1/runs', { headers, data: { agentId: 'scout', prompt: 'Check the sources once' } })).json();
   await expect.poll(async () => (await (await request.get(control + `/v1/runs/${run.id}`, { headers })).json()).state).toBe('completed');
   for (let visit = 0; visit < 2; visit += 1) {
     await page.reload();
     await expect(page.getByRole('button', { name: 'Edit Atlas profile' })).toBeVisible();
-    if (isMobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+    await openNavigation(page);
     await page.getByRole('textbox', { name: 'Search conversations' }).fill('Check the sources once');
     await page.locator('aside.sidebar .recent', { hasText: 'Check the sources once' }).first().click();
     await expect(page.locator('.transcript .message.user')).toHaveCount(1);

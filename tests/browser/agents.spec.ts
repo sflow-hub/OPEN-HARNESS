@@ -1,3 +1,4 @@
+import { openNavigation, closeNavigation } from './navigation';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { initialWorkspace } from '../../lib/types';
 
@@ -70,8 +71,7 @@ test('creating an agent uses the coordinator and survives a reload', async ({ pa
   await expect.poll(() => storedAgentIds(page)).toContain(id);
 });
 
-test('a new agent starts with an empty conversation', async ({ page, request }, testInfo) => {
-  const mobile = testInfo.project.name === 'mobile';
+test('a new agent starts with an empty conversation', async ({ page, request }) => {
   await page.addInitScript(({ workspace }) => {
     localStorage.setItem('open-harness.workspace.v2', JSON.stringify({
       ...workspace,
@@ -83,7 +83,7 @@ test('a new agent starts with an empty conversation', async ({ page, request }, 
   await expect(page.getByText('Earlier work here')).toBeVisible();
   await page.getByPlaceholder('Message Atlas…').fill('A half-written request');
 
-  if (mobile) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await openNavigation(page);
   const created = createResponse(page);
   await page.getByRole('button', { name: 'New agent', exact: true }).click();
   const id = (await (await created).json()).agent.id as string;
@@ -91,7 +91,7 @@ test('a new agent starts with an empty conversation', async ({ page, request }, 
   const dialog = page.getByRole('dialog', { name: 'Agent settings' });
   await dialog.getByRole('button', { name: 'Close agent settings' }).click();
   await expect(dialog).toBeHidden();
-  if (mobile) await page.getByRole('button', { name: 'Close navigation' }).dispatchEvent('click');
+  await closeNavigation(page);
 
   await expect(page.locator('.chat-toolbar strong')).toHaveText('New agent');
   await expect(page.getByText('Earlier work here')).toHaveCount(0);
@@ -152,6 +152,52 @@ test('a deleted agent stays gone after reload, even from a stale cache', async (
   await expect.poll(() => storedWithout(page, id)).toBe(true);
   expect((await serverAgents(request)).map(agent => agent.id)).not.toContain(id);
   await expectPreservedCache();
+});
+
+test('a missing team member in cached or refreshed data preserves the conversation and its draft', async ({ page }) => {
+  const stamp = '2026-11-20T12:00:00Z';
+  const team = { id: 'notes-team', name: 'Notes team', description: '', color: 'sage', icon: 'writing', revision: 1,
+    memberAgentIds: ['atlas', 'former-agent'], retiredAt: null, createdAt: stamp, updatedAt: stamp };
+  const conversation = { id: 'cached-notes', agentId: 'atlas', title: 'Saved meeting notes', updatedAt: stamp,
+    messages: [{ id: 'cached-reply', role: 'assistant', content: 'The meeting summary is saved.' }] };
+  const backup = JSON.stringify({ ...initialWorkspace, teams: [team], conversations: [conversation] });
+  await page.addInitScript(saved => {
+    localStorage.setItem('open-harness.migrated.v1', 'done');
+    if (!localStorage.getItem('open-harness.workspace.v2')) localStorage.setItem('open-harness.workspace.v2', saved);
+  }, backup);
+  await page.route(`${control}/v1/conversations`, route => route.fulfill({ json: { conversations: [] } }));
+  await page.route(`${control}/v1/runs`, route => route.fulfill({ json: { runs: [] } }));
+  await page.route(`${control}/v1/teams/sync`, route => route.fulfill({ json: { ok: true } }));
+  const refreshed = { ...team, revision: 2, memberAgentIds: ['scout', 'agent-added-after-roster'] };
+  let releaseSnapshot!: () => void;
+  const snapshot = new Promise<void>(resolve => { releaseSnapshot = resolve; });
+  await page.route(`${control}/v1/teams?includeRetired=1`, async route => {
+    await snapshot;
+    await route.fulfill({ json: { teams: [refreshed] } });
+  });
+
+  const storedTeams = () => page.evaluate(() => JSON.parse(localStorage.getItem('open-harness.workspace.v2')!).teams);
+  const recent = page.locator('aside.sidebar').getByRole('button', { name: conversation.title, exact: true });
+  const composer = page.getByRole('textbox', { name: 'Message Atlas' });
+  try {
+    await page.goto(`/?controlPort=${controlPort}`);
+    await openNavigation(page);
+    await expect(recent).toBeVisible();
+    await recent.click();
+    await expect(page.locator('.transcript')).toContainText(conversation.messages[0].content);
+    await composer.fill('Add the action items before sending.');
+    await expect.poll(storedTeams).toEqual([{ ...team, memberAgentIds: ['atlas'] }]);
+  } finally { releaseSnapshot(); }
+  await expect.poll(storedTeams).toEqual([{ ...refreshed, memberAgentIds: ['scout'] }]);
+  await page.reload();
+  await openNavigation(page);
+  await expect(recent).toBeVisible();
+  await recent.click();
+  await expect(page.locator('.transcript')).toContainText(conversation.messages[0].content);
+  await expect(composer).toHaveValue('Add the action items before sending.');
+
+  await page.locator('input[type=file][accept=".json"]').setInputFiles({ name: 'stale-team.json', mimeType: 'application/json', buffer: Buffer.from(backup) });
+  await expect(page.getByRole('status').filter({ hasText: 'not a valid Open Harness backup' })).toBeVisible();
 });
 
 test('a refused delete shows the reason and keeps the agent', async ({ page }) => {

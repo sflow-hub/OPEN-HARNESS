@@ -19,6 +19,10 @@ test('coordination crosses a long workspace path and rejects other agents and AP
   if (process.platform === 'linux') {
     assert.match(socket.socketPath, new RegExp(`^/proc/${process.pid}/fd/\\d+/coord\\.sock$`));
     assert.equal(statSync(dirname(socket.socketPath)).ino, statSync(dir).ino);
+  } else if (process.platform === 'darwin') {
+    assert.notEqual(socket.socketPath, socket.path);
+    assert.equal(statSync(socket.socketPath).ino, statSync(socket.path).ino);
+    assert.equal(statSync(dirname(dirname(socket.socketPath))).mode & 0o777, 0o700);
   }
   async function call(path: string, agent = 'atlas', method = 'POST') {
     return new Promise<number>((resolve, reject) => {
@@ -120,8 +124,10 @@ test('refusals are ordinary results, outages are isError, and keepalive pings ar
 // http.request(options, options, callback) makes node read the second argument as the response
 // listener, so each coordination call failed inside the agent with "The listener argument must
 // be of type function" and no coordination tool worked at all on the default local setup.
-test('socket coordination through the agent-side server reaches the coordinator', { skip: process.platform === 'win32' }, async () => {
-  const dir = join(mkdtempSync(join(tmpdir(), 'harness-socket-call-')), 'managed');
+test('socket coordination through the agent-side server reaches the coordinator', { skip: process.platform === 'win32' }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-socket-call-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, 'a-long-workspace-name-'.repeat(8), 'managed');
   let received: { url?: string; agent?: string; authorization?: string; run?: string; body?: string } = {};
   const socket = await coordinationSocket(dir, 'atlas', (req, res) => {
     let body = '';
@@ -132,8 +138,7 @@ test('socket coordination through the agent-side server reaches the coordinator'
       res.end('{"runId":"child-1","state":"completed"}');
     });
   });
-  // A separate process cannot borrow this one's /proc/self/fd handle, and it does not need to:
-  // in a container the socket is /run/open-harness/coord.sock, well inside the 108-byte limit.
+  // Native MCP children use the short host path even when the managed directory is deeply nested.
   const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'runtime', 'hermes', 'coordination.mjs')], {
     env: { ...process.env, OPEN_HARNESS_CONTROL_SOCKET: socket.socketPath, OPEN_HARNESS_AGENT_ID: 'atlas', OPEN_HARNESS_AGENT_TOKEN: 'run-token', OPEN_HARNESS_RUN_ID: 'run-1' },
     stdio: ['pipe', 'pipe', 'pipe'],
